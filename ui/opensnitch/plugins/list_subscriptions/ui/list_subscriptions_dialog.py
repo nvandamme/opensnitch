@@ -63,9 +63,11 @@ from opensnitch.plugins.list_subscriptions.ui.subscription_dialog import (
 from opensnitch.plugins.list_subscriptions.ui.bulk_edit_dialog import BulkEditDialog
 from opensnitch.plugins.list_subscriptions._utils import (
     ACTION_FILE,
+    ACTION_SUBSCRIPTIONS,
     DEFAULT_LISTS_DIR,
     RES_DIR,
     INTERVAL_UNITS,
+    SYSTEM_LISTS_DIR,
     TIMEOUT_UNITS,
     SIZE_UNITS,
     display_str,
@@ -85,10 +87,18 @@ from opensnitch.plugins.list_subscriptions._utils import (
 from opensnitch.plugins.list_subscriptions.io.storage import (
     write_json_atomic_locked,
 )
+from ....proto import ui_pb2
 from opensnitch.config import Config
 from opensnitch.dialogs.ruleseditor import RulesEditorDialog
 import requests
 from opensnitch.plugins.list_subscriptions.list_subscriptions import ListSubscriptions
+SUBS_OP_LIST: Final[int] = int(getattr(ui_pb2, "SUBSCRIPTION_OPERATION_LIST", 1))
+SUBS_OP_APPLY: Final[int] = int(getattr(ui_pb2, "SUBSCRIPTION_OPERATION_APPLY", 2))
+SUBS_OP_DELETE: Final[int] = int(getattr(ui_pb2, "SUBSCRIPTION_OPERATION_DELETE", 3))
+SUBS_OP_REFRESH: Final[int] = int(getattr(ui_pb2, "SUBSCRIPTION_OPERATION_REFRESH", 4))
+SUBS_OP_DEPLOY: Final[int] = int(getattr(ui_pb2, "SUBSCRIPTION_OPERATION_DEPLOY", 5))
+SUBS_STATUS_READY: Final[int] = int(getattr(ui_pb2, "SUBSCRIPTION_STATUS_READY", 2))
+SUBS_STATUS_ERROR: Final[int] = int(getattr(ui_pb2, "SUBSCRIPTION_STATUS_ERROR", 4))
 
 LIST_SUBSCRIPTIONS_DIALOG_UI_PATH: Final[str] = os.path.join(
     RES_DIR, "list_subscriptions_dialog.ui"
@@ -117,6 +127,12 @@ COL_LAST_CHECKED: Final[int] = 15
 COL_LAST_UPDATED: Final[int] = 16
 COL_FAILS: Final[int] = 17
 COL_ERROR: Final[int] = 18
+
+# First daemon release that handles Action_SUBSCRIPTIONS notifications.
+# Daemons reporting a version below this are immediately treated as incapable
+# without waiting for the 15-second probe timeout.
+# TODO: bump to the actual release version once subscriptions ship.
+_MIN_SUBS_DAEMON_VERSION: Final[tuple[int, ...]] = (1, 9, 0)
 
 logger: Final[logging.Logger] = logging.getLogger(__name__)
 
@@ -260,6 +276,8 @@ class SortableTableWidgetItem(QtWidgets.QTableWidgetItem):
 
 
 class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
+    _daemon_notification_callback = QtCore.pyqtSignal(str, ui_pb2.NotificationReply)
+
     if TYPE_CHECKING:
         rootLayout: QtWidgets.QVBoxLayout
         topRowLayout: QtWidgets.QHBoxLayout
@@ -283,6 +301,7 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
         runtime_status_label: QtWidgets.QLabel
         defaults_section_bar: QtWidgets.QFrame
         defaults_section_label: QtWidgets.QLabel
+        daemon_mode_check: QtWidgets.QCheckBox
         lists_dir_label: QtWidgets.QLabel
         lists_dir_edit: QtWidgets.QLineEdit
         default_interval_label: QtWidgets.QLabel
@@ -323,6 +342,20 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
         _pending_runtime_reload: str | None
         _pending_refresh_keys: set[str]
         _active_refresh_keys: set[str]
+        _pending_daemon_reconcile_ids: set[int]
+        _daemon_reconcile_added_count: int
+        _daemon_reconcile_error_count: int
+        # maps addr -> bool: True = confirmed supports SUBSCRIPTIONS action;
+        # False = timed out (old daemon). Populated lazily on first send.
+        _node_subs_capable: dict[str, bool]
+        # maps notification id -> node addr for outstanding callbacks (timeout detection)
+        _pending_notification_addrs: dict[int, str]
+        # maps addr -> (total, ready, error) derived from daemon stats or LIST replies
+        _node_subs_health: dict[str, tuple[int, int, int]]
+        # subscription counter badge placed in the top bar (daemon mode only)
+        _subs_counters_label: QtWidgets.QLabel
+        # tab bar above the table that switches between Config and Monitoring views
+        _table_tab_bar: QtWidgets.QTabBar
 
     def __init__(
         self,
@@ -347,9 +380,17 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
         self._pending_runtime_reload: str | None = None
         self._pending_refresh_keys: set[str] = set()
         self._active_refresh_keys: set[str] = set()
+        self._pending_daemon_reconcile_ids: set[int] = set()
+        self._daemon_reconcile_added_count = 0
+        self._daemon_reconcile_error_count = 0
+        self._node_subs_capable: dict[str, bool] = {}
+        self._pending_notification_addrs: dict[int, str] = {}
+        self._node_subs_health: dict[str, tuple[int, int, int]] = {}
         self._state_poll_timer = QtCore.QTimer(self)
         self._state_poll_timer.setInterval(2000)
         self._state_poll_timer.timeout.connect(self._refresh_states_if_visible)
+        self._daemon_notification_callback.connect(self._on_daemon_notification_reply)
+        self._nodes.nodesUpdated.connect(self._on_nodes_runtime_updated)
         self._build_ui()
 
     def showEvent(self, event: QtGui.QShowEvent | None):  # type: ignore[override]
@@ -437,6 +478,16 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
         self.runtime_status_label.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
+        self._subs_counters_label = QtWidgets.QLabel("")
+        self._subs_counters_label.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
+        self._subs_counters_label.setContentsMargins(8, 0, 4, 0)
+        self._subs_counters_label.setVisible(False)
+        self.topRowLayout.addWidget(self._subs_counters_label)
+        self.topRowLayout.setAlignment(
+            self._subs_counters_label, QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
         self.runtime_status_title_label.setContentsMargins(12, 0, 0, 0)
         self.runtime_status_title_label.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
@@ -470,6 +521,20 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
         ):
             self.topRowLayout.setAlignment(widget, QtCore.Qt.AlignmentFlag.AlignVCenter)
         self.table.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+
+        self.daemon_mode_check = QtWidgets.QCheckBox(
+            QC.translate("stats", "Use daemon mode (system-wide)")
+        )
+        self.daemon_mode_check.setChecked(False)
+        self.daemon_mode_check.setToolTip(
+            QC.translate(
+                "stats",
+                "When enabled, subscriptions are managed by the daemon using /etc/opensnitchd/subscriptions.",
+            )
+        )
+        daemon_mode_row = self.defaultsGridLayout.rowCount()
+        self.defaultsGridLayout.addWidget(self.daemon_mode_check, daemon_mode_row, 0, 1, 3)
+
         self.table.setLineWidth(0)
         self.table.setContentsMargins(0, 0, 0, 0)
         self.table.setMinimumHeight(0)
@@ -589,6 +654,7 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
         self.table.sortItems(COL_ENABLED, QtCore.Qt.SortOrder.AscendingOrder)
         # Keep advanced tuning + verbose metadata available internally but
         # reduce visible table complexity; edit dialog exposes full details.
+        # Initial column visibility is controlled by _on_table_view_tab_changed below.
         for col in (
             COL_INTERVAL,
             COL_INTERVAL_UNITS,
@@ -598,10 +664,18 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
             COL_MAX_SIZE_UNITS,
             COL_FILE,
             COL_META,
-            COL_FAILS,
-            COL_ERROR,
         ):
             self.table.setColumnHidden(col, True)
+
+        # Tab bar to switch between Config and Monitoring column views.
+        self._table_tab_bar = QtWidgets.QTabBar(self)
+        self._table_tab_bar.addTab(QC.translate("stats", "Config"))
+        self._table_tab_bar.addTab(QC.translate("stats", "Monitoring"))
+        self._table_tab_bar.setContentsMargins(12, 4, 12, 0)
+        self._table_tab_bar.currentChanged.connect(self._on_table_view_tab_changed)
+        self.tableContentLayout.insertWidget(0, self._table_tab_bar)
+        # Apply initial column visibility for the default (Config) tab.
+        self._on_table_view_tab_changed(0)
 
         self.create_file_button.clicked.connect(self.create_action_file)
         self.save_button.clicked.connect(self.save_action_file)
@@ -621,6 +695,8 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
         self.table.clicked.connect(self._handle_table_clicked)
         self.table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._open_table_context_menu)
+        self.daemon_mode_check.toggled.connect(self._on_daemon_mode_toggled)
+        self.nodes_combo.currentIndexChanged.connect(self._on_daemon_node_selection_changed)
         sel_model = self.table.selectionModel()
         if sel_model is not None:
             sel_model.selectionChanged.connect(
@@ -797,7 +873,9 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
             self.table.setRowCount(0)
             self.create_file_button.setVisible(True)
             self.lists_dir_edit.setText(DEFAULT_LISTS_DIR)
+            self.daemon_mode_check.setChecked(False)
             self.enable_plugin_check.setChecked(False)
+            self._apply_daemon_mode_widgets(False)
             self._set_runtime_state(active=False)
             self._global_defaults = GlobalDefaults.from_dict(
                 {}, lists_dir=DEFAULT_LISTS_DIR
@@ -831,9 +909,15 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
             )
             self._global_defaults = action_model.plugin.defaults
             self.enable_plugin_check.setChecked(action_model.enabled)
+            self.daemon_mode_check.setChecked(
+                bool(self._global_defaults.daemon_mode)
+            )
             self._sync_runtime_binding_state()
             self.lists_dir_edit.setText(
                 normalize_lists_dir(self._global_defaults.lists_dir)
+            )
+            self._apply_daemon_mode_widgets(
+                bool(self._global_defaults.daemon_mode)
             )
             self._apply_defaults_to_widgets()
 
@@ -898,6 +982,15 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
                 )
 
     def start_runtime_clicked(self):
+        if self._is_daemon_mode_enabled():
+            self._set_status(
+                QC.translate(
+                    "stats",
+                    "Runtime is disabled in daemon mode. Use transfer actions to push templates.",
+                ),
+                error=False,
+            )
+            return
         runtime_plugin = self._sync_runtime_binding_state()
         if runtime_plugin is not None and bool(
             getattr(runtime_plugin, "enabled", False)
@@ -960,6 +1053,12 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
             )
 
     def stop_runtime_clicked(self):
+        if self._is_daemon_mode_enabled():
+            self._set_status(
+                QC.translate("stats", "Runtime is disabled in daemon mode."),
+                error=False,
+            )
+            return
         runtime_plugin = self._sync_runtime_binding_state()
         if runtime_plugin is None or not bool(
             getattr(runtime_plugin, "enabled", False)
@@ -987,6 +1086,9 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
             )
 
     def reload_runtime_and_config(self):
+        if self._is_daemon_mode_enabled():
+            self.reconcile_from_daemon()
+            return
         runtime_plugin = self._sync_runtime_binding_state()
         if runtime_plugin is None or not bool(
             getattr(runtime_plugin, "enabled", False)
@@ -1041,15 +1143,20 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
         if subscriptions is None:
             return
 
+        daemon_mode_enabled = self._is_daemon_mode_enabled()
         lists_dir = normalize_lists_dir(
             self.lists_dir_edit.text().strip() or DEFAULT_LISTS_DIR
         )
+        if daemon_mode_enabled:
+            lists_dir = SYSTEM_LISTS_DIR
+            self.lists_dir_edit.setText(lists_dir)
         try:
             os.makedirs(lists_dir, mode=0o700, exist_ok=True)
         except Exception:
             pass
         defaults = GlobalDefaults(
             lists_dir=lists_dir,
+            daemon_mode=daemon_mode_enabled,
             interval=max(1, int(self.default_interval_spin.value())),
             interval_units=self.default_interval_units.currentText(),
             timeout=max(1, int(self.default_timeout_spin.value())),
@@ -1059,7 +1166,9 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
             user_agent=(self.default_user_agent.text() or "").strip(),
         )
         action_model = MutableActionConfig.default(lists_dir)
-        action_model.enabled = self.enable_plugin_check.isChecked()
+        action_model.enabled = (
+            self.enable_plugin_check.isChecked() if not daemon_mode_enabled else False
+        )
         action_model.plugin.defaults = defaults
         action_model.plugin.subscriptions = subscriptions
         normalized_subscriptions = action_model.plugin.normalize_subscriptions(
@@ -1109,9 +1218,48 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
             QC.translate("stats", "List subscriptions configuration saved."),
             error=False,
         )
+        self._apply_daemon_mode_widgets(daemon_mode_enabled)
+        if daemon_mode_enabled:
+            self._set_status(
+                QC.translate(
+                    "stats",
+                    "Template saved. Use transfer actions to deploy subscriptions to daemon nodes.",
+                ),
+                error=False,
+            )
 
     def refresh_states(self):
         with self._sorting_suspended():
+            if self._is_daemon_mode_enabled():
+                template_color = self._state_text_color("template")
+                for row in range(self.table.rowCount()):
+                    self._set_text_item(row, COL_FILE, "template", editable=False)
+                    self._set_text_item(row, COL_META, "template", editable=False)
+                    self._set_text_item(
+                        row,
+                        COL_STATE,
+                        QC.translate("stats", "template (user-side)"),
+                        editable=False,
+                    )
+                    self._set_text_item(row, COL_LAST_CHECKED, "", editable=False)
+                    self._set_text_item(row, COL_LAST_UPDATED, "", editable=False)
+                    self._set_text_item(row, COL_FAILS, "", editable=False)
+                    self._set_text_item(row, COL_ERROR, "", editable=False)
+                    for col in (
+                        COL_FILE,
+                        COL_META,
+                        COL_STATE,
+                        COL_LAST_CHECKED,
+                        COL_LAST_UPDATED,
+                        COL_FAILS,
+                        COL_ERROR,
+                    ):
+                        item = self.table.item(row, col)
+                        if item is not None:
+                            item.setForeground(template_color)
+                    self._update_row_sort_keys(row)
+                return
+
             lists_dir = normalize_lists_dir(
                 self.lists_dir_edit.text().strip() or DEFAULT_LISTS_DIR
             )
@@ -1211,6 +1359,7 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
         if dark_theme:
             colors = {
                 "disabled": "#B8C0CC",
+                "template": "#D6B45C",
                 "pending": "#F5D76E",
                 "busy": "#F5D76E",
                 "missing": "#FF8A80",
@@ -1227,6 +1376,7 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
         else:
             colors = {
                 "disabled": "#6B7280",
+                "template": "#9A6700",
                 "pending": "#9A6700",
                 "busy": "#9A6700",
                 "missing": "#C62828",
@@ -1581,6 +1731,57 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
         return sorted(groups)
 
     def refresh_selected_now(self):
+        if self._is_daemon_mode_enabled():
+            compiled_cfg = self._compile_config_from_widgets()
+            if compiled_cfg is None:
+                return
+            rows = self._selected_rows()
+            if not rows:
+                row = self.table.currentRow()
+                if row >= 0:
+                    rows = [row]
+            if not rows:
+                self._set_status(
+                    QC.translate("stats", "Select one or more subscription rows first."),
+                    error=True,
+                )
+                return
+            by_identity = {
+                (sub.url, sub.filename): sub for sub in compiled_cfg.subscriptions
+            }
+            selected: list[SubscriptionSpec] = []
+            for row in rows:
+                url = self._cell_text(row, COL_URL)
+                filename, changed = self._ensure_row_final_filename(row)
+                if changed:
+                    self.save_action_file()
+                if url == "" or filename == "":
+                    continue
+                sub = by_identity.get((url, filename))
+                if sub is not None:
+                    selected.append(sub)
+            if not selected:
+                self._set_status(
+                    QC.translate("stats", "No valid selected subscriptions to transfer."),
+                    error=True,
+                )
+                return
+            apply_ids = self._send_daemon_subscription_request(
+                SUBS_OP_APPLY,
+                subscriptions=selected,
+            )
+            if not apply_ids:
+                return
+            self._send_daemon_subscription_request(SUBS_OP_DEPLOY)
+            self._set_status(
+                QC.translate(
+                    "stats",
+                    "Transferred {0} selected template subscriptions to daemon nodes.",
+                ).format(len(selected)),
+                error=False,
+            )
+            return
+
         rows = self._selected_rows()
         if not rows:
             row = self.table.currentRow()
@@ -1735,6 +1936,31 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
         )
 
     def refresh_all_now(self):
+        if self._is_daemon_mode_enabled():
+            compiled_cfg = self._compile_config_from_widgets()
+            if compiled_cfg is None:
+                return
+            if not compiled_cfg.subscriptions:
+                self._set_status(
+                    QC.translate("stats", "No subscriptions available to transfer."),
+                    error=True,
+                )
+                return
+            apply_ids = self._send_daemon_subscription_request(
+                SUBS_OP_APPLY,
+                subscriptions=compiled_cfg.subscriptions,
+            )
+            if not apply_ids:
+                return
+            self._send_daemon_subscription_request(SUBS_OP_DEPLOY)
+            self._set_status(
+                QC.translate(
+                    "stats", "Transferred all template subscriptions to daemon nodes."
+                ),
+                error=False,
+            )
+            return
+
         _, _, plug = self._find_loaded_action()
         if plug is None:
             self._set_status(
@@ -2329,6 +2555,9 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
         self._set_status(message, error=is_error)
 
     def _set_runtime_state(self, active: bool | None, text: str | None = None):
+        if self._is_daemon_mode_enabled() and text is None:
+            active, text = self._daemon_runtime_state_from_nodes()
+
         if text is None:
             if active is True:
                 text = QC.translate("stats", "Runtime: active")
@@ -2346,8 +2575,13 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
 
         self.runtime_status_label.setStyleSheet(style)
         self.runtime_status_label.setText(text)
-        self.start_runtime_button.setEnabled(active is not True)
-        self.stop_runtime_button.setEnabled(active is not False)
+        self._update_subs_counters()
+        if self._is_daemon_mode_enabled():
+            self.start_runtime_button.setEnabled(False)
+            self.stop_runtime_button.setEnabled(False)
+        else:
+            self.start_runtime_button.setEnabled(active is not True)
+            self.stop_runtime_button.setEnabled(active is not False)
 
     def _find_loaded_action(self):
         for action_key, action_obj in self._actions.getAll().items():
@@ -2549,13 +2783,33 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
         self._update_row_sort_keys(row)
 
     def _reload_nodes(self):
+        selected_before = self.nodes_combo.currentData()
         self.nodes_combo.blockSignals(True)
         self.nodes_combo.clear()
+        self.nodes_combo.addItem(
+            QC.translate("stats", "All local daemon nodes"),
+            "",
+        )
         for addr in self._nodes.get_nodes():
+            try:
+                if not self._nodes.is_local(addr):
+                    continue
+            except Exception:
+                continue
             self.nodes_combo.addItem(addr, addr)
+        if isinstance(selected_before, str) and selected_before != "":
+            idx = self.nodes_combo.findData(selected_before)
+            if idx >= 0:
+                self.nodes_combo.setCurrentIndex(idx)
         self.nodes_combo.blockSignals(False)
 
     def _apply_defaults_to_widgets(self):
+        self.daemon_mode_check.blockSignals(True)
+        self.daemon_mode_check.setChecked(
+            bool(self._global_defaults.daemon_mode)
+        )
+        self.daemon_mode_check.blockSignals(False)
+        self._apply_daemon_mode_widgets(bool(self._global_defaults.daemon_mode))
         self.default_interval_spin.setValue(max(1, int(self._global_defaults.interval)))
         self.default_interval_units.setCurrentText(
             normalize_unit(
@@ -2575,6 +2829,615 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
         self.default_user_agent.setText(
             (self._global_defaults.user_agent or "").strip()
         )
+
+    def _is_daemon_mode_enabled(self):
+        return bool(self.daemon_mode_check.isChecked())
+
+    def _on_daemon_mode_toggled(self, checked: bool):
+        self._apply_daemon_mode_widgets(bool(checked))
+
+    @QtCore.pyqtSlot(int)
+    def _on_nodes_runtime_updated(self, _total: int):
+        if self._is_daemon_mode_enabled():
+            self._reload_nodes()
+            self._set_runtime_state(active=None)
+
+    @QtCore.pyqtSlot(int)
+    def _on_daemon_node_selection_changed(self, _index: int):
+        if self._is_daemon_mode_enabled():
+            self._set_runtime_state(active=None)
+
+    def _daemon_runtime_state_from_nodes(self):
+        selected_node = self.nodes_combo.currentData()
+        local_nodes: list[str] = []
+        selected_addr = ""
+
+        if isinstance(selected_node, str) and selected_node.strip() != "":
+            selected_addr = selected_node.strip()
+            try:
+                if self._nodes.is_local(selected_addr):
+                    local_nodes = [selected_addr]
+            except Exception:
+                local_nodes = []
+        else:
+            for addr in self._nodes.get().keys():
+                try:
+                    if self._nodes.is_local(addr):
+                        local_nodes.append(addr)
+                except Exception:
+                    continue
+
+        total_local = len(local_nodes)
+        connected_local = 0
+        for addr in local_nodes:
+            try:
+                if self._nodes.is_connected(addr):
+                    connected_local += 1
+            except Exception:
+                continue
+
+        health_nodes = [addr for addr in local_nodes if self._nodes.is_connected(addr)]
+        health_suffix = self._daemon_health_suffix(health_nodes)
+
+        if total_local == 0:
+            return (
+                False,
+                (
+                    QC.translate("stats", "Runtime: daemon inactive (no local node available)")
+                    + health_suffix
+                ),
+            )
+
+        if selected_addr != "":
+            if connected_local > 0:
+                return (
+                    True,
+                    (
+                        QC.translate("stats", "Runtime: daemon active on {0}").format(
+                            selected_addr
+                        )
+                        + health_suffix
+                    ),
+                )
+            return (
+                False,
+                (
+                    QC.translate("stats", "Runtime: daemon inactive on {0}").format(
+                        selected_addr
+                    )
+                    + health_suffix
+                ),
+            )
+
+        if connected_local == 0:
+            return (
+                False,
+                QC.translate(
+                    "stats", "Runtime: daemon inactive (0/{0} local nodes connected)"
+                ).format(total_local)
+                + health_suffix,
+            )
+        if connected_local == total_local:
+            return (
+                True,
+                QC.translate(
+                    "stats", "Runtime: daemon active ({0}/{1} local nodes connected)"
+                ).format(connected_local, total_local)
+                + health_suffix,
+            )
+        return (
+            None,
+            QC.translate(
+                "stats", "Runtime: partially active ({0}/{1} local nodes connected)"
+            ).format(connected_local, total_local)
+            + health_suffix,
+        )
+
+    def _on_table_view_tab_changed(self, index: int) -> None:
+        monitoring = index == 1
+        # Columns that are always hidden (advanced / internal fields).
+        always_hidden = {
+            COL_INTERVAL, COL_INTERVAL_UNITS,
+            COL_TIMEOUT, COL_TIMEOUT_UNITS,
+            COL_MAX_SIZE, COL_MAX_SIZE_UNITS,
+            COL_FILE, COL_META,
+        }
+        # Columns only visible in the Monitoring tab.
+        monitoring_only = {COL_STATE, COL_LAST_CHECKED, COL_LAST_UPDATED, COL_FAILS, COL_ERROR}
+        # Columns only visible in the Config tab.
+        config_only = {COL_ENABLED, COL_URL, COL_FILENAME, COL_FORMAT, COL_GROUP}
+        # COL_NAME is visible in both tabs.
+        for col in range(self.table.columnCount()):
+            if col in always_hidden:
+                self.table.setColumnHidden(col, True)
+            elif col in monitoring_only:
+                self.table.setColumnHidden(col, not monitoring)
+            elif col in config_only:
+                self.table.setColumnHidden(col, monitoring)
+
+    def _update_subs_counters(self) -> None:
+        """Refresh the compact counter badge in the top bar (daemon mode only)."""
+        if not self._is_daemon_mode_enabled():
+            self._subs_counters_label.setVisible(False)
+            return
+        # Collect connected local nodes the same way _daemon_runtime_state_from_nodes does.
+        selected_node = self.nodes_combo.currentData()
+        if isinstance(selected_node, str) and selected_node.strip() != "":
+            candidate_addrs = [selected_node.strip()]
+        else:
+            candidate_addrs = list(self._nodes.get().keys())
+        health_nodes: list[str] = []
+        for addr in candidate_addrs:
+            try:
+                if self._nodes.is_local(addr) and self._nodes.is_connected(addr):
+                    health_nodes.append(addr)
+            except Exception:
+                continue
+        total = ready = errored = seen = 0
+        for addr in health_nodes:
+            health = self._node_subs_health_from_node_stats(addr)
+            if health is None:
+                health = self._node_subs_health.get(addr)
+            if health is None:
+                continue
+            seen += 1
+            total += health[0]
+            ready += health[1]
+            errored += health[2]
+        if seen == 0:
+            self._subs_counters_label.setVisible(False)
+            return
+        dark = self.palette().color(QtGui.QPalette.ColorRole.Window).lightness() < 128
+        ok_color = "#7CE3A1" if dark else "#0F8A4B"
+        err_color = ("#FF8A80" if dark else "#C62828") if errored > 0 else ("#888" if dark else "#999")
+        base_color = "#ccc" if dark else "#555"
+        text = (
+            f"<span style='color:{base_color};'>subs</span>  "
+            f"<span style='color:{ok_color};'>✓ {ready}</span>  "
+            f"<span style='color:{err_color};'>✗ {errored}</span>  "
+            f"<span style='color:{base_color};'>/ {total}</span>"
+        )
+        self._subs_counters_label.setText(text)
+        self._subs_counters_label.setVisible(True)
+
+    def _node_subs_health_from_node_stats(self, addr: str):
+        try:
+            node = self._nodes.get_node(addr)
+            if node is None:
+                return None
+            stats = node.get("stats")
+            if stats is None:
+                return None
+
+            total = int(
+                getattr(stats, "subscription_total", None)
+                or getattr(stats, "subscriptionTotal", None)
+                or 0
+            )
+            ready = int(
+                getattr(stats, "subscription_ready", None)
+                or getattr(stats, "subscriptionReady", None)
+                or 0
+            )
+            errored = int(
+                getattr(stats, "subscription_error", None)
+                or getattr(stats, "subscriptionError", None)
+                or 0
+            )
+            if total <= 0 and ready <= 0 and errored <= 0:
+                return None
+            return (total, ready, errored)
+        except Exception:
+            return None
+
+    def _daemon_health_suffix(self, addrs: list[str]) -> str:
+        total = 0
+        ready = 0
+        errored = 0
+        seen = 0
+        for addr in addrs:
+            health = self._node_subs_health_from_node_stats(addr)
+            if health is None:
+                health = self._node_subs_health.get(addr)
+            if health is None:
+                continue
+            seen += 1
+            total += int(health[0])
+            ready += int(health[1])
+            errored += int(health[2])
+
+        if seen == 0:
+            return ""
+        if total <= 0:
+            return QC.translate("stats", " | subs: n/a")
+        if errored > 0:
+            return QC.translate("stats", " | subs: issues ({0}/{1})").format(
+                errored, total
+            )
+        return QC.translate("stats", " | subs: healthy ({0}/{1})").format(
+            ready, total
+        )
+
+    def _apply_daemon_mode_widgets(self, daemon_mode: bool):
+        if daemon_mode:
+            self.lists_dir_edit.setText(SYSTEM_LISTS_DIR)
+            self._reload_nodes()
+            self._stop_runtime_for_daemon_mode()
+        self.lists_dir_edit.setEnabled(not daemon_mode)
+        self.enable_plugin_check.setEnabled(not daemon_mode)
+        self.start_runtime_button.setEnabled(not daemon_mode)
+        self.stop_runtime_button.setEnabled(not daemon_mode)
+        self.node_label.setVisible(daemon_mode)
+        self.nodes_combo.setVisible(daemon_mode)
+        self.reload_button.setText(
+            QC.translate("stats", "Reconcile from daemon")
+            if daemon_mode
+            else QC.translate("stats", "Reload runtime")
+        )
+        self.refresh_now_button.setText(
+            QC.translate("stats", "Transfer selected")
+            if daemon_mode
+            else QC.translate("stats", "Refresh selected")
+        )
+        self.refresh_state_button.setText(
+            QC.translate("stats", "Transfer all")
+            if daemon_mode
+            else QC.translate("stats", "Refresh all")
+        )
+        if daemon_mode:
+            self.enable_plugin_check.setChecked(False)
+            self._set_runtime_state(active=None)
+
+    def _compile_config_from_widgets(self):
+        subscriptions = self._collect_subscriptions()
+        if subscriptions is None:
+            return None
+        lists_dir = normalize_lists_dir(
+            self.lists_dir_edit.text().strip() or DEFAULT_LISTS_DIR
+        )
+        if self._is_daemon_mode_enabled():
+            lists_dir = SYSTEM_LISTS_DIR
+        defaults = GlobalDefaults(
+            lists_dir=lists_dir,
+            daemon_mode=self._is_daemon_mode_enabled(),
+            interval=max(1, int(self.default_interval_spin.value())),
+            interval_units=self.default_interval_units.currentText(),
+            timeout=max(1, int(self.default_timeout_spin.value())),
+            timeout_units=self.default_timeout_units.currentText(),
+            max_size=max(1, int(self.default_max_size_spin.value())),
+            max_size_units=self.default_max_size_units.currentText(),
+            user_agent=(self.default_user_agent.text() or "").strip(),
+        )
+        payload = {
+            "lists_dir": lists_dir,
+            "daemon_mode": bool(defaults.daemon_mode),
+            "interval": int(defaults.interval),
+            "interval_units": defaults.interval_units,
+            "timeout": int(defaults.timeout),
+            "timeout_units": defaults.timeout_units,
+            "max_size": int(defaults.max_size),
+            "max_size_units": defaults.max_size_units,
+            "user_agent": defaults.user_agent,
+            "subscriptions": [sub.to_dict() for sub in subscriptions],
+        }
+        return PluginConfig.from_dict(
+            payload,
+            lists_dir=lists_dir,
+            invalidate_duplicates=True,
+        )
+
+    def _build_daemon_subscription(self, sub: SubscriptionSpec):
+        subscription = ui_pb2.Subscription()
+        subscription.id = ""
+        subscription.name = sub.name
+        subscription.url = sub.url
+        subscription.filename = sub.filename
+        subscription.groups[:] = list(sub.groups)
+        subscription.enabled = bool(sub.enabled)
+        subscription.format = sub.format
+        subscription.interval_seconds = int(sub.interval_seconds)
+        subscription.timeout_seconds = int(sub.timeout_seconds)
+        subscription.max_bytes = int(sub.max_bytes)
+        subscription.node = ""
+        return subscription
+
+    def _build_subscription_spec_from_daemon(
+        self, sub: ui_pb2.Subscription
+    ) -> SubscriptionSpec | None:
+        payload: dict[str, Any] = {
+            "name": str(sub.name or "").strip(),
+            "url": str(sub.url or "").strip(),
+            "filename": safe_filename(sub.filename),
+            "groups": list(sub.groups),
+            "enabled": bool(sub.enabled),
+            "format": str(sub.format or "hosts").strip().lower() or "hosts",
+            "interval": int(sub.interval_seconds),
+            "interval_units": "seconds",
+            "timeout": int(sub.timeout_seconds),
+            "timeout_units": "seconds",
+            "max_size": int(sub.max_bytes),
+            "max_size_units": "bytes",
+        }
+        return SubscriptionSpec.from_dict(payload, self._global_defaults)
+
+    def _selected_local_nodes(self):
+        selected_node = self.nodes_combo.currentData()
+        local_nodes: list[str] = []
+        if isinstance(selected_node, str) and selected_node.strip() != "":
+            try:
+                if self._nodes.is_local(selected_node) and self._nodes.is_connected(
+                    selected_node
+                ):
+                    local_nodes = [selected_node]
+            except Exception:
+                local_nodes = []
+        else:
+            for addr in self._nodes.get().keys():
+                try:
+                    if self._nodes.is_local(addr) and self._nodes.is_connected(addr):
+                        local_nodes.append(addr)
+                except Exception:
+                    continue
+        return local_nodes
+
+    def _node_subs_version_ok(self, addr: str) -> bool | None:
+        """Return True if the node's reported daemon version meets the
+        minimum version for subscription support, False if it is clearly
+        too old, or None if the version cannot be determined."""
+        try:
+            node = self._nodes.get_node(addr)
+            if node is None:
+                return None
+            raw: str = node["data"].version or ""
+            parts = tuple(int(p) for p in raw.split(".") if p.isdigit())
+            if not parts:
+                return None
+            return parts >= _MIN_SUBS_DAEMON_VERSION
+        except Exception:
+            return None
+
+    def _send_daemon_subscription_request(
+        self,
+        operation: int,
+        *,
+        subscriptions: list[SubscriptionSpec] | None = None,
+        force: bool = False,
+        callback_signal: Any = None,
+    ):
+        local_nodes = self._selected_local_nodes()
+
+        if not local_nodes:
+            self._set_status(
+                QC.translate(
+                    "stats",
+                    "No local daemon node is connected. Cannot send daemon subscription request.",
+                ),
+                error=True,
+            )
+            return []
+
+        # Skip nodes we already know don't support subscriptions (old daemon).
+        incapable = [a for a in local_nodes if self._node_subs_capable.get(a) is False]
+        # Also mark incapable immediately if the reported version is too old,
+        # so we skip the 15-second probe for known-old daemons.
+        for addr in local_nodes:
+            if addr not in self._node_subs_capable:
+                ver_ok = self._node_subs_version_ok(addr)
+                if ver_ok is False:
+                    self._node_subs_capable[addr] = False
+        incapable = [a for a in local_nodes if self._node_subs_capable.get(a) is False]
+        if incapable:
+            self._set_status(
+                QC.translate(
+                    "stats",
+                    "Daemon node(s) not upgraded, skipping: {0}",
+                ).format(", ".join(incapable)),
+                error=True,
+            )
+        local_nodes = [a for a in local_nodes if self._node_subs_capable.get(a) is not False]
+        if not local_nodes:
+            return []
+
+        proto_subs = [
+            self._build_daemon_subscription(sub)
+            for sub in (subscriptions or [])
+        ]
+        sent_ids: list[int] = []
+        for addr in local_nodes:
+            request = ui_pb2.SubscriptionRequest()
+            request.operation = cast(Any, operation)
+            request.subscriptions.extend(proto_subs)
+            request.force = bool(force)
+            notification = ui_pb2.Notification(
+                clientName="",
+                serverName="",
+                type=ACTION_SUBSCRIPTIONS,
+            )
+            notification.subscription.CopyFrom(request)
+            sent_id = self._nodes.send_notification(addr, notification, callback_signal)
+            if isinstance(sent_id, int):
+                sent_ids.append(sent_id)
+                if callback_signal is not None:
+                    self._pending_notification_addrs[sent_id] = addr
+
+        # Arm a timeout so that daemons that silently ignore SUBSCRIPTIONS
+        # (old builds without the handler) are detected and marked incapable.
+        if callback_signal is not None and sent_ids:
+            ids_snapshot = frozenset(sent_ids)
+            QtCore.QTimer.singleShot(
+                15_000,
+                lambda s=ids_snapshot: self._on_subscription_notify_timeout(s),
+            )
+
+        return sent_ids
+
+    def _push_daemon_configuration(self, compiled_cfg: PluginConfig):
+        if not self._is_daemon_mode_enabled():
+            return
+        apply_ids = self._send_daemon_subscription_request(
+            SUBS_OP_APPLY,
+            subscriptions=list(compiled_cfg.subscriptions),
+        )
+        if not apply_ids:
+            return
+        self._send_daemon_subscription_request(SUBS_OP_DEPLOY)
+
+    def _stop_runtime_for_daemon_mode(self):
+        runtime_plugin = self._sync_runtime_binding_state()
+        if runtime_plugin is None:
+            return
+        if not bool(getattr(runtime_plugin, "enabled", False)):
+            return
+        try:
+            runtime_plugin.signal_in.emit(
+                {
+                    "plugin": runtime_plugin.get_name(),
+                    "signal": PluginSignal.DISABLE,
+                    "action_path": self._action_path,
+                }
+            )
+        except Exception:
+            pass
+
+    def _on_subscription_notify_timeout(self, ids_snapshot: frozenset[int]):
+        """Called 15 s after a subscription notify batch is sent.
+        Any id still in _pending_notification_addrs was never answered — the
+        daemon is too old to know about SUBSCRIPTIONS and silently dropped it.
+        """
+        timed_out_addrs: list[str] = []
+        for nid in ids_snapshot:
+            addr = self._pending_notification_addrs.pop(nid, None)
+            if addr is not None:
+                # Only mark False if we haven't already received a reply for
+                # this address (a concurrent reply could have set True already).
+                if addr not in self._node_subs_capable:
+                    self._node_subs_capable[addr] = False
+                    timed_out_addrs.append(addr)
+            # Remove from reconcile set too so it doesn't block forever.
+            self._pending_daemon_reconcile_ids.discard(nid)
+
+        if not timed_out_addrs:
+            return
+
+        self._set_status(
+            QC.translate(
+                "stats",
+                "Node(s) did not respond to subscription request "
+                "(daemon not upgraded?): {0}",
+            ).format(", ".join(timed_out_addrs)),
+            error=True,
+        )
+        # Refresh the runtime label so the user sees the capability gap.
+        self._set_runtime_state(active=None)
+
+    def reconcile_from_daemon(self):
+        if not self._is_daemon_mode_enabled():
+            self.load_action_file()
+            return
+        if self._pending_daemon_reconcile_ids:
+            self._set_status(
+                QC.translate(
+                    "stats", "Daemon reconcile already in progress. Please wait."
+                ),
+                error=False,
+            )
+            return
+        sent_ids = self._send_daemon_subscription_request(
+            SUBS_OP_LIST,
+            callback_signal=self._daemon_notification_callback,
+        )
+        if not sent_ids:
+            return
+        self._pending_daemon_reconcile_ids = set(sent_ids)
+        self._daemon_reconcile_added_count = 0
+        self._daemon_reconcile_error_count = 0
+        self._set_status(
+            QC.translate(
+                "stats", "Reconciling template from daemon nodes ({0} pending replies)..."
+            ).format(len(sent_ids)),
+            error=False,
+        )
+
+    @QtCore.pyqtSlot(str, ui_pb2.NotificationReply)
+    def _on_daemon_notification_reply(self, addr: str, reply: ui_pb2.NotificationReply):
+        # Any reply (OK or ERROR) proves the daemon handles SUBSCRIPTIONS.
+        # Silence (timeout) means the daemon is too old — handled separately.
+        self._pending_notification_addrs.pop(reply.id, None)
+        self._node_subs_capable[addr] = True
+
+        if reply.id not in self._pending_daemon_reconcile_ids:
+            return
+        self._pending_daemon_reconcile_ids.discard(reply.id)
+
+        if reply.code != ui_pb2.OK:
+            self._daemon_reconcile_error_count += 1
+        else:
+            payload = reply.subscription
+            if payload.operation == SUBS_OP_LIST:
+                total = len(payload.subscriptions)
+                ready = 0
+                errored = 0
+                for sub in payload.subscriptions:
+                    if sub.status == SUBS_STATUS_READY:
+                        ready += 1
+                    elif sub.status == SUBS_STATUS_ERROR:
+                        errored += 1
+                self._node_subs_health[addr] = (total, ready, errored)
+                added = self._merge_daemon_subscriptions_into_template(
+                    list(payload.subscriptions)
+                )
+                self._daemon_reconcile_added_count += added
+
+        self._set_runtime_state(active=None)
+
+        if self._pending_daemon_reconcile_ids:
+            return
+
+        if self._daemon_reconcile_added_count > 0:
+            self.save_action_file()
+
+        self.refresh_states()
+        if self._daemon_reconcile_error_count > 0:
+            self._set_status(
+                QC.translate(
+                    "stats",
+                    "Reconcile completed with errors. Added {0} template subscription(s).",
+                ).format(self._daemon_reconcile_added_count),
+                error=True,
+            )
+            return
+
+        self._set_status(
+            QC.translate(
+                "stats",
+                "Reconcile completed. Added {0} template subscription(s) from daemon nodes.",
+            ).format(self._daemon_reconcile_added_count),
+            error=False,
+        )
+
+    def _merge_daemon_subscriptions_into_template(
+        self, subscriptions: list[ui_pb2.Subscription]
+    ):
+        existing: set[tuple[str, str]] = set()
+        for row in range(self.table.rowCount()):
+            url = self._cell_text(row, COL_URL).strip()
+            filename = safe_filename(self._cell_text(row, COL_FILENAME))
+            if url != "" and filename != "":
+                existing.add((url, filename))
+
+        added = 0
+        with self._sorting_suspended():
+            for daemon_sub in subscriptions:
+                spec = self._build_subscription_spec_from_daemon(daemon_sub)
+                if spec is None:
+                    continue
+                identity = (spec.url, safe_filename(spec.filename))
+                if identity in existing:
+                    continue
+                self._append_row(MutableSubscriptionSpec.from_spec(spec))
+                existing.add(identity)
+                added += 1
+        return added
 
     def _set_units_combo(
         self, row: int, col: int, allowed: tuple[str, ...], value: str | None
@@ -2681,4 +3544,6 @@ class ListSubscriptionsDialog(QtWidgets.QDialog, ListSubscriptionsDialogUI):
 
     def _refresh_states_if_visible(self):
         if self.isVisible() and not self._loading:
+            if self._is_daemon_mode_enabled():
+                self._set_runtime_state(active=None)
             self.refresh_states()

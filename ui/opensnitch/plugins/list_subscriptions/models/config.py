@@ -116,6 +116,7 @@ class MutablePluginConfig:
     def to_dict(self):
         return {
             "lists_dir": normalize_lists_dir(self.defaults.lists_dir),
+            "daemon_mode": bool(self.defaults.daemon_mode),
             "interval": int(self.defaults.interval),
             "interval_units": self.defaults.interval_units,
             "timeout": int(self.defaults.timeout),

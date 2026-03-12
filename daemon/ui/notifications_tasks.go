@@ -76,6 +76,10 @@ func (c *Client) monitorTaskEvents(ctx context.Context, taskName string, stream 
 			postMsg("", err)
 
 		case temp := <-results:
+			if reply, ok := temp.(*protocol.SubscriptionReply); ok {
+				c.sendSubscriptionNotificationReply(stream, protocol.Action_SUBSCRIPTIONS, ntfId, reply, nil)
+				continue
+			}
 			data, ok := temp.(string)
 			if ok {
 				postMsg(data, nil)

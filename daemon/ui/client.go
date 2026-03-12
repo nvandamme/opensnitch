@@ -13,6 +13,7 @@ import (
 	"github.com/evilsocket/opensnitch/daemon/procmon"
 	"github.com/evilsocket/opensnitch/daemon/rule"
 	"github.com/evilsocket/opensnitch/daemon/statistics"
+	"github.com/evilsocket/opensnitch/daemon/subscriptions"
 	"github.com/evilsocket/opensnitch/daemon/tasks"
 	"github.com/evilsocket/opensnitch/daemon/ui/auth"
 	"github.com/evilsocket/opensnitch/daemon/ui/config"
@@ -49,6 +50,7 @@ type Client struct {
 	loggers       *loggers.LoggerManager
 	stats         *statistics.Statistics
 	rules         *rule.Loader
+	subscriptions *subscriptions.Service
 	con           *grpc.ClientConn
 	configWatcher *fsnotify.Watcher
 
@@ -71,15 +73,42 @@ func NewClient(socketPath, localConfigFile string, stats *statistics.Statistics,
 	if localConfigFile != "" {
 		configFile = localConfigFile
 	}
-	c := &Client{
-		loggers:      loggers,
-		stats:        stats,
-		rules:        rules,
-		isUnixSocket: false,
-		isAsking:     false,
-		isConnected:  make(chan bool),
-		alertsChan:   make(chan protocol.Alert, maxQueuedAlerts),
+	var subStore subscriptions.Store
+	subStore, err := subscriptions.NewFileStore(subscriptions.DefaultStoreFile)
+	if err != nil {
+		log.Warning("[subscriptions] failed to initialize file store %s: %v", subscriptions.DefaultStoreFile, err)
+		subStore = subscriptions.NewMemoryStore()
 	}
+
+	c := &Client{
+		loggers:       loggers,
+		stats:         stats,
+		rules:         rules,
+		subscriptions: subscriptions.NewService(subStore, subscriptions.WithRootDir(subscriptions.DefaultRootDir)),
+		isUnixSocket:  false,
+		isAsking:      false,
+		isConnected:   make(chan bool),
+		alertsChan:    make(chan protocol.Alert, maxQueuedAlerts),
+	}
+	if err := c.subscriptions.RestoreLayout(context.Background()); err != nil {
+		log.Warning("[subscriptions] failed to restore layout on startup: %v", err)
+	}
+	go func() {
+		req := &protocol.SubscriptionRequest{
+			Operation: protocol.SubscriptionOperation_SUBSCRIPTION_OPERATION_REFRESH,
+		}
+		reply, err := c.subscriptions.Refresh(context.Background(), req)
+		if err != nil {
+			log.Warning("[subscriptions] startup recheck failed: %v", err)
+			return
+		}
+		if reply != nil && len(reply.Errors) > 0 {
+			log.Warning("[subscriptions] startup recheck completed with %d errors", len(reply.Errors))
+		}
+		if err := c.subscriptions.Flush(context.Background()); err != nil {
+			log.Warning("[subscriptions] startup recheck flush failed: %v", err)
+		}
+	}()
 	c.config.Rules.Path = rules.Path
 	//for i := 0; i < 4; i++ {
 	go c.alertsDispatcher()
@@ -175,14 +204,14 @@ func (c *Client) Connected() bool {
 	return true
 }
 
-//GetIsAsking returns the isAsking flag
+// GetIsAsking returns the isAsking flag
 func (c *Client) GetIsAsking() bool {
 	c.RLock()
 	defer c.RUnlock()
 	return c.isAsking
 }
 
-//SetIsAsking sets the isAsking flag
+// SetIsAsking sets the isAsking flag
 func (c *Client) SetIsAsking(flag bool) {
 	c.Lock()
 	defer c.Unlock()
@@ -330,6 +359,16 @@ func (c *Client) ping(ts time.Time) (err error) {
 	if serializedStats == nil {
 		log.Trace("client, no stats")
 		return nil
+	}
+	if c.subscriptions != nil {
+		total, ready, errored, subErr := c.subscriptions.StatusCounts(c.clientCtx)
+		if subErr != nil {
+			log.Debug("[subscriptions] failed to collect stats counters: %v", subErr)
+		} else {
+			serializedStats.SubscriptionTotal = total
+			serializedStats.SubscriptionReady = ready
+			serializedStats.SubscriptionError = errored
+		}
 	}
 
 	reqID := uint64(ts.UnixNano())

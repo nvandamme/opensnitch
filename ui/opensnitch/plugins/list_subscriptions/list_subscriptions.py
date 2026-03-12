@@ -603,8 +603,8 @@ class ListSubscriptions(PluginBase, metaclass=SingletonABCMeta):
                     if not matched:
                         continue
 
-                    notification = ui_pb2.Notification(  # type: ignore
-                        type=ui_pb2.CHANGE_RULE,  # type: ignore
+                    notification = ui_pb2.Notification(
+                        type=ui_pb2.CHANGE_RULE,
                         rules=[rule],
                     )
                     self._nodes.send_notification(addr, notification, None)

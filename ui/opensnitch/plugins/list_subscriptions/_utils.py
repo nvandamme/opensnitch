@@ -14,6 +14,8 @@ DEFAULT_LISTS_DIR: Final[str] = os.path.join(
 )
 PLUGIN_DIR: Final[str] = os.path.abspath(os.path.dirname(__file__))
 RES_DIR: Final[str] = os.path.join(PLUGIN_DIR, "res")
+SYSTEM_LISTS_DIR: Final[str] = "/etc/opensnitchd/subscriptions"
+ACTION_SUBSCRIPTIONS: Final[str] = "SUBSCRIPTIONS"
 
 INTERVAL_UNITS: Final[tuple[str, ...]] = (
     "seconds",

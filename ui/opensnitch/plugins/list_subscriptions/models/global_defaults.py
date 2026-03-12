@@ -8,6 +8,7 @@ from typing import Any
 @dataclass(frozen=True)
 class GlobalDefaults:
     lists_dir: str
+    daemon_mode: bool = False
     interval: int = 24
     interval_units: str = "hours"
     timeout: int = 60
@@ -32,6 +33,7 @@ class GlobalDefaults:
 
         return GlobalDefaults(
             lists_dir=lists_dir,
+            daemon_mode=bool(d.get("daemon_mode", False)),
             interval=_int(d.get("interval"), 24),
             interval_units=_str(d.get("interval_units"), "hours"),
             timeout=_int(d.get("timeout"), 60),

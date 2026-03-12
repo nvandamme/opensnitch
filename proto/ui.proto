@@ -94,6 +94,9 @@ message Statistics {
 	map<string, uint64> by_uid = 15;
 	map<string, uint64> by_executable = 16;
     repeated Event events = 17;
+    uint64 subscription_total = 18;
+    uint64 subscription_ready = 19;
+    uint64 subscription_error = 20;
 }
 
 message PingRequest {
@@ -192,6 +195,60 @@ enum Action {
      */
     TASK_START = 13;
     TASK_STOP = 14;
+
+    /* Typed subscription management routed through the same persistent
+     * Notifications stream used by the daemon today.
+     */
+    SUBSCRIPTIONS = 15;
+}
+
+enum SubscriptionOperation {
+    SUBSCRIPTION_OPERATION_UNSPECIFIED = 0;
+    SUBSCRIPTION_OPERATION_LIST = 1;
+    SUBSCRIPTION_OPERATION_APPLY = 2;
+    SUBSCRIPTION_OPERATION_DELETE = 3;
+    SUBSCRIPTION_OPERATION_REFRESH = 4;
+    SUBSCRIPTION_OPERATION_DEPLOY = 5;
+}
+
+enum SubscriptionStatus {
+    SUBSCRIPTION_STATUS_UNSPECIFIED = 0;
+    SUBSCRIPTION_STATUS_PENDING = 1;
+    SUBSCRIPTION_STATUS_READY = 2;
+    SUBSCRIPTION_STATUS_SYNCING = 3;
+    SUBSCRIPTION_STATUS_ERROR = 4;
+}
+
+message Subscription {
+    string id = 1;
+    string name = 2;
+    string url = 3;
+    string filename = 4;
+    repeated string groups = 5;
+    bool enabled = 6;
+    string format = 7;
+    uint32 interval_seconds = 8;
+    uint32 timeout_seconds = 9;
+    uint64 max_bytes = 10;
+    string node = 11;
+    SubscriptionStatus status = 12;
+    string last_updated = 13;
+    string last_error = 14;
+}
+
+message SubscriptionRequest {
+    SubscriptionOperation operation = 1;
+    repeated Subscription subscriptions = 2;
+    repeated string targets = 3;
+    bool force = 4;
+}
+
+message SubscriptionReply {
+    SubscriptionOperation operation = 1;
+    repeated Subscription subscriptions = 2;
+    repeated string errors = 3;
+    string message = 4;
+    bool accepted = 5;
 }
 
 message StatementValues {
@@ -279,6 +336,7 @@ message Notification {
     string data = 5;   
     repeated Rule rules = 6;
     SysFirewall sysFirewall = 7;
+    SubscriptionRequest subscription = 8;
 }
 
 // notification reply sent to the server (GUI)
@@ -286,6 +344,7 @@ message NotificationReply {
     uint64 id = 1;
     NotificationReplyCode code = 2;
     string data = 3;
+    SubscriptionReply subscription = 4;
 }
 
 enum NotificationReplyCode {

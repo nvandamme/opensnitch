@@ -18,6 +18,7 @@ import (
 	"github.com/evilsocket/opensnitch/daemon/tasks/nodemonitor"
 	"github.com/evilsocket/opensnitch/daemon/tasks/pidmonitor"
 	"github.com/evilsocket/opensnitch/daemon/tasks/socketsmonitor"
+	subscriptionstask "github.com/evilsocket/opensnitch/daemon/tasks/subscriptions"
 	"github.com/evilsocket/opensnitch/daemon/ui/config"
 	"github.com/evilsocket/opensnitch/daemon/ui/protocol"
 	"golang.org/x/net/context"
@@ -285,6 +286,91 @@ func (c *Client) handleActionReloadFw(stream protocol.UI_NotificationsClient, nt
 
 }
 
+func (c *Client) handleActionSubscriptions(stream protocol.UI_NotificationsClient, ntf *protocol.Notification) {
+	if ntf.Subscription == nil {
+		c.sendSubscriptionNotificationReply(
+			stream,
+			ntf.Type,
+			ntf.Id,
+			&protocol.SubscriptionReply{
+				Message:  "missing subscription payload",
+				Accepted: false,
+			},
+			fmt.Errorf("missing subscription payload"),
+		)
+		return
+	}
+
+	req := ntf.Subscription
+	switch req.Operation {
+	case protocol.SubscriptionOperation_SUBSCRIPTION_OPERATION_LIST,
+		protocol.SubscriptionOperation_SUBSCRIPTION_OPERATION_APPLY,
+		protocol.SubscriptionOperation_SUBSCRIPTION_OPERATION_DELETE:
+		reply, err := c.subscriptions.HandleRequest(c.clientCtx, req)
+		c.sendSubscriptionNotificationReply(stream, ntf.Type, ntf.Id, reply, err)
+
+	case protocol.SubscriptionOperation_SUBSCRIPTION_OPERATION_REFRESH,
+		protocol.SubscriptionOperation_SUBSCRIPTION_OPERATION_DEPLOY:
+		if TaskMgr == nil {
+			c.sendSubscriptionNotificationReply(
+				stream,
+				ntf.Type,
+				ntf.Id,
+				&protocol.SubscriptionReply{
+					Operation: req.Operation,
+					Message:   "task manager unavailable",
+					Accepted:  false,
+				},
+				fmt.Errorf("task manager unavailable"),
+			)
+			return
+		}
+
+		taskName, task := subscriptionstask.New(c.subscriptions, req, true)
+		task.SetID(ntf.Id)
+		if _, err := TaskMgr.AddTask(taskName, task); err != nil {
+			c.sendSubscriptionNotificationReply(
+				stream,
+				ntf.Type,
+				ntf.Id,
+				&protocol.SubscriptionReply{
+					Operation: req.Operation,
+					Message:   "failed to schedule subscription task",
+					Accepted:  false,
+				},
+				err,
+			)
+			return
+		}
+
+		c.sendSubscriptionNotificationReply(
+			stream,
+			ntf.Type,
+			ntf.Id,
+			&protocol.SubscriptionReply{
+				Operation:     req.Operation,
+				Subscriptions: req.Subscriptions,
+				Message:       "subscription task scheduled",
+				Accepted:      true,
+			},
+			nil,
+		)
+
+	default:
+		c.sendSubscriptionNotificationReply(
+			stream,
+			ntf.Type,
+			ntf.Id,
+			&protocol.SubscriptionReply{
+				Operation: req.Operation,
+				Message:   "unsupported subscription operation",
+				Accepted:  false,
+			},
+			fmt.Errorf("unsupported subscription operation: %s", req.Operation.String()),
+		)
+	}
+}
+
 func (c *Client) handleNotification(stream protocol.UI_NotificationsClient, ntf *protocol.Notification) {
 	switch {
 	case ntf.Type == protocol.Action_TASK_START:
@@ -318,6 +404,9 @@ func (c *Client) handleNotification(stream protocol.UI_NotificationsClient, ntf 
 	// CHANGE_RULE can add() or replace() an existing rule.
 	case ntf.Type == protocol.Action_CHANGE_RULE:
 		c.handleActionChangeRule(stream, ntf)
+
+	case ntf.Type == protocol.Action_SUBSCRIPTIONS:
+		c.handleActionSubscriptions(stream, ntf)
 	}
 }
 
@@ -333,6 +422,29 @@ func (c *Client) sendNotificationReply(stream protocol.UI_NotificationsClient, n
 			return nil
 		}
 		log.Error("Error replying to notification, type: %d, id: %d, err: %s", nType, reply.Id, err)
+		return err
+	}
+
+	return nil
+}
+
+func (c *Client) sendSubscriptionNotificationReply(stream protocol.UI_NotificationsClient, nType protocol.Action, nID uint64, payload *protocol.SubscriptionReply, err error) error {
+	reply := NewReply(nID, protocol.NotificationReplyCode_OK, "")
+	reply.Subscription = payload
+	if err != nil {
+		reply.Code = protocol.NotificationReplyCode_ERROR
+		if payload != nil && payload.Message != "" {
+			reply.Data = payload.Message
+		} else {
+			reply.Data = fmt.Sprint(err)
+		}
+	}
+	if err := stream.Send(reply); err != nil {
+		if err == io.EOF {
+			log.Trace("[Notifications] sendSubscriptionNotificationReply, stream channel closed")
+			return nil
+		}
+		log.Error("Error replying to subscription notification, type: %d, id: %d, err: %s", nType, reply.Id, err)
 		return err
 	}
 
