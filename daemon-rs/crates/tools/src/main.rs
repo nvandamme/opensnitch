@@ -4,14 +4,21 @@ use std::{
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
 };
+use time::{OffsetDateTime, macros::format_description};
 
 type DynError = Box<dyn std::error::Error>;
 
 const TABLE_HEADER: &str = "| Date | Backend | Profile | Rounds | Commit | p50 ms | p95 ms | p99 ms | max ms | drop_total | Baseline Check | Go Ref | vs Go p50 | vs Go p95 | vs Go p99 | vs Go max | vs Go drop | Prev Commit Ref | vs Prev p50 | vs Prev p95 | vs Prev p99 | vs Prev max | vs Prev drop | Notes |";
 const DELTA_TABLE_HEADER: &str = "| Date | Delta Target | Rounds | Commit | Hot Δ p50 ms | Hot Δ p95 ms | Hot Δ p99 ms | Hot Δ max ms | Hot Δ drop_total | Cold Go total s | Cold Rust total s | Cold Δ s (Rust-Go) | Result | Notes |";
 const EMPTY_COMPARISON_COLUMNS: &str = "- | - | - | - | - | - | - | - | - | - | - | -";
+const TS_COMPACT: &[time::format_description::FormatItem<'static>] =
+    format_description!("[year][month][day]-[hour][minute][second]");
+
+fn compact_timestamp() -> Result<String, DynError> {
+    let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+    Ok(now.format(TS_COMPACT)?)
+}
 
 fn main() {
     if let Err(err) = run() {
@@ -1025,13 +1032,11 @@ fn launch_daemon_live_logs() -> Result<(), DynError> {
         .unwrap_or_else(|_| repo_root.join("logs"));
     fs::create_dir_all(&logs_dir)?;
 
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|err| format!("system clock error: {err}"))?
-        .as_secs();
+    let ts = compact_timestamp()?;
     let stem = format!("daemon-rs-live-{ts}");
-    let stdout_path = logs_dir.join(format!("{stem}.stdout.log"));
-    let stderr_path = logs_dir.join(format!("{stem}.stderr.log"));
+    let stdout_path = logs_dir.join(format!("{stem}-stdout.log"));
+    let stderr_path = logs_dir.join(format!("{stem}-stderr.log"));
+    let daemon_log_path = logs_dir.join(format!("daemon-rs-{ts}.log"));
     let latest_path = logs_dir.join("daemon-rs-live.latest");
     let rust_log = env::var("OPENSNITCH_DAEMON_RS_RUST_LOG").unwrap_or_else(|_| "info".to_string());
     let run_release = !env_flag("OPENSNITCH_DAEMON_RS_LIVE_DEBUG");
@@ -1047,6 +1052,10 @@ fn launch_daemon_live_logs() -> Result<(), DynError> {
         .arg("-n")
         .arg("env")
         .arg(format!("RUST_LOG={rust_log}"))
+        .arg(format!(
+            "OPENSNITCH_DAEMON_RS_LOG_FILE={}",
+            daemon_log_path.display()
+        ))
         .arg("cargo")
         .arg("run");
 
@@ -1068,15 +1077,17 @@ fn launch_daemon_live_logs() -> Result<(), DynError> {
 
     let mode = if run_release { "release" } else { "debug" };
     let latest_content = format!(
-        "pid={pid}\nmode={mode}\nrust_log={rust_log}\nstdout={}\nstderr={}\n",
+        "pid={pid}\nmode={mode}\nrust_log={rust_log}\nstdout={}\nstderr={}\nlogfile={}\n",
         stdout_path.display(),
         stderr_path.display(),
+        daemon_log_path.display(),
     );
     fs::write(&latest_path, latest_content)?;
 
     println!("daemon-rs live log session launched pid={pid} mode={mode}");
     println!("stdout={}", stdout_path.display());
     println!("stderr={}", stderr_path.display());
+    println!("logfile={}", daemon_log_path.display());
     println!("latest={}", latest_path.display());
     println!("tail: tail -f {}", stdout_path.display(),);
     println!("stop: sudo kill {pid}");

@@ -198,7 +198,7 @@ rust-parity-tests:
 	@RUST_LOG=$(RUST_TEST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) -p $(DAEMON_RS_PACKAGE) client::client::tests:: -- --nocapture
 
 rust-kernel-it:
-	@RUST_LOG=$(RUST_TEST_LOG_LEVEL) OPENSNITCH_RUN_KERNEL_IT=1 OPENSNITCH_KERNEL_IT_STRICT=1 cargo test --manifest-path $(DAEMON_RS_MANIFEST) -p $(DAEMON_RS_PACKAGE) --features integration-kernel-tests integration_kernel_tests:: -- --nocapture
+	@RUST_LOG=$(RUST_TEST_LOG_LEVEL) OPENSNITCH_RUN_KERNEL_IT=1 OPENSNITCH_KERNEL_IT_STRICT=1 cargo test --manifest-path $(DAEMON_RS_MANIFEST) -p $(DAEMON_RS_PACKAGE) integration_kernel_tests:: -- --nocapture
 
 go-rust-parity-full:
 	@if [ "$$(id -u)" -ne 0 ]; then \
@@ -230,5 +230,4 @@ daemon-rs-live-logs:
 
 daemon-rs-live-stop:
 	@$(DAEMON_RS_TOOLS_RUN) stop-daemon-live-logs
-
 

@@ -1,4 +1,5 @@
 use std::{
+    env,
     fs::OpenOptions,
     io::{self, Write},
     net::{SocketAddr, ToSocketAddrs, UdpSocket},
@@ -154,6 +155,13 @@ fn sink_options() -> &'static RwLock<LogSinkOptions> {
 }
 
 pub fn apply_config(config: &crate::config::Config) -> Result<()> {
+    let override_log_file = env::var("OPENSNITCH_DAEMON_RS_LOG_FILE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let effective_log_file = override_log_file.or_else(|| config.log_file.clone());
+
     let udp_target = config
         .loggers
         .iter()
@@ -163,7 +171,7 @@ pub fn apply_config(config: &crate::config::Config) -> Result<()> {
         .and_then(|logger| parse_udp_target(&logger.server));
 
     if let Ok(mut guard) = sink_options().write() {
-        guard.log_file = config.log_file.clone();
+        guard.log_file = effective_log_file.clone();
         guard.log_utc = config.log_utc;
         guard.log_micro = config.log_micro;
         guard.udp_target = udp_target;
@@ -171,7 +179,7 @@ pub fn apply_config(config: &crate::config::Config) -> Result<()> {
 
     // Keep atomic fast-path flags in sync so make_writer() and format_time()
     // can avoid the RwLock in the common stdout-only case.
-    LOG_SINK_HAS_FILE.store(config.log_file.is_some(), Ordering::Relaxed);
+    LOG_SINK_HAS_FILE.store(effective_log_file.is_some(), Ordering::Relaxed);
     LOG_SINK_HAS_UDP.store(udp_target.is_some(), Ordering::Relaxed);
     LOG_SINK_UTC.store(config.log_utc, Ordering::Relaxed);
     LOG_SINK_MICRO.store(config.log_micro, Ordering::Relaxed);

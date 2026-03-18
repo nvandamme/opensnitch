@@ -294,6 +294,7 @@ impl StatsService {
         self.counters.dropped.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[cfg(test)]
     pub fn on_ignored(&self) {
         self.counters.ignored.fetch_add(1, Ordering::Relaxed);
         self.counters.accepted.fetch_add(1, Ordering::Relaxed);

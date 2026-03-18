@@ -437,10 +437,11 @@ impl NotificationFlow {
 fn auth_fingerprint(config: &Config) -> String {
     let tls = &config.client_auth.tls_options;
     format!(
-        "{}|{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}",
         config.client_auth.auth_type.as_name(),
         tls.ca_cert,
         tls.server_cert,
+        tls.server_key,
         tls.client_cert,
         tls.client_key,
         tls.client_auth_type,
