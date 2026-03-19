@@ -211,6 +211,9 @@ impl WorkerControl for ProcWorkersControl {
 impl OneShotWorker for ProcWorkersControl {}
 
 impl Daemon {
+    const STARTUP_UI_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+    const STARTUP_UI_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
     fn boxed_one_shot_worker<T>(worker: T) -> Box<dyn WorkerControl>
     where
         T: WorkerControl + OneShotWorker + 'static,
@@ -435,6 +438,7 @@ impl Daemon {
             task_reply: 256,
             alert: 1024,
         });
+        crate::utils::daemon_guard::ensure_no_competing_daemon_instances()?;
         let config = crate::config::Config::load_from_default_locations()?
             .with_client_addr_override(client_addr);
         if let Some(status) = crate::tunables::RuntimeTunables::maybe_autotune_on_startup() {
@@ -531,16 +535,7 @@ impl Daemon {
         if let Err(err) = crate::logging::LoggingState::apply_config(&config) {
             warn!("failed to apply startup logging config: {err}");
         }
-        match Client::connect_with_config(&config).await {
-            Ok(mut client) => {
-                if let Err(err) = self.startup_handshake(&mut client).await {
-                    warn!(addr = %config.client_addr, "startup UI handshake failed, continuing without blocking runtime: {err}");
-                }
-            }
-            Err(err) => {
-                warn!(addr = %config.client_addr, "startup UI connect failed, continuing without blocking runtime: {err}");
-            }
-        }
+        self.spawn_startup_ui_handshake_task(config.clone());
 
         let verdict_flow = VerdictFlow::new(
             self.inner.bus.clone(),
@@ -575,6 +570,41 @@ impl Daemon {
         crate::utils::systemd_notify::status("Daemon stopped");
 
         Ok(())
+    }
+
+    fn spawn_startup_ui_handshake_task(&self, config: Arc<crate::config::Config>) {
+        let daemon = self.clone();
+        tokio::spawn(async move {
+            match tokio::time::timeout(
+                Self::STARTUP_UI_CONNECT_TIMEOUT,
+                Client::connect_with_config(&config),
+            )
+            .await
+            {
+                Ok(Ok(mut client)) => {
+                    match tokio::time::timeout(
+                        Self::STARTUP_UI_HANDSHAKE_TIMEOUT,
+                        daemon.startup_handshake(&mut client),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => {
+                            warn!(addr = %config.client_addr, "startup UI handshake failed, continuing without blocking runtime: {err}");
+                        }
+                        Err(_) => {
+                            warn!(addr = %config.client_addr, timeout = ?Self::STARTUP_UI_HANDSHAKE_TIMEOUT, "startup UI handshake timed out, continuing without blocking runtime");
+                        }
+                    }
+                }
+                Ok(Err(err)) => {
+                    warn!(addr = %config.client_addr, "startup UI connect failed, continuing without blocking runtime: {err}");
+                }
+                Err(_) => {
+                    warn!(addr = %config.client_addr, timeout = ?Self::STARTUP_UI_CONNECT_TIMEOUT, "startup UI connect timed out, continuing without blocking runtime");
+                }
+            }
+        });
     }
 
     async fn startup_handshake(&self, client: &mut Client) -> Result<()> {

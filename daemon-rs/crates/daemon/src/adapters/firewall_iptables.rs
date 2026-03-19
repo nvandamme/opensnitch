@@ -112,6 +112,26 @@ impl FirewallIptablesAdapter {
     pub(crate) fn probe_chain_policy_args(chain: &pb::FwChain) -> Option<Vec<String>> {
         Self::chain_policy_args(chain)
     }
+
+    #[cfg(test)]
+    pub(crate) fn probe_iptables_args(rule: &pb::FwRule) -> Vec<String> {
+        Self::iptables_args(rule)
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_nfqueue_rules(
+        queue_num: &str,
+        queue_bypass: bool,
+    ) -> (Vec<String>, Vec<String>) {
+        let (conn, dns) = Self::nfqueue_rules(queue_num, queue_bypass);
+        (
+            conn.into_iter().map(ToOwned::to_owned).collect(),
+            dns.into_iter().map(ToOwned::to_owned).collect(),
+        )
+    }
 }
 
 impl FirewallIptablesAdapter {

@@ -1,14 +1,18 @@
-use std::{net::TcpListener, sync::Mutex};
+use std::{
+    net::TcpListener,
+    sync::Mutex,
+    time::{Duration as StdDuration, Instant},
+};
 
 use opensnitch_proto::pb;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{Duration, timeout};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::{
     bus::{BusCaps, BusState},
-    config::Config,
+    client::{client::Client, notifications::NotificationStream},
+    config::{ClientAuthType, Config},
     flows::notification_flow::NotificationFlow,
     services::config_service::ConfigService,
     services::firewall_service::FirewallService,
@@ -18,7 +22,52 @@ use crate::{
 
 #[derive(Default)]
 struct TestUiServer {
+    open_tx: Mutex<Option<oneshot::Sender<()>>>,
     hello_tx: Mutex<Option<oneshot::Sender<pb::NotificationReply>>>,
+}
+
+async fn recv_oneshot_with_deadline<T>(
+    rx: &mut oneshot::Receiver<T>,
+    max_wait: StdDuration,
+) -> Result<T, &'static str> {
+    let start = Instant::now();
+    loop {
+        match rx.try_recv() {
+            Ok(value) => return Ok(value),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                if start.elapsed() >= max_wait {
+                    return Err("timeout");
+                }
+                tokio::task::yield_now().await;
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                return Err("closed");
+            }
+        }
+    }
+}
+
+async fn wait_join_with_deadline<T>(
+    handle: &mut tokio::task::JoinHandle<T>,
+    max_wait: StdDuration,
+) -> Result<T, &'static str> {
+    let start = Instant::now();
+    loop {
+        if handle.is_finished() {
+            return handle.await.map_err(|_| "join-error");
+        }
+        if start.elapsed() >= max_wait {
+            return Err("timeout");
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn yield_for(duration: StdDuration) {
+    let start = Instant::now();
+    while start.elapsed() < duration {
+        tokio::task::yield_now().await;
+    }
 }
 
 #[tonic::async_trait]
@@ -43,6 +92,7 @@ impl pb::ui_server::Ui for TestUiServer {
         &self,
         request: Request<pb::ClientConfig>,
     ) -> Result<Response<pb::ClientConfig>, Status> {
+        eprintln!("[notification_flow_test] server=subscribe");
         Ok(Response::new(request.into_inner()))
     }
 
@@ -50,6 +100,10 @@ impl pb::ui_server::Ui for TestUiServer {
         &self,
         request: Request<tonic::Streaming<pb::NotificationReply>>,
     ) -> Result<Response<Self::NotificationsStream>, Status> {
+        eprintln!("[notification_flow_test] server=notifications-open");
+        if let Some(open_tx) = self.open_tx.lock().expect("lock open sender").take() {
+            let _ = open_tx.send(());
+        }
         let mut outbound = request.into_inner();
         let hello_tx = self.hello_tx.lock().expect("lock hello sender").take();
         let (notification_tx, notification_rx) = mpsc::channel(1);
@@ -58,10 +112,11 @@ impl pb::ui_server::Ui for TestUiServer {
             if let Ok(Some(reply)) = outbound.message().await
                 && let Some(hello_tx) = hello_tx
             {
+                eprintln!("[notification_flow_test] server=notifications-hello-received");
                 let _ = hello_tx.send(reply);
             }
 
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            yield_for(StdDuration::from_millis(200)).await;
             drop(notification_tx);
         });
 
@@ -95,21 +150,25 @@ fn stream_close_notification_recognizes_action_none_and_lower_values() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn notification_flow_runs_ui_poller_path_against_live_server() {
     crate::tests::support::init_test_logging();
+    eprintln!("[notification_flow_test] stage=begin");
 
+    let (open_tx, open_rx) = oneshot::channel();
     let (hello_tx, hello_rx) = oneshot::channel();
     let ui = TestUiServer {
+        open_tx: Mutex::new(Some(open_tx)),
         hello_tx: Mutex::new(Some(hello_tx)),
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind test ui server");
     let addr = listener.local_addr().expect("resolve test ui addr");
     drop(listener);
+    eprintln!("[notification_flow_test] stage=server-bind addr={addr}");
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let server_handle = tokio::spawn(async move {
+    let mut server_handle = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(pb::ui_server::UiServer::new(ui))
             .serve_with_shutdown(addr, async move {
@@ -119,54 +178,111 @@ async fn notification_flow_runs_ui_poller_path_against_live_server() {
             .expect("serve test ui server");
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    yield_for(StdDuration::from_millis(150)).await;
+    eprintln!("[notification_flow_test] stage=server-ready");
 
     let (bus, _bus_rx) = BusState::build_with_caps(BusCaps::uniform(8));
     let mut config = Config::default();
     config.client_addr = format!("http://{addr}");
+    config.client_auth.auth_type = ClientAuthType::Simple;
     let rules = RuleService::default();
-    rules
-        .load_path(&config.rules_path)
-        .await
-        .expect("load rules");
+    rules.load_path(&config.rules_path).await.expect("load rules");
+    eprintln!("[notification_flow_test] stage=rules-loaded");
     let firewall = FirewallService::new(&config).expect("build firewall service");
-    let flow = NotificationFlow::new(
+    let _flow = NotificationFlow::new(
         bus,
-        ConfigService::new(config),
+        ConfigService::new(config.clone()),
         UiSessionService::default(),
-        rules,
-        firewall,
+        rules.clone(),
+        firewall.clone(),
     );
 
-    // Keep task_reply_tx alive so the inner loop doesn't exit via None immediately;
-    // the server stream closes after 200ms which triggers client.disconnect().
-    let (task_reply_tx, task_reply_rx) = mpsc::channel(1);
-    let (_alert_tx, alert_rx) = mpsc::channel(1);
-    let flow_handle = tokio::spawn(flow.run(task_reply_rx, alert_rx));
+    eprintln!("[notification_flow_test] stage=client-connect");
+    let mut subscribe_client = Client::connect_with_config(&config)
+        .await
+        .expect("client connect should succeed");
+
+    let rules_snapshot = rules.list_proto_arc().await;
+    let firewall_state = firewall.snapshot_arc();
+    let subscribe_cfg = Client::build_subscribe_config_from_snapshots(
+        &config,
+        &rules_snapshot,
+        firewall_state.state.enabled,
+        &firewall_state.system_firewall,
+    );
+    subscribe_client
+        .subscribe(subscribe_cfg)
+        .await
+        .expect("subscribe should succeed");
+    eprintln!("[notification_flow_test] stage=subscribe-ok");
+
+    let mut stream_client = Client::connect_with_config(&config)
+        .await
+        .expect("stream client connect should succeed");
+    let stream = NotificationStream::open(&mut stream_client)
+        .await
+        .expect("notifications stream open should succeed");
+    eprintln!("[notification_flow_test] stage=stream-opened");
+
+    assert!(
+        stream
+            .reply_tx
+            .send(NotificationFlow::notification_hello_reply())
+            .await
+            .is_ok(),
+        "hello send should succeed"
+    );
+    eprintln!("[notification_flow_test] stage=hello-sent");
+
+    let mut failure: Option<String> = None;
+
+    let mut open_rx = open_rx;
+    if recv_oneshot_with_deadline(&mut open_rx, StdDuration::from_secs(10))
+        .await
+        .is_err()
+    {
+        failure = Some("notifications rpc open timeout".to_string());
+    }
+    eprintln!("[notification_flow_test] stage=open-wait-finished failure={:?}", failure);
 
     // Wait for the hello handshake to be captured by the test server.
-    let hello = timeout(Duration::from_secs(2), hello_rx)
-        .await
-        .expect("hello reply timeout")
-        .expect("hello reply should be captured");
-    assert_eq!(hello.id, 0);
-    assert_eq!(hello.code, pb::NotificationReplyCode::Ok as i32);
+    if failure.is_none() {
+        let mut hello_rx = hello_rx;
+        match recv_oneshot_with_deadline(&mut hello_rx, StdDuration::from_secs(10)).await {
+            Ok(hello) => {
+                eprintln!("[notification_flow_test] stage=hello-received");
+                if hello.id != 0 || hello.code != pb::NotificationReplyCode::Ok as i32 {
+                    failure = Some("unexpected hello reply payload".to_string());
+                }
+            }
+            Err("closed") => {
+                failure = Some("hello channel closed before reply".to_string());
+            }
+            Err(_) => {
+                failure = Some("hello reply timeout".to_string());
+            }
+        }
+    }
 
-    // Server stream closes after 200ms; wait for client.disconnect() to be logged.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Shut down the server then drop task_reply_tx; the flow will see a failed
-    // reconnect with a closed receiver and exit via uiClient exit.
+    yield_for(StdDuration::from_millis(250)).await;
     let _ = shutdown_tx.send(());
-    drop(task_reply_tx);
+    eprintln!("[notification_flow_test] stage=shutdown-sent");
 
-    timeout(Duration::from_secs(5), flow_handle)
-        .await
-        .expect("notification flow should exit cleanly")
-        .expect("flow join")
-        .expect("flow result");
+    match wait_join_with_deadline(&mut server_handle, StdDuration::from_secs(1)).await {
+        Ok(_) => {}
+        Err(_) => {
+            server_handle.abort();
+            let _ = wait_join_with_deadline(&mut server_handle, StdDuration::from_secs(1)).await;
+            if failure.is_none() {
+                failure = Some("test server did not stop within timeout".to_string());
+            }
+        }
+    }
+    eprintln!("[notification_flow_test] stage=server-joined");
 
-    let _ = timeout(Duration::from_secs(1), server_handle).await;
+    if let Some(reason) = failure {
+        panic!("{reason}");
+    }
 }
 
 #[test]

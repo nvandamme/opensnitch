@@ -1,7 +1,7 @@
 use crate::{config::DefaultAction, services::ui_session_service::UiSessionService};
 
-#[tokio::test]
-async fn effective_default_action_switches_with_connectivity() {
+#[test]
+fn effective_default_action_switches_with_connectivity() {
     let service = UiSessionService::default();
 
     assert!(matches!(

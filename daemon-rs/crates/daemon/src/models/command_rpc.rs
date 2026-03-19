@@ -53,6 +53,7 @@ pub enum ClientCommand {
         notification_id: u64,
         rule_names: Vec<String>,
     },
+    #[allow(dead_code)]
     PauseRuntimeTasks,
     ResumeRuntimeTasks,
     StopRuntimeTasks,

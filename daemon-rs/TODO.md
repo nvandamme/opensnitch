@@ -101,6 +101,21 @@ Override at runtime when needed:
 | `NETLINK_SOCK_DIAG` | Socket dump/destroy path | `netlink-sys`, `netlink-packet-sock-diag` | same | Keep as-is |
 | `NETLINK_NETFILTER` | Packet verdict path | libc + FFI boundary | keep current path | Keep as-is |
 
+## Kernel 6.19 / libbpf Compatibility Notes (4b)
+
+- Latest live run evidence (`logs/daemon-rs-live-20260319-161248-stdout.log`) shows DNS hook downgrade, not netlink breakage:
+	- `dns eBPF hook disabled: kernel/libbpf does not support this probe format; using non-eBPF DNS monitors`
+- Current daemon behavior is resilient here:
+	- DNS monitor continues via systemd-resolved varlink (`/run/systemd/resolve/io.systemd.Resolve.Monitor`) and `resolvectl monitor` fallback.
+	- Netlink-based workers (`NETLINK_CONNECTOR`, `NETLINK_SOCK_DIAG`, `NETLINK_ROUTE`) are separate from libbpf and keep operating when DNS eBPF hook is disabled.
+- Compatibility interpretation for 6.19:
+	- This symptom is typically probe auto-attach / userspace tooling format mismatch (bpftool/libbpf + object probe metadata), not a generic kernel netlink incompatibility.
+	- Treat `kernel + bpftool + libbpf + compiled BPF object` as a compatibility unit.
+- Implementation guidance:
+	- Keep current netlink stack (`netlink-sys` + typed packet crates + `rtnetlink`) for protocol correctness and parity with Go behavior.
+	- Do not replace netlink parsing with ad-hoc raw-byte mappings unless required for a verified parser bug.
+	- `rustix` remains appropriate for fd/poll/syscall helpers (already used in proc-connector and nfqueue tuning), not as a direct replacement for typed netlink protocol decoding.
+
 ## Completed Milestones
 
 ### Parity hardening

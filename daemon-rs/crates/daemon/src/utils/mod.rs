@@ -1,5 +1,6 @@
 pub mod command_path;
 pub mod config_reload;
+pub mod daemon_guard;
 pub mod lru_cache;
 pub mod name_parsing;
 pub mod net_iface;

@@ -1,4 +1,11 @@
-use std::{env, fs, path::PathBuf, process::Command};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    env, fs,
+    path::PathBuf,
+    process::Command,
+    thread,
+    time::Duration,
+};
 
 use crate::{DynError, compact_timestamp, env_flag, run_command};
 
@@ -126,15 +133,54 @@ pub(crate) fn stop_daemon_live_logs() -> Result<(), DynError> {
 
     run_command(repo_root, "sudo", ["-n", "true"], &[])?;
 
-    match run_command(
-        repo_root,
-        "sudo",
-        ["-n", "kill", "-0", pid_str.as_str()],
-        &[],
-    ) {
+    match run_command(repo_root, "sudo", ["-n", "kill", "-0", pid_str.as_str()], &[]) {
         Ok(_) => {
-            run_command(repo_root, "sudo", ["-n", "kill", pid_str.as_str()], &[])?;
-            println!("stopped daemon-rs live session pid={pid_str}");
+            let root_pid: u32 = pid_str
+                .parse()
+                .map_err(|err| format!("invalid pid '{pid_str}': {err}"))?;
+            let mut targets = collect_process_tree_pids(root_pid);
+            targets.push(root_pid);
+            targets.sort_unstable();
+            targets.dedup();
+
+            // Kill children before launcher/root to avoid orphaning daemon descendants.
+            targets.sort_unstable_by(|a, b| b.cmp(a));
+            for pid in &targets {
+                let pid_value = pid.to_string();
+                let _ = run_command(
+                    repo_root,
+                    "sudo",
+                    ["-n", "kill", "-TERM", pid_value.as_str()],
+                    &[],
+                );
+            }
+
+            thread::sleep(Duration::from_millis(200));
+
+            for pid in &targets {
+                let pid_value = pid.to_string();
+                let still_alive = run_command(
+                    repo_root,
+                    "sudo",
+                    ["-n", "kill", "-0", pid_value.as_str()],
+                    &[],
+                )
+                .is_ok();
+
+                if still_alive {
+                    let _ = run_command(
+                        repo_root,
+                        "sudo",
+                        ["-n", "kill", "-KILL", pid_value.as_str()],
+                        &[],
+                    );
+                }
+            }
+
+            println!(
+                "stopped daemon-rs live session pid={pid_str} tree_size={}",
+                targets.len()
+            );
         }
         Err(err) => {
             let text = err.to_string();
@@ -150,4 +196,58 @@ pub(crate) fn stop_daemon_live_logs() -> Result<(), DynError> {
     println!("removed metadata file {}", latest_path.display());
 
     Ok(())
+}
+
+fn collect_process_tree_pids(root_pid: u32) -> Vec<u32> {
+    let mut by_parent: HashMap<u32, Vec<u32>> = HashMap::new();
+
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let pid_text = file_name.to_string_lossy();
+        if !pid_text.chars().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+
+        let Ok(pid) = pid_text.parse::<u32>() else {
+            continue;
+        };
+
+        let status_path = entry.path().join("status");
+        let Ok(status_text) = fs::read_to_string(status_path) else {
+            continue;
+        };
+
+        let mut parent: Option<u32> = None;
+        for line in status_text.lines() {
+            if let Some(ppid) = line.strip_prefix("PPid:") {
+                parent = ppid.trim().parse::<u32>().ok();
+                break;
+            }
+        }
+
+        if let Some(ppid) = parent {
+            by_parent.entry(ppid).or_default().push(pid);
+        }
+    }
+
+    let mut queue = VecDeque::from([root_pid]);
+    let mut seen = HashSet::new();
+    let mut descendants = Vec::new();
+
+    while let Some(parent) = queue.pop_front() {
+        if let Some(children) = by_parent.get(&parent) {
+            for child in children {
+                if seen.insert(*child) {
+                    descendants.push(*child);
+                    queue.push_back(*child);
+                }
+            }
+        }
+    }
+
+    descendants
 }

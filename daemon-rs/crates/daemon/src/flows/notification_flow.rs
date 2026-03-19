@@ -197,9 +197,7 @@ impl NotificationFlow {
             let mut inbound = stream.inbound;
             let reply_tx = stream.reply_tx;
             tracing::debug!("UI auth: {auth_mode}");
-
             if !Self::send_channel_item(&reply_tx, Self::notification_hello_reply()).await {
-                tracing::warn!("notification hello send failed; reconnecting");
                 if self.reconnect_without_warning(&task_reply_rx).await {
                     break;
                 }
@@ -292,68 +290,69 @@ impl NotificationFlow {
                                     break true;
                                 }
 
-                                let cmd = match action {
-                                    x if x == pb::Action::EnableInterception as i32 => {
+                                let parsed_action = pb::Action::try_from(action).ok();
+                                let cmd = match parsed_action {
+                                    Some(pb::Action::EnableInterception) => {
                                         Some(ClientCommand::SetInterception {
                                             notification_id: id,
                                             enabled: true,
                                         })
                                     }
-                                    x if x == pb::Action::DisableInterception as i32 => {
+                                    Some(pb::Action::DisableInterception) => {
                                         Some(ClientCommand::SetInterception {
                                             notification_id: id,
                                             enabled: false,
                                         })
                                     }
-                                    x if x == pb::Action::EnableFirewall as i32 => {
+                                    Some(pb::Action::EnableFirewall) => {
                                         Some(ClientCommand::SetFirewall {
                                             notification_id: id,
                                             enabled: true,
                                         })
                                     }
-                                    x if x == pb::Action::DisableFirewall as i32 => {
+                                    Some(pb::Action::DisableFirewall) => {
                                         Some(ClientCommand::SetFirewall {
                                             notification_id: id,
                                             enabled: false,
                                         })
                                     }
-                                    x if x == pb::Action::ReloadFwRules as i32 => {
+                                    Some(pb::Action::ReloadFwRules) => {
                                         Some(ClientCommand::ReloadFirewall {
                                             notification_id: id,
                                             sys_firewall,
                                         })
                                     }
-                                    x if x == pb::Action::ChangeConfig as i32 => {
+                                    Some(pb::Action::ChangeConfig) => {
                                         Some(ClientCommand::ApplyConfig {
                                             notification_id: id,
                                             raw_json: data,
                                         })
                                     }
-                                    x if x == pb::Action::EnableRule as i32 => {
+                                    Some(pb::Action::EnableRule) => {
                                         Some(ClientCommand::EnableRules {
                                             notification_id: id,
                                             rules,
                                         })
                                     }
-                                    x if x == pb::Action::DisableRule as i32 => {
+                                    Some(pb::Action::DisableRule) => {
                                         Some(ClientCommand::DisableRules {
                                             notification_id: id,
                                             rules,
                                         })
                                     }
-                                    x if x == pb::Action::DeleteRule as i32 => {
+                                    Some(pb::Action::DeleteRule) => {
                                         Some(ClientCommand::DeleteRules {
                                             notification_id: id,
                                             rule_names: rules.into_iter().map(|rule| rule.name).collect(),
                                         })
                                     }
-                                    x if x == pb::Action::ChangeRule as i32 => {
+                                    Some(pb::Action::ChangeRule) => {
                                         Some(ClientCommand::UpsertRules {
                                             notification_id: id,
                                             rules,
                                         })
                                     }
-                                    x if x == pb::Action::TaskStart as i32 => {
+                                    Some(pb::Action::TaskStart) => {
                                         match Self::parse_task_notification_data(id, &data) {
                                             Ok(task) => Some(ClientCommand::StartTask(task)),
                                             Err(err) => {
@@ -368,7 +367,7 @@ impl NotificationFlow {
                                             }
                                         }
                                     }
-                                    x if x == pb::Action::TaskStop as i32 => {
+                                    Some(pb::Action::TaskStop) => {
                                         match Self::parse_task_notification_data(id, &data) {
                                             Ok(task) => Some(ClientCommand::StopTask(task)),
                                             Err(_) => {
@@ -383,7 +382,7 @@ impl NotificationFlow {
                                             }
                                         }
                                     }
-                                    x if x == pb::Action::LogLevel as i32 => {
+                                    Some(pb::Action::LogLevel) => {
                                         Self::parse_log_level_data(&data).map(|level| {
                                             ClientCommand::SetLogLevel {
                                                 notification_id: id,
@@ -391,7 +390,7 @@ impl NotificationFlow {
                                             }
                                         })
                                     }
-                                    x if x == pb::Action::Stop as i32 => {
+                                    Some(pb::Action::Stop) => {
                                         Some(ClientCommand::Shutdown {
                                             notification_id: id,
                                         })
@@ -410,7 +409,7 @@ impl NotificationFlow {
                                             .await;
                                         tracing::error!(notification_id = id, "failed to queue notification command");
                                     }
-                                } else if action == pb::Action::LogLevel as i32 {
+                                } else if matches!(parsed_action, Some(pb::Action::LogLevel)) {
                                     tracing::warn!(notification_id = id, "invalid log-level payload in notification");
                                     let _ = Self::send_channel_item(&reply_tx, pb::NotificationReply {
                                             id,

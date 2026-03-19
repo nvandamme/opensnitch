@@ -136,7 +136,54 @@ impl FirewallNftAdapter {
 
     fn normalize_nft_parameters(parameters: &str) -> String {
         let out = Self::normalize_nft_type_list(parameters, "icmp type");
-        Self::normalize_nft_type_list(&out, "icmpv6 type")
+        let out = Self::normalize_nft_type_list(&out, "icmpv6 type");
+        let out = Self::normalize_l4proto_list(&out);
+        Self::normalize_transport_ports(&out)
+    }
+
+    fn normalize_l4proto_list(parameters: &str) -> String {
+        for marker in ["meta l4proto ==", "meta l4proto"] {
+            let Some(marker_start) = parameters.find(marker) else {
+                continue;
+            };
+
+            let values_start = marker_start + marker.len();
+            let after_marker = &parameters[values_start..];
+            let trimmed = after_marker.trim_start();
+            let token_end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+            let token = &trimmed[..token_end];
+
+            if !token.contains(',') || token.starts_with('{') {
+                continue;
+            }
+
+            let values: Vec<&str> = token
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .collect();
+
+            if values.len() < 2 {
+                continue;
+            }
+
+            let prefix = &parameters[..marker_start];
+            let suffix = &trimmed[token_end..];
+
+            return format!("{prefix}meta l4proto {{ {} }}{suffix}", values.join(", "));
+        }
+
+        parameters.to_string()
+    }
+
+    fn normalize_transport_ports(parameters: &str) -> String {
+        parameters
+            .replace("meta dport ==", "th dport")
+            .replace("meta sport ==", "th sport")
+            .replace("meta dport", "th dport")
+            .replace("meta sport", "th sport")
+            .replace("th dport ==", "th dport")
+            .replace("th sport ==", "th sport")
     }
 
     fn normalize_nft_type_list(parameters: &str, marker: &str) -> String {

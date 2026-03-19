@@ -32,10 +32,10 @@ impl UiSessionService {
     }
 
     pub fn set_connected(&self, connected: bool) {
-        let snapshot = self.snapshot_rx.borrow();
+        let connected_default_action = self.snapshot_rx.borrow().connected_default_action;
         let next = UiSessionSnapshot {
             connected,
-            connected_default_action: snapshot.connected_default_action,
+            connected_default_action,
         };
         self.publish_snapshot(next);
     }
@@ -45,9 +45,9 @@ impl UiSessionService {
     }
 
     pub fn set_connected_default_action(&self, action: crate::config::DefaultAction) {
-        let snapshot = self.snapshot_rx.borrow();
+        let connected = self.snapshot_rx.borrow().connected;
         let next = UiSessionSnapshot {
-            connected: snapshot.connected,
+            connected,
             connected_default_action: action,
         };
         self.publish_snapshot(next);

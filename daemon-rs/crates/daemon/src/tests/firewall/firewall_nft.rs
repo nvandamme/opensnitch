@@ -306,6 +306,55 @@ fn nft_expression_normalizes_icmp_type_lists_from_statements() {
 }
 
 #[test]
+fn nft_expression_normalizes_python_firewall_payload_shape() {
+    let rule = pb::FwRule {
+        expressions: vec![
+            pb::Expressions {
+                statement: Some(pb::Statement {
+                    op: "==".to_string(),
+                    name: "meta".to_string(),
+                    values: vec![pb::StatementValues {
+                        key: "l4proto".to_string(),
+                        value: "tcp,udp".to_string(),
+                    }],
+                }),
+            },
+            pb::Expressions {
+                statement: Some(pb::Statement {
+                    op: "==".to_string(),
+                    name: "meta".to_string(),
+                    values: vec![pb::StatementValues {
+                        key: "dport".to_string(),
+                        value: "88".to_string(),
+                    }],
+                }),
+            },
+        ],
+        target: "accept".to_string(),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        FirewallNftAdapter::probe_nft_expression(&rule, 0),
+        "meta l4proto { tcp, udp } th dport 88 accept"
+    );
+}
+
+#[test]
+fn nft_expression_normalizes_meta_dport_parameters() {
+    let rule = pb::FwRule {
+        parameters: "meta l4proto == tcp,udp meta dport == 88".to_string(),
+        target: "accept".to_string(),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        FirewallNftAdapter::probe_nft_expression(&rule, 0),
+        "meta l4proto { tcp, udp } th dport 88 accept"
+    );
+}
+
+#[test]
 fn chain_defaults_use_explicit_values_when_present() {
     let chain = pb::FwChain {
         family: "ip".to_string(),

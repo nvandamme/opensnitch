@@ -6,7 +6,11 @@ use crate::{
     adapters::proto_mapper::ProtoMapperAdapter,
     bus::Bus,
     client::client::Client,
-    models::{connection_state::ConnectionAttempt, verdict_rpc::VerdictReply},
+    models::{
+        connection_state::ConnectionAttempt,
+        ui_alert::{UiAlert, enqueue_alert},
+        verdict_rpc::VerdictReply,
+    },
     services::{
         config_service::ConfigService, connection_service::ConnectionService,
         rule_service::RuleService, stats_service::StatsService,
@@ -36,7 +40,25 @@ impl VerdictFlow {
         attempt.pid == 0 && !intercept_unknown
     }
 
-    async fn apply_default_action_on_ui_miss(&self, request_id: u64) {
+    fn enqueue_connection_warning_alert(&self, conn: pb::Connection) {
+        enqueue_alert(&self.bus.alert_tx, UiAlert::warning_connection(conn));
+    }
+
+    fn enqueue_process_warning_alert(&self, proc_info: &crate::models::process_state::ProcessInfo) {
+        enqueue_alert(
+            &self.bus.alert_tx,
+            UiAlert::warning_process(proc_info.to_proto_process()),
+        );
+    }
+
+    async fn apply_default_action_on_ui_miss(
+        &self,
+        request_id: u64,
+        proc_info: &crate::models::process_state::ProcessInfo,
+        conn: pb::Connection,
+    ) {
+        self.enqueue_connection_warning_alert(conn);
+        self.enqueue_process_warning_alert(proc_info);
         self.stats.on_missed_default_action();
         self.apply_default_action(request_id, false).await;
     }
@@ -272,7 +294,10 @@ impl VerdictFlow {
                 request_id = attempt.request_id,
                 "ui ask already in progress; applying default action"
             );
-            self.apply_default_action_on_ui_miss(attempt.request_id)
+            let conn = pb_conn.take().unwrap_or_else(|| {
+                ProtoMapperAdapter::to_proto_connection(&attempt, &proc_info, dst_host.as_deref())
+            });
+            self.apply_default_action_on_ui_miss(attempt.request_id, &proc_info, conn)
                 .await;
             return Ok(());
         };
@@ -282,7 +307,10 @@ impl VerdictFlow {
             Ok(client) => client,
             Err(err) => {
                 debug!(request_id = attempt.request_id, addr = %client_addr, "ui connect failed while handling miss; applying default action: {err}");
-                self.apply_default_action_on_ui_miss(attempt.request_id)
+                let conn = pb_conn.take().unwrap_or_else(|| {
+                    ProtoMapperAdapter::to_proto_connection(&attempt, &proc_info, dst_host.as_deref())
+                });
+                self.apply_default_action_on_ui_miss(attempt.request_id, &proc_info, conn)
                     .await;
                 return Ok(());
             }
@@ -296,7 +324,10 @@ impl VerdictFlow {
             Ok(rule) => rule,
             Err(err) => {
                 debug!(request_id = attempt.request_id, addr = %client_addr, "ui ask_rule failed while handling miss; applying default action: {err}");
-                self.apply_default_action_on_ui_miss(attempt.request_id)
+                let conn = pb_conn.take().unwrap_or_else(|| {
+                    ProtoMapperAdapter::to_proto_connection(&attempt, &proc_info, dst_host.as_deref())
+                });
+                self.apply_default_action_on_ui_miss(attempt.request_id, &proc_info, conn)
                     .await;
                 return Ok(());
             }
