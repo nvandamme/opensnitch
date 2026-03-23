@@ -12,7 +12,7 @@ use aya_ebpf::{
 };
 use opensnitch_ebpf_common::{
     dns::{
-        AF_INET, AF_INET6, AF_UNRESOLVED, ADDRINFO_ARGS_MAX_ENTRIES, DnsEvent,
+        DnsEvent, ADDRINFO_ARGS_MAX_ENTRIES, AF_INET, AF_INET6, AF_UNRESOLVED,
         GETHOSTBYNAME_ARGS_MAX_ENTRIES, HOST_LEN, MAX_IPS, NODE_LEN,
     },
     maps::EVENTS_MAP_MAX_ENTRIES,

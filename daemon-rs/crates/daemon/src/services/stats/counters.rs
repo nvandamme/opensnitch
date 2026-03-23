@@ -5,6 +5,10 @@ use crate::services::storage::StorageOperation;
 use super::stats::{StatsService, StorageEventCounters};
 
 impl StatsService {
+    pub fn on_rule_miss(&self) {
+        self.counters.rule_misses.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn on_fast_allow(&self) {
         self.fast_allow.fetch_add(1, Ordering::Relaxed);
     }
@@ -41,7 +45,7 @@ impl StatsService {
     // Go parity: when no rule matches and default action is applied, statistics
     // count it as a miss and a dropped connection, regardless of verdict action.
     pub fn on_missed_default_action(&self) {
-        self.counters.rule_misses.fetch_add(1, Ordering::Relaxed);
+        self.on_rule_miss();
         self.counters.dropped.fetch_add(1, Ordering::Relaxed);
     }
 

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::sync::Arc;
 use tracing::{info, warn};
 
 use super::Daemon;
@@ -30,7 +31,8 @@ impl Daemon {
             Self::startup_ui_handshake_once,
         );
 
-        let verdict_flow = VerdictFlow::new(
+        #[allow(unused_mut)]
+        let mut verdict_flow = VerdictFlow::new(
             self.inner.bus.clone(),
             self.inner.config.clone(),
             self.inner.ui_session.clone(),
@@ -38,6 +40,18 @@ impl Daemon {
             self.inner.connections.clone(),
             self.inner.stats.clone(),
         );
+
+        let exporter = Arc::new(
+            crate::platform::adapters::connection_event_logger::ConnectionEventLoggerAdapter::new(
+                &config.loggers,
+            ),
+        );
+        if exporter.has_sinks() {
+            info!("siem event logger enabled");
+        } else {
+            info!("siem event logger configured with no active sinks");
+        }
+        verdict_flow = verdict_flow.with_event_exporter(exporter);
 
         let notification_flow = NotificationFlow::new(
             self.inner.bus.clone(),

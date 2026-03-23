@@ -16,6 +16,8 @@ use crate::{
 
 pub(crate) use crate::models::worker_telemetry::WorkerTelemetrySnapshot;
 
+use crate::platform::ports::stats_exporter_port::StatsExporterPort;
+
 pub(crate) struct StatsFlow {
     shutdown: CancellationToken,
     config: ConfigService,
@@ -25,7 +27,10 @@ pub(crate) struct StatsFlow {
     drop_stats_snapshot: Arc<dyn Fn() -> KernelPipelineDropStats + Send + Sync>,
     worker_name: &'static str,
     worker_snapshot: Arc<dyn Fn() -> WorkerTelemetrySnapshot + Send + Sync>,
+    /// Optional stats snapshot exporter (Prometheus scrape, push-gateway, Loki, etc.)
+    stats_exporter: Option<Arc<dyn StatsExporterPort>>,
 }
+
 
 impl StatsFlow {
     pub(crate) fn new(
@@ -47,7 +52,25 @@ impl StatsFlow {
             drop_stats_snapshot,
             worker_name,
             worker_snapshot,
+            stats_exporter: None,
         }
+    }
+
+    /// Attach an optional stats exporter (Prometheus, Grafana Mimir, etc.).
+    ///
+    /// The exporter receives every `pb::Statistics` snapshot produced by
+    /// the 1-second emission cycle.  When not attached, the flow behaves
+    /// identically to before.  Call sites that do not need the exporter
+    /// do not need to change.
+    ///
+    /// See `platform::ports::stats_exporter_port::StatsExporterPort`.
+    #[allow(dead_code)]
+    pub(crate) fn with_stats_exporter(
+        mut self,
+        exporter: Arc<dyn StatsExporterPort>,
+    ) -> Self {
+        self.stats_exporter = Some(exporter);
+        self
     }
 
     pub(crate) fn spawn(self) -> JoinHandle<()> {
@@ -60,6 +83,7 @@ impl StatsFlow {
             drop_stats_snapshot,
             worker_name,
             worker_snapshot,
+            stats_exporter,
         } = self;
 
         tokio::spawn(async move {
@@ -224,6 +248,10 @@ impl StatsFlow {
                         let Some(snapshot) = stats.snapshot_if_pending(rules_count) else {
                             continue;
                         };
+
+                        if let Some(ref exporter) = stats_exporter {
+                            exporter.export_snapshot(&snapshot);
+                        }
 
                         let req = opensnitch_proto::pb::PingRequest {
                             id: ping_id,

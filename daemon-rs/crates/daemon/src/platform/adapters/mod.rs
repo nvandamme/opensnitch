@@ -1,4 +1,5 @@
 pub mod audit_netlink;
+pub mod connection_event_logger;
 pub mod firewall_iptables;
 pub mod firewall_nft_netlink;
 pub mod firewall_nft;

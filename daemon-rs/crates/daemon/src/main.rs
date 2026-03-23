@@ -15,14 +15,6 @@ mod workers;
 
 use anyhow::Result;
 
-#[cfg(test)]
-mod probe_bootstrap {
-    #[ctor::ctor]
-    fn init_logging_for_all_tests() {
-        crate::tests::support::init_test_logging();
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     logging::LoggingState::init();

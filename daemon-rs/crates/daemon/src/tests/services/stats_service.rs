@@ -156,3 +156,18 @@ fn go_parity_missed_default_action_counts_drop() {
     assert_eq!(snapshot.accepted, 0);
     assert_eq!(snapshot.dropped, 1);
 }
+
+#[test]
+fn strict_accounting_counts_miss_and_verdict_separately() {
+    let stats = StatsService::default();
+
+    // Strict mode model: count a miss, then count actual verdict outcome.
+    stats.on_rule_miss();
+    stats.on_verdict(true);
+
+    let snapshot = stats.snapshot(0);
+    assert_eq!(snapshot.rule_hits, 0);
+    assert_eq!(snapshot.rule_misses, 1);
+    assert_eq!(snapshot.accepted, 1);
+    assert_eq!(snapshot.dropped, 0);
+}

@@ -169,6 +169,10 @@ impl NfqueueRuntimeState {
         Self::decode_overload_policy(runtime.overload_policy.load(Ordering::Relaxed))
     }
 
+    pub(crate) fn overload_policy() -> NfqueueOverloadPolicy {
+        Self::current_overload_policy()
+    }
+
     pub(crate) fn init(
         bus: Bus,
         primary_queue_num: u16,

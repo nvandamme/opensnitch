@@ -4,8 +4,11 @@ use tokio::sync::Semaphore;
 
 use crate::{
     bus::Bus,
+    models::effective_tunables::NfqueueOverloadPolicy,
     models::{connection_state::ConnectionAttempt, verdict_rpc::VerdictReply},
+    platform::ffi::nfqueue::NfqueueRuntimeState,
     platform::adapters::proto_mapper::ProtoMapperAdapter,
+    platform::ports::connection_event_exporter_port::ConnectionEventExporterPort,
     services::{
         client::{
             Client, UiSessionService, enqueue_alert, warning_connection_alert,
@@ -29,15 +32,45 @@ pub struct VerdictFlow {
     connections: ConnectionService,
     stats: StatsService,
     ui_ask_guard: Arc<Semaphore>,
+    /// Optional per-connection event exporter (Loki, remote syslog, JSON sink, etc.)
+    event_exporter: Option<Arc<dyn ConnectionEventExporterPort>>,
 }
 
 impl VerdictFlow {
+    fn emit_connection_event(&self, conn: pb::Connection, rule: Option<pb::Rule>) {
+        if let Some(ref exporter) = self.event_exporter {
+            let config = self.config.get_snapshot();
+            exporter.refresh_loggers(&config.loggers);
+            exporter.on_connection_event(&conn, rule.as_ref());
+        }
+        self.stats.on_event(conn, rule);
+    }
+
     fn is_self_connection(attempt: &ConnectionAttempt) -> bool {
         attempt.pid == std::process::id()
     }
 
     fn should_apply_unknown_default(attempt: &ConnectionAttempt, intercept_unknown: bool) -> bool {
         attempt.pid == 0 && !intercept_unknown
+    }
+
+    fn strict_miss_accounting_enabled(&self) -> bool {
+        matches!(
+            NfqueueRuntimeState::overload_policy(),
+            NfqueueOverloadPolicy::DropFast
+        )
+    }
+
+    async fn account_miss_and_apply_default(&self, request_id: u64) {
+        if self.strict_miss_accounting_enabled() {
+            // Strict accounting mode: miss and final verdict are counted separately.
+            self.stats.on_rule_miss();
+            self.apply_default_action(request_id, true).await;
+        } else {
+            // Go parity mode: misses are pessimistically counted as dropped.
+            self.stats.on_missed_default_action();
+            self.apply_default_action(request_id, false).await;
+        }
     }
 
     fn enqueue_connection_warning_alert(&self, conn: pb::Connection) {
@@ -57,10 +90,10 @@ impl VerdictFlow {
         proc_info: &crate::models::process_state::ProcessInfo,
         conn: pb::Connection,
     ) {
+        self.emit_connection_event(conn.clone(), None);
         self.enqueue_connection_warning_alert(conn);
         self.enqueue_process_warning_alert(proc_info);
-        self.stats.on_missed_default_action();
-        self.apply_default_action(request_id, false).await;
+        self.account_miss_and_apply_default(request_id).await;
     }
 
     pub fn new(
@@ -79,7 +112,22 @@ impl VerdictFlow {
             connections,
             stats,
             ui_ask_guard: Arc::new(Semaphore::new(1)),
+            event_exporter: None,
         }
+    }
+
+    /// Attach an optional per-connection event exporter (Loki, remote syslog, JSON, etc.).
+    ///
+    /// The exporter is called once per resolved verdict, receiving the full
+    /// connection proto and the matched rule (if any).  Exactly mirrors the
+    /// Go `LoggerManager.Log(con.Serialize(), action, rname)` call in
+    /// `statistics.OnConnectionEvent()`.
+    ///
+    /// See `platform::ports::connection_event_exporter_port::ConnectionEventExporterPort`.
+    #[allow(dead_code)]
+    pub fn with_event_exporter(mut self, exporter: Arc<dyn ConnectionEventExporterPort>) -> Self {
+        self.event_exporter = Some(exporter);
+        self
     }
 
     fn try_send_verdict(
@@ -156,8 +204,7 @@ impl VerdictFlow {
         let request_id = attempt.request_id;
         if let Err(err) = self.process_connect_attempt(attempt).await {
             warn!(request_id, err = %err, "verdict flow failed; applying default action");
-            self.stats.on_missed_default_action();
-            self.apply_default_action(request_id, false).await;
+            self.account_miss_and_apply_default(request_id).await;
         }
     }
 
@@ -246,7 +293,8 @@ impl VerdictFlow {
                         dst_host.as_deref(),
                     )
                 });
-                self.stats.on_event(conn, Some(allow.to_summary_rule()));
+                let summary_rule = allow.to_summary_rule();
+                self.emit_connection_event(conn, Some(summary_rule));
             }
             if allow.allow {
                 let verdict = if allow.nolog {
@@ -284,8 +332,11 @@ impl VerdictFlow {
         let config_snapshot = self.config.get_snapshot();
 
         if Self::should_apply_unknown_default(&attempt, config_snapshot.intercept_unknown) {
-            self.stats.on_missed_default_action();
-            self.apply_default_action(attempt.request_id, false).await;
+            let conn = pb_conn.take().unwrap_or_else(|| {
+                ProtoMapperAdapter::to_proto_connection(&attempt, &proc_info, dst_host.as_deref())
+            });
+            self.emit_connection_event(conn, None);
+            self.account_miss_and_apply_default(attempt.request_id).await;
             return Ok(());
         }
 
@@ -348,7 +399,8 @@ impl VerdictFlow {
             let conn = pb_conn.take().unwrap_or_else(|| {
                 ProtoMapperAdapter::to_proto_connection(&attempt, &proc_info, dst_host.as_deref())
             });
-            self.stats.on_event(conn, Some(decision.to_summary_rule()));
+            let summary_rule = decision.to_summary_rule();
+            self.emit_connection_event(conn, Some(summary_rule));
         }
 
         if decision.allow {

@@ -3,19 +3,19 @@
 use core::ptr;
 
 use aya_ebpf::{
-	helpers::{
-		bpf_get_current_pid_tgid, bpf_get_current_uid_gid,
-		bpf_probe_read_user, bpf_probe_read_user_str_bytes,
-	},
-	macros::{map, tracepoint},
-	maps::{HashMap, PerCpuArray},
-	programs::TracePointContext,
-	EbpfContext,
+    helpers::{
+        bpf_get_current_pid_tgid, bpf_get_current_uid_gid,
+        bpf_probe_read_user, bpf_probe_read_user_str_bytes,
+    },
+    macros::{map, tracepoint},
+    maps::{HashMap, PerCpuArray},
+    programs::TracePointContext,
+    EbpfContext,
 };
 
 use crate::common::process::{
-	COMPLETE_ARGS, EV_TYPE_EXEC, EV_TYPE_EXECVEAT, EV_TYPE_SCHED_EXIT, ExecEvent, INCOMPLETE_ARGS,
-	MAX_ARGS, TASK_COMM_LEN,
+    ExecEvent, COMPLETE_ARGS, EV_TYPE_EXEC, EV_TYPE_EXECVEAT, EV_TYPE_SCHED_EXIT, INCOMPLETE_ARGS,
+    MAX_ARGS, TASK_COMM_LEN,
 };
 use crate::probes::dns::EVENTS;
 
