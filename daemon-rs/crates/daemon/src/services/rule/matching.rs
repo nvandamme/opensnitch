@@ -8,10 +8,7 @@ use crate::{
         process_state::ProcessInfo,
         rule_record::RuleOperator,
     },
-    utils::{
-        name_parsing::case_folded,
-        net_iface::interface_name_by_index,
-    },
+    utils::name_parsing::case_folded,
 };
 
 use super::{
@@ -714,8 +711,8 @@ impl RuleService {
             "source.ip" => Some(Cow::Borrowed(derived.src_ip_text())),
             "source.network" => Some(Cow::Borrowed(derived.src_ip_text())),
             "source.port" => Some(Cow::Owned(attempt.src_port.to_string())),
-            "iface.in" => interface_name_by_index(attempt.iface_in_idx).map(Cow::Owned),
-            "iface.out" => interface_name_by_index(attempt.iface_out_idx).map(Cow::Owned),
+            "iface.in" => crate::platform::adapters::net_iface::NetIfaceAdapter::interface_name_by_index(attempt.iface_in_idx).ok().flatten().map(Cow::Owned),
+            "iface.out" => crate::platform::adapters::net_iface::NetIfaceAdapter::interface_name_by_index(attempt.iface_out_idx).ok().flatten().map(Cow::Owned),
             "protocol" => Some(Cow::Borrowed(match attempt.protocol {
                 TransportProtocol::Tcp => "TCP",
                 TransportProtocol::Udp => "UDP",

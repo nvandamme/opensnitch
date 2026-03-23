@@ -10,6 +10,7 @@ use crate::{
         client::Client, config::ConfigService, rule::RuleService, stats::StatsService,
         storage::StorageService,
     },
+    utils::lru_cache::global_dual_layer_metrics_snapshot,
     workers::dns::dns_worker::DnsWorkerControl,
 };
 
@@ -93,6 +94,7 @@ impl StatsFlow {
             let mut last_fast_allow = stats.fast_allow_count();
             let mut last_fast_deny = stats.fast_deny_count();
             let mut last_storage_events = stats.storage_event_counts();
+            let mut last_cache_metrics = global_dual_layer_metrics_snapshot();
             let mut last_drop_log_at = tokio::time::Instant::now();
 
             loop {
@@ -193,10 +195,28 @@ impl StatsFlow {
                                 );
                             }
 
+                            let cache_metrics_total = global_dual_layer_metrics_snapshot();
+                            let cache_metrics_delta = cache_metrics_total.saturating_delta(last_cache_metrics);
+                            if cache_metrics_delta.total() > 0 {
+                                debug!(
+                                    touch_enqueued = cache_metrics_delta.touch_enqueued,
+                                    touch_dropped = cache_metrics_delta.touch_dropped,
+                                    touch_reconciled_batches = cache_metrics_delta.touch_reconciled_batches,
+                                    touch_reconciled_keys = cache_metrics_delta.touch_reconciled_keys,
+                                    publish_incremental = cache_metrics_delta.publish_incremental,
+                                    publish_full = cache_metrics_delta.publish_full,
+                                    publish_reconcile_scans = cache_metrics_delta.publish_reconcile_scans,
+                                    publish_reconcile_removed = cache_metrics_delta.publish_reconcile_removed,
+                                    publish_total_ns = cache_metrics_delta.publish_total_ns,
+                                    "dual-layer cache metrics snapshot"
+                                );
+                            }
+
                             last_drop_snapshot = current;
                             last_fast_allow = fast_allow_total;
                             last_fast_deny = fast_deny_total;
                             last_storage_events = storage_events_total;
+                            last_cache_metrics = cache_metrics_total;
                             last_drop_log_at = tokio::time::Instant::now();
                         }
 

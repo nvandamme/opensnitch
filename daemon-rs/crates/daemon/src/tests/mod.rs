@@ -60,6 +60,8 @@ mod proc_fs;
 mod process_service;
 #[path = "smoke/readonly_smoke.rs"]
 mod readonly_smoke;
+#[path = "smoke/netlink_sync_async_harness.rs"]
+mod netlink_sync_async_harness;
 #[path = "rules/rule_benchmark_support.rs"]
 mod rule_benchmark_support;
 #[path = "rules/rule_command.rs"]
@@ -74,6 +76,9 @@ mod rule_service_match_engine;
 mod rule_storage;
 #[path = "parsing/socket_diag.rs"]
 mod socket_diag;
+#[cfg(feature = "netlink-bindings-socket-diag")]
+#[path = "parsing/socket_diag_backend_matrix.rs"]
+mod socket_diag_backend_matrix;
 #[path = "parsing/sort_key.rs"]
 mod sort_key;
 #[path = "parsing/string_iter.rs"]
@@ -106,7 +111,11 @@ mod workers_dns;
 mod workers_ebpf;
 #[path = "parsing/atomic_write.rs"]
 mod atomic_write;
+#[path = "parsing/audit_netlink.rs"]
+mod audit_netlink;
 #[path = "parsing/lru_cache.rs"]
 mod lru_cache;
+#[path = "parsing/ring_buffer.rs"]
+mod ring_buffer;
 #[path = "parsing/transient_files.rs"]
 mod transient_files;

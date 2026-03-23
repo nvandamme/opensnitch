@@ -25,7 +25,7 @@ fn proc_connector_readonly_smoke() {
         return;
     }
 
-    let socket = match ProcEventSocket::open() {
+    let mut socket = match ProcEventSocket::open() {
         Ok(socket) => socket,
         Err(err) => {
             if strict_mode() {

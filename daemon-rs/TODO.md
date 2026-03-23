@@ -6,7 +6,7 @@ It supersedes:
 - `daemon-rs/FEATURE_PARITY.md`
 - `daemon-rs/SERVICE_ASYNC_AND_MODEL_SCAN_2026-03-15.md`
 
-Last update: 2026-03-22 (entry 432)
+Last update: 2026-03-22 (entry 438)
 
 ## Scope
 
@@ -109,6 +109,34 @@ Flow-vs-worker extraction heuristic:
 - Do not keep compatibility shims once call sites are migrated in the same refactor slice (including one-line helper aliases kept only for transitional naming).
 - Keep behavior parity first; run `cargo check`/tests each slice.
 
+5. Cache selection rule (dual-layer policy)
+- Dual-layer cache (`DualLayerLruMap` / `SyncDualLayerLruMap`) is preferred by
+  default for read-dominant, shared runtime caches where lock-free immutable
+  snapshot reads are important and eventual recency convergence is acceptable.
+- Dual-layer is not mandatory for every cache: choose plain `LruCache` or plain
+  map-based cache when caller profile is write-heavy/high-churn, strict
+  mutation/recency semantics are required, or ownership is local/ephemeral.
+- Capacity and rollout guidance for dual-layer-backed caches:
+  - tune capacity with publish cost in mind (snapshot publish work scales with
+    live entry count),
+  - avoid broad dual-layer rollout to high-churn writers until publish-path
+    optimization and metrics instrumentation are in place,
+  - keep domain-level capacity tunables explicit and documented when dual-layer
+    is selected.
+- Required observability for dual-layer evolution:
+  - expose touch-drop rate / touch-queue pressure signals,
+  - expose publish-path cost signals (latency and allocation/churn-oriented
+    counters) for regression tracking.
+- Caller-class matrix (keep updated as cache-bearing domains change):
+
+| Cache caller class | Read/Write profile | Concurrency/ownership | Semantics tolerance | Preferred implementation |
+|---|---|---|---|---|
+| DNS shared lookup cache | read-heavy with periodic writes | shared across runtime paths | eventual recency acceptable | dual-layer |
+| Process inspection cache | read-heavy with mutation side bookkeeping | shared service cache | eventual recency acceptable; strict coherence guarded by service checks | dual-layer + dedicated mutable side-state |
+| Connection owner PID caches | read-heavy with moderate writes | shared sync runtime access | eventual recency acceptable | sync dual-layer |
+| Write-heavy churn cache (generic) | write-heavy/high churn | any | strict recency/mutation visibility required | plain LRU or plain map |
+| Local ephemeral cache (generic) | mixed/local | single owner or short-lived scope | no shared snapshot requirement | plain LRU or plain map |
+
 ## Current Status Snapshot
 
 - Baseline parity reference: commit tag "release: prepare v0.1.0" is treated as the basic functional parity-aligned release baseline (without full functional eBPF module parity).
@@ -166,6 +194,34 @@ Override at runtime when needed:
 	- Note: deferred for now to stay aligned with base opensnitch implementation; revisit in a future dedicated compatibility PR.
 
 2. Design-rule backlog (active)
+- [x] Cache strategy policy codification (caller-class matrix + default-not-mandatory dual-layer stance).
+  - Decision baseline (2026-03-22 review): dual-layer is preferred/default for shared read-heavy caches with lock-free immutable reads, but is not the only allowed cache implementation.
+  - Selection rule: allow plain `LruCache` or map-based caches for write-heavy/high-churn or strictly local ownership paths when dual-layer publish overhead would dominate.
+  - Deliverable: add and keep updated a short caller-class matrix (read/write profile, ownership, required semantics) for cache-bearing domains (`dns`, `process`, `connection owner`, and other runtime caches touched in future slices).
+  - Completed (entry 434): added explicit design-rule cache policy and matrix under `Design Rule: Domain Boundary + Trait-First Architecture (Tracking)`.
+- [ ] Dual-layer publish-path optimization (`utils/lru_cache.rs`).
+  - Current behavior to improve: publish rebuilds full immutable snapshots (`HashMap::from_iter(...)`) on write/publish paths for both async and sync dual-layer variants.
+  - Goal: reduce write amplification and allocator churn while preserving lock-free read semantics and eventual touch recency convergence.
+  - Suggested direction: evaluate incremental snapshot update or bounded batched publish policies with explicit tunables and focused perf regression checks.
+  - Exploration add-ons (entry 434):
+    - add optional metrics for touch-drop rate and publish-path cost,
+    - add explicit capacity guidance/checkpoints for dual-layer-backed caches.
+  - Progress (entry 435): landed first implementation slice for both add-ons:
+    - metrics hooks added to dual-layer caches (touch enqueue/drop, reconcile batches/keys, full vs incremental publish counters, reconcile scan/removed counters, cumulative publish time),
+    - incremental publish prototype added for common mutation paths (single-key insert with eviction reconciliation, remove, clear) for async and sync variants,
+    - full mutable snapshot rebuild retained as fallback for multi-entry/capacity-reset paths.
+  - Progress (entry 436): landed second slice and observability wiring:
+    - bounded `insert_many` optimization: small batches now use incremental publish path; large batches still fall back to full rebuild,
+    - global dual-layer metrics export surface added and wired into existing periodic stats telemetry flow (`flows/stats/stats.rs`) with delta logging,
+    - focused tests extended for small-batch incremental behavior, large-batch fallback, and global metrics export visibility.
+  - Progress (entry 437): synthetic harness tests added for continued measurement and regression detection:
+    - read-heavy synthetic workload validates touch-queue pressure dominates publish activity for hot-key reads,
+    - write-heavy batched synthetic workload validates full-publish pressure under large-batch write churn,
+    - manual ignored trend harness prints reproducible workload reports for periodic perf tracking.
+  - Progress (entry 438): codebase application pass for cache strategy points 1/2/3:
+    - kept dual-layer/keyed caches on lookup-critical domains (`dns`, `process`, `connection owner`),
+    - migrated append-heavy telemetry/event overflow paths to explicit bounded ring buffers (`utils/ring_buffer.rs`) in stats and UI alert overflow queues,
+    - retained dual-layer for keyed cache semantics and ring buffers for latest-N stream semantics.
 - [x] Continue trait-first boundary rollout: remove remaining stateful top-level functions as services/domains are touched.
   - Migrated from stale `Tracking checklist`.
   - Assumption check (2026-03-22): `make -C .. daemon-rs-policy-audit` passes, and naming/layout scan still reports no `RuntimeIntent` symbols or `intent.rs` files under `crates/daemon/src`.
@@ -666,3 +722,203 @@ Override at runtime when needed:
   - `cargo check --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs` passes.
   - focused process tests pass:
     - `cargo test --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs process_service -- --nocapture`
+
+## 433 — Cache caller strategy decision + optimization backlog seed
+
+- Trigger/context:
+  - requested full review of cache callers (including dual-layer users) and a
+    strategy decision on whether dual-layer should be the only cache
+    implementation.
+
+- Review findings (caller inventory + operation patterns):
+  - dual-layer utilities are now the primary shared cache abstraction in active
+    read-heavy runtime domains (`dns`, `process`, `connection owner`).
+  - lock-free immutable read paths are working as intended for hot-path lookups.
+  - key risk remains dual-layer publish cost under churn: immutable snapshot
+    publish currently rebuilds full map state on write/publish paths.
+
+- Strategy decision recorded:
+  - **do not promote dual-layer as the only cache implementation**.
+  - keep dual-layer as preferred default for shared read-mostly runtime caches.
+  - permit simpler cache forms (plain LRU/map) when caller profile is
+    write-heavy, local, or semantics do not justify dual-layer publish overhead.
+
+- Backlog impact:
+  - added active design-rule items to codify cache selection policy and to land
+    dual-layer publish-path optimization in `utils/lru_cache.rs`.
+
+- Validation/evidence:
+  - strategy derived from source inventory/operation scans and implementation
+    review in this slice; no behavior change code landed in this entry.
+
+## 434 — Cache selection design rule codification
+
+- Trigger/context:
+  - requested to explore/operationalize the recommended cache strategy and
+    consider adding an explicit design rule.
+
+- Changes in this slice:
+  - added explicit `Cache selection rule (dual-layer policy)` under design
+    rules with:
+    - default-not-mandatory dual-layer stance,
+    - decision criteria for dual-layer vs plain LRU/map,
+    - dual-layer capacity guidance,
+    - required observability signals (touch-drop and publish-path cost),
+    - short caller-class matrix covering current key cache domains and generic
+      caller profiles.
+  - marked active backlog item `Cache strategy policy codification` complete.
+  - refined active backlog exploration scope for dual-layer optimization to
+    include metrics + capacity checkpoints.
+
+- Validation/evidence:
+  - tracker/design-rule update only (no runtime behavior change in this slice).
+
+## 435 — Dual-layer internals slice 1 (metrics hooks + incremental publish prototype)
+
+- Trigger/context:
+  - requested to execute both next steps: add metrics hooks and prototype
+    incremental publish behavior in dual-layer cache internals.
+
+- Changes in this slice:
+  - updated `utils/lru_cache.rs` for both `DualLayerLruMap` and
+    `SyncDualLayerLruMap`:
+    - added dual-layer metrics snapshot surface and counters:
+      - touch enqueue/drop,
+      - touch reconcile batches/keys,
+      - publish full vs incremental counts,
+      - publish reconcile scans/removed keys,
+      - cumulative publish time (ns).
+    - added incremental publish paths for:
+      - single-key insert (including eviction reconciliation against mutable
+        state),
+      - remove-by-key,
+      - clear.
+    - retained full publish rebuild path for `insert_many` and `set_capacity`
+      where broad mutable reshaping remains expected.
+  - added focused tests in `tests/parsing/lru_cache.rs` to validate:
+    - eviction correctness under incremental publish reconciliation,
+    - metrics surface visibility on hot-path usage.
+
+- Validation:
+  - `cargo test --manifest-path Cargo.toml -p opensnitchd-rs lru_cache -- --nocapture`
+    passes (`5 passed`, `0 failed`).
+
+## 436 — Dual-layer internals slice 2 (insert_many optimization + stats-flow export)
+
+- Trigger/context:
+  - requested execution order: (2) bounded `insert_many` optimization first,
+    then (1) metrics export wiring into existing observability flow.
+
+- Changes in this slice:
+  - `utils/lru_cache.rs`:
+    - added bounded `insert_many` optimization for async and sync dual-layer
+      maps:
+      - small batches use incremental publish path,
+      - large batches fall back to full mutable snapshot rebuild.
+    - added module-level global dual-layer metrics snapshot surface so runtime
+      observability can sample aggregate cache behavior without invasive
+      plumbing through each service.
+    - wired global counter updates for touch enqueue/drop, touch reconcile,
+      publish mode, reconcile cleanup, and cumulative publish time.
+  - `flows/stats/stats.rs`:
+    - integrated global dual-layer metrics into the existing 30-second
+      telemetry debug path with delta reporting.
+  - `tests/parsing/lru_cache.rs`:
+    - added tests for bounded `insert_many` behavior and global metrics export.
+
+- Validation:
+  - `cargo test --manifest-path Cargo.toml -p opensnitchd-rs lru_cache -- --nocapture`
+    passes (`8 passed`, `0 failed`).
+
+## 437 — Synthetic cache harness tests (publish/reconcile pressure tracking)
+
+- Trigger/context:
+  - requested synthetic harness coverage to keep measuring dual-layer
+    publish/reconcile overhead after recent optimization slices.
+
+- Changes in this slice:
+  - `tests/parsing/lru_cache.rs` now includes synthetic workload harnesses:
+    - read-heavy hot-key workload (`run_read_write_workload`) with explicit
+      touch-vs-publish pressure checks,
+    - write-heavy batched workload (`run_batched_write_workload`) with explicit
+      full-publish pressure checks,
+    - ignored manual trend snapshot harness for periodic measurement captures.
+  - harness reports are based on dual-layer metrics snapshot counters so tests
+    can detect drift in publish mode pressure and reconcile behavior.
+
+- Validation:
+  - `cargo test --manifest-path Cargo.toml -p opensnitchd-rs lru_cache -- --nocapture`
+    passes (`10 passed`, `0 failed`, `1 ignored` manual trend harness).
+
+## 438 — Strategy application pass (1/2/3) + verification harness run
+
+- Trigger/context:
+  - requested explicit codebase application (not only policy) for:
+    1) keep dual-layer/keyed caches where lookup semantics matter,
+    2) use ring buffers for append-heavy telemetry/event streams,
+    3) keep latest-N write-heavy stream behavior on ring surfaces,
+    and validate through harness/tests.
+
+- Changes in this slice:
+  - kept keyed dual-layer cache usage unchanged for lookup-critical services:
+    - `services/dns/dns.rs`
+    - `services/process/cache.rs`
+    - `services/connection/owner.rs`
+  - added reusable bounded ring utility `utils/ring_buffer.rs` and migrated
+    append-heavy queues:
+    - stats event backlog now uses ring buffer semantics (`services/stats/*`),
+    - UI alert overflow queue now uses ring buffer semantics
+      (`services/client/alerts.rs`).
+  - added ring-buffer utility tests (`tests/parsing/ring_buffer.rs`).
+
+- Verification/harness:
+  - focused test runs:
+    - `cargo test --manifest-path Cargo.toml -p opensnitchd-rs ring_buffer -- --nocapture`
+    - `cargo test --manifest-path Cargo.toml -p opensnitchd-rs stats_service -- --nocapture`
+    - `cargo test --manifest-path Cargo.toml -p opensnitchd-rs lru_cache -- --nocapture`
+  - results:
+    - ring_buffer: `3 passed`,
+    - stats_service: `10 passed`,
+    - lru_cache: `10 passed`, `1 ignored` manual trend harness.
+
+## 439 — Ring-buffer tunables parity (stats event + alert overflow capacities)
+
+- Trigger/context:
+  - requested tunables parity so ring-buffer-backed surfaces can be sized via
+    the same runtime tunables model already used by cache capacities.
+
+- Changes in this slice:
+  - extended tunables schema/models:
+    - `models/effective_tunables.rs`
+    - `models/runtime_tunables.rs`
+    - new fields:
+      - `stats_event_ring_capacity`
+      - `alert_overflow_ring_capacity`
+  - extended tunables resolution in `tunables.rs`:
+    - defaults, raw-file parsing, env overrides, and clamp bounds for both
+      ring capacities,
+    - added unit tests validating raw parse + clamp behavior.
+  - wired bootstrap application in `daemon/bootstrap.rs`:
+    - logs both new effective tunables,
+    - applies runtime configuration via:
+      - `StatsService::configure_event_ring_capacity(...)`
+      - `client::configure_alert_overflow_ring_capacity(...)`.
+  - added runtime hooks:
+    - `services/stats/internal.rs` + `services/stats/stats.rs`:
+      - tunable-backed static capacity default for event ring,
+      - `apply_config()` now enforces tunable cap when applying `max_events`.
+    - `services/client/alerts.rs`:
+      - tunable-backed static capacity for alert overflow ring,
+      - applies to existing queue instance if already initialized.
+  - updated tunables samples:
+    - `data/tunables.example.json`
+    - `data/tunables.json`.
+
+- Validation:
+  - `cargo test -p opensnitchd-rs tunables::tests -- --nocapture`
+  - `cargo test -p opensnitchd-rs ring_buffer -- --nocapture`
+  - `cargo test -p opensnitchd-rs stats_service -- --nocapture`
+  - results:
+    - tunables tests: `2 passed`,
+    - ring_buffer target: `5 passed` (includes tunables module tests),
+    - stats_service: `10 passed`.

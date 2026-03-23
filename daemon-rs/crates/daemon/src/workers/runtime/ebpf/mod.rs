@@ -26,6 +26,7 @@ macro_rules! ebpf_worker_newtype {
                         daemon_shutdown,
                         tunables,
                         $crate::workers::runtime::ebpf::control::EbpfWorkerMode::$mode_variant,
+                        $worker_name,
                     ),
                 }
             }

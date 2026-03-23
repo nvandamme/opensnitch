@@ -1,14 +1,10 @@
-use std::{
-    os::fd::{AsFd, AsRawFd},
-    time::Duration,
-};
+use std::{os::fd::AsFd, time::Duration};
 
 use anyhow::Result;
-use netlink_sys::{Socket, SocketAddr};
 use nix::libc;
+use netlink_bindings::traits::{NetlinkRequest, Protocol};
+use netlink_socket2::{MulticastSocketRaw, NetlinkSocket};
 use rustix::{
-    event::{PollFd, PollFlags, Timespec, poll},
-    fd::BorrowedFd,
     thread::{LinkNameSpaceType, move_into_link_name_space},
 };
 
@@ -32,17 +28,52 @@ pub(crate) const PROC_EVENT_EXEC: u32 = 0x0000_0002;
 pub(crate) const PROC_EVENT_EXIT: u32 = 0x8000_0000;
 
 pub struct ProcEventSocket {
-    pub(crate) sock: Socket,
+    pub(crate) request_sock: NetlinkSocket,
+    pub(crate) event_sock: MulticastSocketRaw,
+}
+
+struct ProcListenRequest {
+    payload: [u8; CN_MSG_LEN + 4],
+}
+
+impl NetlinkRequest for ProcListenRequest {
+    fn protocol(&self) -> Protocol {
+        Protocol::Raw {
+            protonum: libc::NETLINK_CONNECTOR as u16,
+            request_type: libc::NLMSG_DONE as u16,
+        }
+    }
+
+    fn flags(&self) -> u16 {
+        0
+    }
+
+    fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    type ReplyType<'buf> = &'buf [u8];
+
+    fn decode_reply<'buf>(buf: &'buf [u8]) -> Self::ReplyType<'buf> {
+        buf
+    }
 }
 
 impl ProcEventSocket {
-    pub fn recv_pid_event(&self, timeout: Duration) -> Result<Option<ProcPidEvent>> {
-        let mut buf = vec![0_u8; 4096];
-        let Some(size) = Self::recv_with_timeout(&self.sock, &mut buf, timeout)? else {
-            return Ok(None);
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn recv_pid_event(&mut self, timeout: Duration) -> Result<Option<ProcPidEvent>> {
+        Self::run_netlink_future(self.recv_pid_event_async(timeout))
+    }
+
+    pub async fn recv_pid_event_async(&mut self, timeout: Duration) -> Result<Option<ProcPidEvent>> {
+        let recv = match tokio::time::timeout(timeout, self.event_sock.recv()).await {
+            Ok(Ok(recv)) => recv,
+            Ok(Err(err)) => return Err(anyhow::Error::new(err)),
+            Err(_) => return Ok(None),
         };
 
-        Ok(Self::parse_pid_event(&buf[..size]))
+        let (_meta, payload) = recv;
+        Ok(Self::parse_pid_event_from_payload(payload))
     }
 
     fn connector_payload(frame: &[u8]) -> Option<&[u8]> {
@@ -66,6 +97,18 @@ impl ProcEventSocket {
 
     fn parse_pid_event(frame: &[u8]) -> Option<ProcPidEvent> {
         let payload = Self::connector_payload(frame)?;
+        Self::parse_pid_event_payload(payload)
+    }
+
+    fn parse_pid_event_from_payload(payload: &[u8]) -> Option<ProcPidEvent> {
+        if payload.len() < PROC_EVENT_HEADER_LEN {
+            return None;
+        }
+
+        Self::parse_pid_event_payload(payload)
+    }
+
+    fn parse_pid_event_payload(payload: &[u8]) -> Option<ProcPidEvent> {
         let what = read_ne_value_at(payload, 0, u32::from_ne_bytes)?;
 
         match what {
@@ -94,30 +137,24 @@ impl ProcEventSocket {
         }
     }
 
-    fn recv_with_timeout(
-        sock: &Socket,
-        buf: &mut [u8],
-        timeout: Duration,
-    ) -> Result<Option<usize>> {
-        // SAFETY: socket fd stays valid for the duration of this function.
-        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(sock.as_raw_fd()) };
-        let mut pfd = [PollFd::new(&borrowed_fd, PollFlags::IN)];
-        let timeout_ts = Timespec::try_from(timeout).ok();
+    fn run_netlink_future<T>(future: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(anyhow::Error::new)?
+            .block_on(future)
+    }
 
-        let poll_rc = poll(&mut pfd, timeout_ts.as_ref())?;
-        if poll_rc == 0 {
-            return Ok(None);
+    fn run_netlink_future_compat<T: Send + 'static>(
+        future: impl std::future::Future<Output = Result<T>> + Send + 'static,
+    ) -> Result<T> {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return std::thread::spawn(move || Self::run_netlink_future(future))
+                .join()
+                .map_err(|_| anyhow::anyhow!("failed to join netlink compatibility thread"))?;
         }
 
-        if !pfd[0].revents().contains(PollFlags::IN) {
-            return Ok(None);
-        }
-
-        match sock.recv(&mut &mut buf[..], libc::MSG_DONTWAIT) {
-            Ok(size) => Ok(Some(size)),
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
-            Err(err) => Err(err.into()),
-        }
+        Self::run_netlink_future(future)
     }
 
     fn switch_to_host_netns() -> Result<()> {
@@ -126,36 +163,41 @@ impl ProcEventSocket {
         Ok(())
     }
 
-    fn build_listen_msg() -> Vec<u8> {
-        let mut msg = vec![0_u8; 40];
-
-        // nlmsghdr
-        msg[0..4].copy_from_slice(&(40_u32).to_ne_bytes());
-        msg[4..6].copy_from_slice(&(libc::NLMSG_DONE as u16).to_ne_bytes());
-        msg[6..8].copy_from_slice(&(0_u16).to_ne_bytes());
-        msg[8..12].copy_from_slice(&(0_u32).to_ne_bytes());
-        msg[12..16].copy_from_slice(&(std::process::id()).to_ne_bytes());
+    fn build_listen_payload() -> [u8; CN_MSG_LEN + 4] {
+        let mut msg = [0_u8; CN_MSG_LEN + 4];
 
         // cn_msg
-        msg[16..20].copy_from_slice(&CN_IDX_PROC.to_ne_bytes());
-        msg[20..24].copy_from_slice(&CN_VAL_PROC.to_ne_bytes());
-        msg[24..28].copy_from_slice(&(0_u32).to_ne_bytes());
-        msg[28..32].copy_from_slice(&(0_u32).to_ne_bytes());
-        msg[32..34].copy_from_slice(&(4_u16).to_ne_bytes());
-        msg[34..36].copy_from_slice(&(0_u16).to_ne_bytes());
+        msg[0..4].copy_from_slice(&CN_IDX_PROC.to_ne_bytes());
+        msg[4..8].copy_from_slice(&CN_VAL_PROC.to_ne_bytes());
+        msg[8..12].copy_from_slice(&(0_u32).to_ne_bytes());
+        msg[12..16].copy_from_slice(&(0_u32).to_ne_bytes());
+        msg[16..18].copy_from_slice(&(4_u16).to_ne_bytes());
+        msg[18..20].copy_from_slice(&(0_u16).to_ne_bytes());
 
         // proc_cn_mcast_op
-        msg[36..40].copy_from_slice(&PROC_CN_MCAST_LISTEN.to_ne_bytes());
+        msg[20..24].copy_from_slice(&PROC_CN_MCAST_LISTEN.to_ne_bytes());
 
         msg
     }
 
     pub fn open() -> Result<Self> {
+        Self::run_netlink_future_compat(Self::open_async())
+    }
+
+    pub async fn open_async() -> Result<Self> {
         let _ = Self::switch_to_host_netns();
-        let mut sock = Socket::new(libc::NETLINK_CONNECTOR as isize)?;
-        sock.bind(&SocketAddr::new(std::process::id(), CN_IDX_PROC))?;
-        sock.send_to(&Self::build_listen_msg(), &SocketAddr::new(0, 0), 0)?;
-        Ok(Self { sock })
+
+        let mut request_sock = NetlinkSocket::new();
+        let mut event_sock = MulticastSocketRaw::new(libc::NETLINK_CONNECTOR as u16)?;
+        event_sock.listen(CN_IDX_PROC)?;
+
+        let request = ProcListenRequest {
+            payload: Self::build_listen_payload(),
+        };
+        let mut iter = request_sock.request(&request).await?;
+        iter.recv_ack().await.map_err(anyhow::Error::new)?;
+
+        Ok(Self { request_sock, event_sock })
     }
 
     #[cfg_attr(not(test), allow(dead_code))]

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use tokio::time::timeout;
-use tracing::warn;
+use tracing::info;
 
 use super::Daemon;
 use crate::utils::systemd_notify::{NotifyState, notify};
@@ -24,18 +24,18 @@ impl Daemon {
                 {
                     Ok(Ok(())) => {}
                     Ok(Err(err)) => {
-                        warn!(addr = %config.client_addr, "startup UI handshake failed, continuing without blocking runtime: {err}");
+                        info!(addr = %config.client_addr, "startup UI handshake unavailable during bootstrap (transient, non-blocking; notification flow will continue retries): {err}");
                     }
                     Err(_) => {
-                        warn!(addr = %config.client_addr, timeout = ?Self::STARTUP_UI_HANDSHAKE_TIMEOUT, "startup UI handshake timed out, continuing without blocking runtime");
+                        info!(addr = %config.client_addr, timeout = ?Self::STARTUP_UI_HANDSHAKE_TIMEOUT, "startup UI handshake unavailable during bootstrap (timeout, non-blocking; notification flow will continue retries)");
                     }
                 }
             }
             Ok(Err(err)) => {
-                warn!(addr = %config.client_addr, "startup UI connect failed, continuing without blocking runtime: {err}");
+                info!(addr = %config.client_addr, "startup UI connect unavailable during bootstrap (transient, non-blocking; notification flow will continue retries): {err}");
             }
             Err(_) => {
-                warn!(addr = %config.client_addr, timeout = ?Self::STARTUP_UI_CONNECT_TIMEOUT, "startup UI connect timed out, continuing without blocking runtime");
+                info!(addr = %config.client_addr, timeout = ?Self::STARTUP_UI_CONNECT_TIMEOUT, "startup UI connect unavailable during bootstrap (timeout, non-blocking; notification flow will continue retries)");
             }
         }
     }

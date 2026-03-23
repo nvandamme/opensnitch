@@ -2,7 +2,8 @@ use anyhow::Result;
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::rt::TokioIo;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use rustls_pki_types::pem::PemObject;
 use rustls::{ClientConfig as RustlsClientConfig, DigitallySignedStruct, SignatureScheme};
 use std::path::Path;
 use std::{os::fd::AsRawFd, sync::Arc, time::Duration};
@@ -104,10 +105,10 @@ pub(super) async fn connect_with_skip_verify(
             .read_bytes_sync_and_notify("client", Path::new(tls_opts.client_cert.trim()))?;
         let key_raw = StorageService::global()
             .read_bytes_sync_and_notify("client", Path::new(tls_opts.client_key.trim()))?;
-        let certs = rustls_pemfile::certs(&mut std::io::Cursor::new(cert_raw))
+        let certs = CertificateDer::pem_slice_iter(&cert_raw)
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(key_raw))?
-            .ok_or_else(|| anyhow::anyhow!("missing private key in {}", tls_opts.client_key))?;
+        let key = PrivateKeyDer::from_pem_slice(&key_raw)
+            .map_err(|e| anyhow::anyhow!("missing/invalid private key in {}: {e}", tls_opts.client_key))?;
         rustls = RustlsClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoVerifier))

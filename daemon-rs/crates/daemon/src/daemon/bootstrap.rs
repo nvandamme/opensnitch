@@ -8,7 +8,7 @@ use super::{Daemon, DaemonInner, ProcWorkersRuntime};
 use crate::{
     bus::{BusCaps, BusRx, BusState},
     services::{
-        client::UiSessionService,
+        client::{self, UiSessionService},
         config::ConfigService,
         connection::ConnectionService,
         dns::DnsService,
@@ -66,6 +66,8 @@ impl Daemon {
             process_info_cache_capacity = tunables.process_info_cache_capacity,
             pid_inode_cache_capacity = tunables.pid_inode_cache_capacity,
             pid_inode_key_cache_capacity = tunables.pid_inode_key_cache_capacity,
+            stats_event_ring_capacity = tunables.stats_event_ring_capacity,
+            alert_overflow_ring_capacity = tunables.alert_overflow_ring_capacity,
             "daemon bootstrap: effective runtime tunables"
         );
         DnsService::configure_cache_capacity(tunables.dns_lru_cache_capacity);
@@ -74,6 +76,8 @@ impl Daemon {
             tunables.pid_inode_cache_capacity,
             tunables.pid_inode_key_cache_capacity,
         );
+        StatsService::configure_event_ring_capacity(tunables.stats_event_ring_capacity);
+        client::configure_alert_overflow_ring_capacity(tunables.alert_overflow_ring_capacity);
         let config_service = ConfigService::new(config.clone());
         let ui_session = UiSessionService::default();
         let rules = RuleService::default();

@@ -5,6 +5,9 @@ use anyhow::Result;
 #[cfg(feature = "libbpf-ebpf")]
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "libbpf-ebpf")]
+use libbpf_rs::{MapType, query::MapInfoIter};
+
 #[derive(Debug)]
 pub(crate) enum EbpfRingbufBackendKind {
     #[cfg(feature = "libbpf-ebpf")]
@@ -16,6 +19,14 @@ pub(crate) enum EbpfRingbufBackendKind {
 pub(crate) struct EbpfRingbufConsumer {
     backend_kind: EbpfRingbufBackendKind,
     inner: BackendInner,
+}
+
+fn describe_map_candidates(map_paths: &[&str]) -> String {
+    if map_paths.is_empty() {
+        return "<none>".to_string();
+    }
+
+    map_paths.join(", ")
 }
 
 impl EbpfRingbufConsumer {
@@ -94,13 +105,18 @@ struct LibbpfRingbuf {
 #[cfg(feature = "libbpf-ebpf")]
 impl LibbpfRingbuf {
     fn try_open(map_paths: &[&str]) -> Result<Self, String> {
-        let map_path = map_paths
-            .iter()
-            .find(|path| Path::new(path).exists())
-            .ok_or_else(|| "no pinned opensnitch ringbuf map found".to_string())?;
-
-        let map = libbpf_rs::MapHandle::from_pinned_path(map_path)
-            .map_err(|err| format!("open pinned ringbuf map failed ({map_path}): {err}"))?;
+        let map = if let Some(map_path) = map_paths.iter().find(|path| Path::new(path).exists()) {
+            libbpf_rs::MapHandle::from_pinned_path(map_path)
+                .map_err(|err| format!("open pinned ringbuf map failed ({map_path}): {err}"))?
+        } else if let Some(map_id) = Self::discover_loaded_ringbuf_map_id() {
+            libbpf_rs::MapHandle::from_map_id(map_id)
+                .map_err(|err| format!("open loaded ringbuf map by id failed (id={map_id}): {err}"))?
+        } else {
+            return Err(format!(
+                "no opensnitch ringbuf map found (checked pinned: {}; loaded map scan: none)",
+                describe_map_candidates(map_paths)
+            ));
+        };
         let map = Box::leak(Box::new(map));
 
         let queue = Arc::new(Mutex::new(Vec::with_capacity(64)));
@@ -125,6 +141,24 @@ impl LibbpfRingbuf {
             ringbuf,
             queue,
         })
+    }
+
+    fn discover_loaded_ringbuf_map_id() -> Option<u32> {
+        let mut candidate_ids: Vec<u32> = Vec::new();
+
+        for info in MapInfoIter::default() {
+            if info.ty != MapType::RingBuf {
+                continue;
+            }
+
+            // Go-side loader consumes an in-memory map named `events` directly
+            // from the loaded collection. Reuse the same kernel map shape here.
+            if info.name.to_string_lossy() == "events" && info.max_entries == (1 << 24) {
+                candidate_ids.push(info.id);
+            }
+        }
+
+        candidate_ids.into_iter().max()
     }
 
     fn poll_samples(&mut self, timeout: Duration) -> Result<Vec<Vec<u8>>, String> {
@@ -152,7 +186,12 @@ impl AyaRingbuf {
         let map_path = map_paths
             .iter()
             .find(|path| Path::new(path).exists())
-            .ok_or_else(|| "no pinned opensnitch ringbuf map found".to_string())?
+            .ok_or_else(|| {
+                format!(
+                    "no pinned opensnitch ringbuf map found (checked: {})",
+                    describe_map_candidates(map_paths)
+                )
+            })?
             .to_string();
 
         // Aya backend scaffold only for now. Selection order prefers Aya first,

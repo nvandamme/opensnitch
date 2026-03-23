@@ -1,13 +1,12 @@
 use std::{path::PathBuf, thread, thread::JoinHandle, time::Duration};
 
-use netlink_packet_core::NetlinkPayload;
-use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::{
     bus::Bus,
     models::{kernel_event::KernelEvent, proc_event::ProcEventKind},
+    platform::adapters::audit_netlink::AuditNetlinkSocket,
     workers::{KernelEventDispatch, runtime::support::build_current_thread_runtime},
 };
 
@@ -54,8 +53,8 @@ impl AuditWorkerControl {
                         break;
                     }
 
-                    let (connection, mut handle, mut messages) = match audit::new_connection() {
-                        Ok(parts) => parts,
+                    let mut socket = match AuditNetlinkSocket::open() {
+                        Ok(socket) => socket,
                         Err(err) => {
                             warn!("audit netlink unavailable, retrying: {err}");
                             tokio::time::sleep(Duration::from_secs(3)).await;
@@ -63,9 +62,7 @@ impl AuditWorkerControl {
                         }
                     };
 
-                    tokio::spawn(connection);
-
-                    if let Err(err) = handle.enable_events().await {
+                    if let Err(err) = socket.enable_events().await {
                         warn!("failed to enable audit events, retrying: {err}");
                         tokio::time::sleep(Duration::from_secs(3)).await;
                         continue;
@@ -74,34 +71,35 @@ impl AuditWorkerControl {
                     debug!("audit netlink monitor connected");
 
                     loop {
-                        tokio::select! {
-                            _ = shutdown.cancelled() => return,
-                            message = messages.next() => {
-                                let Some((msg, _)) = message else {
-                                    warn!("audit netlink stream ended, reconnecting");
-                                    break;
-                                };
+                        if shutdown.is_cancelled() {
+                            return;
+                        }
 
-                                if let NetlinkPayload::InnerMessage(audit::packet::AuditMessage::Event((_kind, data))) = msg.payload {
-                                    if !Self::is_relevant_audit_line(&data) {
-                                        continue;
-                                    }
+                        match socket.recv_event(Duration::from_millis(500)).await {
+                            Ok(Some(event)) => {
+                                if !Self::is_relevant_audit_line(&event.data) {
+                                    continue;
+                                }
 
-                                    if let Some(pid) = Self::parse_audit_pid(&data)
-                                        && matches!(
-                                            crate::workers::dispatch_kernel_event_with_backoff(
-                                                &bus.kernel_tx,
-                                                KernelEvent::ProcStateChanged {
+                                if let Some(pid) = Self::parse_audit_pid(&event.data)
+                                    && matches!(
+                                        crate::workers::dispatch_kernel_event_with_backoff(
+                                            &bus.kernel_tx,
+                                            KernelEvent::ProcStateChanged {
                                                 pid,
                                                 kind: ProcEventKind::Exec,
                                             },
-                                            ),
-                                            KernelEventDispatch::ChannelClosed
-                                        )
-                                    {
-                                        return;
-                                    }
+                                        ),
+                                        KernelEventDispatch::ChannelClosed
+                                    )
+                                {
+                                    return;
                                 }
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                warn!("audit netlink stream ended, reconnecting: {err}");
+                                break;
                             }
                         }
                     }

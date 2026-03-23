@@ -1,18 +1,33 @@
 use std::{
-    collections::VecDeque,
     sync::{Mutex, OnceLock},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use opensnitch_proto::pb;
 use tokio::sync::mpsc;
 
 use crate::models::ui_alert::{UiAlert, UiAlertData};
+use crate::utils::ring_buffer::RingBuffer;
 
 const ALERT_OVERFLOW_CAP: usize = 32;
-static ALERT_OVERFLOW: OnceLock<Mutex<VecDeque<UiAlert>>> = OnceLock::new();
+static ALERT_OVERFLOW_CAPACITY: AtomicUsize = AtomicUsize::new(ALERT_OVERFLOW_CAP);
+static ALERT_OVERFLOW: OnceLock<Mutex<RingBuffer<UiAlert>>> = OnceLock::new();
 
-fn overflow_queue() -> &'static Mutex<VecDeque<UiAlert>> {
-    ALERT_OVERFLOW.get_or_init(|| Mutex::new(VecDeque::with_capacity(ALERT_OVERFLOW_CAP)))
+fn overflow_queue() -> &'static Mutex<RingBuffer<UiAlert>> {
+    ALERT_OVERFLOW.get_or_init(|| {
+        let cap = ALERT_OVERFLOW_CAPACITY.load(Ordering::Relaxed).max(1);
+        Mutex::new(RingBuffer::new(cap))
+    })
+}
+
+pub(crate) fn configure_alert_overflow_ring_capacity(capacity: usize) {
+    let capacity = capacity.max(1);
+    ALERT_OVERFLOW_CAPACITY.store(capacity, Ordering::Relaxed);
+    if let Some(queue) = ALERT_OVERFLOW.get()
+        && let Ok(mut queue) = queue.lock()
+    {
+        queue.set_capacity(capacity);
+    }
 }
 
 pub(crate) fn info_alert(text: impl Into<String>) -> UiAlert {
@@ -52,10 +67,7 @@ pub(crate) fn enqueue_alert(alert_tx: &mpsc::Sender<UiAlert>, alert: UiAlert) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Full(alert)) => {
             if let Ok(mut queue) = overflow_queue().lock() {
-                if queue.len() >= ALERT_OVERFLOW_CAP {
-                    let _ = queue.pop_front();
-                }
-                queue.push_back(alert);
+                queue.push_overwrite(alert);
             }
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {}
@@ -64,7 +76,7 @@ pub(crate) fn enqueue_alert(alert_tx: &mpsc::Sender<UiAlert>, alert: UiAlert) {
 
 pub(crate) fn drain_overflow_alerts() -> Vec<UiAlert> {
     if let Ok(mut queue) = overflow_queue().lock() {
-        queue.drain(..).collect()
+        queue.drain_all()
     } else {
         Vec::new()
     }

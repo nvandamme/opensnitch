@@ -14,11 +14,21 @@ use crate::workers::runtime::control::{
     WorkerCommand, WorkerCommandResult, WorkerControl, WorkerJoinStatus, WorkerState,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmptyWatchTargetsBehavior {
+    WarnPollFallback,
+    InfoPollFallback,
+}
+
 pub(crate) trait WatchWorkerControl: Send + 'static {
     fn worker_name(&self) -> &'static str;
     fn poll_interval(&self) -> Duration;
     fn targets(&self) -> Vec<PathBuf>;
     fn scan<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+
+    fn empty_targets_behavior(&self) -> EmptyWatchTargetsBehavior {
+        EmptyWatchTargetsBehavior::WarnPollFallback
+    }
 
     fn path_targets(path: &Path) -> Vec<PathBuf>
     where
@@ -62,6 +72,7 @@ struct GenericWatchWorkerControl<S: WatchWorkerControl> {
     name: &'static str,
     poll_interval: Duration,
     targets: Vec<PathBuf>,
+    empty_targets_behavior: EmptyWatchTargetsBehavior,
     token: Mutex<Option<CancellationToken>>,
     trigger_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     scan_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -72,6 +83,7 @@ impl<S: WatchWorkerControl> GenericWatchWorkerControl<S> {
         let name = spec.worker_name();
         let poll_interval = spec.poll_interval();
         let targets = spec.targets();
+        let empty_targets_behavior = spec.empty_targets_behavior();
         Self {
             runtime,
             parent_shutdown,
@@ -79,6 +91,7 @@ impl<S: WatchWorkerControl> GenericWatchWorkerControl<S> {
             name,
             poll_interval,
             targets,
+            empty_targets_behavior,
             token: Mutex::new(None),
             trigger_handle: Mutex::new(None),
             scan_handle: Mutex::new(None),
@@ -140,6 +153,7 @@ impl<S: WatchWorkerControl> GenericWatchWorkerControl<S> {
             run_token,
             self.poll_interval,
             self.targets.clone(),
+            self.empty_targets_behavior,
             move || {
                 let trigger_tx = trigger_tx.clone();
                 async move {
@@ -174,6 +188,7 @@ pub(crate) fn spawn_scanner_watch_task<F, Fut>(
     shutdown: CancellationToken,
     poll_interval: Duration,
     targets: Vec<PathBuf>,
+    empty_targets_behavior: EmptyWatchTargetsBehavior,
     on_scan_trigger: F,
 ) -> tokio::task::JoinHandle<()>
 where
@@ -181,9 +196,15 @@ where
     Fut: Future<Output = ()> + Send + 'static,
 {
     let mut on_scan_trigger = on_scan_trigger;
-    spawn_watch_trigger_task(shutdown, poll_interval, targets, move || {
+    spawn_watch_trigger_task(
+        shutdown,
+        poll_interval,
+        targets,
+        empty_targets_behavior,
+        move || {
         Box::pin(on_scan_trigger())
-    })
+        },
+    )
 }
 
 pub(crate) fn should_forward_inotify_mask(mask: u32) -> bool {
@@ -224,13 +245,15 @@ fn spawn_watch_trigger_task<F>(
     shutdown: CancellationToken,
     poll_interval: Duration,
     targets: Vec<PathBuf>,
+    empty_targets_behavior: EmptyWatchTargetsBehavior,
     mut on_scan_trigger: F,
 ) -> tokio::task::JoinHandle<()>
 where
     F: FnMut() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static,
 {
     tokio::spawn(async move {
-        let (_watcher, mut fs_rx_enabled, mut fs_rx) = setup_fs_trigger(&targets);
+        let (_watcher, mut fs_rx_enabled, mut fs_rx) =
+            setup_fs_trigger(&targets, empty_targets_behavior);
 
         loop {
             let mut should_scan = false;
@@ -261,6 +284,7 @@ where
 
 fn setup_fs_trigger(
     paths: &[PathBuf],
+    empty_targets_behavior: EmptyWatchTargetsBehavior,
 ) -> (
     Option<InotifyTrigger>,
     bool,
@@ -314,7 +338,14 @@ fn setup_fs_trigger(
         unsafe {
             nix::libc::close(fd);
         }
-        tracing::warn!("no filesystem watch targets registered, using poll-only fallback");
+        match empty_targets_behavior {
+            EmptyWatchTargetsBehavior::WarnPollFallback => {
+                tracing::warn!("no filesystem watch targets registered, using poll-only fallback");
+            }
+            EmptyWatchTargetsBehavior::InfoPollFallback => {
+                tracing::info!("no filesystem watch targets registered by design, using poll-only fallback");
+            }
+        }
         return (None, false, rx);
     }
 

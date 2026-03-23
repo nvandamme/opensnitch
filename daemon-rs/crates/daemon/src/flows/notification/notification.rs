@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
+use std::time::Instant;
 
 use anyhow::Result;
 use opensnitch_proto::pb;
@@ -47,15 +48,40 @@ pub struct NotificationFlow {
 
 impl NotificationFlow {
     const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+    const STARTUP_TRANSIENT_WINDOW: Duration = Duration::from_secs(20);
+    const PERSISTENT_WARN_EVERY_ATTEMPTS: u64 = 10;
 
     async fn do_reconnect(
         &self,
         task_reply_rx: &mpsc::Receiver<pb::NotificationReply>,
+        reconnect_state: &mut ReconnectState,
         warning: Option<&str>,
     ) -> bool {
         self.ui_session.set_connected(false);
         if let Some(msg) = warning {
-            tracing::warn!("{msg}");
+            reconnect_state.failures = reconnect_state.failures.saturating_add(1);
+            let elapsed = reconnect_state.started_at.elapsed();
+            let attempt = reconnect_state.failures;
+
+            if elapsed <= Self::STARTUP_TRANSIENT_WINDOW {
+                tracing::info!(
+                    attempt,
+                    elapsed_secs = elapsed.as_secs(),
+                    "{msg}; transient startup unavailability, retrying"
+                );
+            } else if attempt == 1 || attempt % Self::PERSISTENT_WARN_EVERY_ATTEMPTS == 0 {
+                tracing::warn!(
+                    attempt,
+                    elapsed_secs = elapsed.as_secs(),
+                    "{msg}; persistent UI connectivity issue, retrying"
+                );
+            } else {
+                tracing::info!(
+                    attempt,
+                    elapsed_secs = elapsed.as_secs(),
+                    "{msg}; still retrying"
+                );
+            }
         }
         if task_reply_rx.is_closed() {
             return true;
@@ -96,6 +122,7 @@ impl NotificationFlow {
         mut task_reply_rx: mpsc::Receiver<pb::NotificationReply>,
         mut alert_rx: mpsc::Receiver<UiAlert>,
     ) -> Result<()> {
+        let mut reconnect_state = ReconnectState::default();
         let subscription_command = SubscriptionCommandService::default();
         const QUEUED_ALERTS_MAX: usize = 32;
         let mut queued_alerts: VecDeque<pb::Alert> = VecDeque::with_capacity(QUEUED_ALERTS_MAX);
@@ -129,6 +156,7 @@ impl NotificationFlow {
                     if self
                         .do_reconnect(
                             &task_reply_rx,
+                            &mut reconnect_state,
                             Some(&format!("notification flow connect failed: {err}")),
                         )
                         .await
@@ -160,6 +188,7 @@ impl NotificationFlow {
                     if self
                         .do_reconnect(
                             &task_reply_rx,
+                            &mut reconnect_state,
                             Some(&format!("notification subscribe failed: {err}")),
                         )
                         .await
@@ -182,6 +211,7 @@ impl NotificationFlow {
                     if self
                         .do_reconnect(
                             &task_reply_rx,
+                            &mut reconnect_state,
                             Some(&format!("notification stream open failed: {err}")),
                         )
                         .await
@@ -196,11 +226,15 @@ impl NotificationFlow {
             let reply_tx = stream.reply_tx;
             tracing::debug!("UI auth: {auth_mode}");
             if !send_with_backpressure(&reply_tx, Self::notification_hello_reply()).await {
-                if self.do_reconnect(&task_reply_rx, None).await {
+                if self
+                    .do_reconnect(&task_reply_rx, &mut reconnect_state, None)
+                    .await
+                {
                     break;
                 }
                 continue;
             }
+            reconnect_state.failures = 0;
             self.ui_session.set_connected(true);
             tracing::info!("notification flow: hello handshake sent");
             if !send_with_backpressure(&self.bus.client_cmd_tx, ClientCommand::ResumeRuntimeTasks)
@@ -430,5 +464,20 @@ impl NotificationFlow {
 
     pub(crate) fn is_stream_close_notification(action: i32) -> bool {
         action <= pb::Action::None as i32
+    }
+}
+
+#[derive(Debug)]
+struct ReconnectState {
+    started_at: Instant,
+    failures: u64,
+}
+
+impl Default for ReconnectState {
+    fn default() -> Self {
+        Self {
+            started_at: Instant::now(),
+            failures: 0,
+        }
     }
 }

@@ -51,7 +51,7 @@ impl StatsService {
         inner: &mut StatsInner,
         rules_count: u64,
     ) -> pb::Statistics {
-        let events = std::mem::take(&mut inner.events).into_iter().collect();
+        let events = inner.events.drain_all();
 
         pb::Statistics {
             daemon_version: Self::daemon_version_string().to_string(),

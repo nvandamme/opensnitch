@@ -1,5 +1,4 @@
 use globset::Glob;
-use nix::libc;
 use nix::unistd::{Uid, User};
 use regex::Regex;
 
@@ -12,7 +11,15 @@ use crate::services::rule::{
     CidrTrieIndex, DomainWildcardTrie, ListRegexCache, ListRegexCacheKey, RegexCacheKey,
     RuleMatchCaches, RuleService,
 };
+use crate::platform::adapters::net_iface::NetIfaceAdapter;
 use crate::tests::support::{TestDir, path_string};
+
+fn loopback_ifindex() -> Option<u32> {
+    NetIfaceAdapter::interface_name_map()
+        .ok()?
+        .into_iter()
+        .find_map(|(ifindex, name)| (name == "lo").then_some(ifindex))
+}
 
 fn probe_process() -> ProcessInfo {
     ProcessInfo {
@@ -135,9 +142,9 @@ fn regexp_insensitive_lowers_pattern_and_candidate_like_go() {
 
 #[test]
 fn iface_in_operand_matches_interface_name() {
-    let lo = std::ffi::CString::new("lo").expect("static lo cstring");
-    // SAFETY: `lo` is NUL-terminated and if_nametoindex does not retain the pointer.
-    let lo_idx = unsafe { libc::if_nametoindex(lo.as_ptr()) };
+    let Some(lo_idx) = loopback_ifindex() else {
+        return;
+    };
     if lo_idx == 0 {
         return;
     }
@@ -165,9 +172,9 @@ fn iface_in_operand_matches_interface_name() {
 
 #[test]
 fn iface_out_operand_matches_interface_name() {
-    let lo = std::ffi::CString::new("lo").expect("static lo cstring");
-    // SAFETY: `lo` is NUL-terminated and if_nametoindex does not retain the pointer.
-    let lo_idx = unsafe { libc::if_nametoindex(lo.as_ptr()) };
+    let Some(lo_idx) = loopback_ifindex() else {
+        return;
+    };
     if lo_idx == 0 {
         return;
     }

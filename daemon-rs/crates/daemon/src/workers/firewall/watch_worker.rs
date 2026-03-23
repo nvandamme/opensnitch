@@ -5,7 +5,10 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     services::{config::ConfigService, firewall::FirewallService},
     utils::duration_parse::{DurationParseOptions, parse_human_duration},
-    workers::{runtime::control::WorkerControl, runtime::watch::control::WatchWorkerControl},
+    workers::{
+        runtime::control::WorkerControl,
+        runtime::watch::control::{EmptyWatchTargetsBehavior, WatchWorkerControl},
+    },
 };
 
 pub(crate) fn parse_firewall_monitor_interval(raw: &str) -> std::time::Duration {
@@ -47,6 +50,10 @@ impl WatchWorkerControl for FirewallWatchControl {
 
     fn targets(&self) -> Vec<PathBuf> {
         Vec::new()
+    }
+
+    fn empty_targets_behavior(&self) -> EmptyWatchTargetsBehavior {
+        EmptyWatchTargetsBehavior::InfoPollFallback
     }
 
     fn scan<'a>(

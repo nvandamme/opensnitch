@@ -1,12 +1,26 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     hash::Hash,
     net::IpAddr,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     time::Instant,
 };
 
 use opensnitch_proto::pb;
+
+use crate::utils::ring_buffer::RingBuffer;
+
+const fn default_stats_event_ring_capacity() -> usize {
+    if cfg!(test) {
+        64
+    } else {
+        250
+    }
+}
+
+const DEFAULT_STATS_EVENT_RING_CAPACITY: usize = default_stats_event_ring_capacity();
+pub(super) static STATS_EVENT_RING_CAPACITY: AtomicUsize =
+    AtomicUsize::new(DEFAULT_STATS_EVENT_RING_CAPACITY);
 
 #[repr(align(64))]
 pub(super) struct CacheAlignedAtomicU64(pub(super) AtomicU64);
@@ -50,7 +64,7 @@ pub(super) struct StatsInner {
     pub(super) by_port: LimitedCountersCopy<u16>,
     pub(super) by_uid: LimitedCountersCopy<u32>,
     pub(super) by_executable: LimitedCountersString,
-    pub(super) events: VecDeque<pb::Event>,
+    pub(super) events: RingBuffer<pb::Event>,
     pub(super) max_events: usize,
     pub(super) max_stats: usize,
     pub(super) workers: usize,
@@ -58,6 +72,7 @@ pub(super) struct StatsInner {
 
 impl Default for StatsInner {
     fn default() -> Self {
+        let max_events = STATS_EVENT_RING_CAPACITY.load(Ordering::Relaxed).max(1);
         Self {
             started_at: Some(Instant::now()),
             by_proto: LimitedCountersString::default(),
@@ -66,8 +81,8 @@ impl Default for StatsInner {
             by_port: LimitedCountersCopy::default(),
             by_uid: LimitedCountersCopy::default(),
             by_executable: LimitedCountersString::default(),
-            events: VecDeque::new(),
-            max_events: 150,
+            events: RingBuffer::new(max_events),
+            max_events,
             max_stats: 25,
             workers: 6,
         }

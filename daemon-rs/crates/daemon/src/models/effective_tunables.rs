@@ -25,4 +25,6 @@ pub struct RuntimeTunables {
     pub process_info_cache_capacity: usize,
     pub pid_inode_cache_capacity: usize,
     pub pid_inode_key_cache_capacity: usize,
+    pub stats_event_ring_capacity: usize,
+    pub alert_overflow_ring_capacity: usize,
 }

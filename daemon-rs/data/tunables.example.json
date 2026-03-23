@@ -10,5 +10,7 @@
   "kernel_dns_queue_capacity": 2048,
   "kernel_process_queue_capacity": 2048,
   "kernel_firewall_queue_capacity": 512,
+  "stats_event_ring_capacity": 250,
+  "alert_overflow_ring_capacity": 32,
   "nfqueue_overload_policy": "fail-open"
 }

@@ -16,12 +16,11 @@ use crate::{
         },
         task_payload::TaskErrorPayload,
     },
-    platform::ports::socket_diag_port::{NativeSocketDiagPort, SocketDiagPlatformPort},
+    platform::ports::socket_diag_port::NativeSocketDiagPort,
     services::{connection::ConnectionService, process::ProcessService, storage::StorageService},
     utils::{
         duration_parse::{parse_human_duration, TASK_INTERVAL_OPTIONS},
         json_value,
-        net_iface::{interface_name_by_index, interface_name_map},
         proc_net::{read_proc_net_packet_rows, read_proc_net_xdp_rows},
         proc_fs::proc_sys_kernel_value,
         name_parsing::case_folded,
@@ -185,10 +184,6 @@ impl TaskRuntimeService {
 
     fn task_error_message(task_name: &str, err: impl Display) -> String {
         format!("{task_name} error: {err}")
-    }
-
-    fn task_join_error_message(task_name: &str, err: impl Display) -> String {
-        format!("{task_name} join error: {err}")
     }
 
     fn task_error_payload(task_name: &str, err: impl Display) -> String {
@@ -426,13 +421,8 @@ impl TaskRuntimeService {
                             break;
                         }
 
-                        let reply = tokio::task::spawn_blocking(move || {
-                            NativeSocketDiagPort::dump_sockets(family, proto)
-                        })
-                        .await;
-
-                        match reply {
-                            Ok(Ok(sockets)) => {
+                        match NativeSocketDiagPort::dump_sockets_async(family, proto).await {
+                            Ok(sockets) => {
                                 let mut inode_pid_cache: HashMap<u32, Option<u32>> = HashMap::new();
                                 let mut iface_cache: HashMap<u32, String> = HashMap::new();
                                 let rtnl_iface_map = Self::fetch_iface_name_map_rtnetlink().await;
@@ -528,27 +518,8 @@ impl TaskRuntimeService {
                                     "task result"
                                 );
                             }
-                            Ok(Err(err)) => {
-                                let message = Self::task_error_message(
-                                    task_runtime_naming::TASK_SOCKETS_MONITOR,
-                                    &err,
-                                );
-                                Self::emit_task_error(
-                                    &task_reply_tx,
-                                    task_runtime_naming::TASK_SOCKETS_MONITOR,
-                                    notification_id,
-                                    message,
-                                )
-                                .await;
-                                tracing::debug!(
-                                    task = task_runtime_naming::TASK_SOCKETS_MONITOR,
-                                    family,
-                                    proto,
-                                    "task error: {err}"
-                                );
-                            }
                             Err(err) => {
-                                let message = Self::task_join_error_message(
+                                let message = Self::task_error_message(
                                     task_runtime_naming::TASK_SOCKETS_MONITOR,
                                     &err,
                                 );
@@ -1018,11 +989,11 @@ impl TaskRuntimeService {
     ) -> (Option<u32>, String) {
         let pid = Self::resolve_cached_socket_pid(inode_pid_cache, inode).await;
         Self::ensure_process_entry(process, process_map, pid).await;
-        let iface_name = Self::resolve_cached_iface_name(iface_cache, rtnl_iface_map, iface);
+        let iface_name = Self::resolve_cached_iface_name(iface_cache, rtnl_iface_map, iface).await;
         (pid, iface_name)
     }
 
-    fn resolve_cached_iface_name(
+    async fn resolve_cached_iface_name(
         iface_cache: &mut HashMap<u32, String>,
         rtnl_iface_map: Option<&HashMap<u32, String>>,
         iface: u32,
@@ -1035,10 +1006,20 @@ impl TaskRuntimeService {
             return name.clone();
         }
 
-        let name = rtnl_iface_map
-            .and_then(|m| m.get(&iface).cloned())
-            .or_else(|| interface_name_by_index(iface))
-            .unwrap_or_default();
+        let name = if let Some(name) = rtnl_iface_map.and_then(|m| m.get(&iface).cloned()) {
+            name
+        } else {
+            match crate::platform::adapters::net_iface::NetIfaceAdapter::interface_name_by_index_async(iface)
+                .await
+            {
+                Ok(Some(name)) => name,
+                Ok(None) => String::new(),
+                Err(err) => {
+                    tracing::warn!(iface, detail = %err, "failed to resolve interface name via rtnetlink");
+                    String::new()
+                }
+            }
+        };
         iface_cache.insert(iface, name.clone());
         name
     }
@@ -1178,8 +1159,14 @@ impl TaskRuntimeService {
     }
 
     async fn fetch_iface_name_map_rtnetlink() -> Option<HashMap<u32, String>> {
-        let map = interface_name_map();
-        if map.is_empty() { None } else { Some(map) }
+        match crate::platform::adapters::net_iface::NetIfaceAdapter::interface_name_map_async().await {
+            Ok(map) if map.is_empty() => None,
+            Ok(map) => Some(map),
+            Err(err) => {
+                tracing::warn!(detail = %err, "failed to enumerate interfaces via rtnetlink");
+                None
+            }
+        }
     }
 }
 

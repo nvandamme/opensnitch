@@ -29,6 +29,8 @@ const MIN_EBPF_PRUNE_TARGET_PERCENT: usize = 10;
 const MAX_EBPF_PRUNE_TARGET_PERCENT: usize = 90;
 const MIN_LRU_CACHE_CAPACITY: usize = 1_024;
 const MAX_LRU_CACHE_CAPACITY: usize = 16_000_000;
+const MIN_RING_BUFFER_CAPACITY: usize = 1;
+const MAX_RING_BUFFER_CAPACITY: usize = 1_000_000;
 
 impl NfqueueOverloadPolicy {
     fn parse(raw: &str) -> Option<Self> {
@@ -69,6 +71,8 @@ impl Default for RuntimeTunables {
             process_info_cache_capacity: 131_072,
             pid_inode_cache_capacity: 262_144,
             pid_inode_key_cache_capacity: 262_144,
+            stats_event_ring_capacity: 250,
+            alert_overflow_ring_capacity: 32,
         }
     }
 }
@@ -199,6 +203,14 @@ impl RuntimeTunables {
         if let Some(value) = raw.pid_inode_key_cache_capacity {
             self.pid_inode_key_cache_capacity =
                 Self::clamp(value, MIN_LRU_CACHE_CAPACITY, MAX_LRU_CACHE_CAPACITY);
+        }
+        if let Some(value) = raw.stats_event_ring_capacity {
+            self.stats_event_ring_capacity =
+                Self::clamp(value, MIN_RING_BUFFER_CAPACITY, MAX_RING_BUFFER_CAPACITY);
+        }
+        if let Some(value) = raw.alert_overflow_ring_capacity {
+            self.alert_overflow_ring_capacity =
+                Self::clamp(value, MIN_RING_BUFFER_CAPACITY, MAX_RING_BUFFER_CAPACITY);
         }
         self
     }
@@ -339,6 +351,16 @@ impl RuntimeTunables {
         if let Some(value) = Self::parse_env_usize("OPENSNITCH_TUNE_PID_INODE_KEY_CACHE_CAPACITY") {
             self.pid_inode_key_cache_capacity =
                 Self::clamp(value, MIN_LRU_CACHE_CAPACITY, MAX_LRU_CACHE_CAPACITY);
+            count += 1;
+        }
+        if let Some(value) = Self::parse_env_usize("OPENSNITCH_TUNE_STATS_EVENT_RING_CAPACITY") {
+            self.stats_event_ring_capacity =
+                Self::clamp(value, MIN_RING_BUFFER_CAPACITY, MAX_RING_BUFFER_CAPACITY);
+            count += 1;
+        }
+        if let Some(value) = Self::parse_env_usize("OPENSNITCH_TUNE_ALERT_OVERFLOW_RING_CAPACITY") {
+            self.alert_overflow_ring_capacity =
+                Self::clamp(value, MIN_RING_BUFFER_CAPACITY, MAX_RING_BUFFER_CAPACITY);
             count += 1;
         }
 
@@ -658,5 +680,37 @@ impl RuntimeTunables {
 
     fn clamp(value: usize, min: usize, max: usize) -> usize {
         value.clamp(min, max)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_raw_accepts_ring_buffer_capacities() {
+        let tunables = RuntimeTunables::default().apply_raw(RawRuntimeTunables {
+            stats_event_ring_capacity: Some(512),
+            alert_overflow_ring_capacity: Some(64),
+            ..Default::default()
+        });
+
+        assert_eq!(tunables.stats_event_ring_capacity, 512);
+        assert_eq!(tunables.alert_overflow_ring_capacity, 64);
+    }
+
+    #[test]
+    fn apply_raw_clamps_ring_buffer_capacities() {
+        let tunables = RuntimeTunables::default().apply_raw(RawRuntimeTunables {
+            stats_event_ring_capacity: Some(0),
+            alert_overflow_ring_capacity: Some(usize::MAX),
+            ..Default::default()
+        });
+
+        assert_eq!(tunables.stats_event_ring_capacity, MIN_RING_BUFFER_CAPACITY);
+        assert_eq!(
+            tunables.alert_overflow_ring_capacity,
+            MAX_RING_BUFFER_CAPACITY
+        );
     }
 }

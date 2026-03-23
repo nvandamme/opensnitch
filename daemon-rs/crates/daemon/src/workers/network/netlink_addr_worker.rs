@@ -9,6 +9,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::platform::adapters::net_iface::NetIfaceAdapter;
 use crate::workers::runtime::support::build_current_thread_runtime;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -83,6 +84,6 @@ impl NetlinkAddrWorkerControl {
     async fn fetch_local_addrs() -> anyhow::Result<HashSet<String>> {
         // Keep behavior close to Go by enumerating local addresses without
         // strict netlink attribute parsing that can emit noisy kernel-version warnings.
-        Ok(crate::utils::net_iface::local_ip_addrs())
+        NetIfaceAdapter::local_ip_addrs_async().await
     }
 }

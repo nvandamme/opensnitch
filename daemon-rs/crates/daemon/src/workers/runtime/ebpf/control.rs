@@ -76,6 +76,10 @@ impl EbpfWorkerMode {
         enable_proc: false,
         enable_conn: true,
     };
+
+    fn native_ringbuf_requested(&self) -> bool {
+        self.enable_proc || self.enable_dns
+    }
 }
 
 pub struct EbpfWorkerControl {
@@ -83,13 +87,14 @@ pub struct EbpfWorkerControl {
     daemon_shutdown: CancellationToken,
     prune_policy: EbpfMapPrunePolicy,
     mode: EbpfWorkerMode,
+    worker_name: &'static str,
     runtime: Mutex<EbpfWorkerRuntime>,
 }
 
 impl EbpfWorkerControl {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(bus: Bus, daemon_shutdown: CancellationToken, tunables: RuntimeTunables) -> Self {
-        Self::new_with_mode(bus, daemon_shutdown, tunables, EbpfWorkerMode::ALL)
+        Self::new_with_mode(bus, daemon_shutdown, tunables, EbpfWorkerMode::ALL, "ebpf")
     }
 
     pub(crate) fn new_with_mode(
@@ -97,16 +102,23 @@ impl EbpfWorkerControl {
         daemon_shutdown: CancellationToken,
         tunables: RuntimeTunables,
         mode: EbpfWorkerMode,
+        worker_name: &'static str,
     ) -> Self {
         let worker_shutdown = daemon_shutdown.child_token();
         let prune_policy = EbpfMapPrunePolicy::from_tunables(tunables);
-        let handle =
-            Self::spawn_worker_thread(bus.clone(), worker_shutdown.clone(), prune_policy, mode);
+        let handle = Self::spawn_worker_thread(
+            bus.clone(),
+            worker_shutdown.clone(),
+            prune_policy,
+            mode,
+            worker_name,
+        );
         Self {
             bus,
             daemon_shutdown,
             prune_policy,
             mode,
+            worker_name,
             runtime: Mutex::new(EbpfWorkerRuntime {
                 shutdown: worker_shutdown,
                 handle: Some(handle),
@@ -148,6 +160,7 @@ impl EbpfWorkerControl {
                 runtime.shutdown.clone(),
                 self.prune_policy,
                 self.mode,
+                self.worker_name,
             ));
         }
 
@@ -159,8 +172,16 @@ impl EbpfWorkerControl {
         shutdown: CancellationToken,
         prune_policy: EbpfMapPrunePolicy,
         mode: EbpfWorkerMode,
+        worker_name: &'static str,
     ) -> JoinHandle<()> {
         thread::spawn(move || {
+            info!(
+                worker = worker_name,
+                enabled = mode.enable_conn || mode.enable_proc || mode.enable_dns,
+                ringbuf_requested = mode.native_ringbuf_requested(),
+                "eBPF worker facilities requested"
+            );
+
             let runtime = match EbpfService::load_existing_objects() {
                 Ok(runtime) => {
                     debug!(
@@ -181,7 +202,7 @@ impl EbpfWorkerControl {
                     Some(runtime)
                 }
                 Err(err) => {
-                    warn!("eBPF runtime not available: {err}");
+                    warn!(worker = worker_name, "eBPF runtime not available: {err}");
                     None
                 }
             };
@@ -193,9 +214,13 @@ impl EbpfWorkerControl {
                 && let Some(dns_obj) = runtime.dns_obj.as_ref()
             {
                 match Self::run_dns_explicit_runtime(&bus, &shutdown, dns_obj) {
-                    Ok(()) => return,
+                    Ok(()) => {
+                        info!(worker = worker_name, "explicit DNS eBPF runtime active");
+                        return;
+                    }
                     Err(err) => {
                         warn!(
+                            worker = worker_name,
                             detail = %err,
                             "explicit DNS eBPF attach/runtime unavailable, continuing with generic eBPF flow"
                         );
@@ -204,32 +229,73 @@ impl EbpfWorkerControl {
             }
 
             let mut state = SupervisorState::default();
-            let mut native_ringbuf = match NativeRingbuf::try_open(mode) {
-                Ok((consumer, diagnostics)) => {
-                    for detail in diagnostics {
-                        warn!(detail = %detail, "native eBPF ringbuf backend fallback detail");
+            let mut native_ringbuf = if mode.native_ringbuf_requested() {
+                match NativeRingbuf::try_open(mode, worker_name) {
+                    Ok((consumer, diagnostics)) => {
+                        for detail in diagnostics {
+                            info!(worker = worker_name, detail = %detail, "native eBPF ringbuf backend fallback detail");
+                        }
+
+                        info!(
+                            worker = worker_name,
+                            backend = ?consumer.backend_kind(),
+                            "native eBPF ringbuf consumer enabled"
+                        );
+
+                        let _ = crate::workers::dispatch_kernel_event_with_backoff(
+                            &bus.kernel_tx,
+                            KernelEvent::EbpfProcessMapHit {
+                                pid: std::process::id(),
+                                uid: 0,
+                                note: "native eBPF ringbuf consumer enabled".into(),
+                            },
+                        );
+                        Some(consumer)
                     }
-
-                    info!(
-                        backend = ?consumer.backend_kind(),
-                        "native eBPF ringbuf consumer enabled"
-                    );
-
-                    let _ = crate::workers::dispatch_kernel_event_with_backoff(
-                        &bus.kernel_tx,
-                        KernelEvent::EbpfProcessMapHit {
-                            pid: std::process::id(),
-                            uid: 0,
-                            note: "native eBPF ringbuf consumer enabled".into(),
-                        },
-                    );
-                    Some(consumer)
+                    Err(err) => {
+                        warn!(worker = worker_name, detail = %err, "native eBPF ringbuf consumer unavailable");
+                        None
+                    }
                 }
-                Err(err) => {
-                    warn!(detail = %err, "native eBPF ringbuf consumer unavailable");
-                    None
-                }
+            } else {
+                info!(worker = worker_name, "native eBPF ringbuf not requested for this worker mode");
+                None
             };
+
+            let active = mode.enable_conn || mode.enable_proc || mode.enable_dns;
+            match (mode.enable_conn, mode.enable_proc, mode.enable_dns) {
+                (true, false, false) => {
+                    info!(
+                        worker = worker_name,
+                        conn_active = true,
+                        "eBPF worker facilities active"
+                    );
+                }
+                (false, true, false) => {
+                    info!(
+                        worker = worker_name,
+                        proc_ringbuf_active = native_ringbuf.is_some(),
+                        "eBPF worker facilities active"
+                    );
+                }
+                (false, false, true) => {
+                    info!(
+                        worker = worker_name,
+                        dns_ringbuf_active = native_ringbuf.is_some(),
+                        "eBPF worker facilities active"
+                    );
+                }
+                _ => {
+                    info!(
+                        worker = worker_name,
+                        active,
+                        conn_active = mode.enable_conn,
+                        proc_ringbuf_active = mode.enable_proc && native_ringbuf.is_some(),
+                        dns_ringbuf_active = mode.enable_dns && native_ringbuf.is_some(),
+                        "eBPF worker facilities active"
+                    );
+                }
+            }
 
             if let Some(runtime) = runtime.as_ref() {
                 Self::ensure_ebpf_runtime_loaded(runtime, &bus, mode);
@@ -249,7 +315,7 @@ impl EbpfWorkerControl {
                 if let Some(consumer) = native_ringbuf.as_mut()
                     && let Err(err) = consumer.poll_and_emit(&bus)
                 {
-                    warn!("native eBPF ringbuf poll failed, disabling consumer: {err}");
+                    warn!(worker = worker_name, "native eBPF ringbuf poll failed, disabling consumer: {err}");
                     native_ringbuf = None;
                 }
 
@@ -449,8 +515,14 @@ impl EbpfWorkerControl {
 
     fn find_libc_path() -> Option<PathBuf> {
         let maps = fs::read_to_string("/proc/self/maps").ok()?;
+        Self::find_libc_path_from_maps(&maps)
+    }
+
+    fn find_libc_path_from_maps(maps: &str) -> Option<PathBuf> {
         for line in maps.lines() {
-            let path = line.split_whitespace().nth(5)?;
+            let Some(path) = line.split_whitespace().nth(5) else {
+                continue;
+            };
             if path.contains("libc.so") {
                 let p = PathBuf::from(path);
                 if p.exists() {
@@ -947,9 +1019,39 @@ impl EbpfWorkerControl {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::EbpfWorkerControl;
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn find_libc_path_skips_unmapped_lines() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let temp_path = std::env::temp_dir().join(format!("opensnitchd-libc.so-{unique}"));
+        fs::write(&temp_path, b"test").expect("write temp libc path");
+
+        let maps = format!(
+            "00400000-00452000 r--p 00000000 00:00 0\n7f1234000000-7f1234100000 r-xp 00000000 08:01 123 {}\n",
+            temp_path.display()
+        );
+
+        let discovered = EbpfWorkerControl::find_libc_path_from_maps(&maps);
+        assert_eq!(discovered, Some(PathBuf::from(&temp_path)));
+
+        let _ = fs::remove_file(temp_path);
+    }
+}
+
 #[cfg(feature = "native-ebpf-ringbuf")]
 impl NativeRingbuf {
-    fn try_open(mode: EbpfWorkerMode) -> Result<(Self, Vec<String>), String> {
+    fn try_open(mode: EbpfWorkerMode, worker_name: &'static str) -> Result<(Self, Vec<String>), String> {
         let candidates: Vec<&str> = if mode.enable_proc && mode.enable_dns {
             vec![
                 "/sys/fs/bpf/opensnitch_procs/events",
@@ -964,7 +1066,10 @@ impl NativeRingbuf {
         };
 
         if candidates.is_empty() {
-            return Err("native ringbuf intent disabled for this worker".to_string());
+            return Err(format!(
+                "native ringbuf path disabled for worker={worker_name} (enable_proc={}, enable_dns={}, enable_conn={})",
+                mode.enable_proc, mode.enable_dns, mode.enable_conn
+            ));
         }
 
         let (consumer, diagnostics) = EbpfRingbufConsumer::try_open_with_diagnostics(&candidates)?;
@@ -1046,7 +1151,7 @@ struct NativeRingbuf;
 
 #[cfg(not(feature = "native-ebpf-ringbuf"))]
 impl NativeRingbuf {
-    fn try_open(_mode: EbpfWorkerMode) -> Result<(Self, Vec<String>), String> {
+    fn try_open(_mode: EbpfWorkerMode, _worker_name: &'static str) -> Result<(Self, Vec<String>), String> {
         Err("native-ebpf-ringbuf feature disabled".to_string())
     }
 

@@ -2,7 +2,9 @@ use std::sync::{Arc, Mutex, atomic::Ordering};
 
 use opensnitch_proto::pb;
 
-use super::internal::{CacheAlignedAtomicU64, StatsCounters, StatsInner};
+use super::internal::{
+    CacheAlignedAtomicU64, STATS_EVENT_RING_CAPACITY, StatsCounters, StatsInner,
+};
 use crate::config::StatsConfig;
 use crate::models::connection_state::ConnectionAttempt;
 pub(crate) use crate::models::storage_event_counters::StorageEventCounters;
@@ -34,6 +36,10 @@ impl Default for StatsService {
 }
 
 impl StatsService {
+    pub(crate) fn configure_event_ring_capacity(capacity: usize) {
+        STATS_EVENT_RING_CAPACITY.store(capacity.max(1), Ordering::Relaxed);
+    }
+
     /// Store current subscription counts; reflected in the next snapshot.
     pub fn update_subscription_counts(&self, total: u64, ready: u64, error: u64) {
         self.sub_total.0.store(total, Ordering::Relaxed);
@@ -44,7 +50,10 @@ impl StatsService {
     pub fn apply_config(&self, config: StatsConfig) {
         let mut inner = self.inner.lock().expect("stats mutex poisoned");
         if config.max_events > 0 {
-            inner.max_events = config.max_events;
+            let cap = STATS_EVENT_RING_CAPACITY.load(Ordering::Relaxed).max(1);
+            let max_events = config.max_events.min(cap).max(1);
+            inner.max_events = max_events;
+            inner.events.set_capacity(max_events);
         }
         if config.max_stats > 0 {
             inner.max_stats = config.max_stats;
@@ -54,9 +63,7 @@ impl StatsService {
         }
         let max_stats = inner.max_stats;
 
-        while inner.events.len() > inner.max_events {
-            inner.events.pop_front();
-        }
+        inner.events.trim_to_capacity();
 
         inner.by_proto.trim_to_limit(max_stats);
         inner.by_address.trim_to_limit(max_stats);
@@ -90,12 +97,9 @@ impl StatsService {
 
     pub fn on_event(&self, connection: pb::Connection, rule: Option<pb::Rule>) {
         let mut inner = self.inner.lock().expect("stats mutex poisoned");
-        if inner.events.len() >= inner.max_events {
-            inner.events.pop_front();
-        }
 
         let unix_nano = i64::try_from(unix_epoch_nanos()).unwrap_or(i64::MAX);
-        inner.events.push_back(pb::Event {
+        inner.events.push_overwrite(pb::Event {
             time: Self::format_event_time(unix_nano),
             connection: Some(connection),
             rule,
