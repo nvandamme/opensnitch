@@ -63,35 +63,14 @@ impl SocketDiagAdapter {
 
     #[allow(dead_code)]
     pub fn dump_sockets(family: u8, protocol: u8) -> Result<Vec<SocketInfo>> {
-        #[cfg(feature = "netlink-bindings-socket-diag")]
-        {
-            return super::socket_diag_bindings::SocketDiagBindingsAdapter::dump_sockets(
-                family, protocol,
-            );
-        }
-
-        #[cfg(not(feature = "netlink-bindings-socket-diag"))]
-        {
-            let _ = (family, protocol);
-            anyhow::bail!("socket-diag backend requires feature netlink-bindings-socket-diag")
-        }
+        super::socket_diag_bindings::SocketDiagBindingsAdapter::dump_sockets(family, protocol)
     }
 
     pub async fn dump_sockets_async(family: u8, protocol: u8) -> Result<Vec<SocketInfo>> {
-        #[cfg(feature = "netlink-bindings-socket-diag")]
-        {
-            return super::socket_diag_bindings::SocketDiagBindingsAdapter::dump_sockets_async(
-                family, protocol,
-            )
-            .await;
-        }
-
-        #[cfg(not(feature = "netlink-bindings-socket-diag"))]
-        {
-            tokio::task::spawn_blocking(move || Self::dump_sockets(family, protocol))
-                .await
-                .context("socket-diag dump task join failed")?
-        }
+        super::socket_diag_bindings::SocketDiagBindingsAdapter::dump_sockets_async(
+            family, protocol,
+        )
+        .await
     }
 
     pub fn find_socket(
@@ -115,23 +94,12 @@ impl SocketDiagAdapter {
         dst: IpAddr,
         dst_port: u16,
     ) -> Result<Vec<SocketInfo>> {
-        #[cfg(feature = "netlink-bindings-socket-diag")]
-        {
-            let sockets = super::socket_diag_bindings::SocketDiagBindingsAdapter::find_socket_candidates_filtered(
-                family, protocol, src, src_port, dst, dst_port,
-            )?;
-            return Ok(Self::select_socket_candidates(
-                &sockets, src, src_port, dst, dst_port,
-            ));
-        }
-
-        #[cfg(not(feature = "netlink-bindings-socket-diag"))]
-        {
-            let sockets = Self::dump_sockets(family, protocol)?;
-            Ok(Self::select_socket_candidates(
-                &sockets, src, src_port, dst, dst_port,
-            ))
-        }
+        let sockets = super::socket_diag_bindings::SocketDiagBindingsAdapter::find_socket_candidates_filtered(
+            family, protocol, src, src_port, dst, dst_port,
+        )?;
+        Ok(Self::select_socket_candidates(
+            &sockets, src, src_port, dst, dst_port,
+        ))
     }
 
     #[allow(dead_code)]
@@ -143,58 +111,27 @@ impl SocketDiagAdapter {
         dst: IpAddr,
         dst_port: u16,
     ) -> Result<Vec<SocketInfo>> {
-        #[cfg(feature = "netlink-bindings-socket-diag")]
-        {
-            let sockets = super::socket_diag_bindings::SocketDiagBindingsAdapter::find_socket_candidates_filtered_async(
-                family, protocol, src, src_port, dst, dst_port,
-            )
-            .await?;
-            return Ok(Self::select_socket_candidates(
-                &sockets, src, src_port, dst, dst_port,
-            ));
-        }
-
-        #[cfg(not(feature = "netlink-bindings-socket-diag"))]
-        {
-            tokio::task::spawn_blocking(move || {
-                Self::find_socket_candidates(family, protocol, src, src_port, dst, dst_port)
-            })
-            .await
-            .context("socket-diag candidate task join failed")?
-        }
+        let sockets = super::socket_diag_bindings::SocketDiagBindingsAdapter::find_socket_candidates_filtered_async(
+            family, protocol, src, src_port, dst, dst_port,
+        )
+        .await?;
+        Ok(Self::select_socket_candidates(
+            &sockets, src, src_port, dst, dst_port,
+        ))
     }
 
     pub fn kill_socket(family: u8, protocol: u8, socket: &SocketInfo) -> Result<()> {
-        #[cfg(feature = "netlink-bindings-socket-diag")]
-        {
-            return super::socket_diag_bindings::SocketDiagBindingsAdapter::kill_socket(
-                family, protocol, socket,
-            );
-        }
-
-        #[cfg(not(feature = "netlink-bindings-socket-diag"))]
-        {
-            let _ = (family, protocol, socket);
-            anyhow::bail!("socket-diag backend requires feature netlink-bindings-socket-diag")
-        }
+        super::socket_diag_bindings::SocketDiagBindingsAdapter::kill_socket(
+            family, protocol, socket,
+        )
     }
 
     #[allow(dead_code)]
     pub async fn kill_socket_async(family: u8, protocol: u8, socket: SocketInfo) -> Result<()> {
-        #[cfg(feature = "netlink-bindings-socket-diag")]
-        {
-            return super::socket_diag_bindings::SocketDiagBindingsAdapter::kill_socket_async(
-                family, protocol, socket,
-            )
-            .await;
-        }
-
-        #[cfg(not(feature = "netlink-bindings-socket-diag"))]
-        {
-            tokio::task::spawn_blocking(move || Self::kill_socket(family, protocol, &socket))
-                .await
-                .context("socket-diag kill task join failed")?
-        }
+        super::socket_diag_bindings::SocketDiagBindingsAdapter::kill_socket_async(
+            family, protocol, socket,
+        )
+        .await
     }
 
     #[cfg_attr(not(test), allow(dead_code))]

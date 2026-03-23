@@ -6,6 +6,4 @@ pub(crate) mod netlink_rt;
 pub mod proc_connector;
 pub mod proto_mapper;
 pub mod socket_diag;
-
-#[cfg(feature = "netlink-bindings-socket-diag")]
 pub mod socket_diag_bindings;

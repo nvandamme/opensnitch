@@ -4,12 +4,10 @@ use std::{
 };
 
 use anyhow::Result;
-#[cfg(feature = "netlink-bindings-socket-diag")]
 use netlink_bindings::{
     rt_addr::{self, Ifaddrmsg},
     rt_link::{self, Ifinfomsg},
 };
-#[cfg(feature = "netlink-bindings-socket-diag")]
 use netlink_socket2::{NetlinkSocket, ReplyError};
 
 fn interface_name_cache() -> &'static RwLock<HashMap<u32, String>> {
@@ -21,39 +19,15 @@ pub(crate) struct NetIfaceAdapter;
 
 impl NetIfaceAdapter {
     pub(crate) async fn local_ip_addrs_async() -> Result<HashSet<String>> {
-        #[cfg(feature = "netlink-bindings-socket-diag")]
-        {
-            return Self::local_ip_addrs_netlink_async_impl().await;
-        }
-
-        #[cfg(not(feature = "netlink-bindings-socket-diag"))]
-        {
-            anyhow::bail!("net iface lookups require feature netlink-bindings-socket-diag")
-        }
+        Self::local_ip_addrs_netlink_async_impl().await
     }
 
     pub(crate) fn interface_name_map() -> Result<HashMap<u32, String>> {
-        #[cfg(feature = "netlink-bindings-socket-diag")]
-        {
-            return super::netlink_rt::run_on_netlink_rt(Self::interface_name_map_netlink_async_impl());
-        }
-
-        #[cfg(not(feature = "netlink-bindings-socket-diag"))]
-        {
-            anyhow::bail!("net iface lookups require feature netlink-bindings-socket-diag")
-        }
+        super::netlink_rt::run_on_netlink_rt(Self::interface_name_map_netlink_async_impl())
     }
 
     pub(crate) async fn interface_name_map_async() -> Result<HashMap<u32, String>> {
-        #[cfg(feature = "netlink-bindings-socket-diag")]
-        {
-            return Self::interface_name_map_netlink_async_impl().await;
-        }
-
-        #[cfg(not(feature = "netlink-bindings-socket-diag"))]
-        {
-            anyhow::bail!("net iface lookups require feature netlink-bindings-socket-diag")
-        }
+        Self::interface_name_map_netlink_async_impl().await
     }
 
     pub(crate) fn interface_name_by_index(index: u32) -> Result<Option<String>> {
@@ -94,7 +68,6 @@ impl NetIfaceAdapter {
         Ok(hit)
     }
 
-    #[cfg(feature = "netlink-bindings-socket-diag")]
     async fn interface_name_map_netlink_async_impl() -> Result<HashMap<u32, String>> {
         let header = Ifinfomsg::new();
         let request = rt_link::Request::new().op_getlink_dump(&header);
@@ -120,7 +93,6 @@ impl NetIfaceAdapter {
         Ok(map)
     }
 
-    #[cfg(feature = "netlink-bindings-socket-diag")]
     async fn local_ip_addrs_netlink_async_impl() -> Result<HashSet<String>> {
         let header = Ifaddrmsg::new();
         let request = rt_addr::Request::new().op_getaddr_dump(&header);
@@ -152,19 +124,16 @@ impl NetIfaceAdapter {
         Ok(out)
     }
 
-    #[cfg(feature = "netlink-bindings-socket-diag")]
     fn map_io_error(action: &'static str, err: std::io::Error) -> anyhow::Error {
         tracing::warn!(action, detail = %err, "net-iface netlink io error");
         anyhow::Error::new(err)
     }
 
-    #[cfg(feature = "netlink-bindings-socket-diag")]
     fn map_reply_error(action: &'static str, err: ReplyError) -> anyhow::Error {
         Self::log_reply_error(action, &err);
         anyhow::Error::new(err)
     }
 
-    #[cfg(feature = "netlink-bindings-socket-diag")]
     fn log_reply_error(action: &'static str, err: &ReplyError) {
         let errno = err.as_io_error().raw_os_error().unwrap_or_default();
         let extack_message = err

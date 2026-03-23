@@ -1,5 +1,3 @@
-#![cfg(feature = "netlink-bindings-socket-diag")]
-
 use crate::models::socket_state::SocketInfo;
 use crate::platform::adapters::socket_diag::SocketDiagAdapter;
 use crate::platform::adapters::socket_diag_bindings::SocketDiagBindingsAdapter;

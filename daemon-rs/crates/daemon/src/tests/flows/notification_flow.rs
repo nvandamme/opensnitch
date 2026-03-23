@@ -14,20 +14,27 @@ use crate::{
     bus::{BusCaps, BusState},
     commands::{
         client::client::{parse_log_level_data, parse_task_notification_data},
-        subscription::SubscriptionCommandService,
     },
     config::{ClientAuthType, Config},
     flows::notification::NotificationFlow,
-    models::subscription_wire::SubscriptionReplyWire,
     services::client::{Client, NotificationStream, UiSessionService},
     services::config::ConfigService,
     services::firewall::FirewallService,
     services::rule::RuleService,
-    services::stats::StatsService,
-    services::subscription::storage::SubscriptionStorage,
-    services::subscription::SubscriptionService,
-    tests::support::TestDir,
 };
+
+#[cfg(feature = "subscriptions")]
+use crate::models::subscription_wire::SubscriptionReplyWire;
+#[cfg(feature = "subscriptions")]
+use crate::commands::subscription::SubscriptionCommandService;
+#[cfg(feature = "subscriptions")]
+use crate::services::stats::StatsService;
+#[cfg(feature = "subscriptions")]
+use crate::services::subscription::SubscriptionService;
+#[cfg(feature = "subscriptions")]
+use crate::services::subscription::storage::SubscriptionStorage;
+#[cfg(feature = "subscriptions")]
+use crate::tests::support::TestDir;
 
 #[derive(Default)]
 struct TestUiServer {
@@ -177,6 +184,7 @@ fn stream_close_notification_recognizes_action_none_and_lower_values() {
     ));
 }
 
+#[cfg(feature = "subscriptions")]
 async fn handle_subscription_notification(
     subscriptions: &SubscriptionService,
     stats: &StatsService,
@@ -188,6 +196,7 @@ async fn handle_subscription_notification(
         .await
 }
 
+#[cfg(feature = "subscriptions")]
 fn sample_subscription_request(url: &str) -> pb::SubscriptionRequest {
     pb::SubscriptionRequest {
         operation: pb::SubscriptionOperation::Apply as i32,
@@ -201,6 +210,7 @@ fn sample_subscription_request(url: &str) -> pb::SubscriptionRequest {
     }
 }
 
+#[cfg(feature = "subscriptions")]
 fn encode_subscription_request(request: pb::SubscriptionRequest) -> String {
     serde_json::to_string(&serde_json::json!({
         "operation": request.operation,
@@ -230,12 +240,14 @@ fn encode_subscription_request(request: pb::SubscriptionRequest) -> String {
     .expect("serialize subscription request payload")
 }
 
+#[cfg(feature = "subscriptions")]
 fn decode_subscription_reply(raw_data: &str) -> pb::SubscriptionReply {
     serde_json::from_str::<SubscriptionReplyWire>(raw_data)
         .expect("invalid subscription reply payload")
         .into_proto()
 }
 
+#[cfg(feature = "subscriptions")]
 #[tokio::test]
 async fn subscription_notification_requires_typed_request() {
     let dir = TestDir::new("notification-flow-subscription-missing");
@@ -255,6 +267,7 @@ async fn subscription_notification_requires_typed_request() {
     assert_eq!(snapshot.subscription_error, 0);
 }
 
+#[cfg(feature = "subscriptions")]
 #[tokio::test]
 async fn subscription_notification_updates_stats_after_apply_and_list() {
     let dir = TestDir::new("notification-flow-subscription-refresh");

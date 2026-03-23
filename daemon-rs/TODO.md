@@ -6,7 +6,7 @@ It supersedes:
 - `daemon-rs/FEATURE_PARITY.md`
 - `daemon-rs/SERVICE_ASYNC_AND_MODEL_SCAN_2026-03-15.md`
 
-Last update: 2026-03-23 (entry 439)
+Last update: 2026-03-23 (entry 442)
 
 ## Scope
 
@@ -179,11 +179,15 @@ Override at runtime when needed:
 
 ## Active Backlog
 
-1. Future enhancements
-- [~] Add optional `aya-ebpf` implementation path as a high-level replacement candidate for current `libbpf-rs` integration. (Scaffold landed: feature flag + backend abstraction wiring; polling implementation still pending)
-- [~] Provisional policy: prefer Aya backend by default, keep libbpf as automatic fallback until Aya path reaches runtime parity.
+1. eBPF backend evolution
+- [x] Add optional `aya-ebpf` implementation path as a high-level replacement candidate for current `libbpf-rs` integration.
+  - Completed (entry 441): optional Aya feature and runtime backend selection/fallback wiring are in place (`Cargo.toml` feature gate + eBPF runtime fallback chain + runtime-mode tests).
+- [x] Provisional policy: prefer Aya backend by default, keep libbpf as automatic fallback until Aya path reaches runtime parity.
+  - Completed (entry 442): parity cross-check aligned Rust Aya attach specs and runtime flows with the current C module probe families (DNS/process/connection), and focused runtime/path tests passed (`ebpf_runtime_mode`, `ebpf_paths`).
 - [x] Document resolved Aya eBPF probe relocation quirk: avoid `.text.unlikely` relocation targets in probe sections by using explicit section wrappers and panic-path-safe probe code patterns.
   - Completed (entry 439): added eBPF quirk documentation in `crates/ebpf/QUIRKS.md`, including detection commands and coding patterns used for DNS/process probe stabilization.
+
+2. Future enhancements
 - [ ] Add optional `scope` field to gRPC/proto `Operator` in a dedicated compatibility PR (default dst semantics, backward-compatible wire evolution, Go/Rust/Python client alignment).
   - Note: deferred for now to stay aligned with base opensnitch implementation; revisit in a future dedicated compatibility PR.
 - [ ] Support AdBlock/AdGuard list format in rule list operators and subscriptions.
@@ -194,14 +198,33 @@ Override at runtime when needed:
 	- Rule operator side: extend `normalize_domain_list_entry` to strip AdBlock/AdGuard decorators before trie insertion (backward-compatible: plain entries already parse).
 	- References: AdGuard DNS filter syntax — `||example.com^`, `||*.example.com^$important`.
 	- Note: deferred for now to stay aligned with base opensnitch implementation; revisit in a future dedicated compatibility PR.
+- [ ] Python UI client explicit disconnect on quit/CTRL-C (graceful stream shutdown before process exit).
+  - Add explicit client-side disconnect/stream-close handling on normal quit paths and signal paths (`SIGINT`/Ctrl-C).
+  - Goal: avoid daemon-side noisy transport warnings (`h2 protocol error`/broken-pipe) during intentional UI termination.
+  - Note: tracked as future work only; do not implement in this branch. Land in a separate PR branch once the related Python-client PR is accepted by maintainers.
+- [ ] Explore nftables handling over netlink (replace/augment `nft` CLI shelling in firewall adapter).
+  - References:
+    - https://raw.githubusercontent.com/one-d-wide/netlink-bindings/refs/heads/main/netlink-socket/examples/nftables.rs
+    - https://raw.githubusercontent.com/one-d-wide/netlink-bindings/refs/heads/main/netlink-socket/examples/nftables-api.rs
+  - Scope for exploration PR branch:
+    - model table/chain/rule lifecycle using chained netlink transactions (`batch begin/end` + generation-id guard),
+    - preserve existing behavior and rule semantics from current `firewall_nft` adapter,
+    - add parity tests against current CLI-backed implementation before any default-path switch.
+  - Note: future enhancement only; keep current branch release-focused and defer implementation to a dedicated follow-up PR branch.
+- [ ] Explore NFQUEUE handling via netlink abstractions (reduce direct C/ffi coupling where practical).
+  - Scope for exploration PR branch:
+    - evaluate a typed netlink path for queue lifecycle/configuration and telemetry while preserving packet verdict semantics,
+    - keep current behavior/performance parity with the existing runtime path,
+    - stage migration behind parity harness checks before considering any default-path switch.
+  - Note: future enhancement only; do not implement in this branch before the release tag.
 
-2. Design-rule backlog (active)
+3. Design-rule backlog (active)
 - [x] Cache strategy policy codification (caller-class matrix + default-not-mandatory dual-layer stance).
   - Decision baseline (2026-03-22 review): dual-layer is preferred/default for shared read-heavy caches with lock-free immutable reads, but is not the only allowed cache implementation.
   - Selection rule: allow plain `LruCache` or map-based caches for write-heavy/high-churn or strictly local ownership paths when dual-layer publish overhead would dominate.
   - Deliverable: add and keep updated a short caller-class matrix (read/write profile, ownership, required semantics) for cache-bearing domains (`dns`, `process`, `connection owner`, and other runtime caches touched in future slices).
   - Completed (entry 434): added explicit design-rule cache policy and matrix under `Design Rule: Domain Boundary + Trait-First Architecture (Tracking)`.
-- [ ] Dual-layer publish-path optimization (`utils/lru_cache.rs`).
+- [x] Dual-layer publish-path optimization (`utils/lru_cache.rs`).
   - Current behavior to improve: publish rebuilds full immutable snapshots (`HashMap::from_iter(...)`) on write/publish paths for both async and sync dual-layer variants.
   - Goal: reduce write amplification and allocator churn while preserving lock-free read semantics and eventual touch recency convergence.
   - Suggested direction: evaluate incremental snapshot update or bounded batched publish policies with explicit tunables and focused perf regression checks.
@@ -224,6 +247,7 @@ Override at runtime when needed:
     - kept dual-layer/keyed caches on lookup-critical domains (`dns`, `process`, `connection owner`),
     - migrated append-heavy telemetry/event overflow paths to explicit bounded ring buffers (`utils/ring_buffer.rs`) in stats and UI alert overflow queues,
     - retained dual-layer for keyed cache semantics and ring buffers for latest-N stream semantics.
+  - Completed (entry 440): optimization target is now considered closed for this branch scope after incremental publish-path updates, snapshotting refinements, bounded batch handling, and publish/touch metrics instrumentation landed across entries 435-438.
 - [x] Continue trait-first boundary rollout: remove remaining stateful top-level functions as services/domains are touched.
   - Migrated from stale `Tracking checklist`.
   - Assumption check (2026-03-22): `make -C .. daemon-rs-policy-audit` passes, and naming/layout scan still reports no `RuntimeIntent` symbols or `intent.rs` files under `crates/daemon/src`.

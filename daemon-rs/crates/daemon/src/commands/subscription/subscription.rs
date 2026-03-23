@@ -18,6 +18,12 @@ impl SubscriptionCommandService {
         subscriptions: &SubscriptionService,
         stats: &StatsService,
     ) -> pb::NotificationReply {
+        if !cfg!(feature = "subscriptions") {
+            return self
+                .handle_notification(id, request_json, subscriptions, stats)
+                .await;
+        }
+
         let request = match parse_subscription_request_data(request_json) {
             Ok(request) => request,
             Err(err) => {

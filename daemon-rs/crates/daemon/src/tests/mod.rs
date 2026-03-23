@@ -90,7 +90,6 @@ mod rule_service_match_engine;
 mod rule_storage;
 #[path = "parsing/socket_diag.rs"]
 mod socket_diag;
-#[cfg(feature = "netlink-bindings-socket-diag")]
 #[path = "parsing/socket_diag_backend_matrix.rs"]
 mod socket_diag_backend_matrix;
 #[path = "parsing/sort_key.rs"]
@@ -104,10 +103,13 @@ mod stats_service;
 #[path = "services/storage_service.rs"]
 mod storage_service;
 #[path = "services/subscription_service.rs"]
+#[cfg(feature = "subscriptions")]
 mod subscription_service;
 #[path = "services/subscription_refresh_targets.rs"]
+#[cfg(feature = "subscriptions")]
 mod subscription_refresh_targets;
 #[path = "services/subscription_storage.rs"]
+#[cfg(feature = "subscriptions")]
 mod subscription_storage;
 #[path = "runtime_tasks/task_runtime.rs"]
 mod task_runtime;

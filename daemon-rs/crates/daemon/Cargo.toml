@@ -4,11 +4,11 @@ version = "0.3.0"
 edition = "2024"
 
 [features]
-default = ["native-ebpf-ringbuf", "aya-ebpf", "libbpf-ebpf", "netlink-bindings-socket-diag"]
+default = ["native-ebpf-ringbuf", "aya-ebpf", "libbpf-ebpf"]
 native-ebpf-ringbuf = []
 libbpf-ebpf = ["dep:libbpf-rs"]
 aya-ebpf = ["dep:aya"]
-netlink-bindings-socket-diag = ["dep:netlink-bindings", "dep:netlink-socket2"]
+subscriptions = []
 
 [dependencies]
 tokio = { version = "1.50.0", features = ["full"] }
@@ -34,8 +34,8 @@ opensnitch-proto = { path = "../proto" }
 opensnitch-ebpf-common = { path = "../ebpf-common" }
 libbpf-rs = { version = "0.26.1", optional = true }
 aya = { version = "0.13.1", optional = true }
-netlink-bindings = { version = "0.3.0", optional = true, features = ["inet-diag", "rt-link", "rt-addr"] }
-netlink-socket2 = { version = "0.3.0", optional = true, features = ["tokio"] }
+netlink-bindings = { version = "0.3.0", features = ["inet-diag", "rt-link", "rt-addr"] }
+netlink-socket2 = { version = "0.3.0", features = ["tokio"] }
 rustix = { version = "1.1.2", features = ["net", "event", "thread", "system"] }
 reqwest = { version = "0.13.2", default-features = true }
 hyper-rustls = { version = "0.27.7", default-features = true, features = ["http2"] }

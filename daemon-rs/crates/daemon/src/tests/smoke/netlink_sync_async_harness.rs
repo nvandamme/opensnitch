@@ -125,7 +125,6 @@ fn net_iface_sync_vs_async_harness() {
     );
 }
 
-#[cfg(feature = "netlink-bindings-socket-diag")]
 #[test]
 fn socket_diag_sync_vs_async_harness() {
     if skip_if_not_opted_in() {

@@ -1,11 +1,9 @@
 use crate::models::socket_state::SocketInfo;
 use crate::platform::adapters::socket_diag::SocketDiagAdapter;
-#[cfg(feature = "netlink-bindings-socket-diag")]
 use crate::platform::adapters::socket_diag_bindings::SocketDiagBindingsAdapter;
 use nix::libc::{AF_INET, IPPROTO_TCP};
 
 #[test]
-#[cfg(feature = "netlink-bindings-socket-diag")]
 fn build_kill_req_v2_preserves_socket_identity() {
     let socket = SocketInfo {
         family: AF_INET as u8,
