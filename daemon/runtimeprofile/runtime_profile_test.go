@@ -427,11 +427,10 @@ func TestConnectAttemptProgressesUnderMixedNonConnectSaturation(t *testing.T) {
 }
 
 func TestStressProfileReportsConnectLatencyAndPipelineDrops(t *testing.T) {
-	enforceHarnessGoLogLevel(t)
-
 	if os.Getenv("OPENSNITCH_STRESS_PROFILE") == "" {
 		t.Skip("profiling harness; set OPENSNITCH_STRESS_PROFILE=1 to run")
 	}
+	enforceHarnessGoLogLevel(t)
 
 	rounds := 500
 	if raw := os.Getenv("OPENSNITCH_STRESS_ROUNDS"); raw != "" {
@@ -724,11 +723,10 @@ func runKernelPressureProfile(durationSecs uint64, floodTasks int, enqueueMode s
 }
 
 func TestStressProfileReportsKernelPipelinePressure(t *testing.T) {
-	enforceHarnessGoLogLevel(t)
-
 	if os.Getenv("OPENSNITCH_STRESS_PROFILE") == "" {
 		t.Skip("profiling harness; set OPENSNITCH_STRESS_PROFILE=1 to run")
 	}
+	enforceHarnessGoLogLevel(t)
 
 	durationSecs := uint64(1)
 	if raw := os.Getenv("OPENSNITCH_KERNEL_PRESSURE_SECS"); raw != "" {
@@ -784,11 +782,10 @@ func TestStressProfileReportsKernelPipelinePressure(t *testing.T) {
 }
 
 func TestStressProfileReportsKernelPipelineTimeoutSweep(t *testing.T) {
-	enforceHarnessGoLogLevel(t)
-
 	if os.Getenv("OPENSNITCH_STRESS_PROFILE") == "" {
 		t.Skip("profiling harness; set OPENSNITCH_STRESS_PROFILE=1 to run")
 	}
+	enforceHarnessGoLogLevel(t)
 
 	durationSecs := uint64(1)
 	if raw := os.Getenv("OPENSNITCH_KERNEL_PRESSURE_SWEEP_SECS"); raw != "" {
@@ -919,15 +916,41 @@ func enforceHarnessGoLogLevel(t *testing.T) {
 	t.Helper()
 
 	raw := strings.TrimSpace(os.Getenv("OPENSNITCH_HARNESS_GO_LOG_LEVEL"))
-	normalized := strings.ToLower(raw)
-	if normalized != "err" && normalized != "error" {
-		fmt.Fprintf(
-			os.Stderr,
-			"warning: go harness tests expect OPENSNITCH_HARNESS_GO_LOG_LEVEL=err|error (current=%q); continuing\n",
-			raw,
-		)
+	if raw == "" {
+		oslog.SetLogLevel(oslog.ERROR)
+		return
 	}
 
-	// Keep Go harness logging noise aligned with Rust perf/harness policy.
-	oslog.SetLogLevel(oslog.ERROR)
+	level, ok := parseGoLogLevel(raw)
+	if !ok {
+		t.Logf(
+			"warning: unknown OPENSNITCH_HARNESS_GO_LOG_LEVEL=%q; valid values: trace, debug, info, important, warn, warning, err, error, fatal — defaulting to error",
+			raw,
+		)
+		oslog.SetLogLevel(oslog.ERROR)
+		return
+	}
+
+	oslog.SetLogLevel(level)
+}
+
+func parseGoLogLevel(raw string) (int, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "trace":
+		return oslog.TRACE, true
+	case "debug", "dbg":
+		return oslog.DEBUG, true
+	case "info", "inf":
+		return oslog.INFO, true
+	case "important":
+		return oslog.IMPORTANT, true
+	case "warn", "warning", "war":
+		return oslog.WARNING, true
+	case "err", "error":
+		return oslog.ERROR, true
+	case "fatal":
+		return oslog.FATAL, true
+	default:
+		return 0, false
+	}
 }

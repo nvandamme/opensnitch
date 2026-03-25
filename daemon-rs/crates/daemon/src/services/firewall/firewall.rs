@@ -1,6 +1,12 @@
-use std::sync::Arc;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -27,9 +33,19 @@ pub struct FirewallService {
     pub(super) runtime: FirewallRuntimeStore,
     pub(super) lifecycle: FirewallLifecycle,
     pub(super) error_tx: broadcast::Sender<String>,
+    drift_recovery_blocked_until_epoch_ms: Arc<AtomicU64>,
 }
 
 impl FirewallService {
+    const DRIFT_RECOVERY_BACKOFF: Duration = Duration::from_secs(15);
+
+    fn now_epoch_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
     pub fn new(config: &Config) -> Result<Self> {
         let (error_tx, _) = broadcast::channel(256);
         let runtime = FirewallRuntimeStore::new(FirewallRuntime {
@@ -56,6 +72,7 @@ impl FirewallService {
             runtime,
             lifecycle,
             error_tx,
+            drift_recovery_blocked_until_epoch_ms: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -171,15 +188,61 @@ impl FirewallService {
             return Ok(());
         }
 
-        let healthy = Self::backend_rules_healthy(backend, queue_num, queue_bypass).await?;
+        let health = Self::backend_rules_health(backend, queue_num, queue_bypass).await?;
 
-        if healthy {
+        if health.valid {
+            self.drift_recovery_blocked_until_epoch_ms
+                .store(0, Ordering::Relaxed);
             return Ok(());
         }
 
-        tracing::warn!(backend = ?backend, queue = queue_num, bypass = queue_bypass, "firewall rule drift detected; reloading interception rules");
+        let now_ms = Self::now_epoch_ms();
+        let blocked_until = self
+            .drift_recovery_blocked_until_epoch_ms
+            .load(Ordering::Relaxed);
+        if blocked_until > now_ms {
+            tracing::debug!(
+                backend = ?backend,
+                queue = queue_num,
+                bypass = queue_bypass,
+                blocked_until_epoch_ms = blocked_until,
+                detail = %health.detail.as_deref().unwrap_or("health-check invalid"),
+                "firewall drift detected but recovery backoff is active; skipping immediate reapply"
+            );
+            return Ok(());
+        }
+
+        tracing::warn!(
+            backend = ?backend,
+            queue = queue_num,
+            bypass = queue_bypass,
+            detail = %health.detail.as_deref().unwrap_or("health-check invalid"),
+            "firewall rule drift detected; reloading interception rules"
+        );
         self.disable_rules().await?;
-        self.ensure_rules().await
+        self.ensure_rules().await?;
+
+        let post_health = Self::backend_rules_health(backend, queue_num, queue_bypass).await?;
+        if post_health.valid {
+            self.drift_recovery_blocked_until_epoch_ms
+                .store(0, Ordering::Relaxed);
+            tracing::info!(backend = ?backend, queue = queue_num, bypass = queue_bypass, "firewall drift recovery converged");
+            return Ok(());
+        }
+
+        let next_retry_at = now_ms + Self::DRIFT_RECOVERY_BACKOFF.as_millis() as u64;
+        self.drift_recovery_blocked_until_epoch_ms
+            .store(next_retry_at, Ordering::Relaxed);
+        let detail = post_health
+            .detail
+            .unwrap_or_else(|| "health-check invalid after reload".to_string());
+        self.emit_error(format!(
+            "firewall drift recovery failed to converge ({detail}); retry deferred"
+        ));
+        bail!(
+            "firewall drift recovery failed to converge: {detail} (next retry after {:?})",
+            Self::DRIFT_RECOVERY_BACKOFF
+        )
     }
 
     pub(crate) fn spawn_watch_task(

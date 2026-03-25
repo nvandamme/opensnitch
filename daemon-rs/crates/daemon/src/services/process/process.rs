@@ -95,13 +95,6 @@ impl ProcessRuntime {
         handles
     }
 
-    pub(super) fn reset_for_stop(&self) {
-        if let Ok(mut st) = self.state.lock() {
-            st.worker_count = 0;
-            st.ebpf_requested = false;
-        }
-    }
-
     pub(super) fn snapshot(&self) -> ProcessWorkerState {
         self.state.lock().map(|state| *state).unwrap_or_default()
     }

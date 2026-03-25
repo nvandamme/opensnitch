@@ -734,16 +734,27 @@ async fn blocklist_subscription_rule_loads_all_txt_files_in_list_directory() -> 
 
 #[tokio::test]
 async fn blocklist_large_segments_load_and_latency_smoke() -> Result<()> {
-    let source_path = std::path::PathBuf::from(
-        "/home/nvand/.config/opensnitch/list_subscriptions/rules.list.d/hagezi-pro-hosts/00-hagezi-pro-hosts.txt",
+    let default_path = format!(
+        "{}/.config/opensnitch/list_subscriptions/rules.list.d/hagezi-pro-hosts/00-hagezi-pro-hosts.txt",
+        std::env::var("HOME").unwrap_or_else(|_| "/root".to_string()),
     );
-    if !source_path.exists() {
+    let explicit = std::env::var("OPENSNITCH_LARGE_SEGMENT_FIXTURE").ok();
+    let fixture_path = explicit.as_deref().unwrap_or(&default_path);
+
+    // Prefer the full local list for a high-fidelity smoke; fall back to the
+    // sampled fixture that is always present in the repository.
+    let bundled = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/tests/testdata/hagezi-pro-hosts-sample.txt"
+    );
+    let source_path = if std::path::Path::new(fixture_path).exists() {
+        std::path::PathBuf::from(fixture_path)
+    } else {
         tracing::info!(
-            "skip: source artifact not found at {}",
-            source_path.display()
+            "full hosts list not found at {fixture_path}; using bundled sample fixture"
         );
-        return Ok(());
-    }
+        std::path::PathBuf::from(bundled)
+    };
 
     let source_raw = tokio::fs::read_to_string(&source_path).await?;
     let domains: Vec<String> = source_raw

@@ -1,6 +1,6 @@
 [package]
 name = "opensnitchd-rs"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 
 [features]
@@ -13,7 +13,7 @@ metrics-export = []
 
 [dependencies]
 async-trait = "0.1.89"
-tokio = { version = "1.50.0", features = ["full"] }
+tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "process", "net", "io-util", "fs"] }
 tokio-stream = "0.1.18"
 tokio-util = "0.7.18"
 tonic = { version = "0.14.5", features = ["tls-webpki-roots", "gzip"] }
@@ -40,7 +40,7 @@ aya = { version = "0.13.1", optional = true }
 netlink-bindings = { version = "0.3.0", features = ["inet-diag", "rt-link", "rt-addr", "nftables"] }
 netlink-socket2 = { version = "0.3.0", features = ["tokio"] }
 rustix = { version = "1.1.2", features = ["net", "event", "thread", "system"] }
-reqwest = { version = "0.13.2", default-features = true }
+reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "http2"] }
 hyper-rustls = { version = "0.27.7", default-features = true, features = ["http2"] }
 hyper-util = { version = "0.1.17", features = ["tokio"] }
 rustls = "0.23.37"

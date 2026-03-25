@@ -51,8 +51,7 @@ pub struct NotificationFlow {
 
 impl NotificationFlow {
     const RECONNECT_DELAY: Duration = Duration::from_secs(1);
-    const STARTUP_TRANSIENT_WINDOW: Duration = Duration::from_secs(20);
-    const PERSISTENT_WARN_EVERY_ATTEMPTS: u64 = 10;
+    const RECONNECT_WARN_THROTTLE: Duration = Duration::from_secs(30);
 
     #[cfg(unix)]
     fn try_unix_peer_uid(client_addr: &str) -> Option<u32> {
@@ -125,6 +124,19 @@ impl NotificationFlow {
         )
     }
 
+    fn client_origin(owner: &ClientPrincipal) -> String {
+        match owner {
+            ClientPrincipal::LocalUid(uid) => format!("local-uid:{uid}"),
+            ClientPrincipal::UnixAbstractName(name) => {
+                format!("unix-abstract:{name}")
+            }
+            ClientPrincipal::NetworkIdentity(identity) => {
+                format!("network:{identity}")
+            }
+            ClientPrincipal::IpFallback(ip) => format!("ip:{ip}"),
+        }
+    }
+
     fn connect_owner_bound_session(&self, session_template: &ClientSession) {
         let default_action = self.client_service.connected_default_action();
         let owner = session_template.owner.clone();
@@ -153,6 +165,8 @@ impl NotificationFlow {
         task_reply_rx: &mpsc::Receiver<pb::NotificationReply>,
         reconnect_state: &mut ReconnectState,
         active_session_id: &mut Option<String>,
+        client_id: &str,
+        client_origin: &str,
         warning: Option<&str>,
     ) -> bool {
         if let Some(session_id) = active_session_id.take() {
@@ -160,27 +174,24 @@ impl NotificationFlow {
         }
         if let Some(msg) = warning {
             reconnect_state.failures = reconnect_state.failures.saturating_add(1);
-            let elapsed = reconnect_state.started_at.elapsed();
-            let attempt = reconnect_state.failures;
-
-            if elapsed <= Self::STARTUP_TRANSIENT_WINDOW {
-                tracing::info!(
-                    attempt,
-                    elapsed_secs = elapsed.as_secs(),
-                    "{msg}; transient startup unavailability, retrying"
-                );
-            } else if attempt == 1 || attempt % Self::PERSISTENT_WARN_EVERY_ATTEMPTS == 0 {
+            let now = Instant::now();
+            let should_warn = reconnect_state
+                .last_warn_at
+                .map(|last| now.duration_since(last) >= Self::RECONNECT_WARN_THROTTLE)
+                .unwrap_or(true);
+            if should_warn {
                 tracing::warn!(
-                    attempt,
-                    elapsed_secs = elapsed.as_secs(),
-                    "{msg}; persistent UI connectivity issue, retrying"
+                    client_id,
+                    client_origin,
+                    attempt = reconnect_state.failures,
+                    suppressed = reconnect_state.suppressed_warns,
+                    elapsed_secs = reconnect_state.started_at.elapsed().as_secs(),
+                    "{msg}; retrying"
                 );
+                reconnect_state.last_warn_at = Some(now);
+                reconnect_state.suppressed_warns = 0;
             } else {
-                tracing::info!(
-                    attempt,
-                    elapsed_secs = elapsed.as_secs(),
-                    "{msg}; still retrying"
-                );
+                reconnect_state.suppressed_warns = reconnect_state.suppressed_warns.saturating_add(1);
             }
         }
         if task_reply_rx.is_closed() {
@@ -190,10 +201,10 @@ impl NotificationFlow {
         false
     }
 
-    async fn request_runtime_task_teardown(&self) {
-        tracing::info!("notification flow: requesting temporary runtime task teardown");
+    async fn request_runtime_task_teardown(&self, client_id: &str, client_origin: &str) {
+        tracing::info!(client_id, client_origin, "notification flow: requesting temporary runtime task teardown");
         if !send_with_backpressure(&self.bus.client_cmd_tx, ClientCommand::StopRuntimeTasks).await {
-            tracing::warn!("failed to queue temporary task teardown after notification disconnect");
+            tracing::warn!(client_id, client_origin, "failed to queue temporary task teardown after notification disconnect");
         }
     }
 
@@ -251,8 +262,10 @@ impl NotificationFlow {
             let client_addr = config_snapshot.client_addr.as_str();
             let auth_mode = config_snapshot.client_auth.auth_type.as_name();
             let session_binding = Self::session_binding_from_client_addr(client_addr);
+            let client_id = session_binding.id.clone();
+            let client_origin = Self::client_origin(&session_binding.owner);
             let current_auth_fingerprint = Self::auth_fingerprint(&config_snapshot);
-            tracing::info!(addr = %client_addr, "notification flow: connecting to UI endpoint");
+            tracing::debug!(client_id, client_origin, addr = %client_addr, "notification flow: connecting to UI endpoint");
 
             let mut client = match ClientService::connect_with_config(&config_snapshot).await {
                 Ok(client) => client,
@@ -262,6 +275,8 @@ impl NotificationFlow {
                             &task_reply_rx,
                             &mut reconnect_state,
                             &mut active_session_id,
+                            client_id.as_str(),
+                            client_origin.as_str(),
                             Some(&format!("notification flow connect failed: {err}")),
                         )
                         .await
@@ -295,6 +310,8 @@ impl NotificationFlow {
                             &task_reply_rx,
                             &mut reconnect_state,
                             &mut active_session_id,
+                            client_id.as_str(),
+                            client_origin.as_str(),
                             Some(&format!("notification subscribe failed: {err}")),
                         )
                         .await
@@ -309,7 +326,7 @@ impl NotificationFlow {
                 .strip_prefix("unix:")
                 .or_else(|| client_addr.strip_prefix("unix-abstract:"))
                 .unwrap_or(client_addr);
-            tracing::debug!("UI service poller started for socket {poller_addr}");
+            tracing::debug!(client_id, client_origin, "UI service poller started for socket {poller_addr}");
 
             let stream = match NotificationStream::open(&mut client).await {
                 Ok(stream) => stream,
@@ -319,6 +336,8 @@ impl NotificationFlow {
                             &task_reply_rx,
                             &mut reconnect_state,
                             &mut active_session_id,
+                            client_id.as_str(),
+                            client_origin.as_str(),
                             Some(&format!("notification stream open failed: {err}")),
                         )
                         .await
@@ -331,13 +350,15 @@ impl NotificationFlow {
 
             let mut inbound = stream.inbound;
             let reply_tx = stream.reply_tx;
-            tracing::debug!("UI auth: {auth_mode}");
+            tracing::debug!(client_id, client_origin, "UI auth: {auth_mode}");
             if !send_with_backpressure(&reply_tx, Self::notification_hello_reply()).await {
                 if self
                     .do_reconnect(
                         &task_reply_rx,
                         &mut reconnect_state,
                         &mut active_session_id,
+                        client_id.as_str(),
+                        client_origin.as_str(),
                         None,
                     )
                     .await
@@ -347,19 +368,22 @@ impl NotificationFlow {
                 continue;
             }
             reconnect_state.failures = 0;
+            reconnect_state.suppressed_warns = 0;
+            reconnect_state.last_warn_at = None;
+            reconnect_state.started_at = Instant::now();
             self.connect_owner_bound_session(&session_binding);
             active_session_id = Some(session_binding.id.clone());
-            tracing::info!("notification flow: hello handshake sent");
+            tracing::info!(client_id, client_origin, addr = %client_addr, "notification flow: client connected (hello handshake sent)");
             if !send_with_backpressure(&self.bus.client_cmd_tx, ClientCommand::ResumeRuntimeTasks)
                 .await
             {
-                tracing::warn!("failed to queue runtime task resume command after UI handshake");
+                tracing::warn!(client_id, client_origin, "failed to queue runtime task resume command after UI handshake");
             }
 
             while let Some(alert) = queued_alerts.pop_front() {
                 if let Err(err) = client.post_alert(alert.clone()).await {
                     queue_alert(&mut queued_alerts, alert);
-                    tracing::warn!("failed to flush queued alert to UI endpoint: {err}");
+                    tracing::warn!(client_id, client_origin, "failed to flush queued alert to UI endpoint: {err}");
                     break;
                 }
             }
@@ -371,7 +395,7 @@ impl NotificationFlow {
                         match maybe_reply {
                             Some(reply) => {
                                 if !send_with_backpressure(&reply_tx, reply).await {
-                                    tracing::warn!("notification reply stream closed; reconnecting");
+                                    tracing::warn!(client_id, client_origin, "notification reply stream closed; reconnecting");
                                     break true;
                                 }
                             }
@@ -379,7 +403,7 @@ impl NotificationFlow {
                                 if let Some(session_id) = active_session_id.take() {
                                     self.client_service.disconnect_session(&session_id);
                                 }
-                                tracing::info!("uiClient exit");
+                                tracing::info!(client_id, client_origin, "uiClient exit");
                                 return Ok(());
                             }
                         }
@@ -389,12 +413,12 @@ impl NotificationFlow {
                         let updated = self.config.get_snapshot();
                         let updated_addr = updated.client_addr.as_str();
                         if updated_addr != client_addr {
-                            tracing::info!(old_addr = %client_addr, new_addr = %updated_addr, "notification endpoint changed; reconnecting");
+                            tracing::info!(client_id, client_origin, old_addr = %client_addr, new_addr = %updated_addr, "client stateful disconnect: notification endpoint changed; reconnecting");
                             break true;
                         }
                         let updated_auth = Self::auth_fingerprint(&updated);
                         if updated_auth != current_auth_fingerprint {
-                            tracing::info!("notification auth settings changed; reconnecting");
+                            tracing::info!(client_id, client_origin, "client stateful disconnect: notification auth settings changed; reconnecting");
                             break true;
                         }
                     }
@@ -404,7 +428,7 @@ impl NotificationFlow {
                                 let pb_alert = Self::build_alert(alert);
                                 if let Err(err) = client.post_alert(pb_alert.clone()).await {
                                     queue_alert(&mut queued_alerts, pb_alert);
-                                    tracing::warn!("failed to post alert to UI endpoint: {err}");
+                                    tracing::warn!(client_id, client_origin, "failed to post alert to UI endpoint: {err}");
                                     break true;
                                 }
                             }
@@ -425,14 +449,18 @@ impl NotificationFlow {
                                     ..
                                 } = notification;
                                 tracing::info!(
+                                    client_id,
+                                    client_origin,
                                     notification_id = id,
                                     action,
                                     "notification received"
                                 );
                                 if Self::is_stream_close_notification(action) {
                                     tracing::info!(
+                                        client_id,
+                                        client_origin,
                                         action,
-                                        "notification stream close requested by server"
+                                        "client stateful disconnect: notification stream close requested by server"
                                     );
                                     break true;
                                 }
@@ -466,7 +494,7 @@ impl NotificationFlow {
                                         {
                                             NotificationCommandDecision::Command(cmd) => Some(cmd),
                                             NotificationCommandDecision::InvalidLogLevel => {
-                                                tracing::warn!(notification_id = id, "invalid log-level payload in notification");
+                                                tracing::warn!(client_id, client_origin, notification_id = id, "invalid log-level payload in notification");
                                                 let _ = send_with_backpressure(
                                                     &reply_tx,
                                                     build_notification_reply(
@@ -485,7 +513,7 @@ impl NotificationFlow {
                                 };
 
                                 if let Some(cmd) = cmd {
-                                    tracing::debug!(notification_id = id, action, "queueing notification command");
+                                    tracing::debug!(client_id, client_origin, notification_id = id, action, "queueing notification command");
                                     if !send_with_backpressure(&self.bus.client_cmd_tx, cmd).await {
                                         let _ = send_with_backpressure(
                                             &reply_tx,
@@ -496,16 +524,16 @@ impl NotificationFlow {
                                             ),
                                         )
                                         .await;
-                                        tracing::error!(notification_id = id, "failed to queue notification command");
+                                        tracing::error!(client_id, client_origin, notification_id = id, "failed to queue notification command");
                                     }
                                 }
                             }
                             Ok(None) => {
-                                tracing::warn!("notification stream closed by remote peer; reconnecting");
+                                tracing::warn!(client_id, client_origin, "notification stream closed by remote peer; reconnecting");
                                 break true;
                             }
                             Err(err) => {
-                                tracing::warn!("notification stream receive failed: {err}");
+                                tracing::warn!(client_id, client_origin, "notification stream receive failed: {err}");
                                 break true;
                             }
                         }
@@ -517,10 +545,10 @@ impl NotificationFlow {
                 if let Some(session_id) = active_session_id.take() {
                     self.client_service.disconnect_session(&session_id);
                 }
-                self.request_runtime_task_teardown().await;
+                self.request_runtime_task_teardown(client_id.as_str(), client_origin.as_str()).await;
             }
 
-            tracing::debug!("client.disconnect()");
+            tracing::debug!(client_id, client_origin, "client.disconnect()");
 
             tokio::time::sleep(Self::RECONNECT_DELAY).await;
         }
@@ -528,7 +556,10 @@ impl NotificationFlow {
         if let Some(session_id) = active_session_id.take() {
             self.client_service.disconnect_session(&session_id);
         }
-        tracing::info!("uiClient exit");
+        let final_cfg = self.config.get_snapshot();
+        let final_session = Self::session_binding_from_client_addr(final_cfg.client_addr.as_str());
+        let final_client_origin = Self::client_origin(&final_session.owner);
+        tracing::info!(client_id = %final_session.id, client_origin = %final_client_origin, "uiClient exit");
         Ok(())
     }
 
@@ -590,6 +621,8 @@ impl NotificationFlow {
 struct ReconnectState {
     started_at: Instant,
     failures: u64,
+    last_warn_at: Option<Instant>,
+    suppressed_warns: u64,
 }
 
 impl Default for ReconnectState {
@@ -597,6 +630,8 @@ impl Default for ReconnectState {
         Self {
             started_at: Instant::now(),
             failures: 0,
+            last_warn_at: None,
+            suppressed_warns: 0,
         }
     }
 }

@@ -5,6 +5,7 @@ pub(crate) enum RuntimeApplyPolicy {
 
 #[derive(Clone, Copy)]
 pub(crate) enum RuntimeApplyMessageContext {
+    #[allow(dead_code)]
     ConfigCommand,
     ConfigWatch,
     Sighup,

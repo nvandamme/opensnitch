@@ -100,6 +100,7 @@ impl ReloadScope {
 #[derive(Debug)]
 pub(crate) enum ReloadError {
     /// Config could not be loaded or parsed.
+    #[allow(dead_code)]
     ConfigLoad(anyhow::Error),
     /// One or more service apply stages failed.
     ServicesApply { stage: RuntimeApplyStage, error: anyhow::Error },

@@ -10,6 +10,26 @@ const SYSFW_TAG_PREFIX: &str = "opensnitch-sysfw:";
 
 pub(crate) struct FirewallNftAdapter;
 
+#[derive(Debug, Clone, Copy)]
+struct NftInterceptionRuleCounts {
+    dns_count: usize,
+    non_tcp_count: usize,
+    tcp_syn_count: usize,
+}
+
+impl NftInterceptionRuleCounts {
+    fn valid(self) -> bool {
+        self.dns_count == 1 && self.non_tcp_count == 1 && self.tcp_syn_count == 1
+    }
+
+    fn detail(self) -> String {
+        format!(
+            "expected exactly one tagged interception rule for each class; observed dns={}, non_tcp={}, tcp_syn={}",
+            self.dns_count, self.non_tcp_count, self.tcp_syn_count
+        )
+    }
+}
+
 impl FirewallNftAdapter {
     fn family_or_default(chain: &pb::FwChain) -> &str {
         if chain.family.is_empty() {
@@ -337,6 +357,23 @@ impl FirewallNftAdapter {
         Self::interception_rules_valid_impl().await
     }
 
+    pub async fn interception_rules_health_report(
+    ) -> Result<crate::platform::ports::firewall_port::InterceptionHealth> {
+        if resolve_command_path("nft").is_none() {
+            return Ok(crate::platform::ports::firewall_port::InterceptionHealth {
+                valid: false,
+                detail: Some("nft binary not found".to_string()),
+            });
+        }
+
+        let counts = Self::interception_rule_counts().await?;
+        let valid = counts.valid();
+        Ok(crate::platform::ports::firewall_port::InterceptionHealth {
+            valid,
+            detail: if valid { None } else { Some(counts.detail()) },
+        })
+    }
+
     pub async fn apply_system_firewall(sysfw: &pb::SysFirewall, queue_num: u16) -> Result<()> {
         if !sysfw.enabled {
             tracing::info!("[nftables] AddSystemRules() fw disabled");
@@ -415,26 +452,27 @@ impl FirewallNftAdapter {
     }
 
     async fn interception_rules_valid_impl() -> Result<bool> {
+        Ok(Self::interception_rule_counts().await?.valid())
+    }
+
+    async fn interception_rule_counts() -> Result<NftInterceptionRuleCounts> {
         let input = Self::list_chain("inet", "opensnitch", "filter_input").await?;
         let output = Self::list_chain("inet", "opensnitch", "mangle_output").await?;
 
         let input_rules = FirewallNftAdapter::nft_rule_lines(&input);
         let output_rules = FirewallNftAdapter::nft_rule_lines(&output);
 
-        if Self::count_rules_with_tag(&input_rules, "opensnitch-queue-dns") != 1 {
-            return Ok(false);
-        }
-
-        let non_tcp_count =
-            Self::count_rules_with_tag(&output_rules, "opensnitch-queue-connections-non-tcp");
-        let tcp_syn_count =
-            Self::count_rules_with_tag(&output_rules, "opensnitch-queue-connections-tcp-syn");
-
-        if non_tcp_count != 1 || tcp_syn_count != 1 {
-            return Ok(false);
-        }
-
-        Ok(true)
+        Ok(NftInterceptionRuleCounts {
+            dns_count: Self::count_rules_with_tag(&input_rules, "opensnitch-queue-dns"),
+            non_tcp_count: Self::count_rules_with_tag(
+                &output_rules,
+                "opensnitch-queue-connections-non-tcp",
+            ),
+            tcp_syn_count: Self::count_rules_with_tag(
+                &output_rules,
+                "opensnitch-queue-connections-tcp-syn",
+            ),
+        })
     }
 
     fn count_rules_with_tag(lines: &[&str], tag: &str) -> usize {

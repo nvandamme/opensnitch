@@ -2,13 +2,19 @@ use std::{
     collections::hash_map::DefaultHasher,
     env, fs,
     hash::{Hash, Hasher},
+    io::Read,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 use time::{OffsetDateTime, macros::format_description};
 
+mod build_cmds;
+mod cli;
 mod harness_cmds;
 mod live_logs;
+mod test_guard;
 
 pub(crate) type DynError = Box<dyn std::error::Error>;
 
@@ -33,26 +39,52 @@ fn main() {
 }
 
 fn run() -> Result<(), DynError> {
+    let all_args: Vec<String> = env::args().skip(1).collect();
+
+    // --help / -h works in both debug and release (before release-mode check).
+    if all_args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{}", cli::help_text());
+        return Ok(());
+    }
+
     ensure_release_tools_mode()?;
     apply_tools_env_defaults()?;
 
-    let mut args = env::args().skip(1);
-    match args.next().as_deref() {
+    let command = cli::parse_and_apply(&all_args)?;
+
+    match command.as_deref() {
+        // ── build ─────────────────────────────────────────────────────────
+        Some("build") => build_cmds::run_build(),
+        Some("build-all") => build_cmds::run_build_all(),
+        Some("build-ebpf") => build_cmds::run_build_ebpf(),
+        // ── test ──────────────────────────────────────────────────────────
+        Some("test") => build_cmds::run_parity_tests(),
+        Some("test-kernel-it") => build_cmds::run_kernel_it(),
+        Some("test-filter") => build_cmds::run_test_filter(),
+        // ── aya eBPF smoke tests ──────────────────────────────────────────
+        Some("aya-smoke-proc") => build_cmds::run_aya_proc_smoke(),
+        Some("aya-smoke-dns") => build_cmds::run_aya_dns_smoke(),
+        Some("aya-smoke-conn") => build_cmds::run_aya_conn_smoke(),
+        Some("aya-smoke-tunnel") => build_cmds::run_aya_tunnel_smoke(),
+        // ── kernel profile harness ────────────────────────────────────────
+        Some("kernel-profile-harness") => build_cmds::run_kernel_profile_harness(),
+        // ── harness / perf ────────────────────────────────────────────────
         Some("update-run-perf") => update_perf_md(),
         Some("quick-pressure-sweep-tunables") => quick_pressure_sweep_tunables(),
         Some("auto-tune-kernel-pressure-tunables") => auto_tune_kernel_pressure_tunables(),
         Some("microbench-connect-dispatch") => microbench_connect_dispatch(),
         Some("parity-gate") => run_parity_gate_command(),
+        Some("parity-hot-path-harness") => harness_cmds::run_parity_hot_path_harness(),
         Some("parity-hot-path-harness-once") => run_parity_hot_path_harness_once_command(),
         Some("parity-cold-path-harness") => run_parity_cold_path_harness_command(),
+        Some("parity-hot-cold-delta") => harness_cmds::run_parity_hot_cold_delta_command(),
         Some("parity-hot-cold-delta-once") => run_parity_hot_cold_delta_once_command(),
+        // ── live daemon ───────────────────────────────────────────────────
         Some("launch-daemon-live-logs") => launch_daemon_live_logs(),
         Some("stop-daemon-live-logs") => stop_daemon_live_logs(),
-        Some(command) => Err(format!("unsupported tools command: {command}").into()),
-        None => Err(
-            "usage: cargo run -p tools -- <update-run-perf|quick-pressure-sweep-tunables|auto-tune-kernel-pressure-tunables|microbench-connect-dispatch|parity-gate|parity-hot-path-harness-once|parity-cold-path-harness|parity-hot-cold-delta-once|launch-daemon-live-logs|stop-daemon-live-logs>\nshort alias from repo root: cargo unit <command>"
-                .into(),
-        ),
+        Some("run-daemon-mock-ui-live-session") => run_daemon_mock_ui_live_session(),
+        Some(command) => Err(format!("unsupported tools command: {command}\n\n{}", cli::help_text()).into()),
+        None => Err(cli::help_text().into()),
     }
 }
 
@@ -289,6 +321,7 @@ impl TunableSet {
 }
 
 fn auto_tune_kernel_pressure_tunables() -> Result<(), DynError> {
+    test_guard::with_guard("auto-tune-kernel-pressure-tunables", || {
     let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let daemon_rs_dir = tools_dir
         .parent()
@@ -550,6 +583,7 @@ fn auto_tune_kernel_pressure_tunables() -> Result<(), DynError> {
     }
 
     Ok(())
+    }) // with_guard auto_tune_kernel_pressure_tunables
 }
 
 fn find_sweetspot_candidate(
@@ -761,6 +795,7 @@ fn tunables_profile_json(profile: &str, tunables: TunableSet, note: &str) -> Str
 }
 
 fn quick_pressure_sweep_tunables() -> Result<(), DynError> {
+    test_guard::with_guard("quick-pressure-sweep-tunables", || {
     let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let daemon_rs_dir = tools_dir
         .parent()
@@ -904,6 +939,7 @@ fn quick_pressure_sweep_tunables() -> Result<(), DynError> {
         selected_row.forced_kernel_abort,
     );
     Ok(())
+    }) // with_guard quick_pressure_sweep_tunables
 }
 
 fn parse_sweep_rows(output: &str) -> Result<Vec<SweepRow>, DynError> {
@@ -1008,7 +1044,12 @@ fn stop_daemon_live_logs() -> Result<(), DynError> {
     live_logs::stop_daemon_live_logs()
 }
 
+fn run_daemon_mock_ui_live_session() -> Result<(), DynError> {
+    live_logs::run_daemon_mock_ui_live_session()
+}
+
 fn update_perf_md() -> Result<(), DynError> {
+    test_guard::with_guard("update-run-perf", || {
     let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let daemon_rs_dir = tools_dir
         .parent()
@@ -1169,22 +1210,10 @@ fn update_perf_md() -> Result<(), DynError> {
     );
     let mut parity_runs = Vec::with_capacity(perf_repeats);
     for run_idx in 0..perf_repeats {
-        let parity_output =
-            with_fixture_backup(repo_root, "daemon/ui/testdata/default-config.json", || {
-                run_command(
-                    repo_root,
-                    "make",
-                    [
-                        "parity-hot-cold-delta",
-                        &format!("STRESS_ROUNDS={parity_rounds}"),
-                        "PERF_REPEATS=1",
-                    ],
-                    &[
-                        ("PERF_RUST_LOG_LEVEL", rust_log.as_str()),
-                        ("HARNESS_GO_LOG_LEVEL", go_log.as_str()),
-                    ],
-                )
-            })?;
+        // Call in-process instead of spawning `make parity-hot-cold-delta`, which
+        // avoids a full subprocess launch + cargo warm start per repeat.
+        let parity_output = harness_cmds::run_parity_delta_to_string(repo_root)?;
+        print!("{}", harness_cmds::format_parity_delta_table(&parity_output));
         let parsed = parse_parity_delta_summary(&parity_output)?;
         println!(
             "  parity-run {}/{} hot_p95_delta_ms={:+.3} status={}",
@@ -1249,8 +1278,10 @@ fn update_perf_md() -> Result<(), DynError> {
     println!("Prev cache:   {}", cache_root.display());
 
     Ok(())
+    }) // with_guard update_perf_md
 }
 
+#[allow(dead_code)]
 fn with_fixture_backup<T, F>(repo_root: &Path, relative_path: &str, work: F) -> Result<T, DynError>
 where
     F: FnOnce() -> Result<T, DynError>,
@@ -1555,6 +1586,91 @@ fn run_git<const N: usize>(cwd: &Path, args: [&str; N]) -> String {
         .to_string()
 }
 
+fn harness_cmd_timeout() -> Duration {
+    let secs = env::var("OPENSNITCH_HARNESS_CMD_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(300);
+    Duration::from_secs(secs)
+}
+
+/// Run `cmd` with a per-command timeout, draining stdout/stderr concurrently to
+/// prevent pipe-buffer deadlocks.  Prints `[harness] START/DONE/TIMEOUT` lines
+/// to stderr regardless of the caller's log level.
+pub(crate) fn run_timed(mut cmd: Command, label: &str) -> Result<String, DynError> {
+    let timeout = harness_cmd_timeout();
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let started = Instant::now();
+    eprintln!("[harness] START {label}");
+    let mut child = cmd.spawn()?;
+
+    // Drain stdout/stderr in background threads so full pipe buffers never
+    // block the child process.
+    let mut stdout_pipe = child.stdout.take().expect("stdout pipe");
+    let mut stderr_pipe = child.stderr.take().expect("stderr pipe");
+
+    let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let stdout_clone = stdout_buf.clone();
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        *stdout_clone.lock().unwrap() = buf;
+    });
+
+    let stderr_clone = stderr_buf.clone();
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        *stderr_clone.lock().unwrap() = buf;
+    });
+
+    loop {
+        match child.try_wait()? {
+            Some(status) => {
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                let elapsed = started.elapsed().as_secs_f64();
+                let out = stdout_buf.lock().unwrap().to_vec();
+                let err = stderr_buf.lock().unwrap().to_vec();
+                if status.success() {
+                    eprintln!("[harness] DONE {label} elapsed={elapsed:.1}s");
+                    let mut combined = String::from_utf8_lossy(&out).into_owned();
+                    combined.push_str(&String::from_utf8_lossy(&err));
+                    return Ok(combined);
+                } else {
+                    let stdout = String::from_utf8_lossy(&out);
+                    let stderr = String::from_utf8_lossy(&err);
+                    return Err(format!(
+                        "command failed: {label}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                    )
+                    .into());
+                }
+            }
+            None => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_thread.join();
+                    let _ = stderr_thread.join();
+                    let elapsed = started.elapsed().as_secs_f64();
+                    eprintln!(
+                        "[harness] TIMEOUT {label} after {elapsed:.0}s (limit={}s)",
+                        timeout.as_secs()
+                    );
+                    return Err(format!(
+                        "[harness] TIMEOUT {label} after {elapsed:.0}s (limit={}s)",
+                        timeout.as_secs()
+                    )
+                    .into());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
+
 pub(crate) fn run_command<const N: usize>(
     cwd: &Path,
     program: &str,
@@ -1566,23 +1682,8 @@ pub(crate) fn run_command<const N: usize>(
     for (key, value) in envs {
         command.env(key, value);
     }
-    let output = command.output()?;
-    if output.status.success() {
-        let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
-        combined.push_str(&String::from_utf8_lossy(&output.stderr));
-        Ok(combined)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Err(format!(
-            "command failed: {} {}\nstdout:\n{}\nstderr:\n{}",
-            program,
-            args.join(" "),
-            stdout,
-            stderr
-        )
-        .into())
-    }
+    let label = format!("{program} {}", args.join(" "));
+    run_timed(command, &label)
 }
 
 pub(crate) fn find_line<'a>(text: &'a str, needle: &str) -> Result<&'a str, DynError> {

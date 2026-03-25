@@ -34,15 +34,15 @@ The stabilization work for DNS and process probes applied these patterns:
 - Define exported wrapper functions with explicit link_section names matching the intended probe section.
 - Keep core logic in internal handler functions.
 
-2. Keep probe hot paths panic-path-safe.
+1. Keep probe hot paths panic-path-safe.
 - Avoid constructs that can trigger hidden panic lowering in probe sections.
 - Prefer direct pointer-oriented writes and explicit guard checks over indexing-heavy convenience code in hot probe paths.
 - Use scratch maps for temporary buffers where it simplifies verifier-safe memory handling.
 
-3. Keep runtime symbol wiring aligned with wrapper symbols.
+1. Keep runtime symbol wiring aligned with wrapper symbols.
 - If wrapper symbol names change, update userspace program lookup names accordingly.
 
-4. Validate relocations directly from built artifacts.
+1. Validate relocations directly from built artifacts.
 - Inspect relocation records for probe sections and ensure they only reference expected map/event symbols.
 
 ### Verification Commands

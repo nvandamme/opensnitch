@@ -13,17 +13,21 @@ use crate::{
 static PREBUILD_DONE: AtomicBool = AtomicBool::new(false);
 const PREBUILD_DONE_ENV: &str = "OPENSNITCH_PARITY_PREBUILD_DONE";
 
+/// Canonical content of the Go-side UI test fixture used by the cold-path
+/// harness.  The harness writes this to `daemon/ui/testdata/default-config.json`
+/// before tests run so the fixture always starts from a known-good state,
+/// regardless of what a previous (possibly crashed) run may have left behind.
+const COLD_PATH_CONFIG_FIXTURE: &str =
+    include_str!("../fixtures/default-config.json");
+/// Path within the repo root at which the Go tests and Rust watch tests both
+/// expect the UI config fixture to live.
+const COLD_PATH_CONFIG_FIXTURE_REL: &str = "daemon/ui/testdata/default-config.json";
+
 pub(crate) fn microbench_connect_dispatch() -> Result<(), DynError> {
-    let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let daemon_rs_dir = tools_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .ok_or("tools dir missing daemon-rs parent")?;
-    let repo_root = daemon_rs_dir
-        .parent()
-        .ok_or("daemon-rs dir missing parent")?;
+    crate::test_guard::with_guard("microbench-connect-dispatch", || {
+    let repo_root = crate::test_guard::repo_root()?;
     let manifest = daemon_rs_manifest_path()?;
-    maybe_prebuild_daemon_rs_release_tests(repo_root, &manifest)?;
+    maybe_prebuild_daemon_rs_release_tests(&repo_root, &manifest)?;
     let rounds = env::var("OPENSNITCH_MICROBENCH_ROUNDS").unwrap_or_else(|_| "4000".to_string());
     let repeats = perf_repeats();
     let rust_log = perf_rust_log_level();
@@ -32,7 +36,7 @@ pub(crate) fn microbench_connect_dispatch() -> Result<(), DynError> {
     for run_idx in 0..repeats {
         let started = std::time::Instant::now();
         let output = run_command(
-            repo_root,
+            &repo_root,
             "cargo",
             [
                 "test",
@@ -82,85 +86,138 @@ pub(crate) fn microbench_connect_dispatch() -> Result<(), DynError> {
         repeats,
     );
     Ok(())
+    }) // with_guard
 }
 
 pub(crate) fn run_parity_gate_command() -> Result<(), DynError> {
-    let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let daemon_rs_dir = tools_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .ok_or("tools dir missing daemon-rs parent")?;
-    let repo_root = daemon_rs_dir
-        .parent()
-        .ok_or("daemon-rs dir missing parent")?;
+    crate::test_guard::with_guard("parity-gate", || {
+    let repo_root = crate::test_guard::repo_root()?;
     let manifest = daemon_rs_manifest_path()?;
-    maybe_prebuild_daemon_rs_release_tests(repo_root, &manifest)?;
-
-    run_parity_gate_internal(repo_root)
+    maybe_prebuild_daemon_rs_release_tests(&repo_root, &manifest)?;
+    run_parity_gate_internal(&repo_root)
+    }) // with_guard
 }
 
 pub(crate) fn run_parity_hot_path_harness_once_command() -> Result<(), DynError> {
-    let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let daemon_rs_dir = tools_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .ok_or("tools dir missing daemon-rs parent")?;
-    let repo_root = daemon_rs_dir
-        .parent()
-        .ok_or("daemon-rs dir missing parent")?;
+    crate::test_guard::with_guard("parity-hot-path-harness-once", || {
+    let repo_root = crate::test_guard::repo_root()?;
     let manifest = daemon_rs_manifest_path()?;
-    maybe_prebuild_daemon_rs_release_tests(repo_root, &manifest)?;
-
-    let output = run_hot_path_harness_once_internal(repo_root)?;
+    maybe_prebuild_daemon_rs_release_tests(&repo_root, &manifest)?;
+    let output = run_hot_path_harness_once_internal(&repo_root)?;
     print!("{output}");
     Ok(())
+    }) // with_guard
+}
+
+/// `parity-hot-path-harness`: run the hot-path parity harness `perf_repeats()`
+/// times.  Pre-build happens on the first pass only (matching the former
+/// Makefile loop that set `PERF_PREBUILD=1` for `i==1` only).
+pub(crate) fn run_parity_hot_path_harness() -> Result<(), DynError> {
+    crate::test_guard::with_guard("parity-hot-path-harness", || {
+    let repo_root = crate::test_guard::repo_root()?;
+    let manifest = daemon_rs_manifest_path()?;
+    let repeats = perf_repeats();
+    for i in 1..=repeats {
+        eprintln!("[tools] parity-hot-path-harness run {i}/{repeats}");
+        if i == 1 {
+            maybe_prebuild_daemon_rs_release_tests(&repo_root, &manifest)?;
+        }
+        let output = run_hot_path_harness_once_internal(&repo_root)?;
+        print!("{output}");
+    }
+    Ok(())
+    }) // with_guard
 }
 
 pub(crate) fn run_parity_cold_path_harness_command() -> Result<(), DynError> {
-    let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let daemon_rs_dir = tools_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .ok_or("tools dir missing daemon-rs parent")?;
-    let repo_root = daemon_rs_dir
-        .parent()
-        .ok_or("daemon-rs dir missing parent")?;
+    crate::test_guard::with_guard("parity-cold-path-harness", || {
+    let repo_root = crate::test_guard::repo_root()?;
     let manifest = daemon_rs_manifest_path()?;
-    maybe_prebuild_daemon_rs_release_tests(repo_root, &manifest)?;
-
-    let output = run_cold_path_harness_internal(repo_root)?;
+    maybe_prebuild_daemon_rs_release_tests(&repo_root, &manifest)?;
+    let output = run_cold_path_harness_internal(&repo_root)?;
     print!("{output}");
     Ok(())
+    }) // with_guard
 }
 
 pub(crate) fn run_parity_hot_cold_delta_once_command() -> Result<(), DynError> {
-    let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let daemon_rs_dir = tools_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .ok_or("tools dir missing daemon-rs parent")?;
-    let repo_root = daemon_rs_dir
-        .parent()
-        .ok_or("daemon-rs dir missing parent")?;
+    crate::test_guard::with_guard("parity-hot-cold-delta-once", || {
+    let repo_root = crate::test_guard::repo_root()?;
     let manifest = daemon_rs_manifest_path()?;
-    maybe_prebuild_daemon_rs_release_tests(repo_root, &manifest)?;
+    maybe_prebuild_daemon_rs_release_tests(&repo_root, &manifest)?;
+    run_parity_hot_cold_delta_once_internal(&repo_root)
+        .map(|output| print!("{}", format_parity_delta_table(&output)))
+    }) // with_guard
+}
 
+/// `parity-hot-cold-delta`: run the full hot+cold parity delta harness
+/// `perf_repeats()` times (default 3, override with `OPENSNITCH_PERF_REPEATS`),
+/// then print the median run by hot-path p95 delta.  Unlike `parity-gate` this
+/// command does not perform a threshold check and does not write PERF.md.
+pub(crate) fn run_parity_hot_cold_delta_command() -> Result<(), DynError> {
+    crate::test_guard::with_guard("parity-hot-cold-delta", || {
+    let repo_root = crate::test_guard::repo_root()?;
+    let manifest = daemon_rs_manifest_path()?;
+    let repeats = perf_repeats();
+    let rounds = parity_stress_rounds();
+
+    eprintln!(
+        "[tools] parity-hot-cold-delta STRESS_ROUNDS={rounds} repeats={repeats}"
+    );
+
+    maybe_prebuild_daemon_rs_release_tests(&repo_root, &manifest)?;
+
+    // (hot_p95, status_line, full output)
+    let mut runs: Vec<(f64, String, String)> = Vec::with_capacity(repeats);
+    for run_idx in 0..repeats {
+        let output = run_parity_hot_cold_delta_once_internal(&repo_root)?;
+        let status_line = find_line(&output, "PARITY DELTA STATUS:")?.to_string();
+        let hot_line = find_line(&output, "PARITY DELTA HOT:")?.to_string();
+        let hot_p95 = parse_metric(&hot_line, "p95")?;
+        print!("{}", format_parity_delta_table(&output));
+        println!(
+            "parity-hot-cold-delta run={}/{} hot_p95={:+.3} status={}",
+            run_idx + 1,
+            repeats,
+            hot_p95,
+            status_line,
+        );
+        runs.push((hot_p95, status_line, output));
+    }
+
+    runs.sort_by(|l, r| l.0.total_cmp(&r.0));
+    let (hot_p95, status_line, median_output) = &runs[runs.len() / 2];
+    println!("\n--- parity-hot-cold-delta median ---");
+    print!("{}", format_parity_delta_table(median_output));
+    println!(
+        "parity-hot-cold-delta median run_count={repeats} hot_p95={hot_p95:+.3} status={status_line}",
+    );
+    Ok(())
+    }) // with_guard
+}
+
+/// Returns the full parity delta output as a String (for callers that need to
+/// parse it, like the parity-gate repeat loop and update-run-perf).
+pub(crate) fn run_parity_delta_to_string(repo_root: &Path) -> Result<String, DynError> {
     run_parity_hot_cold_delta_once_internal(repo_root)
 }
 
-fn run_parity_hot_cold_delta_once_internal(repo_root: &Path) -> Result<(), DynError> {
+fn run_parity_hot_cold_delta_once_internal(repo_root: &Path) -> Result<String, DynError> {
     let rounds = parity_stress_rounds();
+    let mut out = String::new();
 
-    println!(
-        "Running hot/cold parity delta harness with STRESS_ROUNDS={} (tools-driven)",
+    out.push_str(&format!(
+        "Running hot/cold parity delta harness with STRESS_ROUNDS={} (tools-driven)\n",
         rounds
-    );
+    ));
 
-    let hot_output = run_hot_path_harness_once_internal(repo_root)?;
-    print!("{hot_output}");
+    // Use the delta-only hot path: skips kernel-pressure tests whose output is
+    // not needed for the delta computation, saving ~15s per pass.
+    let hot_output = run_hot_path_delta_only_internal(repo_root)?;
+    out.push_str(&hot_output);
 
     let cold_output = run_cold_path_harness_internal(repo_root)?;
-    print!("{cold_output}");
+    out.push_str(&cold_output);
 
     let go_mixed_line = find_line(&hot_output, "mixed-saturation backend=go")?;
     let rust_mixed_line = find_line(&hot_output, "mixed-saturation backend=rust")?;
@@ -226,6 +283,8 @@ fn run_parity_hot_cold_delta_once_internal(repo_root: &Path) -> Result<(), DynEr
         .into_iter()
         .sum();
 
+    use std::fmt::Write as _;
+
     let delta = |a: f64, b: f64| -> f64 { a - b };
 
     let mixed_delta = delta(rust_mixed_ms, go_mixed_ms);
@@ -237,56 +296,50 @@ fn run_parity_hot_cold_delta_once_internal(repo_root: &Path) -> Result<(), DynEr
     let cold_ui_delta = delta(rust_ui_elapsed, go_ui_elapsed);
     let cold_tasks_delta = delta(rust_tasks_elapsed, go_tasks_elapsed);
 
-    println!(
+    let _ = writeln!(out,
         "PARITY DELTA HOT MIXED: go_verdict_ms={:.3} rust_verdict_ms={:.3} delta_ms={:+.3}",
         go_mixed_ms, rust_mixed_ms, mixed_delta
     );
-    println!(
+    let _ = writeln!(out,
         "PARITY DELTA COLD COMPONENTS: go_rule_s={:.3} go_ui_s={:.3} go_tasks_s={:.3} rust_rule_s={:.3} rust_ui_s={:.3} rust_tasks_s={:.3}",
-        go_rule_elapsed,
-        go_ui_elapsed,
-        go_tasks_elapsed,
-        rust_rule_elapsed,
-        rust_ui_elapsed,
-        rust_tasks_elapsed
+        go_rule_elapsed, go_ui_elapsed, go_tasks_elapsed,
+        rust_rule_elapsed, rust_ui_elapsed, rust_tasks_elapsed
     );
-    println!(
+    let _ = writeln!(out,
         "PARITY DELTA COLD DETAIL: rust_rule-vs-go_rule_s={:+.3} rust_ui-vs-go_ui_s={:+.3} rust_tasks-vs-go_tasks_s={:+.3}",
         cold_rule_delta, cold_ui_delta, cold_tasks_delta
     );
-    println!(
+    let _ = writeln!(out,
         "PARITY DELTA COLD COMPARABLE-TASKS: go_total_with_tasks_s={:.3} rust_total_with_tasks_s={:.3} delta_with_tasks_s={:+.3}",
-        go_cold_with_tasks,
-        rust_cold_with_tasks,
+        go_cold_with_tasks, rust_cold_with_tasks,
         delta(rust_cold_with_tasks, go_cold_with_tasks)
     );
-    println!(
+    let _ = writeln!(out,
         "PARITY DELTA HOT COMPONENTS: go_hot_wall_s={:.3} rust_hot_wall_s={:.3}",
         go_hot_wall_s, rust_hot_wall_s
     );
-    println!(
+    let _ = writeln!(out,
         "PARITY DELTA HOT THROUGHPUT: go_time_op_us={:.3} rust_time_op_us={:.3} go_ops_s={:.1} rust_ops_s={:.1}",
         go_time_op_us, rust_time_op_us, go_ops_s, rust_ops_s
     );
-    println!(
+    let _ = writeln!(out,
         "PARITY DELTA HOT: vs_go p50={:+.3} p95={:+.3} p99={:+.3} max={:+.3} drop_total={:+.0}",
-        delta(rust_p50, go_p50),
-        delta(rust_p95, go_p95),
-        delta(rust_p99, go_p99),
-        delta(rust_max, go_max),
+        delta(rust_p50, go_p50), delta(rust_p95, go_p95),
+        delta(rust_p99, go_p99), delta(rust_max, go_max),
         delta(rust_drop, go_drop),
     );
-    println!(
+    let _ = writeln!(out,
         "PARITY DELTA COLD: go_total_s={:.3} rust_total_s={:.3} delta_s={:+.3}",
-        go_cold,
-        rust_cold,
-        delta(rust_cold, go_cold)
+        go_cold, rust_cold, delta(rust_cold, go_cold)
     );
-
-    println!("PARITY DELTA STATUS: PASS");
-    Ok(())
+    out.push_str("PARITY DELTA STATUS: PASS
+");
+    Ok(out)
 }
 
+/// Full hot-path harness — runs all 8 tests including the kernel-pressure suite.
+/// Used by `parity-hot-path-harness-once` (the standalone command) so users see
+/// everything.  Not used by the delta / parity-gate repeat loop.
 fn run_hot_path_harness_once_internal(repo_root: &Path) -> Result<String, DynError> {
     let rounds = parity_stress_rounds();
     let rust_log = perf_rust_log_level();
@@ -305,39 +358,7 @@ fn run_hot_path_harness_once_internal(repo_root: &Path) -> Result<String, DynErr
         "Running hot-path parity harness (Go + Rust) with STRESS_ROUNDS={rounds}\n"
     ));
 
-    out.push_str(&run_command(
-        &daemon_dir,
-        "go",
-        [
-            "test",
-            "./runtimeprofile",
-            "-run",
-            "TestConnectAttemptProgressesUnderMixedNonConnectSaturation",
-            "-count=1",
-            "-v",
-        ],
-        &[("OPENSNITCH_HARNESS_GO_LOG_LEVEL", go_log.as_str())],
-    )?);
-    out.push('\n');
-
-    out.push_str(&run_command(
-        &daemon_dir,
-        "go",
-        [
-            "test",
-            "./runtimeprofile",
-            "-run",
-            "TestStressProfileReportsConnectLatencyAndPipelineDrops",
-            "-count=1",
-            "-v",
-        ],
-        &[
-            ("OPENSNITCH_HARNESS_GO_LOG_LEVEL", go_log.as_str()),
-            ("OPENSNITCH_STRESS_PROFILE", "1"),
-            ("OPENSNITCH_STRESS_ROUNDS", rounds.as_str()),
-        ],
-    )?);
-    out.push('\n');
+    out.push_str(&run_hot_path_core(repo_root, &daemon_dir, &rounds, &go_log, &rust_log)?);
 
     out.push_str(&run_command(
         &daemon_dir,
@@ -385,25 +406,6 @@ fn run_hot_path_harness_once_internal(repo_root: &Path) -> Result<String, DynErr
 
     out.push_str(&run_prebuilt_daemon_rs_test(
         repo_root,
-        "tests::daemon_runtime::connect_attempt_progresses_under_mixed_non_connect_saturation",
-        &["--nocapture"],
-        &[("RUST_LOG", rust_log.as_str())],
-    )?);
-    out.push('\n');
-
-    out.push_str(&run_prebuilt_daemon_rs_test(
-        repo_root,
-        "tests::daemon_runtime::stress_profile_reports_connect_latency_and_pipeline_drops",
-        &["--ignored", "--nocapture"],
-        &[
-            ("RUST_LOG", rust_log.as_str()),
-            ("OPENSNITCH_STRESS_ROUNDS", rounds.as_str()),
-        ],
-    )?);
-    out.push('\n');
-
-    out.push_str(&run_prebuilt_daemon_rs_test(
-        repo_root,
         "tests::daemon_runtime::stress_profile_reports_kernel_pipeline_pressure",
         &["--ignored", "--nocapture"],
         &[
@@ -435,16 +437,106 @@ fn run_hot_path_harness_once_internal(repo_root: &Path) -> Result<String, DynErr
     Ok(out)
 }
 
+/// Fast hot-path variant used by the delta / parity-gate repeat loop.
+/// Runs only the 4 tests whose output is required for the delta computation
+/// (mixed-saturation + stress-profile for Go and Rust), skipping the
+/// kernel-pressure suite which is not read by the delta parser.
+fn run_hot_path_delta_only_internal(repo_root: &Path) -> Result<String, DynError> {
+    let rounds = parity_stress_rounds();
+    let rust_log = perf_rust_log_level();
+    let go_log = perf_go_log_level();
+    let daemon_dir = repo_root.join("daemon");
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Running hot-path parity harness (Go + Rust, delta-subset) with STRESS_ROUNDS={rounds}\n"
+    ));
+
+    out.push_str(&run_hot_path_core(repo_root, &daemon_dir, &rounds, &go_log, &rust_log)?);
+    out.push_str("\nPARITY HOT-PATH STATUS: PASS\n");
+    Ok(out)
+}
+
+/// Shared core: mixed-saturation + stress-profile for both Go and Rust.
+fn run_hot_path_core(
+    repo_root: &Path,
+    daemon_dir: &Path,
+    rounds: &str,
+    go_log: &str,
+    rust_log: &str,
+) -> Result<String, DynError> {
+    let mut out = String::new();
+
+    out.push_str(&run_command(
+        daemon_dir,
+        "go",
+        [
+            "test",
+            "./runtimeprofile",
+            "-run",
+            "TestConnectAttemptProgressesUnderMixedNonConnectSaturation",
+            "-count=1",
+            "-v",
+        ],
+        &[("OPENSNITCH_HARNESS_GO_LOG_LEVEL", go_log)],
+    )?);
+    out.push('\n');
+
+    out.push_str(&run_command(
+        daemon_dir,
+        "go",
+        [
+            "test",
+            "./runtimeprofile",
+            "-run",
+            "TestStressProfileReportsConnectLatencyAndPipelineDrops",
+            "-count=1",
+            "-v",
+        ],
+        &[
+            ("OPENSNITCH_HARNESS_GO_LOG_LEVEL", go_log),
+            ("OPENSNITCH_STRESS_PROFILE", "1"),
+            ("OPENSNITCH_STRESS_ROUNDS", rounds),
+        ],
+    )?);
+    out.push('\n');
+
+    out.push_str(&run_prebuilt_daemon_rs_test(
+        repo_root,
+        "tests::daemon_runtime::connect_attempt_progresses_under_mixed_non_connect_saturation",
+        &["--nocapture"],
+        &[("RUST_LOG", rust_log)],
+    )?);
+    out.push('\n');
+
+    out.push_str(&run_prebuilt_daemon_rs_test(
+        repo_root,
+        "tests::daemon_runtime::stress_profile_reports_connect_latency_and_pipeline_drops",
+        &["--ignored", "--nocapture"],
+        &[
+            ("RUST_LOG", rust_log),
+            ("OPENSNITCH_STRESS_ROUNDS", rounds),
+        ],
+    )?);
+    out.push('\n');
+
+    Ok(out)
+}
+
 fn run_cold_path_harness_internal(repo_root: &Path) -> Result<String, DynError> {
     let rust_log = perf_rust_log_level();
     let go_log = perf_go_log_level();
     let daemon_dir = repo_root.join("daemon");
 
-    let fixture_path = repo_root.join("daemon/ui/testdata/default-config.json");
+    let fixture_path = repo_root.join(COLD_PATH_CONFIG_FIXTURE_REL);
     let backup_path =
         fixture_path.with_file_name(format!("default-config.json.backup.{}", std::process::id()));
 
+    // Preserve the existing Go-side fixture; it is restored unconditionally on exit.
     fs::copy(&fixture_path, &backup_path)?;
+    // Write our canonical copy so the harness always starts from a known-good
+    // state — a crashed previous run cannot leave a partially-mutated file behind.
+    fs::write(&fixture_path, COLD_PATH_CONFIG_FIXTURE)?;
 
     let run_result: Result<String, DynError> = (|| {
         let mut out = String::new();
@@ -605,7 +697,25 @@ fn daemon_rs_manifest_path() -> Result<PathBuf, DynError> {
 }
 
 fn daemon_rs_release_test_binary_path(repo_root: &Path) -> Result<PathBuf, DynError> {
-    let deps_dir = repo_root.join("daemon-rs/target/release/deps");
+    // When the harness runs with CARGO_TARGET_DIR (e.g. daemon-rs/target-kernel), the
+    // prebuild writes the test binary there — NOT in the default daemon-rs/target dir.
+    // Use the env var so both paths stay in sync.
+    let target_dir = if let Ok(dir) = env::var("CARGO_TARGET_DIR") {
+        PathBuf::from(dir)
+    } else {
+        repo_root.join("daemon-rs/target")
+    };
+    let deps_dir = target_dir.join("release/deps");
+
+    // Cargo hard-links the final daemon binary from deps/opensnitchd_rs-HASH to
+    // target/release/opensnitchd-rs.  Picking that hard-linked file would run the
+    // production daemon, not the test harness.  Exclude any deps/ candidate whose
+    // inode matches the release binary so we always pick the real test binary.
+    use std::os::unix::fs::MetadataExt as _;
+    let release_ino: Option<u64> = fs::metadata(target_dir.join("release/opensnitchd-rs"))
+        .ok()
+        .map(|m| m.ino());
+
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
 
     for entry in fs::read_dir(&deps_dir)? {
@@ -622,6 +732,11 @@ fn daemon_rs_release_test_binary_path(repo_root: &Path) -> Result<PathBuf, DynEr
 
         let metadata = entry.metadata()?;
         if !metadata.is_file() {
+            continue;
+        }
+
+        // Skip the daemon binary (same inode as release/opensnitchd-rs).
+        if release_ino.map_or(false, |ino| metadata.ino() == ino) {
             continue;
         }
 
@@ -650,38 +765,22 @@ fn run_prebuilt_daemon_rs_test(
     command
         .current_dir(repo_root)
         .arg(test_filter)
-        .args(test_args);
+        .args(test_args)
+        // The parity harness always runs as root.  Set this so the test binary
+        // knows it is executing in a privileged context (mirrors what the
+        // Makefile does for every parity/harness target).
+        .env("OPENSNITCH_RUN_PRIVILEGED_TESTS", "1");
     for (key, value) in envs {
         command.env(key, value);
     }
-
-    let output = command.output()?;
-    if output.status.success() {
-        let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
-        combined.push_str(&String::from_utf8_lossy(&output.stderr));
-        Ok(combined)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Err(format!(
-            "prebuilt test binary failed: {} {} {}\nstdout:\n{}\nstderr:\n{}",
-            test_binary.display(),
-            test_filter,
-            test_args.join(" "),
-            stdout,
-            stderr
-        )
-        .into())
-    }
+    let label = format!("prebuilt-test {test_filter}");
+    crate::run_timed(command, &label)
 }
 
 pub(crate) fn run_parity_gate_internal(repo_root: &Path) -> Result<(), DynError> {
     let rounds = parity_stress_rounds();
     let repeats = perf_repeats();
     let require_exceed = env_flag("OPENSNITCH_PARITY_REQUIRE_EXCEED_GO");
-    let rust_log = perf_rust_log_level();
-    let go_log = perf_go_log_level();
-    let prebuild_done = if prebuild_done_state() { "1" } else { "0" };
 
     println!(
         "Running parity gate with STRESS_ROUNDS={} ({}x, median by hot p95 delta)...",
@@ -689,25 +788,15 @@ pub(crate) fn run_parity_gate_internal(repo_root: &Path) -> Result<(), DynError>
     );
     let mut runs = Vec::with_capacity(repeats);
     for run_idx in 0..repeats {
-        let output = run_command(
-            repo_root,
-            "make",
-            [
-                "parity-hot-cold-delta",
-                &format!("STRESS_ROUNDS={rounds}"),
-                "PERF_REPEATS=1",
-            ],
-            &[
-                ("PERF_RUST_LOG_LEVEL", rust_log.as_str()),
-                ("HARNESS_GO_LOG_LEVEL", go_log.as_str()),
-                (PREBUILD_DONE_ENV, prebuild_done),
-            ],
-        )?;
+        // Run in-process — avoids spawning a new subprocess + cargo warm start
+        // each iteration which was adding overhead per repeat.
+        let output = run_parity_delta_to_string(repo_root)?;
 
         let status_line = find_line(&output, "PARITY DELTA STATUS:")?.to_string();
         let hot_line = find_line(&output, "PARITY DELTA HOT:")?.to_string();
         let hot_p95 = parse_metric(&hot_line, "p95")?;
         let hot_p99 = parse_metric(&hot_line, "p99")?;
+        print!("{}", format_parity_delta_table(&output));
         println!(
             "parity-gate run={}/{} hot_p95={:+.3} hot_p99={:+.3} status={}",
             run_idx + 1,
@@ -737,4 +826,199 @@ pub(crate) fn run_parity_gate_internal(repo_root: &Path) -> Result<(), DynError>
         repeats, status_line, hot_p95, hot_p99
     );
     Ok(())
+}
+
+/// Formats the machine-readable parity delta output as a human-readable table.
+/// Falls back to the raw output string if any metric cannot be parsed.
+pub(crate) fn format_parity_delta_table(output: &str) -> String {
+    build_parity_delta_table(output).unwrap_or_else(|_| output.to_string())
+}
+
+fn build_parity_delta_table(output: &str) -> Result<String, DynError> {
+    use std::fmt::Write as _;
+
+    let hot_mixed_line = find_line(output, "PARITY DELTA HOT MIXED:")?;
+    let hot_throughput_line = find_line(output, "PARITY DELTA HOT THROUGHPUT:")?;
+    let hot_line = find_line(output, "PARITY DELTA HOT:")?;
+    let hot_components_line = find_line(output, "PARITY DELTA HOT COMPONENTS:")?;
+    let cold_components_line = find_line(output, "PARITY DELTA COLD COMPONENTS:")?;
+    let cold_detail_line = find_line(output, "PARITY DELTA COLD DETAIL:")?;
+    let cold_line = find_line(output, "PARITY DELTA COLD:")?;
+    let status_line = find_line(output, "PARITY DELTA STATUS:")?;
+    let status = status_line.split(':').nth(1).map(str::trim).unwrap_or("PASS");
+    let cold_comparable_line = output.lines().find(|l| {
+        l.contains("PARITY DELTA COLD COMPARABLE-TASKS:")
+            || l.contains("PARITY DELTA COLD NON-COMPARABLE-TASKS:")
+    });
+
+    let go_mixed_ms = parse_metric(hot_mixed_line, "go_verdict_ms")?;
+    let rust_mixed_ms = parse_metric(hot_mixed_line, "rust_verdict_ms")?;
+    let mixed_delta_ms = parse_metric(hot_mixed_line, "delta_ms")?;
+    let go_wall = parse_metric(hot_components_line, "go_hot_wall_s")?;
+    let rust_wall = parse_metric(hot_components_line, "rust_hot_wall_s")?;
+    let go_time_op = parse_metric(hot_throughput_line, "go_time_op_us")?;
+    let rust_time_op = parse_metric(hot_throughput_line, "rust_time_op_us")?;
+    let go_ops_s = parse_metric(hot_throughput_line, "go_ops_s")?;
+    let rust_ops_s = parse_metric(hot_throughput_line, "rust_ops_s")?;
+    let hot_p50 = parse_metric(hot_line, "p50")?;
+    let hot_p95 = parse_metric(hot_line, "p95")?;
+    let hot_p99 = parse_metric(hot_line, "p99")?;
+    let hot_max = parse_metric(hot_line, "max")?;
+    let hot_drop = parse_metric(hot_line, "drop_total")?;
+    let go_rule = parse_metric(cold_components_line, "go_rule_s")?;
+    let rust_rule = parse_metric(cold_components_line, "rust_rule_s")?;
+    let delta_rule = parse_metric(cold_detail_line, "rust_rule-vs-go_rule_s")?;
+    let go_ui = parse_metric(cold_components_line, "go_ui_s")?;
+    let rust_ui = parse_metric(cold_components_line, "rust_ui_s")?;
+    let delta_ui = parse_metric(cold_detail_line, "rust_ui-vs-go_ui_s")?;
+    let go_tasks = parse_metric(cold_components_line, "go_tasks_s")?;
+    let rust_tasks = parse_metric(cold_components_line, "rust_tasks_s")?;
+    let delta_tasks = parse_metric(cold_detail_line, "rust_tasks-vs-go_tasks_s")?;
+    let go_cold = parse_metric(cold_line, "go_total_s")?;
+    let rust_cold = parse_metric(cold_line, "rust_total_s")?;
+    let cold_delta = parse_metric(cold_line, "delta_s")?;
+    let (go_cold_wt, rust_cold_wt, cold_wt_delta) = if let Some(line) = cold_comparable_line {
+        (
+            parse_metric(line, "go_total_with_tasks_s")?,
+            parse_metric(line, "rust_total_with_tasks_s")?,
+            parse_metric(line, "delta_with_tasks_s")?,
+        )
+    } else {
+        (go_cold, rust_cold, cold_delta)
+    };
+
+    // Layout: metric=16, go=13, rust=13, delta=15 → total line width = 70 chars.
+    // Verified: 1+1+16+1 + 1+1+13+1 + 1+1+13+1 + 1+1+15+1+1 = 70
+    fn row(c0: &str, c1: &str, c2: &str, c3: &str) -> String {
+        format!("│ {c0:<16} │ {c1:<13} │ {c2:<13} │ {c3:<15} │\n")
+    }
+    fn hr(cl: char, cm: char, cr: char) -> String {
+        format!(
+            "{cl}{}{cm}{}{cm}{}{cm}{}{cr}\n",
+            "─".repeat(18),
+            "─".repeat(15),
+            "─".repeat(15),
+            "─".repeat(17)
+        )
+    }
+    // Section close: join column separators into bottom-T connectors.
+    fn hr_close() -> String {
+        format!(
+            "├{}┴{}┴{}┴{}┤\n",
+            "─".repeat(18),
+            "─".repeat(15),
+            "─".repeat(15),
+            "─".repeat(17)
+        )
+    }
+    // Full-width banner: │ + space + 66-char content + space + │ = 70 chars.
+    fn banner(text: &str) -> String {
+        format!("│ {:<66} │\n", text)
+    }
+
+    let mut t = String::new();
+    let _ = write!(t, "{}", hr('┌', '┬', '┐'));
+    let _ = write!(t, "{}", row("Metric", "Go", "Rust", "Delta (Rust-Go)"));
+    let _ = write!(t, "{}", hr('├', '┼', '┤'));
+    let _ = write!(
+        t,
+        "{}",
+        row(
+            "Hot: mixed",
+            &format!("{:.3} ms", go_mixed_ms),
+            &format!("{:.3} ms", rust_mixed_ms),
+            &format!("{:+.3} ms", mixed_delta_ms),
+        )
+    );
+    let _ = write!(
+        t,
+        "{}",
+        row(
+            "Hot: wall time",
+            &format!("{:.3} s", go_wall),
+            &format!("{:.3} s", rust_wall),
+            "",
+        )
+    );
+    let _ = write!(
+        t,
+        "{}",
+        row(
+            "Hot: time/op",
+            &format!("{:.3} us", go_time_op),
+            &format!("{:.3} us", rust_time_op),
+            "",
+        )
+    );
+    let _ = write!(
+        t,
+        "{}",
+        row(
+            "Hot: ops/sec",
+            &format!("{:.1} /s", go_ops_s),
+            &format!("{:.1} /s", rust_ops_s),
+            "",
+        )
+    );
+    let _ = write!(t, "{}", row("Hot delta p50", "", "", &format!("{:+.3} ms", hot_p50)));
+    let _ = write!(t, "{}", row("Hot delta p95", "", "", &format!("{:+.3} ms", hot_p95)));
+    let _ = write!(t, "{}", row("Hot delta p99", "", "", &format!("{:+.3} ms", hot_p99)));
+    let _ = write!(t, "{}", row("Hot delta max", "", "", &format!("{:+.3} ms", hot_max)));
+    let _ = write!(t, "{}", row("Hot delta drop", "", "", &format!("{:+.0}", hot_drop)));
+    let _ = write!(t, "{}", hr('├', '┼', '┤'));
+    let _ = write!(
+        t,
+        "{}",
+        row(
+            "Cold: rule",
+            &format!("{:.3} s", go_rule),
+            &format!("{:.3} s", rust_rule),
+            &format!("{:+.3} s", delta_rule),
+        )
+    );
+    let _ = write!(
+        t,
+        "{}",
+        row(
+            "Cold: ui",
+            &format!("{:.3} s", go_ui),
+            &format!("{:.3} s", rust_ui),
+            &format!("{:+.3} s", delta_ui),
+        )
+    );
+    let _ = write!(
+        t,
+        "{}",
+        row(
+            "Cold: tasks",
+            &format!("{:.3} s", go_tasks),
+            &format!("{:.3} s", rust_tasks),
+            &format!("{:+.3} s", delta_tasks),
+        )
+    );
+    let _ = write!(
+        t,
+        "{}",
+        row(
+            "Cold: total",
+            &format!("{:.3} s", go_cold),
+            &format!("{:.3} s", rust_cold),
+            &format!("{:+.3} s", cold_delta),
+        )
+    );
+    let _ = write!(
+        t,
+        "{}",
+        row(
+            "Cold: +tasks",
+            &format!("{:.3} s", go_cold_wt),
+            &format!("{:.3} s", rust_cold_wt),
+            &format!("{:+.3} s", cold_wt_delta),
+        )
+    );
+    let _ = write!(t, "{}", hr_close());
+    let _ = write!(t, "{}", banner(&format!("STATUS: {status}")));
+    let _ = write!(t, "└{}┘\n", "─".repeat(68));
+
+    Ok(t)
 }

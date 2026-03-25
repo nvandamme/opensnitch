@@ -75,25 +75,6 @@ impl TaskLifecycle {
         self.transition_state(to);
     }
 
-    fn is_degraded(&self) -> bool {
-        self.lifecycle_state == ServiceState::Degraded
-    }
-
-    fn error_or_default(&self) -> String {
-        self.last_error
-            .clone()
-            .unwrap_or_else(|| "service degraded".to_string())
-    }
-
-    fn emit_health_check_failed(&self, error: String) {
-        let _ = self
-            .event_tx
-            .send(ServiceEvent::HealthCheckFailed { error });
-    }
-
-    fn emit_message(&self, text: String) {
-        let _ = self.event_tx.send(ServiceEvent::Message { text });
-    }
 }
 
 #[async_trait::async_trait]
@@ -171,7 +152,10 @@ impl ServiceLifecycle for TaskRuntime {
                 );
                 self.lifecycle.set_error(Some(err.clone()));
                 self.lifecycle.transition_state(ServiceState::Degraded);
-                self.lifecycle.emit_health_check_failed(err.clone());
+                let _ = self
+                    .lifecycle
+                    .event_tx
+                    .send(ServiceEvent::HealthCheckFailed { error: err.clone() });
                 anyhow::bail!(err);
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -179,9 +163,16 @@ impl ServiceLifecycle for TaskRuntime {
     }
 
     async fn health_check(&self) -> anyhow::Result<()> {
-        if self.lifecycle.is_degraded() {
-            let err = self.lifecycle.error_or_default();
-            self.lifecycle.emit_health_check_failed(err.clone());
+        if self.lifecycle.lifecycle_state == ServiceState::Degraded {
+            let err = self
+                .lifecycle
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "service degraded".to_string());
+            let _ = self
+                .lifecycle
+                .event_tx
+                .send(ServiceEvent::HealthCheckFailed { error: err.clone() });
             anyhow::bail!(err);
         }
         Ok(())
@@ -194,7 +185,9 @@ impl ServiceLifecycle for TaskRuntime {
     async fn reset(&mut self) -> anyhow::Result<()> {
         self.stop().await?;
         self.lifecycle.set_error(None);
-        self.lifecycle.emit_message("service state reset".to_string());
+        let _ = self.lifecycle.event_tx.send(ServiceEvent::Message {
+            text: "service state reset".to_string(),
+        });
         Ok(())
     }
 

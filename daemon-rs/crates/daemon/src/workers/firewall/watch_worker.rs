@@ -45,7 +45,14 @@ impl WatchWorkerControl for FirewallWatchControl {
     }
 
     fn poll_interval(&self) -> std::time::Duration {
-        Self::poll_every_secs(1)
+        let snapshot = self.config.get_snapshot();
+        let interval = parse_firewall_monitor_interval(snapshot.firewall_monitor_interval.as_str());
+        if interval.is_zero() {
+            // Keep a low wake-up cadence when monitor checks are disabled.
+            Self::poll_every_secs(1)
+        } else {
+            interval
+        }
     }
 
     fn targets(&self) -> Vec<PathBuf> {

@@ -5,6 +5,7 @@ use opensnitch_proto::pb;
 
 use crate::{
     models::firewall_state::FirewallBackend,
+    platform::ports::firewall_port::InterceptionHealth,
     services::lifecycle::ServiceState,
     platform::ports::firewall_port::{
         FirewallPlatformPort, IptablesFirewallPort, NftablesFirewallPort,
@@ -151,17 +152,17 @@ impl FirewallService {
         }
     }
 
-    pub(super) async fn backend_rules_healthy(
+    pub(super) async fn backend_rules_health(
         backend: FirewallBackend,
         queue_num: u16,
         queue_bypass: bool,
-    ) -> Result<bool> {
+    ) -> Result<InterceptionHealth> {
         match backend {
             FirewallBackend::Nftables => {
-                NftablesFirewallPort::interception_rules_valid(queue_num, queue_bypass).await
+                NftablesFirewallPort::interception_rules_health(queue_num, queue_bypass).await
             }
             FirewallBackend::Iptables => {
-                IptablesFirewallPort::interception_rules_valid(queue_num, queue_bypass).await
+                IptablesFirewallPort::interception_rules_health(queue_num, queue_bypass).await
             }
         }
     }

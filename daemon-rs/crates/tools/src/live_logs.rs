@@ -2,186 +2,16 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     env, fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Child, Command},
     thread,
     time::Duration,
 };
 
 use crate::{DynError, compact_timestamp, env_flag};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PrivCmd {
-    Direct,
-    Pkexec,
-    Sudo,
-}
-
-fn command_exists(bin: &str) -> bool {
-    Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {bin} >/dev/null 2>&1"))
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
-fn is_root() -> bool {
-    Command::new("id")
-        .arg("-u")
-        .output()
-        .ok()
-        .map(|out| out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "0")
-        .unwrap_or(false)
-}
-
-fn pick_priv_cmd() -> PrivCmd {
-    if is_root() {
-        return PrivCmd::Direct;
-    }
-
-    if let Ok(raw) = env::var("OPENSNITCH_TOOLS_PRIV_CMD") {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "direct" | "none" => return PrivCmd::Direct,
-            "pkexec" => return PrivCmd::Pkexec,
-            "sudo" => return PrivCmd::Sudo,
-            _ => {}
-        }
-    }
-
-    PrivCmd::Sudo
-}
-
-fn run_command_capture(cwd: &Path, program: &str, args: &[&str]) -> Result<String, DynError> {
-    let output = Command::new(program).current_dir(cwd).args(args).output()?;
-    if output.status.success() {
-        let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
-        combined.push_str(&String::from_utf8_lossy(&output.stderr));
-        Ok(combined)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Err(format!(
-            "command failed: {} {}\nstdout:\n{}\nstderr:\n{}",
-            program,
-            args.join(" "),
-            stdout,
-            stderr
-        )
-        .into())
-    }
-}
-
-fn ensure_privileged_ready(cwd: &Path, priv_cmd: PrivCmd, action: &str) -> Result<(), DynError> {
-    match priv_cmd {
-        PrivCmd::Direct => Ok(()),
-        PrivCmd::Sudo => run_command_capture(cwd, "sudo", &["-v"]).map(|_| ()).map_err(|err| {
-            format!(
-                "{action} requires elevated privileges and sudo authentication failed. Details: {err}"
-            )
-            .into()
-        }),
-        PrivCmd::Pkexec => {
-            if command_exists("pkexec") {
-                Ok(())
-            } else {
-                Err(format!("{action} requires pkexec but it is not available in PATH").into())
-            }
-        }
-    }
-}
-
-fn run_privileged_command(
-    cwd: &Path,
-    priv_cmd: PrivCmd,
-    program: &str,
-    args: &[&str],
-) -> Result<String, DynError> {
-    match priv_cmd {
-        PrivCmd::Direct => run_command_capture(cwd, program, args),
-        PrivCmd::Sudo => {
-            let mut all_args = Vec::with_capacity(args.len() + 2);
-            all_args.push("--");
-            all_args.push(program);
-            all_args.extend_from_slice(args);
-            run_command_capture(cwd, "sudo", &all_args)
-        }
-        PrivCmd::Pkexec => {
-            let mut all_args = Vec::with_capacity(args.len() + 1);
-            all_args.push(program);
-            all_args.extend_from_slice(args);
-            match run_command_capture(cwd, "pkexec", &all_args) {
-                Ok(output) => Ok(output),
-                Err(err) => {
-                    let text = err.to_string();
-                    if text.contains("exit status: 126") || text.contains("exit status: 127") {
-                        let mut sudo_args = Vec::with_capacity(args.len() + 2);
-                        sudo_args.push("--");
-                        sudo_args.push(program);
-                        sudo_args.extend_from_slice(args);
-                        run_command_capture(cwd, "sudo", &sudo_args)
-                    } else {
-                        Err(err)
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn kill_if_running(repo_root: &Path, priv_cmd: PrivCmd, proc_name: &str) {
-    let running = Command::new("pgrep")
-        .arg("-x")
-        .arg(proc_name)
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if !running {
-        return;
-    }
-
-    let _ = run_privileged_command(repo_root, priv_cmd, "pkill", &["-x", proc_name]);
-}
-
-fn stop_service_if_active(repo_root: &Path, priv_cmd: PrivCmd, scope: &str, service: &str) {
-    let mut show_args = vec!["show", "--property=ActiveState", service];
-    if scope == "user" {
-        show_args.insert(0, "--user");
-    }
-
-    let active = match Command::new("systemctl").args(&show_args).output() {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).contains("ActiveState=active")
-        }
-        _ => false,
-    };
-    if !active {
-        return;
-    }
-
-    if scope == "user" {
-        let _ = run_command_capture(repo_root, "systemctl", &["--user", "stop", service]);
-    } else {
-        let _ = run_privileged_command(repo_root, priv_cmd, "systemctl", &["stop", service]);
-    }
-}
-
-fn preflight_cleanup(repo_root: &Path, priv_cmd: PrivCmd) {
-    if command_exists("systemctl") {
-        for service in ["opensnitchd-rs", "opensnitchd", "opensnitch-ui"] {
-            stop_service_if_active(repo_root, priv_cmd, "system", service);
-            stop_service_if_active(repo_root, priv_cmd, "user", service);
-        }
-    }
-
-    kill_if_running(repo_root, priv_cmd, "opensnitchd-rs");
-    kill_if_running(repo_root, priv_cmd, "opensnitchd");
-
-    let _ = run_command_capture(
-        repo_root,
-        "pkill",
-        &["-f", "(^|[[:space:]]|/)opensnitch-ui([[:space:]]|$)"],
-    );
-}
+use crate::test_guard::{
+    PrivCmd, ensure_privileged_ready, pick_priv_cmd, preflight_cleanup,
+    restart_stopped_services, run_privileged_command,
+};
 
 pub(crate) fn launch_daemon_live_logs() -> Result<(), DynError> {
     let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -214,7 +44,7 @@ pub(crate) fn launch_daemon_live_logs() -> Result<(), DynError> {
     let priv_cmd = pick_priv_cmd();
 
     ensure_privileged_ready(repo_root, priv_cmd, "launch-daemon-live-logs")?;
-    preflight_cleanup(repo_root, priv_cmd);
+    let stopped_services = preflight_cleanup(repo_root, priv_cmd);
 
     let stdout_file = fs::File::create(&stdout_path)?;
     let stderr_file = fs::File::create(&stderr_path)?;
@@ -265,8 +95,13 @@ pub(crate) fn launch_daemon_live_logs() -> Result<(), DynError> {
         PrivCmd::Pkexec => "pkexec",
         PrivCmd::Sudo => "sudo",
     };
+    let stopped_services_field: String = stopped_services
+        .iter()
+        .map(|(scope, svc)| format!("{scope}:{svc}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     let latest_content = format!(
-        "pid={pid}\nmode={mode}\nprivilege={privilege}\nrust_log={rust_log}\nstdout={}\nstderr={}\nlogfile={}\n",
+        "pid={pid}\nmode={mode}\nprivilege={privilege}\nrust_log={rust_log}\nstdout={}\nstderr={}\nlogfile={}\nstopped_services={stopped_services_field}\n",
         stdout_path.display(),
         stderr_path.display(),
         daemon_log_path.display(),
@@ -321,6 +156,18 @@ pub(crate) fn stop_daemon_live_logs() -> Result<(), DynError> {
         return Ok(());
     };
     let pid_str = pid_line.trim().to_string();
+    let stopped_services_record: Vec<(String, String)> = latest_content
+        .lines()
+        .find_map(|line| line.strip_prefix("stopped_services="))
+        .unwrap_or("")
+        .split_ascii_whitespace()
+        .filter_map(|entry| {
+            let mut parts = entry.splitn(2, ':');
+            let scope = parts.next()?.to_string();
+            let svc = parts.next()?.to_string();
+            Some((scope, svc))
+        })
+        .collect();
 
     let _pid: u32 = pid_str.parse().map_err(|err| {
         format!(
@@ -397,6 +244,141 @@ pub(crate) fn stop_daemon_live_logs() -> Result<(), DynError> {
 
     fs::remove_file(&latest_path)?;
     println!("removed metadata file {}", latest_path.display());
+    restart_stopped_services(repo_root, priv_cmd, &stopped_services_record);
+
+    Ok(())
+}
+
+fn wait_for_log_patterns(path: &Path, patterns: &[&str], timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if let Ok(content) = fs::read_to_string(path) {
+            if patterns.iter().all(|pattern| content.contains(pattern)) {
+                return true;
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+
+    false
+}
+
+fn stop_mock_ui_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+pub(crate) fn run_daemon_mock_ui_live_session() -> Result<(), DynError> {
+    let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let daemon_rs_dir = tools_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or("tools dir missing daemon-rs parent")?;
+    let repo_root = daemon_rs_dir
+        .parent()
+        .ok_or("daemon-rs dir missing parent")?;
+
+    let logs_dir = env::var("OPENSNITCH_DAEMON_RS_LOG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| repo_root.join("logs"));
+    fs::create_dir_all(&logs_dir)?;
+
+    let ts = compact_timestamp()?;
+    let mock_stdout = logs_dir.join(format!("mock-ui-live-{ts}-stdout.log"));
+    let mock_stderr = logs_dir.join(format!("mock-ui-live-{ts}-stderr.log"));
+    let ready_file = logs_dir.join(format!("mock-ui-live-{ts}.ready"));
+
+    let mock_socket = env::var("OPENSNITCH_MOCK_UI_SOCKET")
+        .unwrap_or_else(|_| "/tmp/osui.sock".to_string());
+    let session_secs = env::var("OPENSNITCH_MOCK_UI_SESSION_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(180)
+        .max(5);
+    let mock_runtime_secs = env::var("OPENSNITCH_MOCK_UI_RUNTIME_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(session_secs + 30)
+        .max(session_secs + 10);
+    let ready_timeout_secs = env::var("OPENSNITCH_MOCK_UI_READY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(10)
+        .max(2);
+
+    let script_path = repo_root.join("daemon-rs/scripts/mock_ui_client.py");
+    if !script_path.exists() {
+        return Err(format!("missing mock-ui script: {}", script_path.display()).into());
+    }
+
+    let socket_path = PathBuf::from(&mock_socket);
+    if socket_path.exists() {
+        let _ = fs::remove_file(&socket_path);
+    }
+    if ready_file.exists() {
+        let _ = fs::remove_file(&ready_file);
+    }
+
+    let stdout_file = fs::File::create(&mock_stdout)?;
+    let stderr_file = fs::File::create(&mock_stderr)?;
+
+    let mut mock_child = Command::new("python3")
+        .arg(&script_path)
+        .arg("--socket")
+        .arg(&mock_socket)
+        .arg("--runtime-seconds")
+        .arg(mock_runtime_secs.to_string())
+        .arg("--ready-file")
+        .arg(&ready_file)
+        .current_dir(repo_root)
+        .stdout(stdout_file)
+        .stderr(stderr_file)
+        .spawn()?;
+
+    if !wait_for_log_patterns(
+        &mock_stdout,
+        &["MOCK_UI READY"],
+        Duration::from_secs(ready_timeout_secs),
+    ) {
+        stop_mock_ui_child(&mut mock_child);
+        return Err(format!(
+            "mock-ui did not become ready in {}s; see {} and {}",
+            ready_timeout_secs,
+            mock_stdout.display(),
+            mock_stderr.display()
+        )
+        .into());
+    }
+
+    launch_daemon_live_logs()?;
+
+    let observed = wait_for_log_patterns(
+        &mock_stdout,
+        &[
+            "MOCK_UI Subscribe",
+            "MOCK_UI Ping",
+            "MOCK_UI Notifications stream open",
+        ],
+        Duration::from_secs(session_secs),
+    );
+
+    let _ = stop_daemon_live_logs();
+    stop_mock_ui_child(&mut mock_child);
+
+    if !observed {
+        return Err(format!(
+            "daemon->mock-ui handshake markers were not fully observed within {}s; inspect {}",
+            session_secs,
+            mock_stdout.display()
+        )
+        .into());
+    }
+
+    println!(
+        "mock-ui live session: pass (subscribe/ping/notifications observed) stdout={} stderr={}",
+        mock_stdout.display(),
+        mock_stderr.display()
+    );
 
     Ok(())
 }

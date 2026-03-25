@@ -123,6 +123,10 @@ impl Default for ClientService {
 }
 
 impl ClientService {
+    fn owned_snapshot(&self) -> ClientSessionSnapshot {
+        self.snapshot_rx.borrow().as_ref().clone()
+    }
+
     fn principal_rank(owner: &ClientPrincipal) -> u8 {
         match owner {
             ClientPrincipal::LocalUid(_) => 0,
@@ -137,19 +141,12 @@ impl ClientService {
     }
 
     pub fn upsert_session(&self, session: ClientSession) {
-        let (mut sessions, connected_default_action) = {
-            let snapshot = self.snapshot_rx.borrow();
-            (snapshot.sessions.clone(), snapshot.connected_default_action)
-        };
-        sessions.insert(session.id.clone(), session);
-        let next = ClientSessionSnapshot {
-            sessions,
-            connected_default_action,
-        };
+        let mut next = self.owned_snapshot();
+        next.sessions.insert(session.id.clone(), session);
         self.publish_snapshot(next);
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn connect_session(&self, session_id: impl Into<String>) {
         let session_id = session_id.into();
         let default_action = self.snapshot_rx.borrow().connected_default_action;
@@ -179,15 +176,8 @@ impl ClientService {
     }
 
     pub fn disconnect_session(&self, session_id: &str) {
-        let (mut sessions, connected_default_action) = {
-            let snapshot = self.snapshot_rx.borrow();
-            (snapshot.sessions.clone(), snapshot.connected_default_action)
-        };
-        sessions.remove(session_id);
-        let next = ClientSessionSnapshot {
-            sessions,
-            connected_default_action,
-        };
+        let mut next = self.owned_snapshot();
+        next.sessions.remove(session_id);
         self.publish_snapshot(next);
     }
 
@@ -224,17 +214,10 @@ impl ClientService {
         session_id: &str,
         action: crate::config::DefaultAction,
     ) {
-        let (mut sessions, connected_default_action) = {
-            let snapshot = self.snapshot_rx.borrow();
-            (snapshot.sessions.clone(), snapshot.connected_default_action)
-        };
-        if let Some(session) = sessions.get_mut(session_id) {
+        let mut next = self.owned_snapshot();
+        if let Some(session) = next.sessions.get_mut(session_id) {
             session.default_action = action;
         }
-        let next = ClientSessionSnapshot {
-            sessions,
-            connected_default_action,
-        };
         self.publish_snapshot(next);
     }
 
@@ -258,17 +241,11 @@ impl ClientService {
     }
 
     pub fn set_connected_default_action(&self, action: crate::config::DefaultAction) {
-        let mut sessions = {
-            let snapshot = self.snapshot_rx.borrow();
-            snapshot.sessions.clone()
-        };
-        if let Some(control_session) = sessions.get_mut(CONTROL_SESSION_ID) {
+        let mut next = self.owned_snapshot();
+        if let Some(control_session) = next.sessions.get_mut(CONTROL_SESSION_ID) {
             control_session.default_action = action;
         }
-        let next = ClientSessionSnapshot {
-            sessions,
-            connected_default_action: action,
-        };
+        next.connected_default_action = action;
         self.publish_snapshot(next);
     }
 

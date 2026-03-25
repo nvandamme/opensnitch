@@ -1,2 +1,2 @@
 [alias]
-unit = "run --release --manifest-path daemon-rs/Cargo.toml -p tools --"
+ost = "run --release --manifest-path daemon-rs/Cargo.toml -p tools --"

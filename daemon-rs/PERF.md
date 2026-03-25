@@ -2,6 +2,8 @@
 
 Track stress-profile harness runs for Rust and Go backends.
 
+Last reviewed: 2026-03-25 (`release: v0.5.0`, commit `4d92dad8`)
+
 ## Harness Commands
 
 - Rust (release):
@@ -51,17 +53,17 @@ This policy applies to `daemon-rs/crates/daemon/src/**` and should be treated as
 - Do not introduce async wrappers that only call another async function without adding logic.
 - In decision loops, keep awaits limited to operations that are truly async-bound (network, disk, channel backpressure, blocking interop).
 
-2. Use direct Arc snapshot reads for runtime state.
+1. Use direct Arc snapshot reads for runtime state.
 - Runtime/config snapshots should be read as `Arc<...>` whenever possible.
 - Avoid value-clone snapshot helpers in hot paths.
 - Build-once/publish-once snapshot updates are preferred for reloadable state.
 
-3. Allowed exceptions.
+1. Allowed exceptions.
 - Use awaited send as the primary path only when ordering/backpressure semantics require it.
 - Value snapshots are acceptable in tests and one-shot cold control paths where clarity is more important than micro-optimization.
 - If an API must remain value-returning for compatibility, document the reason in code review notes.
 
-4. Review checklist for hot-path touching PRs.
+1. Review checklist for hot-path touching PRs.
 - Confirm no new unnecessary `.send(...).await` was added in hot loops.
 - Confirm new snapshot reads are Arc-based where practical.
 - Confirm no extra parse/clone work was added in per-packet/per-event paths.
@@ -109,6 +111,15 @@ The `update-run-perf` tools command runs the current Rust release harness and cu
 
 | Date | Backend | Profile | Rounds | Commit | p50 ms | p95 ms | p99 ms | max ms | drop_total | Baseline Check | Go Ref | vs Go p50 | vs Go p95 | vs Go p99 | vs Go max | vs Go drop | Prev Commit Ref | vs Prev p50 | vs Prev p95 | vs Prev p99 | vs Prev max | vs Prev drop | Notes |
 |---|---|---|---:|---|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---|
+| 2026-03-25 | Rust | release (ThinLTO) | 500 | `75ac11aa` | 0.001 | 0.001 | 0.003 | 0.077 | 0 | pass | Go default same run | +0.000 | -0.001 | -0.002 | +0.058 | +0 | `90acb5d5` | +0.000 | +0.000 | +0.000 | +0.008 | +0 | Auto-updated current reference Rust run (release: v0.5.0); workspace dirty. |
+| 2026-03-25 | Go | default | 500 | `75ac11aa` | 0.001 | 0.002 | 0.005 | 0.019 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated current Go comparison row paired with Rust actual. |
+| 2026-03-25 | Rust | release (ThinLTO) | 500 | `90acb5d5` | 0.001 | 0.001 | 0.003 | 0.069 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated previous commit benchmark (daemon-rs: add transactional policy path and multi-user verdict safeguards) using cached previous-commit worktree/results when available. |
+| 2026-03-25 | Rust | release (ThinLTO) | 500 | `75ac11aa` | 0.001 | 0.001 | 0.003 | 0.086 | 0 | pass | Go default same run | +0.000 | -0.001 | -0.003 | +0.061 | +0 | `90acb5d5` | +0.000 | +0.000 | +0.000 | +0.017 | +0 | Auto-updated current reference Rust run (release: v0.5.0); workspace dirty. |
+| 2026-03-25 | Go | default | 500 | `75ac11aa` | 0.001 | 0.002 | 0.006 | 0.025 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated current Go comparison row paired with Rust actual. |
+| 2026-03-25 | Rust | release (ThinLTO) | 500 | `90acb5d5` | 0.001 | 0.001 | 0.003 | 0.069 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated previous commit benchmark (daemon-rs: add transactional policy path and multi-user verdict safeguards) using cached previous-commit worktree/results when available. |
+| 2026-03-25 | Rust | release (ThinLTO) | 500 | `75ac11aa` | 0.001 | 0.001 | 0.003 | 0.074 | 0 | pass | Go default same run | +0.000 | -0.001 | -0.001 | +0.034 | +0 | `90acb5d5` | +0.000 | +0.000 | +0.000 | +0.005 | +0 | Auto-updated current reference Rust run (release: v0.5.0); workspace dirty. |
+| 2026-03-25 | Go | default | 500 | `75ac11aa` | 0.001 | 0.002 | 0.004 | 0.040 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated current Go comparison row paired with Rust actual. |
+| 2026-03-25 | Rust | release (ThinLTO) | 500 | `90acb5d5` | 0.001 | 0.001 | 0.003 | 0.069 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated previous commit benchmark (daemon-rs: add transactional policy path and multi-user verdict safeguards) using cached previous-commit worktree/results when available. |
 | 2026-03-23 | Rust | release (ThinLTO) | 1000 | `613ef5cc` | 0.001 | 0.001 | 0.001 | 0.067 | 0 | pass | Go default same run | +0.000 | -0.001 | -0.003 | -0.024 | +0 | `0bc72a16` | +0.000 | +0.000 | +0.000 | +0.004 | +0 | Auto-updated current reference Rust run (daemon-rs: expand nft netlink parity with telemetry and tests); workspace dirty. |
 | 2026-03-23 | Go | default | 1000 | `613ef5cc` | 0.001 | 0.002 | 0.004 | 0.091 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated current Go comparison row paired with Rust actual. |
 | 2026-03-23 | Rust | release (ThinLTO) | 1000 | `0bc72a16` | 0.001 | 0.001 | 0.001 | 0.063 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated previous commit benchmark (release: bump daemon-rs to v0.4.0 and activate netfilter/netlink backlog) using cached previous-commit worktree/results when available. |
@@ -171,6 +182,9 @@ Track explicit Rust-vs-Go deltas emitted by `parity-hot-cold-delta`.
 
 | Date | Delta Target | Rounds | Commit | Hot Mixed Go verdict ms | Hot Mixed Rust verdict ms | Hot Mixed Δ ms (Rust-Go) | Hot Throughput Go time/op us | Hot Throughput Rust time/op us | Hot Throughput Go op/s | Hot Throughput Rust op/s | Hot Δ p50 ms | Hot Δ p95 ms | Hot Δ p99 ms | Hot Δ max ms | Hot Δ drop_total | Cold Go rule s | Cold Rust rule s | Cold Δ rule s | Cold Go ui s | Cold Rust ui s | Cold Δ ui s | Cold Go tasks s | Cold Rust tasks s | Cold Δ tasks s | Cold Go total s | Cold Rust total s | Cold Δ total s (Rust-Go) | Result | Notes |
 |---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| 2026-03-25 | `make parity-hot-cold-delta` | 500 | `75ac11aa` | 0.006 | 0.010 | +0.004 | 1.575 | 1.544 | 635119.0 | 647800.1 | +0.000 | -0.001 | +0.000 | +0.081 | +0 | 0.050 | 0.151 | +0.101 | 4.000 | 4.013 | +0.013 | 0.249 | 0.244 | -0.005 | 4.299 | 4.408 | +0.109 | PASS | Auto-updated parity hot/cold delta row from tools command. |
+| 2026-03-25 | `make parity-hot-cold-delta` | 500 | `75ac11aa` | 0.007 | 0.022 | +0.015 | 1.679 | 1.066 | 595456.4 | 937701.0 | +0.000 | -0.002 | -0.004 | +0.016 | +0 | 0.100 | 0.155 | +0.055 | 4.000 | 4.014 | +0.014 | 0.246 | 0.244 | -0.002 | 4.346 | 4.413 | +0.067 | PASS | Auto-updated parity hot/cold delta row from tools command. |
+| 2026-03-25 | `make parity-hot-cold-delta` | 500 | `75ac11aa` | 0.007 | 0.013 | +0.006 | 1.629 | 1.136 | 613788.4 | 880610.4 | +0.000 | -0.002 | -0.002 | +0.032 | +0 | 0.101 | 0.151 | +0.050 | 4.001 | 4.012 | +0.011 | 0.246 | 0.245 | -0.002 | 4.348 | 4.408 | +0.059 | PASS | Auto-updated parity hot/cold delta row from tools command. |
 | 2026-03-23 | `make parity-hot-cold-delta` | 1000 | `613ef5cc` | 0.008 | 0.028 | +0.020 | 1.111 | 1.059 | 899832.5 | 944635.8 | +0.000 | -0.001 | -0.003 | +0.066 | +0 | 0.101 | 0.153 | +0.052 | 4.000 | 4.013 | +0.013 | 0.247 | 0.243 | -0.003 | 4.348 | 4.409 | +0.062 | PASS | Auto-updated parity hot/cold delta row from tools command. |
 | 2026-03-19 | `make parity-hot-cold-delta` | 10000 | `5dacbb86` | 0.074 | 0.017 | -0.057 | 1.321 | 1.805 | 756757.3 | 553978.9 | +0.000 | +0.002 | +0.001 | -0.252 | +0 | 0.100 | 0.401 | +0.301 | 4.001 | 4.001 | +0.000 | 0.000 | 0.244 | +0.244 | 4.101 | 4.402 | +0.301 | PASS | Auto-updated parity hot/cold delta row from tools command. |
 | 2026-03-19 | `make parity-hot-cold-delta` | 10000 | `d9340a45` | 0.012 | 0.010 | -0.002 | 1.484 | 1.954 | 673628.9 | 511714.6 | +0.000 | +0.003 | +0.002 | -0.376 | +0 | 0.101 | 0.401 | +0.300 | 4.001 | 4.205 | +0.204 | 0.000 | 0.244 | +0.244 | 4.102 | 4.606 | +0.504 | PASS | Auto-updated parity hot/cold delta row from tools command. |

@@ -21,6 +21,12 @@ const NFT_NETLINK_RECOVERY_POLL_INTERVAL: Duration = Duration::from_millis(800);
 static NFT_NETLINK_RECOVERY: NetlinkRecoveryGate =
     NetlinkRecoveryGate::new("nftables-netlink", NFT_NETLINK_RECOVERY_POLL_INTERVAL);
 
+#[derive(Debug, Clone)]
+pub(crate) struct InterceptionHealth {
+    pub valid: bool,
+    pub detail: Option<String>,
+}
+
 fn nft_netlink_experiment_enabled() -> bool {
     std::env::var(OPENSNITCH_NFT_NETLINK_EXPERIMENT_ENV)
         .ok()
@@ -88,6 +94,11 @@ pub(crate) trait FirewallPlatformPort {
         queue_num: u16,
         queue_bypass: bool,
     ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send>>;
+
+    fn interception_rules_health(
+        queue_num: u16,
+        queue_bypass: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<InterceptionHealth>> + Send>>;
 
     fn apply_system_firewall<'a>(
         sysfw: &'a pb::SysFirewall,
@@ -167,6 +178,24 @@ impl FirewallPlatformPort for NftablesFirewallPort {
         })
     }
 
+    fn interception_rules_health(
+        _queue_num: u16,
+        _queue_bypass: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<InterceptionHealth>> + Send>> {
+        Box::pin(async move {
+            let valid = Self::interception_rules_valid(0, false).await?;
+            if valid {
+                return Ok(InterceptionHealth {
+                    valid: true,
+                    detail: None,
+                });
+            }
+
+            // Provide richer mismatch diagnostics from the nft compatibility path.
+            FirewallNftAdapter::interception_rules_health_report().await
+        })
+    }
+
     fn apply_system_firewall<'a>(
         sysfw: &'a pb::SysFirewall,
         queue_num: u16,
@@ -242,6 +271,23 @@ impl FirewallPlatformPort for IptablesFirewallPort {
     ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send>> {
         Box::pin(async move {
             FirewallIptablesAdapter::interception_rules_valid(queue_num, queue_bypass).await
+        })
+    }
+
+    fn interception_rules_health(
+        queue_num: u16,
+        queue_bypass: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<InterceptionHealth>> + Send>> {
+        Box::pin(async move {
+            let valid = Self::interception_rules_valid(queue_num, queue_bypass).await?;
+            Ok(InterceptionHealth {
+                valid,
+                detail: if valid {
+                    None
+                } else {
+                    Some("iptables interception rules are missing or duplicated".to_string())
+                },
+            })
         })
     }
 
