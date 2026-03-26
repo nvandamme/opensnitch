@@ -20,3 +20,15 @@ license = "GPL-3.0"
 
 [profile.release]
 lto = "thin"
+
+# Size-optimised profile for embedded/constrained targets (e.g. OpenWrt).
+# Use: cargo build --profile release-embedded -p opensnitchd-rs
+# Then: make install-rs CARGO_PROFILE=release-embedded ...
+# Trades hot-path throughput for ~30-40% smaller binary vs release.
+[profile.release-embedded]
+inherits = "release"
+opt-level = "z"     # size-first; disables loop unrolling and some vectorisation
+lto = true          # fat LTO: maximum dead-code elimination across all crates
+codegen-units = 1   # single CGU required for fat LTO; no parallel codegen
+strip = "symbols"   # strip debug symbols from the final binary
+panic = "abort"     # no unwinding machinery; saves ~50-100 KB on musl targets

@@ -13,6 +13,35 @@ use crate::test_guard::{
     restart_stopped_services, run_privileged_command,
 };
 
+// ── live-test isolation ───────────────────────────────────────────────────────
+
+/// Creates a per-session isolated rules directory under
+/// `/tmp/opensnitch-live-test-<ts>/rules/` containing only the dev-default
+/// loopback-allow rules from `daemon/data/rules/`.
+///
+/// Pass the returned path to the daemon with `--rules-path <dir>`, mirroring
+/// the Go daemon flag of the same name.  No user- or machine-specific rules
+/// (e.g. allow-always-python3) are present, so RFC 5737 TEST-NET traffic is
+/// always unmatched and reaches the AskRule flow deterministically.
+fn create_live_test_rules_dir(ts: &str, repo_root: &Path) -> Result<PathBuf, DynError> {
+    let rules_dir = std::env::temp_dir()
+        .join(format!("opensnitch-live-test-{ts}"))
+        .join("rules");
+    fs::create_dir_all(&rules_dir)?;
+
+    // Copy only the two loopback-allow JSON files from daemon/data/rules/.
+    let dev_rules_src = repo_root.join("daemon").join("data").join("rules");
+    for entry in fs::read_dir(&dev_rules_src)?.flatten() {
+        if entry.path().extension().is_some_and(|e| e == "json") {
+            fs::copy(entry.path(), rules_dir.join(entry.file_name()))?;
+        }
+    }
+
+    println!("live test rules: {}", rules_dir.display());
+    Ok(rules_dir)
+}
+
+
 pub(crate) fn launch_daemon_live_logs() -> Result<(), DynError> {
     let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let daemon_rs_dir = tools_dir
@@ -45,6 +74,14 @@ pub(crate) fn launch_daemon_live_logs() -> Result<(), DynError> {
 
     ensure_privileged_ready(repo_root, priv_cmd, "launch-daemon-live-logs")?;
     let stopped_services = preflight_cleanup(repo_root, priv_cmd);
+
+    // Rules directory: honour explicit CLI override (--rules-path / OPENSNITCH_DAEMON_RULES_PATH);
+    // fall back to an isolated temp dir so machine-specific rules can't mask AskRule.
+    let rules_path = if let Ok(p) = env::var("OPENSNITCH_DAEMON_RULES_PATH") {
+        PathBuf::from(p)
+    } else {
+        create_live_test_rules_dir(&ts, repo_root)?
+    };
 
     let stdout_file = fs::File::create(&stdout_path)?;
     let stderr_file = fs::File::create(&stderr_path)?;
@@ -82,6 +119,19 @@ pub(crate) fn launch_daemon_live_logs() -> Result<(), DynError> {
         .arg(&manifest_path)
         .arg("-p")
         .arg("opensnitchd-rs")
+        // `--` separates cargo flags from binary flags; what follows goes to the daemon.
+        .arg("--")
+        .arg("--rules-path")
+        .arg(&rules_path);
+
+    if let Ok(config_file) = env::var("OPENSNITCH_DAEMON_CONFIG_FILE") {
+        command.arg("--config-file").arg(config_file);
+    }
+    if let Ok(ui_socket) = env::var("OPENSNITCH_DAEMON_UI_SOCKET") {
+        command.arg("--ui-socket").arg(ui_socket);
+    }
+
+    command
         .current_dir(repo_root)
         .stdout(stdout_file)
         .stderr(stderr_file);
@@ -322,14 +372,20 @@ pub(crate) fn run_daemon_mock_ui_live_session() -> Result<(), DynError> {
     let stdout_file = fs::File::create(&mock_stdout)?;
     let stderr_file = fs::File::create(&mock_stderr)?;
 
-    let mut mock_child = Command::new("python3")
+    let mut mock_cmd = Command::new("python3");
+    mock_cmd
         .arg(&script_path)
         .arg("--socket")
         .arg(&mock_socket)
         .arg("--runtime-seconds")
         .arg(mock_runtime_secs.to_string())
         .arg("--ready-file")
-        .arg(&ready_file)
+        .arg(&ready_file);
+
+    #[cfg(feature = "subscriptions")]
+    mock_cmd.arg("--subscriptions");
+
+    let mut mock_child = mock_cmd
         .current_dir(repo_root)
         .stdout(stdout_file)
         .stderr(stderr_file)
@@ -352,18 +408,68 @@ pub(crate) fn run_daemon_mock_ui_live_session() -> Result<(), DynError> {
 
     launch_daemon_live_logs()?;
 
+    let handshake_markers: Vec<&str> = vec![
+        "MOCK_UI Subscribe",
+        "MOCK_UI SubscribeNode",
+        "MOCK_UI Ping",
+        "MOCK_UI Notifications stream open",
+        "MOCK_UI PingStats",
+        // Notification command round-trips (mock → daemon → NotificationReply)
+        "MOCK_UI NotificationCommandReply cmd=LOG_LEVEL",
+        "MOCK_UI NotificationCommandReply cmd=CHANGE_RULE",
+        "MOCK_UI NotificationCommandReply cmd=ENABLE_RULE",
+        "MOCK_UI NotificationCommandReply cmd=DISABLE_RULE",
+        "MOCK_UI NotificationCommandReply cmd=DELETE_RULE",
+        "MOCK_UI NotificationCommandReply cmd=ENABLE_FIREWALL",
+        "MOCK_UI NotificationCommandReply cmd=DISABLE_FIREWALL",
+        "MOCK_UI NotificationCommandReply cmd=RELOAD_FW_RULES",
+        // Session recap fires once all initial-batch commands are acked.
+        // AskRule results (if any background traffic matched) are included.
+        "MOCK_UI SessionRecap status=PASS",
+        // subscriptions feature: daemon calls back into Subscriptions.List RPC
+        #[cfg(feature = "subscriptions")]
+        "MOCK_UI SubscriptionsList",
+    ];
+
     let observed = wait_for_log_patterns(
         &mock_stdout,
-        &[
-            "MOCK_UI Subscribe",
-            "MOCK_UI Ping",
-            "MOCK_UI Notifications stream open",
-        ],
+        &handshake_markers,
         Duration::from_secs(session_secs),
     );
 
     let _ = stop_daemon_live_logs();
     stop_mock_ui_child(&mut mock_child);
+
+    // Print the recap table directly to test stdout so it's visible without
+    // inspecting the log file artifact.  Extract the last ┌…└ block, which
+    // corresponds to the final (Case C) stable stream.
+    if let Ok(content) = fs::read_to_string(&mock_stdout) {
+        let lines: Vec<&str> = content.lines().collect();
+        let mut table_start: Option<usize> = None;
+        let mut table_end: Option<usize> = None;
+        for (i, line) in lines.iter().enumerate() {
+            if line.starts_with('┌') {
+                table_start = Some(i);
+            }
+            if line.starts_with('└') {
+                table_end = Some(i);
+            }
+        }
+        if let (Some(start), Some(end)) = (table_start, table_end) {
+            println!();
+            for line in &lines[start..=end] {
+                println!("{line}");
+            }
+            if let Some(recap) = lines
+                .iter()
+                .rev()
+                .find(|l| l.starts_with("MOCK_UI SessionRecap"))
+            {
+                println!("{recap}");
+            }
+            println!();
+        }
+    }
 
     if !observed {
         return Err(format!(
@@ -374,8 +480,15 @@ pub(crate) fn run_daemon_mock_ui_live_session() -> Result<(), DynError> {
         .into());
     }
 
+    #[cfg(feature = "subscriptions")]
     println!(
-        "mock-ui live session: pass (subscribe/ping/notifications observed) stdout={} stderr={}",
+        "mock-ui live session: pass (subscribe/ping/notifications/ping-stats/log-level-reply/subscriptions-list observed) stdout={} stderr={}",
+        mock_stdout.display(),
+        mock_stderr.display()
+    );
+    #[cfg(not(feature = "subscriptions"))]
+    println!(
+        "mock-ui live session: pass (subscribe/ping/notifications/ping-stats/log-level-reply observed) stdout={} stderr={}",
         mock_stdout.display(),
         mock_stderr.display()
     );

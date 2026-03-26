@@ -28,6 +28,18 @@ pub(crate) use kernel_pipeline::{
     KernelPipeline, KernelPipelineCounters, KernelPipelineDropStats, KernelPipelineIngressStats,
     ProcessKernelEvent,
 };
+
+/// CLI overrides parallel to the Go daemon's flag package:
+///
+///   --config-file <path>   Config JSON file (highest priority, above OPENSNITCH_CONFIG_FILE).
+///   --rules-path  <path>   Rules directory override applied after config is loaded.
+///   --ui-socket   <addr>   UI gRPC address (same as OPENSNITCH_CLIENT_ADDR env var).
+#[derive(Debug, Default)]
+pub struct CliOverrides {
+    pub config_file: Option<std::path::PathBuf>,
+    pub rules_path:  Option<std::path::PathBuf>,
+    pub ui_socket:   Option<String>,
+}
 pub(crate) use proc_workers::ProcWorkersRuntime;
 
 #[derive(Clone)]
@@ -61,8 +73,8 @@ impl Daemon {
     const STARTUP_UI_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
     const STARTUP_UI_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-    pub async fn start(client_addr: Option<&str>) -> Result<()> {
-        let (daemon, rx) = Self::bootstrap(client_addr).await?;
+    pub async fn start(cli: CliOverrides) -> Result<()> {
+        let (daemon, rx) = Self::bootstrap(cli).await?;
         daemon.serve(rx).await
     }
 

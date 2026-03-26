@@ -75,7 +75,6 @@ struct GenericWatchWorkerControl<S: WatchWorkerControl> {
     empty_targets_behavior: EmptyWatchTargetsBehavior,
     token: Mutex<Option<CancellationToken>>,
     trigger_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    scan_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl<S: WatchWorkerControl> GenericWatchWorkerControl<S> {
@@ -94,7 +93,6 @@ impl<S: WatchWorkerControl> GenericWatchWorkerControl<S> {
             empty_targets_behavior,
             token: Mutex::new(None),
             trigger_handle: Mutex::new(None),
-            scan_handle: Mutex::new(None),
         }
     }
 
@@ -105,13 +103,7 @@ impl<S: WatchWorkerControl> GenericWatchWorkerControl<S> {
             .expect("watch trigger handle mutex poisoned")
             .as_ref()
             .is_some_and(|h| !h.is_finished());
-        let scan_running = self
-            .scan_handle
-            .lock()
-            .expect("watch scan handle mutex poisoned")
-            .as_ref()
-            .is_some_and(|h| !h.is_finished());
-        if trigger_running && scan_running {
+        if trigger_running {
             return;
         }
 
@@ -124,47 +116,38 @@ impl<S: WatchWorkerControl> GenericWatchWorkerControl<S> {
             *token_guard = Some(run_token.clone());
         }
 
-        let (scan_tx, mut scan_rx) = tokio::sync::mpsc::channel::<()>(1);
-        let spec = self.spec.clone();
-        let scan_token = run_token.clone();
-        let scan_task = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = scan_token.cancelled() => break,
-                    msg = scan_rx.recv() => {
-                        if msg.is_none() {
-                            break;
-                        }
-
-                        {
-                            let mut spec = spec.lock().await;
-                            spec.scan().await;
-                        }
-
-                        while scan_rx.try_recv().is_ok() {}
-                    }
-                }
+        // Run an initial scan immediately on startup (matches the previous
+        // scan_task's initial scan_tx.try_send()).
+        let spec_init = self.spec.clone();
+        let init_token = run_token.clone();
+        tokio::spawn(async move {
+            if !init_token.is_cancelled() {
+                let mut spec = spec_init.lock().await;
+                spec.scan().await;
             }
         });
-        let _ = scan_tx.try_send(());
 
-        let trigger_tx = scan_tx.clone();
+        // The trigger task calls spec.scan() directly — matching Go's pattern
+        // where the goroutine receiving the fsnotify event immediately executes
+        // the handler inline.  Previous design routed through an intermediate
+        // scan_tx channel and a separate scan_task (two async hops).
+        // Coalescing is preserved: the trigger loop calls the callback once per
+        // should_scan=true iteration; rapid inotify events accumulate in the
+        // inotify channel while scan() runs and are all observed next iteration.
+        let spec_for_trigger = self.spec.clone();
         let trigger_task = spawn_scanner_watch_task(
             run_token,
             self.poll_interval,
             self.targets.clone(),
             self.empty_targets_behavior,
             move || {
-                let trigger_tx = trigger_tx.clone();
+                let spec = spec_for_trigger.clone();
                 async move {
-                    let _ = trigger_tx.try_send(());
+                    let mut spec = spec.lock().await;
+                    spec.scan().await;
                 }
             },
         );
-        *self
-            .scan_handle
-            .lock()
-            .expect("watch scan handle mutex poisoned") = Some(scan_task);
         *self
             .trigger_handle
             .lock()
@@ -511,13 +494,7 @@ impl<S: WatchWorkerControl> WorkerControl for GenericWatchWorkerControl<S> {
             .expect("watch trigger handle mutex poisoned")
             .as_ref()
             .is_some_and(|h| !h.is_finished());
-        let scan_running = self
-            .scan_handle
-            .lock()
-            .expect("watch scan handle mutex poisoned")
-            .as_ref()
-            .is_some_and(|h| !h.is_finished());
-        if trigger_running && scan_running {
+        if trigger_running {
             WorkerState::Running
         } else {
             WorkerState::Stopped
@@ -535,21 +512,9 @@ impl<S: WatchWorkerControl> WorkerControl for GenericWatchWorkerControl<S> {
             .lock()
             .expect("watch trigger handle mutex poisoned")
             .take();
-        let scan = self
-            .scan_handle
-            .lock()
-            .expect("watch scan handle mutex poisoned")
-            .take();
 
         let mut panicked = false;
         if let Some(handle) = trigger {
-            match self.runtime.block_on(async { handle.await }) {
-                Ok(()) => {}
-                Err(err) if err.is_panic() => panicked = true,
-                Err(_) => {}
-            }
-        }
-        if let Some(handle) = scan {
             match self.runtime.block_on(async { handle.await }) {
                 Ok(()) => {}
                 Err(err) if err.is_panic() => panicked = true,

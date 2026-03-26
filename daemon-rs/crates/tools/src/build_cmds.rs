@@ -26,22 +26,29 @@ use crate::{DynError, env_flag, perf_repeats, perf_rust_log_level};
 
 // ── public commands ───────────────────────────────────────────────────────────
 
-/// `build`: `cargo build --release -p <crate>` in the daemon-rs workspace.
+/// `build`: `cargo build --profile <profile> -p <crate>` in the daemon-rs workspace.
 ///
-/// Crate defaults to `opensnitchd-rs`; override with `--crate=NAME`
-/// [`OPENSNITCH_BUILD_CRATE`].
+/// Crate defaults to `opensnitchd-rs`; override with `--crate=NAME` [`OPENSNITCH_BUILD_CRATE`].
+/// Profile defaults to `release`; override with `--profile=PROFILE` [`OPENSNITCH_BUILD_PROFILE`].
+/// Cross-compile with `--target=TRIPLE` [`OPENSNITCH_BUILD_TARGET`].
 pub(crate) fn run_build() -> Result<(), DynError> {
     let (daemon_rs, crate_name, target) = common_params()?;
+    let profile = build_profile();
+    let triple = env::var("OPENSNITCH_BUILD_TARGET").ok().filter(|s| !s.is_empty());
     let mut args = vec![
         "build",
         "--manifest-path",
         "Cargo.toml",
-        "--release",
+        "--profile",
+        &profile,
         "-p",
         &crate_name,
     ];
     if check_bool_flag("OPENSNITCH_BUILD_ALL_FEATURES") {
         args.push("--all-features");
+    }
+    if let Some(ref t) = triple {
+        args.extend(["--target", t.as_str()]);
     }
     run_live(&daemon_rs, &args, &[("CARGO_TARGET_DIR", &target)])
 }
@@ -333,14 +340,19 @@ fn kernel_target_dir(daemon_rs: &Path) -> String {
         .unwrap_or_else(|_| daemon_rs.join("target-kernel").to_string_lossy().to_string())
 }
 
-/// `build-all`: `cargo build --release` (full workspace) in daemon-rs.
+/// `build-all`: `cargo build --profile <profile>` (full workspace) in daemon-rs.
+///
+/// Profile defaults to `release`; override with `--profile=PROFILE` [`OPENSNITCH_BUILD_PROFILE`].
+/// Cross-compile with `--target=TRIPLE` [`OPENSNITCH_BUILD_TARGET`].
 pub(crate) fn run_build_all() -> Result<(), DynError> {
     let (daemon_rs, _crate, target) = common_params()?;
-    run_live(
-        &daemon_rs,
-        &["build", "--manifest-path", "Cargo.toml", "--release"],
-        &[("CARGO_TARGET_DIR", &target)],
-    )
+    let profile = build_profile();
+    let triple = env::var("OPENSNITCH_BUILD_TARGET").ok().filter(|s| !s.is_empty());
+    let mut args = vec!["build", "--manifest-path", "Cargo.toml", "--profile", &profile];
+    if let Some(ref t) = triple {
+        args.extend(["--target", t.as_str()]);
+    }
+    run_live(&daemon_rs, &args, &[("CARGO_TARGET_DIR", &target)])
 }
 
 /// `build-ebpf`: invoke `daemon-rs/scripts/build_ebpf.sh --release`.
@@ -524,6 +536,13 @@ fn rust_test_log_level() -> String {
     env::var("OPENSNITCH_TEST_LOG_LEVEL")
         .or_else(|_| env::var("RUST_TEST_LOG_LEVEL"))
         .unwrap_or_else(|_| "info,opensnitchd_rs=debug".to_string())
+}
+
+fn build_profile() -> String {
+    env::var("OPENSNITCH_BUILD_PROFILE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "release".to_string())
 }
 
 fn check_bool_flag(name: &str) -> bool {

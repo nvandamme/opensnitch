@@ -22,9 +22,8 @@ jobs:
 
   # This workflow contains a single job called "build"
   # The matrix configuration will execute the steps, once per dimension defined:
-  # kernel 5.8 + tag 1.5.0
-  # kernel 5.8 + tag master
-  # kernel 6.0 + tag 1.5.0, etc
+  # kernel 6.0 + tag 1.5.0
+  # kernel 6.0 + tag master
   build:  
     strategy:
         matrix:
@@ -37,6 +36,7 @@ jobs:
         - name: Check out code into the Go module directory
           uses: actions/checkout@v3
           with:
+            repository: evilsocket/opensnitch
             # ref: can be a branch name, tag, commit, etc
             ref: ${{ matrix.tag }}
       

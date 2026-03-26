@@ -87,9 +87,16 @@ pub(crate) fn help_text() -> &'static str {
         "  stop-daemon-live-logs                Stop live daemon session\n",
         "  run-daemon-mock-ui-live-session      Run daemon with mock Python UI\n",
         "\n",
+        "Live daemon flags:\n",
+        "  --rules-path=PATH     Daemon rules directory (default: isolated temp dir)  [OPENSNITCH_DAEMON_RULES_PATH]\n",
+        "  --config-file=PATH    Daemon config file path override                     [OPENSNITCH_DAEMON_CONFIG_FILE]\n",
+        "  --ui-socket=PATH      Daemon + mock-UI Unix socket path override           [OPENSNITCH_DAEMON_UI_SOCKET, OPENSNITCH_MOCK_UI_SOCKET]\n",
+        "\n",
         "Build flags:\n",
-        "  --crate=NAME          Crate to build/test                 [OPENSNITCH_BUILD_CRATE] (default: opensnitchd-rs)\n",
-        "  --all-features        Pass --all-features to cargo build  [OPENSNITCH_BUILD_ALL_FEATURES=1]\n",
+        "  --crate=NAME          Crate to build/test                  [OPENSNITCH_BUILD_CRATE] (default: opensnitchd-rs)\n",
+        "  --profile=PROFILE     Cargo build profile                  [OPENSNITCH_BUILD_PROFILE] (default: release; use release-embedded for OpenWrt)\n",
+        "  --target=TRIPLE       Cross-compile target triple          [OPENSNITCH_BUILD_TARGET] (e.g. aarch64-unknown-linux-musl)\n",
+        "  --all-features        Pass --all-features to cargo build   [OPENSNITCH_BUILD_ALL_FEATURES=1]\n",
         "\n",
         "Test flags:\n",
         "  --test-log=LEVEL      RUST_LOG for test runs              [OPENSNITCH_TEST_LOG_LEVEL] (default: info,opensnitchd_rs=debug)\n",
@@ -191,8 +198,22 @@ fn apply_value_flag(key: &str, val: &str) -> Result<(), DynError> {
         "smoke-timeout" => set("DAEMON_RS_EBPF_SMOKE_TIMEOUT_SECS", val),
         "smoke-kill-after" => set("DAEMON_RS_EBPF_SMOKE_TIMEOUT_KILL_AFTER_SECS", val),
 
-        // build / test
+        // Live daemon overrides
+        "rules-path" => set("OPENSNITCH_DAEMON_RULES_PATH", val),
+        "config-file" => set("OPENSNITCH_DAEMON_CONFIG_FILE", val),
+        "ui-socket" => {
+            set("OPENSNITCH_DAEMON_UI_SOCKET", val);
+            set("OPENSNITCH_MOCK_UI_SOCKET", val);
+        }
+
+        // build flags
         "crate" => set("OPENSNITCH_BUILD_CRATE", val),
+        // Target triple for cross-compilation (e.g. aarch64-unknown-linux-musl).
+        // Passed as --target to cargo build / build-all.
+        "target" => set("OPENSNITCH_BUILD_TARGET", val),
+        // Cargo profile override.  Defaults to "release"; use "release-embedded"
+        // for size-optimised OpenWrt/constrained builds.
+        "profile" => set("OPENSNITCH_BUILD_PROFILE", val),
         "test-log" => {
             set("OPENSNITCH_TEST_LOG_LEVEL", val);
             set("RUST_TEST_LOG_LEVEL", val);

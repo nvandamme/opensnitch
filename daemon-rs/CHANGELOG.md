@@ -10,24 +10,6 @@ Versioning baseline:
 - `v0.4.0`
 - `v0.5.0`
 
-## [Unreleased]
-
-### Fixed
-- `inotify` watch thread was sleeping 50 ms on `EWOULDBLOCK` (non-blocking fd, nothing
-  to read) before retrying `read()`.  This added up to 50 ms latency per
-  `wait_until_rule_count` barrier in the cold-path parity harness and in production rule
-  reload paths.  The thread now opens an `epoll` descriptor, adds the inotify fd with
-  `EPOLLIN`, and calls `epoll_wait` with a 10 ms timeout instead — reacting to file
-  events in effectively zero time.  Cold-path rule reload delta in the parity harness
-  improved from +50 ms to +12 ms (Go 0.101 s → Rust 0.112 s).
-- `RuleWatchControl::scan()` was re-reading every JSON rule file on every scan tick
-  (every 2 s poll interval and every inotify event) purely to collect list directory
-  paths for mtime tracking.  The in-memory snapshot's `rules: Vec<RuleRecord>` already
-  holds the same operator data.  The new `snapshot_list_dirs` helper derives list dirs
-  from the snapshot; the new `read_rules_dir_file_state_with_hint` scan variant uses it,
-  eliminating N async JSON reads per scan pass.  The full-directory reload on change
-  detection is unchanged.
-
 ## [v0.5.0] - 2026-03-26
 
 ### Added
@@ -58,6 +40,30 @@ Versioning baseline:
 - Lightweight non-GUI mock Python UI service (`daemon-rs/scripts/mock_ui_client.py`) plus tools orchestration command (`run-daemon-mock-ui-live-session`) for daemon-to-UI handshake validation.
 - Explicit notification/session client identity logging fields: `client_id` and `client_origin` (`ClientPrincipal`-derived).
 - Interception-health diagnostic reporting for firewall drift checks with backend detail payloads (including nftables tagged-rule count mismatch context).
+- CLI flag parity with Go daemon: `--rules-path`, `--config-file`, `--ui-socket` parsed
+  from `std::env::args()` in `main.rs` without any additional dependency.  Mirrors the
+  Go daemon's `flag.StringVar` surface (`daemon/main.go`).
+  - `--rules-path <dir>`: overrides the rules directory after config load, matching Go's
+    post-load `rules.Reload(rulesPath)` behaviour.
+  - `--config-file <path>`: highest-priority config file path, above
+    `OPENSNITCH_CONFIG_FILE` env var and default search locations.
+  - `--ui-socket <addr>`: UI gRPC address, same surface as `OPENSNITCH_CLIENT_ADDR` env var.
+- `daemon::CliOverrides` struct threaded through `Daemon::start` → `bootstrap`.
+- `Config::load_from_default_locations_with_override(cli_path)` and
+  `Config::with_rules_path_override(path)` builder methods in `config.rs`.
+- Live-test rules isolation: `create_live_test_rules_dir` in
+  `crates/tools/src/live_logs.rs` copies only the loopback-allow rules from
+  `daemon/data/rules/` to a temp dir and passes them via `-- --rules-path <dir>` in
+  `cargo run`.  Replaces the previous `OPENSNITCH_CONFIG_FILE` temp-config approach
+  with the new CLI flag.
+- Mock UI (`mock_ui_client.py`) AskRule round-trip exercised end-to-end: real TCP SYNs to
+  RFC 5737 TEST-NET addresses (`192.0.2.1`, `198.51.100.1`) are intercepted by nfqueue,
+  routed to `AskRule`, receive alternating allow/deny verdicts (rules with `dest.ip`
+  operator), and the resulting `CHANGE_RULE_FROM_ASK` notification is correlated back to
+  the daemon.  Live session score: 17/17 PASS.
+- `_ASK_RULE_EXPECTED_DSTS` module-level constant in `mock_ui_client.py`: background
+  (non-TEST-NET) `AskRule` calls are silently allowed to preserve machine connectivity
+  during isolated-rules test runs.
 
 ### Changed
 - Rule/control command mutation paths now execute through shared transactional coordinator ownership-tagged by active client principal (`primary_owner()`).
@@ -75,8 +81,109 @@ Versioning baseline:
 - `gotools` help text and DOCS.md updated to reflect the full command/flag surface; `build`, `test`, eBPF smoke, and `kernel-profile-harness` command groups are now documented.
 - Release process convention (backfilled for `v0.5.0`, required for future releases): each `release: vx.y.z` commit message should embed the full changelog entry for that version so release metadata remains self-contained in git history.
 - Release workflow automation added: `daemon-rs/scripts/release_commit_from_changelog.sh vX.Y.Z --dry-run|--push` now standardizes changelog extraction, release commit amend, tag move, and optional remote sync.
+- `Daemon::start` signature updated from `()` to `CliOverrides`.
+- `Config::load_from_default_locations` now delegates to
+  `load_from_default_locations_with_override(None)` to eliminate duplication.
+- `parse_cli_overrides()` supports both `--flag value` and `--flag=value` forms.
+- `mock_ui_client.py` phase-1 break condition: exits the acknowledgement polling loop
+  when only the `LOG_LEVEL` notification remains unacknowledged (late-arriving ack no
+  longer blocks the loop).
+- `mock_ui_client.py` Notifications stream: removed all `yield NONE` keepalives (action
+  value `0` is interpreted by the daemon as a stream-close request); phase-2 handler now
+  issues an explicit `return` after printing the recap to close the stream gracefully.
+- `proto/Makefile`: added `subscriptions_pb2.py` / `subscriptions_pb2_grpc.py` /
+  `subscriptions_pb2.pyi` build target and corresponding `clean` entries; `all` target
+  updated to include the new artifact.
+- `DOCS.md` mock-ui session description expanded to list all validated handshake markers
+  (`Subscribe`, `Ping`, `PingStats`, `Notifications`, `NotificationCommandReply(LOG_LEVEL)`).
+- `daemon-rs/crates/tools/Cargo.toml`: added `subscriptions` feature flag scaffold.
+- `cargo ost` live daemon flags: `--rules-path=PATH`, `--config-file=PATH`, and
+  `--ui-socket=PATH` added to `cli.rs` (`apply_value_flag` + help text).  These set
+  `OPENSNITCH_DAEMON_RULES_PATH`, `OPENSNITCH_DAEMON_CONFIG_FILE`, and
+  `OPENSNITCH_DAEMON_UI_SOCKET` / `OPENSNITCH_MOCK_UI_SOCKET` respectively.
+  `launch_daemon_live_logs` in `live_logs.rs` now reads these env vars and forwards them
+  as `--rules-path`, `--config-file`, `--ui-socket` to the daemon binary.  The default
+  isolated rules dir is still created automatically when `--rules-path` is not provided.
+- `daemon/cmd/gotools`: same `--rules-path`, `--config-file`, `--ui-socket` flags added
+  to `applyValueFlag` and `forwardedEnvKeys`; help text updated.  The env vars are
+  forwarded across any sudo/pkexec re-exec so they reach any daemon subprocess a Go test
+  may launch.
+- `daemon-rs/data/init/opensnitchd-rs.service.in`: templated systemd unit for
+  `opensnitchd-rs`.  Uses `Type=notify` (matches the daemon's `sd_notify` integration:
+  `READY=1` on startup, `RELOADING=1`/`READY=1` on SIGHUP, `STOPPING=1` on shutdown),
+  `ExecReload=/bin/kill -HUP $MAINPID` for live-config-reload, and a capability set
+  (`CAP_NET_ADMIN`, `CAP_NET_RAW`, `CAP_SYS_PTRACE`, `CAP_BPF`, `CAP_PERFMON`,
+  `CAP_SYS_ADMIN` for pre-5.8 kernels) with hardening directives.  Placeholders
+  `@PREFIX@` and `@SYSCONFDIR@` substituted via `sed` at install time.
+- `daemon-rs/data/init/opensnitchd-rs.openrc.in`: templated OpenRC init script for
+  Alpine Linux and other non-systemd distros.  Uses `start-stop-daemon` with a pid file,
+  `reload()` sends SIGHUP (matching the daemon's live-reload path), and `start_pre()`
+  enforces correct ownership/permissions on the config and socket directories.  Same
+  `@PREFIX@`/`@SYSCONFDIR@` substitution as the systemd template.
+- `daemon-rs/data/init/opensnitchd-rs.procd.in`: templated procd init script for
+  OpenWrt.  Uses `USE_PROCD=1` / `procd_open_instance` with `respawn`, `reload_signal
+  HUP`, `file` config tracking, and `service_triggers` for network-up reload.  Adds
+  `@BINDIR@` placeholder (rendered as `sbin` for OpenWrt) alongside `@PREFIX@` and
+  `@SYSCONFDIR@`.  procd does not forward `NOTIFY_SOCKET`; the daemon's existing
+  log-based lifecycle fallback activates automatically.
+- `Makefile` `install-rs`: init system detection added; probes `/run/systemd/private`
+  for systemd and `/run/openrc` / `openrc-run` for OpenRC; falls back to `none` (binary
+  + config only).  Override with `INIT_SYSTEM=systemd|openrc|procd|none`.  Added
+  `BINDIR` variable (default `bin`; set to `sbin` for OpenWrt).  `systemctl
+  daemon-reload` is skipped when `DESTDIR` is set (staging builds).  `PREFIX` defaults
+  to `/usr/local`; packagers use `PREFIX=/usr SYSCONFDIR=/etc DESTDIR=<staging>`;
+  OpenWrt packagers use `PREFIX=/usr BINDIR=sbin CARGO_PROFILE=release-embedded INIT_SYSTEM=procd DESTDIR=<staging>`.
+- `daemon-rs/Cargo.toml`: added `[profile.release-embedded]` inheriting from `release`
+  with `opt-level = "z"`, `lto = true` (fat), `codegen-units = 1`, `strip = "symbols"`,
+  `panic = "abort"` — targets constrained/embedded deployments (OpenWrt/musl).  The
+  default `release` profile (`lto = "thin"`) is unchanged to preserve hot-path
+  performance and parity harness baselines.  Build with
+  `cargo build --profile release-embedded -p opensnitchd-rs`.
+- `Makefile`: added `CARGO_PROFILE` variable (default `release`); `install-rs` now
+  resolves the binary via `DAEMON_RS_CARGO_TARGET_DIR` (default `target-kernel`) and an
+  optional `CARGO_TARGET_TRIPLE` segment so the path always matches what `daemon-rs-build`
+  produced.  Short lowercase Make aliases added (`profile=`, `target=`, `rounds=`,
+  `repeats=`, `rust_log=`, `go_log=`, `live_log=`, `pressure_secs=`, `sweep_secs=`,
+  `smoke_timeout=`, `toolchain=`, `ebpf_target=`, `priv_cmd=`, `prefix=`, `sysconfdir=`,
+  `bindir=`).
+- `Makefile`: `export` block bridges all Makefile variable names to their
+  `OPENSNITCH_*` env counterparts so recipe lines no longer need per-target `KEY=$(VAR)`
+  prefixes; all parity/harness/go-test recipe lines simplified to bare `$(DAEMON_RS_TOOLS_RUN) <cmd>`.
+- `cargo ost build` / `build-all`: added `--profile=PROFILE` (`OPENSNITCH_BUILD_PROFILE`,
+  default `release`) and `--target=TRIPLE` (`OPENSNITCH_BUILD_TARGET`) flags.  Both
+  commands now pass `--profile` and optionally `--target` to Cargo, replacing the
+  hardcoded `--release`.  `daemon-rs-build` Makefile target forwards
+  `OPENSNITCH_BUILD_PROFILE=$(CARGO_PROFILE)` and `OPENSNITCH_BUILD_TARGET=$(CARGO_TARGET_TRIPLE)`
+  so the full build+install flow is driven by a single consistent variable pair.
+- `build_cmds.rs`: `build_profile()` helper reads `OPENSNITCH_BUILD_PROFILE` with
+  empty-string guard (defaults to `release`).
 
 ### Fixed
+- `.gitignore`: added `ui/opensnitch/proto/subscriptions_pb2.py`,
+  `subscriptions_pb2_grpc.py`, and `subscriptions_pb2.pyi` to ignore list alongside
+  existing `ui_pb2*` entries so generated proto artifacts are not tracked by git.
+
+- `inotify` watch thread was sleeping 50 ms on `EWOULDBLOCK` (non-blocking fd, nothing
+  to read) before retrying `read()`.  This added up to 50 ms latency per
+  `wait_until_rule_count` barrier in the cold-path parity harness and in production rule
+  reload paths.  The thread now opens an `epoll` descriptor, adds the inotify fd with
+  `EPOLLIN`, and calls `epoll_wait` with a 10 ms timeout instead — reacting to file
+  events in effectively zero time.  Cold-path rule reload delta in the parity harness
+  improved from +50 ms to +12 ms (Go 0.101 s → Rust 0.112 s).
+- `RuleWatchControl::scan()` was re-reading every JSON rule file on every scan tick
+  (every 2 s poll interval and every inotify event) purely to collect list directory
+  paths for mtime tracking.  The in-memory snapshot's `rules: Vec<RuleRecord>` already
+  holds the same operator data.  The new `snapshot_list_dirs` helper derives list dirs
+  from the snapshot; the new `read_rules_dir_file_state_with_hint` scan variant uses it,
+  eliminating N async JSON reads per scan pass.  The full-directory reload on change
+  detection is unchanged.
+- `GenericWatchWorkerControl` used two async tasks separated by a channel: a trigger
+  task (inotify/poll) and a scan task (executes `spec.scan()`).  The channel hop added
+  latency on every event.  The scan task is removed; the trigger task now calls
+  `spec.scan()` directly in its callback — matching Go's `liveReloadWorker` pattern
+  where the goroutine receiving the fsnotify event executes the handler inline.
+  Coalescing is preserved: the trigger loop calls the callback once per iteration and
+  inotify events accumulate while scan runs.
 - Harness hang in `parity-hot-cold-delta-once` / `parity-hot-path-*` commands when
   invoked via `cargo ost` (without the Makefile).  Cargo hard-links the final daemon
   binary into `target/release/deps/` under an `opensnitchd_rs-<HASH>` name;
@@ -91,8 +198,17 @@ Versioning baseline:
 - `blocklist_large_segments_load_and_latency_smoke`: removed hardcoded absolute path
   `/home/nvand/.config/opensnitch/...`; the test now resolves the fixture via `$HOME`
   and falls back to the bundled sample when the full list is absent.
+- Parity harness `wait_until_rule_count` / `waitForRuleCount` poll interval tightened
+  from 50 ms to 5 ms in both the Rust and Go cold-path tests.  With epoll delivering
+  inotify events near-instantly the 50 ms interval was the dominant term in the
+  measured `cold-profile component=rule elapsed_s`, masking actual reload latency with
+  poll-tick jitter.  After: Go ~0.010 s, Rust ~0.021 s — stable, comparable measurements.
 - Firewall drift-heal loop behavior after backend-toggle churn: recovery now validates post-reload convergence and applies bounded retry backoff when interception rules remain invalid.
-- Warning profile cleanup for touched slices: removed dead helper code where not needed and kept explicit `#[allow(dead_code)]` only for intentional compatibility/API placeholders.
+- Warning profile cleanup for touched slices: removed dead helper code where not needed
+  and kept explicit `#[allow(dead_code)]` only for intentional compatibility/API
+  placeholders (`Config::load_from_default_locations`,
+  `RuleService::collect_rule_list_dirs`,
+  `RuleService::read_rules_dir_file_state_async`).
 
 ### Notes
 - `AskTimeoutPolicy` is intentionally a daemon safeguard for ambiguous/no-decision paths (UI connect failure, AskRule RPC failure, stale/discarded decision). When UI returns a concrete rule, that rule remains authoritative.

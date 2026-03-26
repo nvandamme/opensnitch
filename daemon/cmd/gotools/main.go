@@ -122,6 +122,10 @@ var forwardedEnvKeys = []string{
 	"OPENSNITCH_KERNEL_PRESSURE_SECS",
 	"OPENSNITCH_KERNEL_PRESSURE_SWEEP_SECS",
 	"GO_UI_TEST_FIXTURE",
+	"OPENSNITCH_DAEMON_RULES_PATH",
+	"OPENSNITCH_DAEMON_CONFIG_FILE",
+	"OPENSNITCH_DAEMON_UI_SOCKET",
+	"OPENSNITCH_MOCK_UI_SOCKET",
 }
 
 func forwardedEnvPairs() []string {
@@ -303,6 +307,13 @@ func applyValueFlag(key, val string) {
 		_ = os.Setenv("OPENSNITCH_KERNEL_PRESSURE_SECS", val)
 	case "sweep-secs":
 		_ = os.Setenv("OPENSNITCH_KERNEL_PRESSURE_SWEEP_SECS", val)
+	case "rules-path":
+		_ = os.Setenv("OPENSNITCH_DAEMON_RULES_PATH", val)
+	case "config-file":
+		_ = os.Setenv("OPENSNITCH_DAEMON_CONFIG_FILE", val)
+	case "ui-socket":
+		_ = os.Setenv("OPENSNITCH_DAEMON_UI_SOCKET", val)
+		_ = os.Setenv("OPENSNITCH_MOCK_UI_SOCKET", val)
 	}
 }
 
@@ -494,6 +505,9 @@ Flags (override env vars):
   --pressure-secs=N     OPENSNITCH_KERNEL_PRESSURE_SECS   (default: 1)
   --sweep-secs=N        OPENSNITCH_KERNEL_PRESSURE_SWEEP_SECS (default: 1)
   --skip-modprobe       Skip kernel module probe step     [OPENSNITCH_GOTOOLS_SKIP_MODPROBE=1]
+  --rules-path=PATH     Daemon rules directory override   [OPENSNITCH_DAEMON_RULES_PATH]
+  --config-file=PATH    Daemon config file path override  [OPENSNITCH_DAEMON_CONFIG_FILE]
+  --ui-socket=PATH      Daemon/mock-UI socket override    [OPENSNITCH_DAEMON_UI_SOCKET, OPENSNITCH_MOCK_UI_SOCKET]
 
 Examples:
   cd daemon && go run ./cmd/gotools go-test-full

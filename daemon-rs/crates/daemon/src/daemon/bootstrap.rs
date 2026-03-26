@@ -23,7 +23,7 @@ use crate::{
 };
 
 impl Daemon {
-    pub async fn bootstrap(client_addr: Option<&str>) -> Result<(Self, BusRx)> {
+    pub async fn bootstrap(cli: crate::CliOverrides) -> Result<(Self, BusRx)> {
         let (bus, rx) = BusState::build_with_caps(BusCaps {
             connect: 1024,
             kernel: 512,
@@ -33,8 +33,9 @@ impl Daemon {
             alert: 1024,
         });
         crate::utils::daemon_guard::ensure_no_competing_daemon_instances()?;
-        let config = crate::config::Config::load_from_default_locations()?
-            .with_client_addr_override(client_addr);
+        let config = crate::config::Config::load_from_default_locations_with_override(cli.config_file.as_deref())?
+            .with_client_addr_override(cli.ui_socket.as_deref())
+            .with_rules_path_override(cli.rules_path.as_deref());
         if let Some(status) = crate::tunables::RuntimeTunables::maybe_autotune_on_startup() {
             info!(status = %status, "daemon bootstrap: startup autotune");
         }

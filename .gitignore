@@ -32,5 +32,8 @@ daemon/ui/protocol/ui_grpc.pb.go
 ui/opensnitch/proto/ui_pb2.py
 ui/opensnitch/proto/ui_pb2_grpc.py
 ui/opensnitch/proto/ui_pb2.pyi
+ui/opensnitch/proto/subscriptions_pb2.py
+ui/opensnitch/proto/subscriptions_pb2_grpc.py
+ui/opensnitch/proto/subscriptions_pb2.pyi
 daemon/ui/testdata/default-config.json
 daemon-rs/data/tunables.json

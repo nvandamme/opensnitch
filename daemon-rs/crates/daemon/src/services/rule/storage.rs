@@ -159,6 +159,7 @@ impl RuleService {
             .then_some(dev_path)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn collect_rule_list_dirs(
         operator: &RuleFileOperator,
         list_dirs: &mut BTreeSet<PathBuf>,
@@ -250,6 +251,7 @@ impl RuleService {
         Some(state)
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn read_rules_dir_file_state_async(
         path: &Path,
     ) -> Option<BTreeMap<String, Option<SystemTime>>> {

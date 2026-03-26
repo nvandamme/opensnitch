@@ -286,15 +286,29 @@ impl Config {
             .join(rel_path)
     }
 
-    pub fn load_from_default_locations() -> Result<Self> {
+    /// Load config from the standard search order, with an optional CLI override.
+    ///
+    /// Resolution priority (highest first):
+    ///   1. `cli_path` — explicit `--config-file` flag
+    ///   2. `OPENSNITCH_CONFIG_FILE` env var
+    ///   3. `/etc/opensnitchd/default-config.json` if it exists
+    ///   4. Dev-tree fallback `daemon/data/default-config.json`
+    pub fn load_from_default_locations_with_override(cli_path: Option<&std::path::Path>) -> Result<Self> {
+        let cli_path = cli_path.and_then(|p| p.exists().then(|| p.to_path_buf()));
         let env_path = std::env::var_os("OPENSNITCH_CONFIG_FILE").map(PathBuf::from);
         let default_path = PathBuf::from("/etc/opensnitchd/default-config.json");
-        let config_path = env_path
-            .filter(|path| path.exists())
+        let config_path = cli_path
+            .or_else(|| env_path.filter(|path| path.exists()))
             .or_else(|| default_path.exists().then_some(default_path))
             .unwrap_or_else(|| Self::dev_default_path("daemon/data/default-config.json"));
 
         Self::load_from_path(&config_path)
+    }
+
+    /// Convenience wrapper: no CLI config-file override.
+    #[allow(dead_code)]
+    pub fn load_from_default_locations() -> Result<Self> {
+        Self::load_from_default_locations_with_override(None)
     }
 
     pub fn load_from_path(path: &Path) -> Result<Self> {
@@ -405,6 +419,15 @@ impl Config {
     pub fn with_client_addr_override(mut self, client_addr: Option<&str>) -> Self {
         if let Some(client_addr) = client_addr.filter(|value| !value.is_empty()) {
             self.client_addr = client_addr.to_string();
+        }
+        self
+    }
+
+    /// Override `rules_path` with the value of `--rules-path` from the CLI.
+    /// Mirrors the Go daemon's post-load `rules.Reload(rulesPath)` behaviour.
+    pub fn with_rules_path_override(mut self, rules_path: Option<&std::path::Path>) -> Self {
+        if let Some(path) = rules_path {
+            self.rules_path = path.to_path_buf();
         }
         self
     }

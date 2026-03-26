@@ -88,7 +88,7 @@ Behavior notes:
 
 - These targets run under test-guard semantics and tools-side privilege routing (`direct` / `pkexec` / `sudo`).
 - Launch path stores metadata for service cleanup/restart and stop path restores previously stopped services unless explicitly disabled.
-- `daemon-rs-mock-ui-session` launches a lightweight mock Python UI endpoint (non-GUI), validates Subscribe/Ping/Notifications handshake markers, and shuts down cleanly.
+- `daemon-rs-mock-ui-session` launches a lightweight mock Python UI endpoint (non-GUI), validates Subscribe/Ping/PingStats/Notifications/NotificationCommandReply(LOG_LEVEL) handshake markers (covering all UI and Subscriptions gRPC endpoints the Python client uses, including stats data flow and notification command round-trip), and shuts down cleanly.
 
 Equivalent tools-only invocation (without Make) is supported:
 

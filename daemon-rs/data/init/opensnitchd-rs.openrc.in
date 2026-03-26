@@ -1,0 +1,39 @@
+#!/sbin/openrc-run
+# Application firewall OpenSnitch (Rust daemon)
+# Template: @PREFIX@ and @SYSCONFDIR@ are substituted at install time by make install-rs.
+
+description="Application firewall OpenSnitch (Rust daemon)"
+command="@PREFIX@/bin/opensnitchd-rs"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+command_args="${OPENSNITCHD_RS_OPTS}"
+
+# Log to a dedicated file; operator may redirect to syslog via logger(1) separately.
+output_log="/var/log/opensnitchd-rs.log"
+error_log="/var/log/opensnitchd-rs.log"
+
+depend() {
+    need net
+    use logger dns
+    provide firewall
+}
+
+start_pre() {
+    checkpath --directory --owner root:root --mode 0755 "@SYSCONFDIR@/opensnitchd"
+    checkpath --directory --owner root:root --mode 0700 "@SYSCONFDIR@/opensnitchd/rules"
+    checkpath --file     --owner root:root --mode 0600 "/var/log/opensnitchd-rs.log"
+    # gRPC Unix socket directory
+    checkpath --directory --owner root:root --mode 0750 "/run/opensnitchd"
+}
+
+stop() {
+    ebegin "Stopping opensnitchd-rs"
+    start-stop-daemon --stop --quiet --pidfile "${pidfile}" --signal TERM --retry 15
+    eend $?
+}
+
+reload() {
+    ebegin "Reloading opensnitchd-rs (SIGHUP)"
+    start-stop-daemon --stop --quiet --pidfile "${pidfile}" --signal HUP
+    eend $?
+}
