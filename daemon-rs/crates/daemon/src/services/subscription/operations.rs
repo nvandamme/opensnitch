@@ -8,7 +8,7 @@ impl SubscriptionService {
     pub(super) fn handle_list(&self) -> pb::SubscriptionReply {
         let items = self.storage.list();
         reply_with(
-            pb::SubscriptionOperation::List,
+            pb::SubscriptionAction::List,
             "subscriptions loaded",
             true,
             items,
@@ -19,7 +19,7 @@ impl SubscriptionService {
     pub(super) async fn handle_apply(&self, raw: Vec<pb::Subscription>) -> pb::SubscriptionReply {
         if raw.is_empty() {
             return base_reply(
-                pb::SubscriptionOperation::Apply,
+                pb::SubscriptionAction::Apply,
                 "no subscriptions supplied",
                 false,
             );
@@ -35,7 +35,7 @@ impl SubscriptionService {
             .collect();
         if normalized.is_empty() {
             return base_reply(
-                pb::SubscriptionOperation::Apply,
+                pb::SubscriptionAction::Apply,
                 "no valid subscriptions supplied",
                 false,
             );
@@ -44,7 +44,7 @@ impl SubscriptionService {
         let sync_err = self.sync_layout_error().await;
         self.flush_storage_best_effort().await;
         reply_with(
-            pb::SubscriptionOperation::Apply,
+            pb::SubscriptionAction::Apply,
             "subscriptions stored",
             true,
             updated,
@@ -58,7 +58,7 @@ impl SubscriptionService {
     ) -> pb::SubscriptionReply {
         if items.is_empty() {
             return base_reply(
-                pb::SubscriptionOperation::Delete,
+                pb::SubscriptionAction::Delete,
                 "no subscriptions supplied",
                 false,
             );
@@ -77,7 +77,7 @@ impl SubscriptionService {
         let sync_err = self.sync_layout_error().await;
         self.flush_storage_best_effort().await;
         reply_with(
-            pb::SubscriptionOperation::Delete,
+            pb::SubscriptionAction::Delete,
             "subscriptions deleted",
             true,
             Vec::new(),
@@ -89,7 +89,7 @@ impl SubscriptionService {
         let sync_err = self.sync_layout_error().await;
         let updated = self.storage.list();
         reply_with(
-            pb::SubscriptionOperation::Deploy,
+            pb::SubscriptionAction::Deploy,
             if sync_err.is_none() {
                 "subscription layout deployed"
             } else {

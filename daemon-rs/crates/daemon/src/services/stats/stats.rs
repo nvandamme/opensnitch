@@ -7,6 +7,7 @@ use super::internal::{
 };
 use crate::config::StatsConfig;
 use crate::models::connection_state::ConnectionAttempt;
+use crate::models::metrics_snapshot::MetricsSnapshot;
 pub(crate) use crate::models::storage_event_counters::StorageEventCounters;
 use crate::utils::time_nonce::unix_epoch_nanos;
 
@@ -17,9 +18,7 @@ pub struct StatsService {
     pub(super) counters: Arc<StatsCounters>,
     pub(super) fast_allow: Arc<CacheAlignedAtomicU64>,
     pub(super) fast_deny: Arc<CacheAlignedAtomicU64>,
-    pub(super) sub_total: Arc<CacheAlignedAtomicU64>,
-    pub(super) sub_ready: Arc<CacheAlignedAtomicU64>,
-    pub(super) sub_error: Arc<CacheAlignedAtomicU64>,
+    pub(super) sub_stats: Arc<Mutex<Option<pb::SubscriptionStatistics>>>,
 }
 
 impl Default for StatsService {
@@ -30,9 +29,7 @@ impl Default for StatsService {
             counters: Arc::new(StatsCounters::default()),
             fast_allow: Arc::new(CacheAlignedAtomicU64::default()),
             fast_deny: Arc::new(CacheAlignedAtomicU64::default()),
-            sub_total: Arc::new(CacheAlignedAtomicU64::default()),
-            sub_ready: Arc::new(CacheAlignedAtomicU64::default()),
-            sub_error: Arc::new(CacheAlignedAtomicU64::default()),
+            sub_stats: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -42,11 +39,9 @@ impl StatsService {
         STATS_EVENT_RING_CAPACITY.store(capacity.max(1), Ordering::Relaxed);
     }
 
-    /// Store current subscription counts; reflected in the next snapshot.
-    pub fn update_subscription_counts(&self, total: u64, ready: u64, error: u64) {
-        self.sub_total.0.store(total, Ordering::Relaxed);
-        self.sub_ready.0.store(ready, Ordering::Relaxed);
-        self.sub_error.0.store(error, Ordering::Relaxed);
+    /// Replace the subscription statistics block; reflected in the next metrics export.
+    pub fn update_subscription_stats(&self, stats: pb::SubscriptionStatistics) {
+        *self.sub_stats.lock().expect("subscription stats mutex poisoned") = Some(stats);
     }
 
     pub fn apply_config(&self, config: StatsConfig) {
@@ -73,6 +68,7 @@ impl StatsService {
         bd.by_port.trim_to_limit(max_stats);
         bd.by_uid.trim_to_limit(max_stats);
         bd.by_executable.trim_to_limit(max_stats);
+        bd.by_rule.trim_to_limit(max_stats);
     }
 
     pub fn on_connect_attempt(&self, attempt: &ConnectionAttempt) {
@@ -107,14 +103,14 @@ impl StatsService {
         });
     }
 
-    pub fn snapshot(&self, rules_count: u64) -> pb::Statistics {
+    pub fn snapshot(&self, rules_count: u64) -> MetricsSnapshot {
         // Lock ordering: events_state before breakdown.
         let mut ev = self.events_state.lock().expect("stats events mutex poisoned");
         let mut bd = self.breakdown.lock().expect("stats breakdown mutex poisoned");
         self.build_snapshot(&mut bd, &mut ev, rules_count)
     }
 
-    pub fn snapshot_if_pending(&self, rules_count: u64) -> Option<pb::Statistics> {
+    pub fn snapshot_if_pending(&self, rules_count: u64) -> Option<MetricsSnapshot> {
         // Lock ordering: events_state before breakdown.
         let mut ev = self.events_state.lock().expect("stats events mutex poisoned");
         if ev.events.is_empty() {

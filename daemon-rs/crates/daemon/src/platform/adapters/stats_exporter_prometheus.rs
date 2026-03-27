@@ -42,12 +42,14 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use opensnitch_proto::pb;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::models::metrics_snapshot::MetricsSnapshot;
 use crate::platform::ports::stats_exporter_port::StatsExporterPort;
+
+use opensnitch_proto::pb;
 
 // ---------------------------------------------------------------------------
 // Compact snapshot (no Events slice — reduces per-tick allocation)
@@ -63,19 +65,19 @@ struct CompactStats {
     dropped: u64,
     rule_hits: u64,
     rule_misses: u64,
-    subscription_total: u64,
-    subscription_ready: u64,
-    subscription_error: u64,
+    subscription_stats: Option<pb::SubscriptionStatistics>,
     by_proto: Vec<(String, u64)>,
     by_address: Vec<(String, u64)>,
     by_host: Vec<(String, u64)>,
     by_port: Vec<(String, u64)>,
     by_uid: Vec<(String, u64)>,
     by_executable: Vec<(String, u64)>,
+    by_rule: Vec<(String, u64)>,
 }
 
-impl From<&pb::Statistics> for CompactStats {
-    fn from(s: &pb::Statistics) -> Self {
+impl From<&MetricsSnapshot> for CompactStats {
+    fn from(m: &MetricsSnapshot) -> Self {
+        let s = &m.stats;
         Self {
             rules: s.rules,
             uptime: s.uptime,
@@ -86,15 +88,14 @@ impl From<&pb::Statistics> for CompactStats {
             dropped: s.dropped,
             rule_hits: s.rule_hits,
             rule_misses: s.rule_misses,
-            subscription_total: s.subscription_total,
-            subscription_ready: s.subscription_ready,
-            subscription_error: s.subscription_error,
+            subscription_stats: m.subscription_stats.clone(),
             by_proto: sorted_pairs(&s.by_proto),
             by_address: sorted_pairs(&s.by_address),
             by_host: sorted_pairs(&s.by_host),
             by_port: sorted_pairs(&s.by_port),
             by_uid: sorted_pairs(&s.by_uid),
             by_executable: sorted_pairs(&s.by_executable),
+            by_rule: sorted_pairs(&m.by_rule),
         }
     }
 }
@@ -317,7 +318,7 @@ impl PrometheusStatsExporter {
 
 impl StatsExporterPort for PrometheusStatsExporter {
     /// Store the snapshot atomically.  Never blocks; no I/O performed here.
-    fn export_snapshot(&self, snapshot: &pb::Statistics) {
+    fn export_snapshot(&self, snapshot: &MetricsSnapshot) {
         self.latest
             .store(Arc::new(Some(CompactStats::from(snapshot))));
     }
@@ -422,12 +423,7 @@ fn render_prometheus_text(s: &CompactStats) -> String {
         "Current number of loaded rules", s.rules);
     gauge(&mut buf, "opensnitch_uptime_seconds",
         "Daemon uptime in seconds", s.uptime);
-    gauge(&mut buf, "opensnitch_subscription_total",
-        "Total subscription slots", s.subscription_total);
-    gauge(&mut buf, "opensnitch_subscription_ready",
-        "Ready subscription slots", s.subscription_ready);
-    gauge(&mut buf, "opensnitch_subscription_error",
-        "Errored subscription slots", s.subscription_error);
+    subscription_gauges(&mut buf, s.subscription_stats.as_ref());
 
     // Breakdown maps as gauge with label
     labeled_gauge(&mut buf, "opensnitch_connections_by_proto",
@@ -442,6 +438,8 @@ fn render_prometheus_text(s: &CompactStats) -> String {
         "Connections by user UID", "uid", &s.by_uid);
     labeled_gauge(&mut buf, "opensnitch_connections_by_executable",
         "Connections by executable", "executable", &s.by_executable);
+    labeled_gauge(&mut buf, "opensnitch_rule_hits_by_rule",
+        "Rule hits by rule name", "rule", &s.by_rule);
 
     buf
 }
@@ -484,6 +482,96 @@ fn escape_label_value(s: &str) -> String {
     out
 }
 
+/// Render subscription scalars, breakdown maps, and per-status labelled gauges
+/// in Prometheus text 0.0.4 / OpenMetrics 1.0.0 format.
+///
+/// Emits (when `sub` is `Some`):
+///   opensnitch_subscription_total / ready / error / refresh_count / refresh_errors
+///   opensnitch_subscription_by_status{status=...}
+///   opensnitch_subscription_by_group{group=...}
+///   opensnitch_subscription_by_node{node=...}
+///   opensnitch_subscription_rule_info{rule=...,subscription=...}  (one row per rule×subscription)
+fn subscription_gauges(buf: &mut String, sub: Option<&pb::SubscriptionStatistics>) {
+    let Some(s) = sub else { return };
+    gauge(buf, "opensnitch_subscription_total",    "Total configured subscriptions",                     s.total);
+    gauge(buf, "opensnitch_subscription_ready",    "Subscriptions in READY state",                      s.ready);
+    gauge(buf, "opensnitch_subscription_error",    "Subscriptions in ERROR state",                      s.error);
+    gauge(buf, "opensnitch_subscription_refresh_count",  "Cumulative successful refresh downloads",     s.refresh_count);
+    gauge(buf, "opensnitch_subscription_refresh_errors", "Cumulative refresh errors",                   s.refresh_errors);
+    let by_status: Vec<_> = s.by_status.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    let by_group:  Vec<_> = s.by_group.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    let by_node:   Vec<_> = s.by_node.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    labeled_gauge(buf, "opensnitch_subscription_by_status", "Subscription count by status",   "status", &by_status);
+    labeled_gauge(buf, "opensnitch_subscription_by_group",  "Subscription count by group",    "group",  &by_group);
+    labeled_gauge(buf, "opensnitch_subscription_by_node",   "Subscription count by node",     "node",   &by_node);
+    if !s.rule_subscriptions.is_empty() {
+        writeln!(buf, "# HELP opensnitch_subscription_rule_info Rules backed by a subscription list operator (static N:N mapping)").ok();
+        writeln!(buf, "# TYPE opensnitch_subscription_rule_info gauge").ok();
+        for entry in &s.rule_subscriptions {
+            let rule_esc = escape_label_value(&entry.rule);
+            for sub_name in &entry.subscriptions {
+                let sub_esc = escape_label_value(sub_name);
+                writeln!(buf, "opensnitch_subscription_rule_info{{rule=\"{rule_esc}\",subscription=\"{sub_esc}\"}} 1").ok();
+            }
+        }
+    }
+}
+
+/// Build Prometheus protobuf MetricFamily entries for subscription statistics.
+fn subscription_proto_families(fams: &mut Vec<prom_proto::MetricFamily>, sub: Option<&pb::SubscriptionStatistics>) {
+    use prom_proto::*;
+    let Some(s) = sub else { return };
+    macro_rules! sub_gauge {
+        ($name:expr, $help:expr, $val:expr) => {
+            fams.push(MetricFamily {
+                name: Some($name.to_string()),
+                help: Some($help.to_string()),
+                r#type: Some(MetricType::Gauge as i32),
+                metric: vec![Metric { gauge: Some(Gauge { value: Some($val as f64) }), ..Default::default() }],
+            });
+        };
+    }
+    sub_gauge!("opensnitch_subscription_total",           "Total configured subscriptions",                 s.total);
+    sub_gauge!("opensnitch_subscription_ready",           "Subscriptions in READY state",                   s.ready);
+    sub_gauge!("opensnitch_subscription_error",           "Subscriptions in ERROR state",                   s.error);
+    sub_gauge!("opensnitch_subscription_refresh_count",   "Cumulative successful refresh downloads",        s.refresh_count);
+    sub_gauge!("opensnitch_subscription_refresh_errors",  "Cumulative refresh errors",                      s.refresh_errors);
+    for (map_name, label_key, map) in [
+        ("opensnitch_subscription_by_status", "status", &s.by_status),
+        ("opensnitch_subscription_by_group",  "group",  &s.by_group),
+        ("opensnitch_subscription_by_node",   "node",   &s.by_node),
+    ] {
+        if map.is_empty() { continue; }
+        fams.push(MetricFamily {
+            name: Some(map_name.to_string()),
+            help: Some(format!("Subscription count by {label_key}")),
+            r#type: Some(MetricType::Gauge as i32),
+            metric: map.iter().map(|(k, v)| Metric {
+                label: vec![LabelPair { name: Some(label_key.to_string()), value: Some(k.clone()) }],
+                gauge: Some(Gauge { value: Some(*v as f64) }),
+                ..Default::default()
+            }).collect(),
+        });
+    }
+    if !s.rule_subscriptions.is_empty() {
+        fams.push(MetricFamily {
+            name: Some("opensnitch_subscription_rule_info".to_string()),
+            help: Some("Rules backed by a subscription list operator (static N:N mapping)".to_string()),
+            r#type: Some(MetricType::Gauge as i32),
+            metric: s.rule_subscriptions.iter().flat_map(|entry| {
+                entry.subscriptions.iter().map(|sub_name| Metric {
+                    label: vec![
+                        LabelPair { name: Some("rule".to_string()), value: Some(entry.rule.clone()) },
+                        LabelPair { name: Some("subscription".to_string()), value: Some(sub_name.clone()) },
+                    ],
+                    gauge: Some(Gauge { value: Some(1.0) }),
+                    ..Default::default()
+                })
+            }).collect(),
+        });
+    }
+}
+
 // ---------------------------------------------------------------------------
 // OpenMetrics text 1.0.0 renderer
 // ---------------------------------------------------------------------------
@@ -524,12 +612,7 @@ fn render_openmetrics_text(s: &CompactStats) -> String {
         "Current number of loaded rules", "", s.rules);
     om_gauge(&mut buf, "opensnitch_uptime_seconds",
         "Daemon uptime in seconds", "seconds", s.uptime);
-    om_gauge(&mut buf, "opensnitch_subscription_total",
-        "Total subscription slots", "", s.subscription_total);
-    om_gauge(&mut buf, "opensnitch_subscription_ready",
-        "Ready subscription slots", "", s.subscription_ready);
-    om_gauge(&mut buf, "opensnitch_subscription_error",
-        "Errored subscription slots", "", s.subscription_error);
+    subscription_gauges(&mut buf, s.subscription_stats.as_ref());
 
     // Breakdown maps as labeled gauges
     om_labeled_gauge(&mut buf, "opensnitch_connections_by_proto",
@@ -544,6 +627,8 @@ fn render_openmetrics_text(s: &CompactStats) -> String {
         "Connections by user UID", "uid", &s.by_uid);
     om_labeled_gauge(&mut buf, "opensnitch_connections_by_executable",
         "Connections by executable", "executable", &s.by_executable);
+    om_labeled_gauge(&mut buf, "opensnitch_rule_hits_by_rule",
+        "Rule hits by rule name", "rule", &s.by_rule);
 
     buf.push_str("# EOF\n");
     buf
@@ -651,12 +736,7 @@ fn build_proto_families(s: &CompactStats) -> Vec<prom_proto::MetricFamily> {
         "Current number of loaded rules", s.rules));
     fams.push(gauge_fam!("opensnitch_uptime_seconds",
         "Daemon uptime in seconds", s.uptime));
-    fams.push(gauge_fam!("opensnitch_subscription_total",
-        "Total subscription slots", s.subscription_total));
-    fams.push(gauge_fam!("opensnitch_subscription_ready",
-        "Ready subscription slots", s.subscription_ready));
-    fams.push(gauge_fam!("opensnitch_subscription_error",
-        "Errored subscription slots", s.subscription_error));
+    subscription_proto_families(&mut fams, s.subscription_stats.as_ref());
 
     // Breakdown gauges with a single label.
     for (metric_name, label_name, pairs) in [
@@ -666,6 +746,7 @@ fn build_proto_families(s: &CompactStats) -> Vec<prom_proto::MetricFamily> {
         ("opensnitch_connections_by_port",       "port",        &s.by_port),
         ("opensnitch_connections_by_uid",        "uid",         &s.by_uid),
         ("opensnitch_connections_by_executable", "executable",  &s.by_executable),
+        ("opensnitch_rule_hits_by_rule",          "rule",        &s.by_rule),
     ] {
         if pairs.is_empty() {
             continue;
@@ -705,5 +786,9 @@ fn build_proto_families(s: &CompactStats) -> Vec<prom_proto::MetricFamily> {
 /// env var (typically used in testing/CI), then `metrics.json`
 /// `prometheus.addr` field as the baseline.
 pub const PROMETHEUS_ADDR_ENV: &str = "OPENSNITCH_PROMETHEUS_ADDR";
+
+#[cfg(test)]
+#[path = "../../tests/metrics/stats_exporter_prometheus.rs"]
+mod prometheus_exporter_tests;
 
 

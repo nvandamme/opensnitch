@@ -4,6 +4,7 @@ use tracing::debug;
 
 use super::SubscriptionService;
 use super::refresh_timing::scheduler_wake_duration;
+use crate::services::rule::RuleService;
 use crate::services::stats::StatsService;
 
 impl SubscriptionService {
@@ -21,6 +22,7 @@ impl SubscriptionService {
         &self,
         shutdown: CancellationToken,
         stats: StatsService,
+        rules: RuleService,
     ) -> tokio::task::JoinHandle<()> {
         let service = self.clone();
         tokio::spawn(async move {
@@ -36,7 +38,7 @@ impl SubscriptionService {
                 }
 
                 let req = pb::SubscriptionRequest {
-                    operation: pb::SubscriptionOperation::Refresh as i32,
+                    operation: pb::SubscriptionAction::Refresh as i32,
                     force: false,
                     ..Default::default()
                 };
@@ -49,8 +51,10 @@ impl SubscriptionService {
                     );
                 }
 
-                let (total, ready, error) = service.counts();
-                stats.update_subscription_counts(total, ready, error);
+                let list_rule_paths = rules.list_rule_data_paths();
+                stats.update_subscription_stats(
+                    service.subscription_stats_with_rules(&list_rule_paths),
+                );
             }
             debug!("subscription scheduler: stopped");
         })

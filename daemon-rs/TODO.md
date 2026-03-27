@@ -7,7 +7,7 @@ It supersedes:
 - `daemon-rs/FEATURE_PARITY.md`
 - `daemon-rs/SERVICE_ASYNC_AND_MODEL_SCAN_2026-03-15.md`
 
-Last update: 2026-03-27 (full codebase optimization rescan)
+Last update: 2026-03-27 (subscription metrics + rule→subscription N:N mapping)
 
 ## Scope
 
@@ -30,10 +30,16 @@ eBPF library policy:
 
 ## Current Status Snapshot
 
-- Active development: `v0.5.1` — hot-path optimization pass complete (all 8 CRITICAL/HIGH/MEDIUM items from post-v0.5.0 backlog implemented).
-- Post-release baseline: `v0.5.0`.
+- Active development: `v0.7.0` — subscription metrics + rule→subscription N:N mapping complete.
+- Post-release baseline: `v0.6.0`.
+- Subscription proto fully decoupled from `ui.proto`; `subscriptions.proto` carries its own
+  service, enums, statistics shape, and `RuleSubscriptionEntry` N:N type.
+- Metrics export covers both `pb.Statistics` (daemon) and `pb.SubscriptionStatistics`
+  (subscription subsystem) across all formats (Prometheus text/OpenMetrics/proto, push-gateway, InfluxDB).
+- `rule_subscriptions` field in `SubscriptionStatistics` provides live N:N rule→subscription
+  mapping refreshed on every scheduler tick.
 - Netfilter/netlink migration scope for this branch is complete.
-- Netlink protocol handling is unified on `netlink-bindings` + `netlink-socket2` (replacing older mixed per-protocol netlink crates).
+- Netlink protocol handling is unified on `netlink-bindings` + `netlink-socket2`.
 - Detailed perf history and machine-readable stress baselines are maintained in `daemon-rs/PERF.md`.
 - This tracker is now active-only and intentionally compact.
 
@@ -62,9 +68,35 @@ eBPF library policy:
   - `make parity-hot-cold-matrix STRESS_ROUNDS=1000`
   - `make parity-hot-cold-delta STRESS_ROUNDS=1000`
 
-## Active Backlog (Post-v0.5.0)
+## Active Backlog (Post-v0.7.0)
 
 ### Active tasks
+
+- [x] **Subscription proto decoupling** — `subscriptions.proto` fully separate from `ui.proto`;
+  all subscription types, `Subscriptions` service, `Commands` bidi stream, `SubscriptionStatistics`,
+  and `RuleSubscriptionEntry` moved/added; `ui.proto` retains only UIService + telemetry types.
+  **Done (v0.7.0)**.
+
+- [x] **Per-subscription metrics export** — `SubscriptionStatistics` three-layer shape
+  (scalars + breakdown maps + event ring) exposed across Prometheus text/OpenMetrics/proto,
+  push-gateway, and InfluxDB line protocol. **Done (v0.7.0)**.
+
+- [x] **Rule→subscription N:N mapping** — `RuleService::list_rule_data_paths()` +
+  `SubscriptionService::build_rule_subscription_entries()` cross-reference active rule list
+  operators against `rules.list.d/` tree; exported as `opensnitch_subscription_rule_info`
+  gauge (Prometheus/OM/proto) and `opensnitch_subscription_rule` measurement (InfluxDB).
+  **Done (v0.7.0)**.
+
+- [x] **Per-rule hit counts in metrics** — `by_rule` map in `Statistics` proto (tag 21);
+  `on_rule_hit(rule_name)` in `StatsService`; `opensnitch_rule_hits_by_rule{rule=...}` gauge;
+  `opensnitch_by_rule,rule=... connections=Ni` InfluxDB line. **Done (v0.7.0)**.
+
+- [x] **Subscription command layer restructured** — `wire.rs` removed; `CommandRpcPayload`
+  model introduced; bidirectional `Commands` stream handler in `subscription.rs`;
+  dedicated `flows/subscription/` task. **Done (v0.7.0)**.
+
+- [x] **Metrics test suite** — 74 new tests (547 total, 7 ignored) covering all renderers,
+  content negotiation, gzip, HTTP live tests, and N:N rule_info assertions. **Done (v0.7.0)**.
 
 - [x] **[CRITICAL]** Eliminate per-connection `bpftool` subprocess fork in eBPF owner lookup.
   - **Done (v0.5.1)**: `libbpf-rs` `MapHandle::from_map_id` + `MapCore::lookup` replaces subprocess; background Arc-swap refresh task for map catalogue.

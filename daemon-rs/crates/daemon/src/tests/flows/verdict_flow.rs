@@ -283,8 +283,8 @@ async fn concurrent_ui_ask_uses_single_inflight_gate() -> Result<()> {
     assert_eq!(ask_calls.load(Ordering::SeqCst), 1);
 
     let snapshot = stats.snapshot(0);
-    assert_eq!(snapshot.rule_hits, 1);
-    assert_eq!(snapshot.rule_misses, 1);
+    assert_eq!(snapshot.stats.rule_hits, 1);
+    assert_eq!(snapshot.stats.rule_misses, 1);
 
     let _ = shutdown_tx.send(());
     let _ = timeout(Duration::from_secs(1), server_handle).await;

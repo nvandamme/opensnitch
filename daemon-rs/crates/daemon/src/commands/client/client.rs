@@ -184,3 +184,4 @@ pub(crate) fn parse_log_level_data(raw_data: &str) -> Option<i32> {
         _ => None,
     }
 }
+

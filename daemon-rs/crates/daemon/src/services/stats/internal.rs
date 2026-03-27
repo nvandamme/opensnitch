@@ -67,6 +67,7 @@ pub(super) struct BreakdownCounters {
     pub(super) by_port: LimitedCountersCopy<u16>,
     pub(super) by_uid: LimitedCountersCopy<u32>,
     pub(super) by_executable: LimitedCountersString,
+    pub(super) by_rule: LimitedCountersString,
     pub(super) max_stats: usize,
 }
 
@@ -79,6 +80,7 @@ impl Default for BreakdownCounters {
             by_port: LimitedCountersCopy::default(),
             by_uid: LimitedCountersCopy::default(),
             by_executable: LimitedCountersString::default(),
+            by_rule: LimitedCountersString::default(),
             max_stats: 25,
         }
     }

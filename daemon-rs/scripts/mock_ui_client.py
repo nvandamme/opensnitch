@@ -48,14 +48,25 @@ nodes.py) without requiring a display.  The mock exercises:
       RELOAD_FW_RULES    Reload firewall rules.
       CHANGE_RULE        (per AskRule call) Confirm/persist the rule returned
                          by AskRule, mirroring the real UI ADD_RULE path.
-      SUBSCRIPTIONS_LIST (--subscriptions only) Trigger Subscriptions.List RPC.
+
+    When --subscriptions is passed, the following subscription commands are
+    also emitted BEFORE the AskRule traffic phase (daemon built with the
+    'subscriptions' Cargo feature required):
+
+      SUBSCRIPTION_APPLY    Apply one test subscription (url + name + id).
+      SUBSCRIPTION_DELETE   Delete the same test subscription by id.
+      SUBSCRIPTION_REFRESH  Refresh with a target list and force=false.
+      SUBSCRIPTION_DEPLOY   Deploy (no payload).
+
+    Each ack prints MOCK_UI NotificationCommandReply cmd=<NAME>.
 
     Each acknowledged command prints MOCK_UI NotificationCommandReply cmd=<NAME>.
 
-  Subscriptions (Command/List/Apply/Delete/Refresh/Deploy)
+  Subscriptions (List/Apply/Delete/Refresh/Deploy)
     Registered only when --subscriptions is passed.  Requires the daemon to be
-    built with the 'subscriptions' Cargo feature; without it the daemon exposes
-    no Subscriptions endpoints at all.
+    built with the 'subscriptions' Cargo feature.  The daemon calls these
+    endpoints proactively on the same socket as the UI service — at handshake
+    (List) and after each local subscription operation (Apply/Delete/Refresh/Deploy).
 """
 
 from __future__ import annotations
@@ -89,16 +100,40 @@ import ui_pb2_grpc  # type: ignore  # noqa: E402
 
 # ── notification data payloads ────────────────────────────────────────────────
 
-# JSON payload for Subscriptions/LIST.  Parsed as SubscriptionRequestWire
-# {operation: 1 (LIST)} by the daemon.
-_SUBSCRIPTIONS_LIST_NOTIFICATION_DATA = json.dumps({"operation": 1})
-
 # LOG_LEVEL: set level 2 (Info) — safe, reversible, no persistent side-effects.
 # Keys accepted case-insensitively by the daemon.
 _LOG_LEVEL_NOTIFICATION_DATA = json.dumps({"log_level": 2})
 
 # Test rule name used for the rule lifecycle (create → enable → disable → delete).
 _MOCK_TEST_RULE_NAME = "mock-ui-test-rule"
+
+# Test subscription used for the subscription lifecycle when --subscriptions is passed.
+# Uses a documentation-only URL (RFC 5737 / IANA reserved) that will never
+# resolve to real content — safe for live + CI sessions.
+_MOCK_TEST_SUBSCRIPTION_ID   = "mock-ui-test-subscription"
+_MOCK_TEST_SUBSCRIPTION_NAME = "Mock UI Test Subscription"
+_MOCK_TEST_SUBSCRIPTION_URL  = "https://198.51.100.1/test-list.txt"
+
+# JSON data payloads for subscription notification actions.
+_SUBSCRIPTION_APPLY_DATA = json.dumps({
+    "subscriptions": [
+        {
+            "id":      _MOCK_TEST_SUBSCRIPTION_ID,
+            "name":    _MOCK_TEST_SUBSCRIPTION_NAME,
+            "url":     _MOCK_TEST_SUBSCRIPTION_URL,
+            "enabled": True,
+        }
+    ]
+})
+_SUBSCRIPTION_DELETE_DATA = json.dumps({
+    "subscriptions": [
+        {"id": _MOCK_TEST_SUBSCRIPTION_ID, "url": _MOCK_TEST_SUBSCRIPTION_URL}
+    ]
+})
+_SUBSCRIPTION_REFRESH_DATA = json.dumps({
+    "targets": [_MOCK_TEST_SUBSCRIPTION_ID],
+    "force": False,
+})
 
 # RFC 5737 TEST-NET addresses used by _send_traffic() inside Notifications.
 # Only connections targeting these addresses are counted as intentional AskRule
@@ -237,15 +272,8 @@ class MockUiService(ui_pb2_grpc.UIServicer):
                 flush=True,
             )
 
-        # Subscription counters (present when subscriptions feature is active).
-        if stats.subscription_total:
-            print(
-                "MOCK_UI PingStatsSubscriptions"
-                f" total={stats.subscription_total}"
-                f" ready={stats.subscription_ready}"
-                f" error={stats.subscription_error}",
-                flush=True,
-            )
+        # Subscription counters are carried as daemon-rs-only fields in
+        # MetricsSnapshot, not in the pb.Statistics wire message — not visible here.
 
         return ui_pb2.PingReply(id=request.id)
 
@@ -460,23 +488,23 @@ class MockUiService(ui_pb2_grpc.UIServicer):
             sys_fw = ui_pb2.SysFirewall(Enabled=True, Version=1)
         yield _send("RELOAD_FW_RULES", ui_pb2.RELOAD_FW_RULES, sys_firewall=sys_fw)
 
-        if self._enable_subscriptions:
-            yield _send(
-                "SUBSCRIPTIONS_LIST",
-                ui_pb2.SUBSCRIPTIONS,
-                _SUBSCRIPTIONS_LIST_NOTIFICATION_DATA,
-            )
-
         # ── Phase 1: drain initial-batch acks ────────────────────────────────
         # Must complete before injecting traffic: the batch includes
         # DISABLE_FIREWALL + ENABLE_FIREWALL + RELOAD_FW_RULES.  Sending SYNs
         # while DISABLE_FIREWALL is still being processed means the firewall may
         # be down and nfqueue won't intercept the packets.
         #
+        # Subscription commands (APPLY / DELETE / REFRESH / DEPLOY) are included
+        # in the same batch when --subscriptions is passed.  They are acked
+        # asynchronously; the phase-1 break condition waits for all non-LOG_LEVEL
+        # non-subscription commands, then breaks — subscription acks arrive later
+        # in phase-2 alongside AskRule CHANGE_RULE acks.
+        #
         # Important: do NOT yield here.  Yielding type=NONE (action=0) is
         # interpreted by the daemon as a stream-close request, which tears down
         # the Notifications stream and forces an immediate reconnect loop.
         # Phase-1 is a pure consumer: it only reads from request_iterator.
+        _PHASE1_SKIP = {"LOG_LEVEL"}
 
         for msg in request_iterator:
             code_name = "OK" if int(msg.code) == 0 else "ERROR"
@@ -492,12 +520,13 @@ class MockUiService(ui_pb2_grpc.UIServicer):
                     f"MOCK_UI NotificationCommandReply cmd={cmd} code={code_name}",
                     flush=True,
                 )
-            # Break when every non-LOG_LEVEL command has been acked.
+            # Break when every non-skipped command has been acked.
             # LOG_LEVEL is processed by a separate async task in the daemon
             # and its ack arrives late (sometimes after RELOAD_FW_RULES).
-            # Leaving it in `pending` lets phase-2 handle it correctly and
-            # print NotificationCommandReply cmd=LOG_LEVEL before the recap.
-            if not any(v != "LOG_LEVEL" for v in pending.values()):
+            # Subscription commands are similarly async — their acks arrive after
+            # the SubscriptionService processes the request and calls back to the
+            # Python SubscriptionsServicer.  Both sets are drained in phase-2.
+            if not any(v not in _PHASE1_SKIP for v in pending.values()):
                 break  # firewall is stable; inject traffic
 
         # ── AskRule traffic injection ─────────────────────────────────────────
@@ -715,10 +744,12 @@ class MockUiService(ui_pb2_grpc.UIServicer):
 class MockSubscriptionsService(subscriptions_pb2_grpc.SubscriptionsServicer):
     """Mock handler for the Subscriptions gRPC service.
 
-    The daemon calls these endpoints when it receives a Notification with
-    type=SUBSCRIPTIONS and the 'subscriptions' Cargo feature is enabled.
-    Each handler prints a unique marker used by the live-session orchestration
-    to verify the full RPC round-trip.
+    Registered on the same socket as MockUiService.  The daemon calls these
+    endpoints proactively using the same gRPC channel as the UI service:
+      - List  — called at handshake to sync subscription state with the UI.
+      - Apply/Delete/Refresh/Deploy — called after local subscription operations
+        to report results back to the UI.
+    Each handler prints a unique marker used by live-session orchestration.
     """
 
     def _accepted_reply(
@@ -729,14 +760,6 @@ class MockSubscriptionsService(subscriptions_pb2_grpc.SubscriptionsServicer):
             accepted=True,
             message="mock-ui-ok",
         )
-
-    def Command(self, request, context):
-        print(
-            f"MOCK_UI SubscriptionsCommand"
-            f" operation={request.operation} targets={list(request.targets)}",
-            flush=True,
-        )
-        return self._accepted_reply(request)
 
     def List(self, request, context):
         print(
@@ -776,6 +799,42 @@ class MockSubscriptionsService(subscriptions_pb2_grpc.SubscriptionsServicer):
         )
         return self._accepted_reply(request)
 
+    def Commands(self, request_iterator, context):
+        """Bidi stream: yields SubscriptionCommand items to the daemon and reads
+        SubscriptionCommandAck items back in a background thread.
+
+        Called by the daemon's SubscriptionCommandFlow on every connect attempt.
+        The daemon (gRPC client) sends acks after processing each command; the
+        daemon (gRPC server-streaming side) reads commands from this generator.
+        """
+        cmd_id = 0
+
+        def _cmd(action: int, data: str = "") -> subscriptions_pb2.SubscriptionCommand:
+            nonlocal cmd_id
+            cmd_id += 1
+            print(f"MOCK_UI SubscriptionsCommandSend id={cmd_id} action={action}", flush=True)
+            return subscriptions_pb2.SubscriptionCommand(id=cmd_id, action=action, data=data)
+
+        def _drain_acks() -> None:
+            try:
+                for ack in request_iterator:
+                    print(
+                        f"MOCK_UI SubscriptionsCommandAck"
+                        f" id={ack.id} action={ack.action}"
+                        f" accepted={ack.accepted} msg={ack.message!r}",
+                        flush=True,
+                    )
+            except Exception as exc:
+                print(f"MOCK_UI SubscriptionsCommandAckError {exc}", flush=True)
+
+        threading.Thread(target=_drain_acks, daemon=True).start()
+
+        yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_LIST)
+        yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_APPLY,   _SUBSCRIPTION_APPLY_DATA)
+        yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_DELETE,  _SUBSCRIPTION_DELETE_DATA)
+        yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_REFRESH, _SUBSCRIPTION_REFRESH_DATA)
+        yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_DEPLOY)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run a mock non-UI OpenSnitch gRPC endpoint")
@@ -800,11 +859,10 @@ def main() -> int:
         action="store_true",
         default=False,
         help=(
-            "Register the Subscriptions gRPC service and probe the daemon's "
-            "Subscriptions.*  endpoints via a proactive SUBSCRIPTIONS/LIST "
-            "notification. Pass this flag only when the daemon is built with "
-            "the 'subscriptions' Cargo feature; without it the daemon exposes "
-            "no Subscriptions endpoints at all."
+            "Register the Subscriptions gRPC service on the same socket as the "
+            "UI service.  The daemon (built with the 'subscriptions' Cargo "
+            "feature) calls List at handshake and Apply/Delete/Refresh/Deploy "
+            "after local subscription operations."
         ),
     )
 

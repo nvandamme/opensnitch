@@ -9,26 +9,38 @@ option go_package = "github.com/evilsocket/opensnitch/daemon/ui/protocol";
 // Command semantics are selected by SubscriptionRequest.operation, which maps
 // to SubscriptionOperation values (LIST/APPLY/DELETE/REFRESH/DEPLOY).
 service Subscriptions {
-    // Compatibility command endpoint (enum-driven dispatch).
-    rpc Command(SubscriptionRequest) returns (SubscriptionReply) {}
-
-    // Explicit operation endpoints mirroring SubscriptionOperation semantics.
+    // List all subscriptions, optionally filtered by SubscriptionRequest.targets.
     rpc List(SubscriptionRequest) returns (SubscriptionReply) {}
+
+    // Apply (create/update) subscriptions specified in SubscriptionRequest.subscriptions.
     rpc Apply(SubscriptionRequest) returns (SubscriptionReply) {}
+
+    // Delete subscriptions specified in SubscriptionRequest.subscriptions or SubscriptionRequest.targets.
     rpc Delete(SubscriptionRequest) returns (SubscriptionReply) {}
+
+    // Force refresh of subscriptions specified in SubscriptionRequest.subscriptions or SubscriptionRequest.targets.
     rpc Refresh(SubscriptionRequest) returns (SubscriptionReply) {}
+
+    // Deploy subscriptions specified in SubscriptionRequest.subscriptions or SubscriptionRequest.targets.
     rpc Deploy(SubscriptionRequest) returns (SubscriptionReply) {}
+
+    // Bidirectional stream for subscription commands.
+    // The UI (server) pushes SubscriptionCommand items; the daemon (client) processes
+    // each command inline and sends back a SubscriptionCommandAck.
+    rpc Commands(stream SubscriptionCommandAck) returns (stream SubscriptionCommand) {}
 }
 
-enum SubscriptionOperation {
-    SUBSCRIPTION_OPERATION_UNSPECIFIED = 0;
-    SUBSCRIPTION_OPERATION_LIST = 1;
-    SUBSCRIPTION_OPERATION_APPLY = 2;
-    SUBSCRIPTION_OPERATION_DELETE = 3;
-    SUBSCRIPTION_OPERATION_REFRESH = 4;
-    SUBSCRIPTION_OPERATION_DEPLOY = 5;
+// SubscriptionAction enumerates the supported operations for subscription management.
+enum SubscriptionAction {
+    SUBSCRIPTION_ACTION_UNSPECIFIED = 0;
+    SUBSCRIPTION_ACTION_LIST        = 1;
+    SUBSCRIPTION_ACTION_APPLY       = 2;
+    SUBSCRIPTION_ACTION_DELETE      = 3;
+    SUBSCRIPTION_ACTION_REFRESH     = 4;
+    SUBSCRIPTION_ACTION_DEPLOY      = 5;
 }
 
+// SubscriptionStatus represents the current state of a subscription.
 enum SubscriptionStatus {
     SUBSCRIPTION_STATUS_UNSPECIFIED = 0;
     SUBSCRIPTION_STATUS_PENDING = 1;
@@ -37,6 +49,8 @@ enum SubscriptionStatus {
     SUBSCRIPTION_STATUS_ERROR = 4;
 }
 
+// SubscriptionRefreshMetadata captures details about the last refresh attempt for a subscription, including
+// the next eligible refresh time, consecutive failures, and HTTP validators.
 message SubscriptionRefreshMetadata {
     // Unix timestamp (UTC seconds) for next eligible automatic refresh.
     int64 next_refresh_after = 1;
@@ -48,6 +62,7 @@ message SubscriptionRefreshMetadata {
     string last_modified = 4;
 }
 
+// Subscription represents a single subscription entity with its configuration and status.
 message Subscription {
     string id = 1;
     string name = 2;
@@ -66,17 +81,95 @@ message Subscription {
     SubscriptionRefreshMetadata refresh_meta = 15;
 }
 
+// SubscriptionRequest represents a request to perform an operation on one or more subscriptions, with optional filtering and force parameters.
 message SubscriptionRequest {
-    SubscriptionOperation operation = 1;
+    SubscriptionAction operation = 1;
     repeated Subscription subscriptions = 2;
     repeated string targets = 3;
     bool force = 4;
 }
 
+// SubscriptionReply represents the response to a SubscriptionRequest, including the operation performed, affected subscriptions, errors, and status.
 message SubscriptionReply {
-    SubscriptionOperation operation = 1;
+    SubscriptionAction operation = 1;
     repeated Subscription subscriptions = 2;
     repeated string errors = 3;
     string message = 4;
     bool accepted = 5;
+}
+
+// SubscriptionCommand is sent by the UI to the daemon over the Commands bidi stream.
+message SubscriptionCommand {
+    uint64 id = 1;
+    SubscriptionAction action = 2;
+    string data = 3;
+}
+
+// SubscriptionCommandAck is sent by the daemon back to the UI to confirm processing.
+message SubscriptionCommandAck {
+    uint64 id = 1;
+    SubscriptionAction action = 2;
+    bool accepted = 3;
+    string message = 4;
+}
+
+// SubscriptionEvent records a single subscription lifecycle event (refresh, apply,
+// delete, error).  Mirrors the shape of ui.proto's Event message so both can be
+// displayed uniformly in the UI and serialised into the same metrics pipeline.
+message SubscriptionEvent {
+    // RFC 3339 wall-clock time at which the event occurred.
+    string time = 1;
+    // Subscription snapshot at the moment of the event (status, refresh_meta, etc.).
+    Subscription subscription = 2;
+    // The operation that triggered this event.
+    SubscriptionAction action = 3;
+    // Unix nanosecond timestamp — used for precise ordering and deduplication.
+    int64 unixnano = 4;
+}
+
+// RuleSubscriptionEntry links a single rule to the subscription(s) whose list
+// operators it references.  Multiple operators in the same rule can reference
+// different groups (each group may itself be populated by multiple subscriptions),
+// making the overall relationship N:N.
+message RuleSubscriptionEntry {
+    // Rule name as stored in the rule JSON file.
+    string rule = 1;
+    // Distinct subscription display names referenced by this rule's list operators.
+    // Sorted for determinism.
+    repeated string subscriptions = 2;
+}
+
+// SubscriptionStatistics mirrors the shape of ui.proto's Statistics message for
+// the subscription subsystem.
+//
+// Three layers — same as Statistics:
+//   1. Scalar counters (total, ready, error, refresh_count, refresh_errors)
+//   2. Breakdown maps  (by_status, by_group, by_node)
+//   3. Event log       (repeated SubscriptionEvent events)
+//
+// Populated by the daemon when the 'subscriptions' Cargo feature is active.
+message SubscriptionStatistics {
+    // Total configured subscriptions.
+    uint64 total = 1;
+    // Subscriptions currently in READY state.
+    uint64 ready = 2;
+    // Subscriptions currently in ERROR state.
+    uint64 error = 3;
+    // Cumulative successful refresh downloads since daemon start.
+    uint64 refresh_count = 4;
+    // Cumulative refresh errors since daemon start.
+    uint64 refresh_errors = 5;
+    // Count of subscriptions per status string ("ready", "error", "pending", "syncing").
+    map<string, uint64> by_status = 6;
+    // Count of subscriptions per group label.
+    map<string, uint64> by_group = 7;
+    // Count of subscriptions per node label.
+    map<string, uint64> by_node = 8;
+    // Recent subscription lifecycle events (capped ring, newest first).
+    repeated SubscriptionEvent events = 9;
+    // Rules that reference subscription-managed list directories, with the subscription(s)
+    // each rule uses.  A rule can reference multiple groups and each group can be populated
+    // by multiple subscriptions (N:N).  Sorted by rule name for determinism.
+    // Populated at each stats collection cycle from the live rule set and subscription layout.
+    repeated RuleSubscriptionEntry rule_subscriptions = 10;
 }

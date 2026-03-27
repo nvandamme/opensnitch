@@ -283,7 +283,7 @@ impl VerdictFlow {
             dst_host.as_deref(),
         )? {
             if !allow.nolog {
-                self.stats.on_rule_hit();
+                self.stats.on_rule_hit(&rule_name);
                 let conn = pb_conn.take().unwrap_or_else(|| {
                     ProtoMapperAdapter::to_proto_connection(
                         &attempt,
@@ -415,7 +415,7 @@ impl VerdictFlow {
         );
 
         if !decision.nolog {
-            self.stats.on_rule_hit();
+            self.stats.on_rule_hit(&ui_rule_name);
             let conn = pb_conn.take().unwrap_or_else(|| {
                 ProtoMapperAdapter::to_proto_connection(&attempt, &proc_info, dst_host.as_deref())
             });

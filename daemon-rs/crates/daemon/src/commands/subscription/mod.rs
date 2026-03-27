@@ -1,4 +1,3 @@
-mod subscription;
-mod wire;
+pub mod subscription;
 
 pub(crate) use subscription::SubscriptionCommandService;

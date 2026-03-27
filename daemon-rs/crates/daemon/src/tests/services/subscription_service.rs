@@ -32,7 +32,7 @@ async fn list_empty_returns_accepted() {
     let svc = make_service();
     let reply = svc
         .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionOperation::List as i32,
+            operation: pb::SubscriptionAction::List as i32,
             ..Default::default()
         })
         .await;
@@ -47,7 +47,7 @@ async fn apply_then_list_round_trips() {
 
     let apply_reply = svc
         .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionOperation::Apply as i32,
+            operation: pb::SubscriptionAction::Apply as i32,
             subscriptions: vec![sub.clone()],
             ..Default::default()
         })
@@ -65,7 +65,7 @@ async fn apply_then_list_round_trips() {
 
     let list_reply = svc
         .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionOperation::List as i32,
+            operation: pb::SubscriptionAction::List as i32,
             ..Default::default()
         })
         .await;
@@ -79,7 +79,7 @@ async fn apply_no_items_is_rejected() {
     let svc = make_service();
     let reply = svc
         .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionOperation::Apply as i32,
+            operation: pb::SubscriptionAction::Apply as i32,
             ..Default::default()
         })
         .await;
@@ -92,7 +92,7 @@ async fn delete_removes_subscription() {
     let sub = sample_sub("block-a", "https://example.com/a.txt");
     let apply = svc
         .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionOperation::Apply as i32,
+            operation: pb::SubscriptionAction::Apply as i32,
             subscriptions: vec![sub],
             ..Default::default()
         })
@@ -102,7 +102,7 @@ async fn delete_removes_subscription() {
     let to_delete = apply.subscriptions.clone();
     let del = svc
         .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionOperation::Delete as i32,
+            operation: pb::SubscriptionAction::Delete as i32,
             subscriptions: to_delete,
             ..Default::default()
         })
@@ -111,7 +111,7 @@ async fn delete_removes_subscription() {
 
     let list = svc
         .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionOperation::List as i32,
+            operation: pb::SubscriptionAction::List as i32,
             ..Default::default()
         })
         .await;
@@ -139,7 +139,7 @@ async fn refresh_downloads_source_and_persists_http_metadata() {
 
     let apply = svc
         .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionOperation::Apply as i32,
+            operation: pb::SubscriptionAction::Apply as i32,
             subscriptions: vec![sample_sub("refresh-me", &server.url("/list.txt"))],
             ..Default::default()
         })
@@ -148,7 +148,7 @@ async fn refresh_downloads_source_and_persists_http_metadata() {
 
     let reply = svc
         .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionOperation::Refresh as i32,
+            operation: pb::SubscriptionAction::Refresh as i32,
             force: true,
             ..Default::default()
         })
@@ -199,7 +199,7 @@ async fn refresh_uses_conditional_headers_for_not_modified_responses() {
 
     let apply = svc
         .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionOperation::Apply as i32,
+            operation: pb::SubscriptionAction::Apply as i32,
             subscriptions: vec![sample_sub("etag-check", &server.url("/etag.txt"))],
             ..Default::default()
         })
@@ -208,7 +208,7 @@ async fn refresh_uses_conditional_headers_for_not_modified_responses() {
 
     let first = svc
         .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionOperation::Refresh as i32,
+            operation: pb::SubscriptionAction::Refresh as i32,
             force: true,
             ..Default::default()
         })
@@ -217,7 +217,7 @@ async fn refresh_uses_conditional_headers_for_not_modified_responses() {
 
     let second = svc
         .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionOperation::Refresh as i32,
+            operation: pb::SubscriptionAction::Refresh as i32,
             force: true,
             ..Default::default()
         })
@@ -247,7 +247,7 @@ async fn refresh_errors_back_off_and_skip_until_due() {
 
     let apply = svc
         .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionOperation::Apply as i32,
+            operation: pb::SubscriptionAction::Apply as i32,
             subscriptions: vec![sample_sub("retry-me", &server.url("/retry.txt"))],
             ..Default::default()
         })
@@ -256,7 +256,7 @@ async fn refresh_errors_back_off_and_skip_until_due() {
 
     let refresh = svc
         .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionOperation::Refresh as i32,
+            operation: pb::SubscriptionAction::Refresh as i32,
             force: true,
             ..Default::default()
         })
@@ -275,7 +275,7 @@ async fn refresh_errors_back_off_and_skip_until_due() {
 
     let skipped = svc
         .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionOperation::Refresh as i32,
+            operation: pb::SubscriptionAction::Refresh as i32,
             ..Default::default()
         })
         .await;
@@ -292,15 +292,15 @@ async fn refresh_errors_back_off_and_skip_until_due() {
 async fn counts_reflects_storage_state() {
     let svc = make_service();
     svc.handle_request(pb::SubscriptionRequest {
-        operation: pb::SubscriptionOperation::Apply as i32,
+        operation: pb::SubscriptionAction::Apply as i32,
         subscriptions: vec![sample_sub("a", "https://a.example/a.txt")],
         ..Default::default()
     })
     .await;
-    let (total, ready, errored) = svc.counts();
-    assert_eq!(total, 1);
-    assert_eq!(ready, 0);
-    assert_eq!(errored, 0);
+    let ss = svc.subscription_stats();
+    assert_eq!(ss.total, 1);
+    assert_eq!(ss.ready, 0);
+    assert_eq!(ss.error, 0);
 }
 
 #[tokio::test]
@@ -308,7 +308,7 @@ async fn unspecified_operation_is_rejected() {
     let svc = make_service();
     let reply = svc
         .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionOperation::Unspecified as i32,
+            operation: pb::SubscriptionAction::Unspecified as i32,
             ..Default::default()
         })
         .await;

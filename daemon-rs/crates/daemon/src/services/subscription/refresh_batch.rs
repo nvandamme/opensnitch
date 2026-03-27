@@ -34,6 +34,9 @@ impl SubscriptionService {
                 Ok(RefreshOutcome::Downloaded) => {
                     refreshed += 1;
                     sync_layout = true;
+                    self.refresh_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let proto = record_to_proto(&record);
+                    self.push_event(proto, opensnitch_proto::pb::SubscriptionAction::Refresh);
                 }
                 Ok(RefreshOutcome::NotModified) => {
                     unchanged += 1;
@@ -41,6 +44,9 @@ impl SubscriptionService {
                 }
                 Err(err) => {
                     errors.push(format!("{}: {err}", subscription_label(&record)));
+                    self.refresh_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let proto = record_to_proto(&record);
+                    self.push_event(proto, opensnitch_proto::pb::SubscriptionAction::Refresh);
                 }
             }
 

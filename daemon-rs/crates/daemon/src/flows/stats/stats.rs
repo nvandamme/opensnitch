@@ -262,17 +262,17 @@ impl StatsFlow {
                         }
 
                         let rules_count = rules.rules_count() as u64;
-                        let Some(snapshot) = stats.snapshot_if_pending(rules_count) else {
+                        let Some(metrics_snapshot) = stats.snapshot_if_pending(rules_count) else {
                             continue;
                         };
 
                         if let Some(ref exporter) = stats_exporter {
-                            exporter.export_snapshot(&snapshot);
+                            exporter.export_snapshot(&metrics_snapshot);
                         }
 
                         let req = opensnitch_proto::pb::PingRequest {
                             id: ping_id,
-                            stats: Some(snapshot),
+                            stats: Some(metrics_snapshot.stats),
                         };
 
                         let config_snapshot = config.get_snapshot();

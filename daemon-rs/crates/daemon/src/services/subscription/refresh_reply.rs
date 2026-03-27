@@ -6,7 +6,7 @@ use crate::utils::sort_key::sort_by_string_key;
 
 pub(super) fn empty_refresh_reply(explicit_targeting: bool) -> pb::SubscriptionReply {
     base_reply(
-        pb::SubscriptionOperation::Refresh,
+        pb::SubscriptionAction::Refresh,
         if explicit_targeting {
             "no matching subscriptions supplied"
         } else {
@@ -28,7 +28,7 @@ pub(super) fn finalize_refresh_reply(
     let accepted = errors.is_empty();
 
     reply_with(
-        pb::SubscriptionOperation::Refresh,
+        pb::SubscriptionAction::Refresh,
         build_refresh_message(refreshed, unchanged, skipped, error_count),
         accepted,
         subscriptions,

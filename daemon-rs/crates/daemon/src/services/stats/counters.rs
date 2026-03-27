@@ -38,8 +38,11 @@ impl StatsService {
         }
     }
 
-    pub fn on_rule_hit(&self) {
+    pub fn on_rule_hit(&self, rule_name: &str) {
         self.counters.rule_hits.fetch_add(1, Ordering::Relaxed);
+        let mut bd = self.breakdown.lock().expect("stats breakdown mutex poisoned");
+        let max_stats = bd.max_stats;
+        bd.by_rule.bump(rule_name, max_stats);
     }
 
     // Go parity: when no rule matches and default action is applied, statistics

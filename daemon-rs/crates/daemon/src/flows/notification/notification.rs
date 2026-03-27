@@ -10,10 +10,7 @@ use tokio::time::Duration;
 
 use crate::{
     bus::Bus,
-    commands::{
-        NotificationCommandDecision, command_from_action_or_reply,
-        subscription::SubscriptionCommandService,
-    },
+    commands::{NotificationCommandDecision, command_from_action_or_reply},
     config::Config,
     models::{
         command_rpc::ClientCommand,
@@ -27,8 +24,6 @@ use crate::{
         config::ConfigService,
         firewall::FirewallService,
         rule::RuleService,
-        stats::StatsService,
-        subscription::SubscriptionService,
     },
     utils::{
         channel_send::send_with_backpressure,
@@ -45,8 +40,6 @@ pub struct NotificationFlow {
     client_service: ClientService,
     rules: RuleService,
     firewall: FirewallService,
-    stats: StatsService,
-    subscriptions: SubscriptionService,
 }
 
 impl NotificationFlow {
@@ -215,8 +208,6 @@ impl NotificationFlow {
         client_service: ClientService,
         rules: RuleService,
         firewall: FirewallService,
-        stats: StatsService,
-        subscriptions: SubscriptionService,
     ) -> Self {
         Self {
             bus,
@@ -225,8 +216,6 @@ impl NotificationFlow {
             client_service,
             rules,
             firewall,
-            stats,
-            subscriptions,
         }
     }
 
@@ -237,7 +226,6 @@ impl NotificationFlow {
     ) -> Result<()> {
         let mut reconnect_state = ReconnectState::default();
         let mut active_session_id: Option<String> = None;
-        let subscription_command = SubscriptionCommandService::default();
         const QUEUED_ALERTS_MAX: usize = 32;
         let mut queued_alerts: VecDeque<pb::Alert> = VecDeque::with_capacity(QUEUED_ALERTS_MAX);
 
@@ -465,26 +453,12 @@ impl NotificationFlow {
                                     break true;
                                 }
 
-                                let parsed_action = pb::Action::try_from(action).ok();
-                                if matches!(parsed_action, Some(pb::Action::Subscriptions)) {
-                                    let reply = subscription_command
-                                        .handle_notification_rpc_first(
-                                            &mut client,
-                                            id,
-                                            &data,
-                                            &self.subscriptions,
-                                            &self.stats,
-                                        )
-                                        .await;
-                                    let _ = send_with_backpressure(&reply_tx, reply).await;
-                                    continue;
-                                }
+                                let parsed_action = pb::Action::try_from(action)
+                                    .unwrap_or(pb::Action::None);
 
-                                let cmd = match parsed_action {
-                                    Some(action) => {
-                                        match command_from_action_or_reply(
+                                let cmd = match command_from_action_or_reply(
                                             id,
-                                            action,
+                                            parsed_action,
                                             &data,
                                             rules,
                                             sys_firewall,
@@ -507,10 +481,7 @@ impl NotificationFlow {
                                                 None
                                             }
                                             NotificationCommandDecision::None => None,
-                                        }
-                                    }
-                                    None => None,
-                                };
+                                        };
 
                                 if let Some(cmd) = cmd {
                                     tracing::debug!(client_id, client_origin, notification_id = id, action, "queueing notification command");

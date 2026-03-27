@@ -17,8 +17,8 @@ impl SubscriptionService {
     }
 
     pub async fn handle_request(&self, req: pb::SubscriptionRequest) -> pb::SubscriptionReply {
-        let operation = pb::SubscriptionOperation::try_from(req.operation)
-            .unwrap_or(pb::SubscriptionOperation::Unspecified) as i32;
+        let operation = pb::SubscriptionAction::try_from(req.operation)
+            .unwrap_or(pb::SubscriptionAction::Unspecified) as i32;
 
         pb::SubscriptionReply {
             operation,
@@ -28,14 +28,29 @@ impl SubscriptionService {
         }
     }
 
-    pub fn counts(&self) -> (u64, u64, u64) {
-        (0, 0, 0)
+    pub fn subscription_stats(&self) -> pb::SubscriptionStatistics {
+        pb::SubscriptionStatistics::default()
+    }
+
+    pub fn subscription_stats_with_rules(
+        &self,
+        _list_rule_paths: &[(std::sync::Arc<str>, std::path::PathBuf)],
+    ) -> pb::SubscriptionStatistics {
+        pb::SubscriptionStatistics::default()
+    }
+
+    pub fn build_rule_subscription_entries(
+        &self,
+        _list_rule_paths: &[(std::sync::Arc<str>, std::path::PathBuf)],
+    ) -> Vec<pb::RuleSubscriptionEntry> {
+        Vec::new()
     }
 
     pub fn spawn_scheduler(
         &self,
         shutdown: CancellationToken,
         _stats: StatsService,
+        _rules: crate::services::rule::RuleService,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             shutdown.cancelled().await;

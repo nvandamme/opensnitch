@@ -1,6 +1,7 @@
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use opensnitch_proto::pb;
+#[cfg(feature = "subscriptions")]
 use pb::subscriptions_client::SubscriptionsClient;
 use pb::ui_client::UiClient;
 use std::net::IpAddr;
@@ -73,6 +74,7 @@ impl GrpcChannelCache {
 #[derive(Clone)]
 pub struct ClientService {
     grpc: Option<UiClient<Channel>>,
+    #[cfg(feature = "subscriptions")]
     subscriptions_grpc: Option<SubscriptionsClient<Channel>>,
     session: Arc<SessionState>,
 }
@@ -85,6 +87,7 @@ impl Default for ClientService {
     fn default() -> Self {
         Self {
             grpc: None,
+            #[cfg(feature = "subscriptions")]
             subscriptions_grpc: None,
             session: Arc::new(SessionState::new()),
         }
@@ -294,10 +297,12 @@ impl ClientService {
 
     fn from_channel(channel: Channel) -> Self {
         let grpc = UiClient::new(channel.clone());
+        #[cfg(feature = "subscriptions")]
         let subscriptions_grpc = SubscriptionsClient::new(channel);
         let mut service = Self::default();
         service.grpc = Some(grpc);
-        service.subscriptions_grpc = Some(subscriptions_grpc);
+        #[cfg(feature = "subscriptions")]
+        { service.subscriptions_grpc = Some(subscriptions_grpc); }
         service
     }
 
@@ -388,17 +393,18 @@ impl ClientService {
             .into_inner())
     }
 
-    pub async fn subscription_command(
-        &mut self,
-        req: pb::SubscriptionRequest,
-    ) -> Result<pb::SubscriptionReply> {
-        Ok(self
-            .subscriptions_grpc_mut()
-            .command(req)
-            .await?
-            .into_inner())
+    pub fn grpc_mut(&mut self) -> &mut UiClient<Channel> {
+        self.grpc
+            .as_mut()
+            .expect("ClientService transport not initialized; connect first")
     }
+}
 
+/// Outbound gRPC client methods for the `Subscriptions` service hosted by the
+/// Python UI on the same socket as the UI service.  All calls go through
+/// `SubscriptionFlow` which owns its own `GrpcChannelCache` and reconnect loop.
+#[cfg(feature = "subscriptions")]
+impl ClientService {
     pub async fn subscription_list(
         &mut self,
         req: pb::SubscriptionRequest,
@@ -454,10 +460,15 @@ impl ClientService {
             .into_inner())
     }
 
-    pub fn grpc_mut(&mut self) -> &mut UiClient<Channel> {
-        self.grpc
-            .as_mut()
-            .expect("ClientService transport not initialized; connect first")
+    pub async fn subscription_commands(
+        &mut self,
+        acks: impl tonic::IntoStreamingRequest<Message = pb::SubscriptionCommandAck>,
+    ) -> Result<tonic::Streaming<pb::SubscriptionCommand>> {
+        Ok(self
+            .subscriptions_grpc_mut()
+            .commands(acks)
+            .await?
+            .into_inner())
     }
 
     fn subscriptions_grpc_mut(&mut self) -> &mut SubscriptionsClient<Channel> {

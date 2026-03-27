@@ -1,6 +1,7 @@
 pub mod client;
 pub mod control;
 pub mod rule;
+#[cfg(feature = "subscriptions")]
 pub mod subscription;
 pub mod task;
 

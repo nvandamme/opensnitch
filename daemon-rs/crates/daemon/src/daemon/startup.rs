@@ -78,7 +78,7 @@ impl Daemon {
         let ping_reply = client
             .ping(opensnitch_proto::pb::PingRequest {
                 id: 1,
-                stats: Some(self.runtime.stats.snapshot(rules_count)),
+                stats: Some(self.runtime.stats.snapshot(rules_count).stats),
             })
             .await?;
 

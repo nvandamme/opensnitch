@@ -4,4 +4,6 @@ pub mod kernel;
 pub mod lifecycle;
 pub mod notification;
 pub mod stats;
+#[cfg(feature = "subscriptions")]
+pub mod subscription;
 pub mod verdict;

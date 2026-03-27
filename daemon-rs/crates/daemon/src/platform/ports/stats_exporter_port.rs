@@ -1,9 +1,13 @@
-use opensnitch_proto::pb;
+use crate::models::metrics_snapshot::MetricsSnapshot;
 
 /// Trait for pluggable stats snapshot exporters.
 ///
-/// Implementors receive a fully-built `pb::Statistics` snapshot each time the
+/// Implementors receive a [`MetricsSnapshot`] each time the
 /// `StatsFlow` emission cycle fires (1s cadence when events are pending).
+///
+/// The snapshot contains the standard `pb::Statistics` proto payload plus
+/// daemon-rs-only fields (subscription counts, per-rule hit breakdown) that
+/// are not part of the upstream `ui.proto` wire format.
 ///
 /// Intended adapter targets:
 /// - Prometheus: convert counters/gauges to text-format and serve via HTTP
@@ -19,5 +23,5 @@ pub trait StatsExporterPort: Send + Sync {
     ///
     /// Implementations must be non-blocking; offload I/O to an internal async
     /// channel or background task to avoid stalling the `StatsFlow` loop.
-    fn export_snapshot(&self, snapshot: &pb::Statistics);
+    fn export_snapshot(&self, snapshot: &MetricsSnapshot);
 }

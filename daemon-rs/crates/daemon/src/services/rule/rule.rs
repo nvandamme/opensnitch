@@ -244,4 +244,31 @@ impl RuleService {
     ) -> Box<dyn crate::workers::runtime::control::WorkerControl> {
         super::storage::start_rule_watch_task(self.clone(), shutdown)
     }
+
+    /// Returns `(rule_name, operator_data_path)` for every active rule that carries
+    /// a `lists.*` operator with a non-empty `data` directory path.
+    ///
+    /// Callers use this to cross-reference which rules are backed by subscription-managed
+    /// list directories (anything under `<subscription_root>/rules.list.d/`).
+    /// The operator tree is walked recursively, so composite `list` rules whose children
+    /// are `lists.*` operators are included as well.
+    pub fn list_rule_data_paths(&self) -> Vec<(Arc<str>, std::path::PathBuf)> {
+        fn collect(op: &crate::models::rule_record::RuleOperator, out: &mut Vec<std::path::PathBuf>) {
+            if RuleService::operator_is_lists(&op.type_name, &op.operand) && !op.data.is_empty() {
+                out.push(std::path::PathBuf::from(&op.data));
+            }
+            for child in &op.list {
+                collect(child, out);
+            }
+        }
+        let snap = self.snapshot();
+        snap.active_rules
+            .iter()
+            .flat_map(|rule| {
+                let mut paths = Vec::new();
+                collect(&rule.operator, &mut paths);
+                paths.into_iter().map(move |p| (rule.name.clone(), p))
+            })
+            .collect()
+    }
 }

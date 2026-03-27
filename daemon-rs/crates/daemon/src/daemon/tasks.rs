@@ -28,6 +28,8 @@ use crate::{
     },
     workers::runtime::control::{RuntimeHandles, WorkerControl},
 };
+#[cfg(feature = "subscriptions")]
+use crate::flows::subscription::{SubscriptionCommandFlow, SubscriptionFlow};
 
 impl Daemon {
     pub(super) fn spawn_tasks(
@@ -126,9 +128,37 @@ impl Daemon {
             "subscription-scheduler",
             self.runtime
                 .subscriptions
-                .spawn_scheduler(self.runtime.shutdown.clone(), self.runtime.stats.clone()),
+                .spawn_scheduler(self.runtime.shutdown.clone(), self.runtime.stats.clone(), self.runtime.rules.clone()),
         );
         debug!("subscription-scheduler task started");
+
+        #[cfg(feature = "subscriptions")]
+        {
+            handles.push_task(
+                "subscription-flow",
+                SubscriptionFlow::new(
+                    self.runtime.shutdown.clone(),
+                    self.runtime.config.clone(),
+                    self.runtime.subscriptions.clone(),
+                )
+                .spawn(),
+            );
+            debug!("subscription-flow task started");
+        }
+
+        #[cfg(feature = "subscriptions")]
+        {
+            handles.push_task(
+                "subscription-command-flow",
+                SubscriptionCommandFlow::new(
+                    self.runtime.shutdown.clone(),
+                    self.runtime.config.clone(),
+                    self.runtime.subscriptions.clone(),
+                )
+                .spawn(),
+            );
+            debug!("subscription-command-flow task started");
+        }
 
         let daemon = self.clone();
         let reconfigure_proc_workers: ConfigProcWorkerReconfigure = Arc::new(move |method| {

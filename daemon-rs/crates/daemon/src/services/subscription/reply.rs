@@ -1,7 +1,7 @@
 use opensnitch_proto::pb;
 
 pub(super) fn base_reply(
-    operation: pb::SubscriptionOperation,
+    operation: pb::SubscriptionAction,
     message: impl Into<String>,
     accepted: bool,
 ) -> pb::SubscriptionReply {
@@ -14,7 +14,7 @@ pub(super) fn base_reply(
 }
 
 pub(super) fn reply_with(
-    operation: pb::SubscriptionOperation,
+    operation: pb::SubscriptionAction,
     message: impl Into<String>,
     accepted: bool,
     subscriptions: Vec<pb::Subscription>,

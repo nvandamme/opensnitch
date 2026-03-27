@@ -23,19 +23,6 @@ use crate::{
     services::rule::RuleService,
 };
 
-#[cfg(feature = "subscriptions")]
-use crate::models::subscription_wire::SubscriptionReplyWire;
-#[cfg(feature = "subscriptions")]
-use crate::commands::subscription::SubscriptionCommandService;
-#[cfg(feature = "subscriptions")]
-use crate::services::stats::StatsService;
-#[cfg(feature = "subscriptions")]
-use crate::services::subscription::SubscriptionService;
-#[cfg(feature = "subscriptions")]
-use crate::services::subscription::storage::SubscriptionStorage;
-#[cfg(feature = "subscriptions")]
-use crate::tests::support::TestDir;
-
 #[derive(Default)]
 struct TestUiServer {
     open_tx: Mutex<Option<oneshot::Sender<()>>>,
@@ -294,138 +281,6 @@ fn session_binding_extracts_local_uid_for_live_unix_abstract_listener() {
     ));
 }
 
-#[cfg(feature = "subscriptions")]
-async fn handle_subscription_notification(
-    subscriptions: &SubscriptionService,
-    stats: &StatsService,
-    id: u64,
-    request_json: &str,
-) -> pb::NotificationReply {
-    SubscriptionCommandService::default()
-        .handle_notification(id, request_json, subscriptions, stats)
-        .await
-}
-
-#[cfg(feature = "subscriptions")]
-fn sample_subscription_request(url: &str) -> pb::SubscriptionRequest {
-    pb::SubscriptionRequest {
-        operation: pb::SubscriptionOperation::Apply as i32,
-        subscriptions: vec![pb::Subscription {
-            name: "fixture".to_string(),
-            url: url.to_string(),
-            enabled: true,
-            ..Default::default()
-        }],
-        ..Default::default()
-    }
-}
-
-#[cfg(feature = "subscriptions")]
-fn encode_subscription_request(request: pb::SubscriptionRequest) -> String {
-    serde_json::to_string(&serde_json::json!({
-        "operation": request.operation,
-        "subscriptions": request
-            .subscriptions
-            .into_iter()
-            .map(|s| serde_json::json!({
-                "id": s.id,
-                "name": s.name,
-                "url": s.url,
-                "filename": s.filename,
-                "groups": s.groups,
-                "enabled": s.enabled,
-                "format": s.format,
-                "interval_seconds": s.interval_seconds,
-                "timeout_seconds": s.timeout_seconds,
-                "max_bytes": s.max_bytes,
-                "node": s.node,
-                "status": s.status,
-                "last_updated": s.last_updated,
-                "last_error": s.last_error,
-            }))
-            .collect::<Vec<_>>(),
-        "targets": request.targets,
-        "force": request.force,
-    }))
-    .expect("serialize subscription request payload")
-}
-
-#[cfg(feature = "subscriptions")]
-fn decode_subscription_reply(raw_data: &str) -> pb::SubscriptionReply {
-    serde_json::from_str::<SubscriptionReplyWire>(raw_data)
-        .expect("invalid subscription reply payload")
-        .into_proto()
-}
-
-#[cfg(feature = "subscriptions")]
-#[tokio::test]
-async fn subscription_notification_requires_typed_request() {
-    let dir = TestDir::new("notification-flow-subscription-missing");
-    let stats = StatsService::default();
-    let subscriptions = SubscriptionService::new(
-        SubscriptionStorage::new(dir.path.join("subscriptions.json"))
-            .expect("create test subscription store"),
-        dir.path.join("lists"),
-    );
-    let reply = handle_subscription_notification(&subscriptions, &stats, 41, "").await;
-    assert_eq!(reply.code, pb::NotificationReplyCode::Error as i32);
-    assert!(reply.data.contains("invalid subscription request payload"));
-
-    let snapshot = stats.snapshot(0);
-    assert_eq!(snapshot.subscription_total, 0);
-    assert_eq!(snapshot.subscription_ready, 0);
-    assert_eq!(snapshot.subscription_error, 0);
-}
-
-#[cfg(feature = "subscriptions")]
-#[tokio::test]
-async fn subscription_notification_updates_stats_after_apply_and_list() {
-    let dir = TestDir::new("notification-flow-subscription-refresh");
-    let stats = StatsService::default();
-    let subscriptions = SubscriptionService::new(
-        SubscriptionStorage::new(dir.path.join("subscriptions.json"))
-            .expect("create test subscription store"),
-        dir.path.join("lists"),
-    );
-    let apply_reply = handle_subscription_notification(
-        &subscriptions,
-        &stats,
-        7,
-        &encode_subscription_request(sample_subscription_request(
-            "https://example.test/list.txt",
-        )),
-    )
-    .await;
-    assert_eq!(apply_reply.code, pb::NotificationReplyCode::Ok as i32);
-    let apply = decode_subscription_reply(&apply_reply.data);
-    assert!(apply.accepted);
-    assert_eq!(apply.subscriptions.len(), 1);
-    let apply_snapshot = stats.snapshot(0);
-    assert_eq!(apply_snapshot.subscription_total, 1);
-    assert_eq!(apply_snapshot.subscription_ready, 0);
-    assert_eq!(apply_snapshot.subscription_error, 0);
-
-    let list_reply = handle_subscription_notification(
-        &subscriptions,
-        &stats,
-        8,
-        &encode_subscription_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionOperation::List as i32,
-            ..Default::default()
-        }),
-    )
-    .await;
-    assert_eq!(list_reply.code, pb::NotificationReplyCode::Ok as i32);
-    let listed = decode_subscription_reply(&list_reply.data);
-    assert!(listed.accepted);
-    assert_eq!(listed.subscriptions.len(), 1);
-
-    let list_snapshot = stats.snapshot(0);
-    assert_eq!(list_snapshot.subscription_total, 1);
-    assert_eq!(list_snapshot.subscription_ready, 0);
-    assert_eq!(list_snapshot.subscription_error, 0);
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn notification_flow_runs_ui_poller_path_against_live_server() {
     crate::tests::support::init_test_logging();
@@ -475,8 +330,6 @@ async fn notification_flow_runs_ui_poller_path_against_live_server() {
         ClientService::default(),
         rules.clone(),
         firewall.clone(),
-        crate::services::stats::StatsService::default(),
-        crate::services::subscription::SubscriptionService::with_system_defaults(),
     );
 
     eprintln!("[notification_flow_test] stage=client-connect");

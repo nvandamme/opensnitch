@@ -61,8 +61,6 @@ impl Daemon {
             self.runtime.client.clone(),
             self.runtime.rules.clone(),
             self.runtime.firewall.clone(),
-            self.runtime.stats.clone(),
-            self.runtime.subscriptions.clone(),
         );
 
         self.spawn_workers(&mut handles).await;

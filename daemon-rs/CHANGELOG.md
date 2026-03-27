@@ -10,6 +10,121 @@ Versioning baseline:
 - `v0.4.0`
 - `v0.5.0`
 - `v0.6.0`
+- `v0.7.0`
+
+## [v0.7.0] - 2026-03-27
+
+### Added
+
+- **Dedicated subscription proto surface** (`proto/subscriptions.proto`, `proto/ui.proto`):
+  - All subscription types (`Subscription`, `SubscriptionRequest`, `SubscriptionReply`,
+    `SubscriptionAction`, `SubscriptionStatus`, `SubscriptionRefreshMetadata`,
+    `SubscriptionCommand`, `SubscriptionCommandAck`) moved from `ui.proto` into a separate
+    `subscriptions.proto` with its own `Subscriptions` service and bi-directional
+    `Commands` streaming RPC.
+  - `ui.proto` retains only connection/verdict/ping-stats wire types — no subscription
+    coupling in the core telemetry path.
+  - New proto messages: `SubscriptionEvent` (lifecycle event record, mirrors `ui.Event`
+    shape) and `SubscriptionStatistics` (mirrored three-layer shape: scalars + breakdown
+    maps + event ring, matches `Statistics`).
+  - New `RuleSubscriptionEntry` message for N:N rule→subscription mapping:
+    `rule: string` + `repeated string subscriptions` (sorted, deduplicated).
+
+- **Per-subscription metrics export** (`services/subscription/`, `platform/adapters/stats_exporter_*`):
+  - `SubscriptionStatistics` populated from `SubscriptionService` at every stats collection
+    cycle (bootstrap + refresh-scheduler tick).
+  - Scalar gauges: `opensnitch_subscription_total / ready / error / refresh_count / refresh_errors`.
+  - Labeled breakdown gauges: `opensnitch_subscription_by_status{status=...}`,
+    `opensnitch_subscription_by_group{group=...}`, `opensnitch_subscription_by_node{node=...}`.
+  - Emitted across all export formats: Prometheus text 0.0.4, OpenMetrics 1.0.0,
+    Prometheus protobuf (length-delimited), push-gateway push, and InfluxDB line protocol.
+  - Subscription event ring (`repeated SubscriptionEvent events`, capacity 64, newest-first)
+    records lifecycle events (apply/refresh/delete/error) with RFC 3339 timestamp + action +
+    Unix nanosecond for deduplication, mirroring `ui.Event` semantics.
+  - `MetricsSnapshot` model (`models/metrics_snapshot.rs`) unifies `pb::Statistics` +
+    `Option<pb::SubscriptionStatistics>` for single-pass snapshot hand-off to exporters.
+
+- **Rule→subscription N:N mapping in metrics** (`services/subscription/subscription.rs`,
+  `services/rule/rule.rs`, `proto/subscriptions.proto`):
+  - `RuleService::list_rule_data_paths()` scans active rules for `lists.*` operators
+    (recursive into composite `list` operators) and returns `(rule_name, data_path)` pairs.
+  - `SubscriptionService::build_rule_subscription_entries()` cross-references those paths
+    against `<root>/rules.list.d/` (groups: `sanitize(filename)`, `"all"`, and explicit
+    groups per `layout.rs`), collecting the full N:N mapping per rule via `HashSet`
+    deduplication.
+  - `subscription_stats_with_rules(list_rule_paths)` produces `SubscriptionStatistics`
+    with the `rule_subscriptions` field populated; called from `bootstrap.rs` at startup
+    and from `refresh_scheduler.rs` after each refresh cycle (now accepts `RuleService`).
+  - Exported as: `opensnitch_subscription_rule_info{rule=...,subscription=...} 1` gauge
+    (one row per rule×subscription pair, Prometheus/OpenMetrics/proto);
+    `opensnitch_subscription_rule,rule=...,subscription=... info=1i` (InfluxDB).
+
+- **Per-rule hit counts in metrics export** (`services/stats/`, `platform/adapters/stats_exporter_*`,
+  `proto/ui.proto`):
+  - New `by_rule` map in `Statistics` proto (tag 21) tracking per-rule connection hit counts.
+  - `on_rule_hit(rule_name)` in `StatsService` bumps a `LimitedCountersString` breakdown.
+  - Exposed as `opensnitch_rule_hits_by_rule{rule="<name>"}` gauge across all metrics
+    formats: Prometheus text 0.0.4, OpenMetrics 1.0.0, Prometheus protobuf, push-gateway,
+    and InfluxDB line protocol (`opensnitch_by_rule,rule=<name> connections=<n>i`).
+  - Subject to `max_stats` top-N eviction like existing breakdown maps.
+  - Provides per-rule observability for Grafana dashboards without requiring syslog parsing.
+
+- **Subscription command layer restructured** (`commands/subscription/`, `models/command_rpc.rs`):
+  - `commands/subscription/wire.rs` removed; wire-protocol concerns inlined into
+    `commands/subscription/subscription.rs` alongside the bidirectional `Commands` stream.
+  - `SubscriptionCommandServiceImpl` handles the `Commands` stream with per-command dispatch,
+    full error propagation, and graceful shutdown on cancellation.
+  - `CommandRpcPayload` model (`models/command_rpc.rs`) replaces the old `subscription_wire`
+    model — carries `id`, `action`, `data`, and `accepted` field for ack construction.
+
+- **Subscription flow** (`flows/subscription/`):
+  - Dedicated `SubscriptionFlow` task wired in `daemon/tasks.rs`; drives the `Commands`
+    bidirectional stream, dispatching each `SubscriptionCommand` to `SubscriptionService`
+    and writing back `SubscriptionCommandAck` inline.
+
+- **Mock UI client subscription + metrics coverage** (`scripts/mock_ui_client.py`):
+  - `MOCK_UI PingStats` markers log all `pb.Statistics` wire fields (scalars, map row
+    counts, one event sample) for live-session observability.
+  - Subscription state (`pb.ListReply`, subscription event counts) logged via `MOCK_UI`
+    markers for integration-level traceability.
+  - Client handles graceful `GOAWAY` / `RpcError` on shutdown without noisy stack traces.
+
+- **Metrics test suite** (`tests/metrics/stats_exporter_prometheus.rs`,
+  `tests/metrics/stats_exporter_push.rs`):
+  - 74 new tests (total: **547** tests, 7 ignored):
+    - Prometheus text 0.0.4: scalar correctness, TYPE/HELP lines, label escaping,
+      subscription gauges, breakdown maps, rule_info N:N rows, absent-when-empty guards.
+    - OpenMetrics 1.0.0: counter base-name TYPE line, `_created` timestamp, EOF sentinel,
+      subscription scalars, rule_info emission.
+    - Prometheus protobuf: MetricFamily stream decoding, scalar counters, by_status labels,
+      rule_info family presence/count/two-label validation, absent-when-empty guard.
+    - Content negotiation: OpenMetrics beats plain-text, proto explicit-param detection,
+      wildcard/empty fallback to text.
+    - Gzip helper: round-trip compress/decompress, empty input sentinel.
+    - HTTP live tests: `GET /metrics` text, proto, gzip, `HEAD` method, 404 on unknown path.
+    - Push text/proto: subscription gauges, breakdowns, rule_info N:N rows.
+    - InfluxDB: stats measurement line fields, subscription breakdown tags, rule tags,
+      tag-value escaping, timestamp format, absent-when-empty guard.
+    - `build_endpoint`: pushgateway/proto path construction, InfluxDB bucket+precision query
+      append, duplicate prevention.
+    - HTTP integration tests (mock server): pushgateway POST, InfluxDB POST body, gzip,
+      bearer auth.
+
+### Changed
+
+- `SubscriptionService::spawn_scheduler` now accepts `RuleService` alongside `StatsService`
+  to enable rule→subscription cross-reference on every refresh cycle without daemon restart.
+- `bootstrap.rs` initial stats snapshot uses `subscription_stats_with_rules` to populate
+  `rule_subscriptions` from the startup rule set.
+- `services/stats/` internal split: `StatsService` now carries `update_subscription_stats`
+  method; `MetricsSnapshot` is the hand-off type between `StatsFlow` and exporters.
+- `stats_exporter_prometheus.rs` and `stats_exporter_push.rs` updated to consume
+  `MetricsSnapshot` (carrying `Option<pb::SubscriptionStatistics>`) instead of raw
+  `pb::Statistics`; both adapters are feature-gated under `metrics-export`.
+- `proto/ui.proto`: subscription message types removed; file now contains only
+  `UIService` RPC surface, `Statistics`, `Event`, `Rule`, and connection/verdict types.
+- Notification flow (`flows/notification/`) stripped of now-superseded subscription
+  bridging logic; notification tests pruned accordingly.
 
 ## [v0.6.0] - 2026-03-27
 

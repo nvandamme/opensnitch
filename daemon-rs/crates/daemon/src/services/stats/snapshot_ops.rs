@@ -1,8 +1,8 @@
 use std::sync::atomic::Ordering;
-
 use opensnitch_proto::pb;
 
 use crate::models::connection_state::ConnectionAttempt;
+use crate::models::metrics_snapshot::MetricsSnapshot;
 
 use super::{internal::{BreakdownCounters, EventsState}, stats::StatsService};
 
@@ -12,7 +12,7 @@ impl StatsService {
     /// array, then converts to `String` with a single exact-sized allocation
     /// — avoids the `time::format_description` dispatch overhead of the
     /// previous `dt.format(EVENT_TIME_FORMAT)` call.
-    pub(super) fn format_event_time(unix_nano: i64) -> String {
+    pub(crate) fn format_event_time(unix_nano: i64) -> String {
         use std::io::Write;
         let secs = unix_nano.div_euclid(1_000_000_000);
         let Ok(dt) = time::OffsetDateTime::from_unix_timestamp(secs) else {
@@ -51,10 +51,10 @@ impl StatsService {
         bd: &mut BreakdownCounters,
         ev: &mut EventsState,
         rules_count: u64,
-    ) -> pb::Statistics {
+    ) -> MetricsSnapshot {
         let events = ev.events.drain_all();
 
-        pb::Statistics {
+        let stats = pb::Statistics {
             daemon_version: Self::daemon_version_string(),
             rules: rules_count,
             uptime: ev
@@ -90,9 +90,16 @@ impl StatsService {
                 .collect(),
             by_executable: bd.by_executable.map.clone(),
             events,
-            subscription_total: self.sub_total.0.load(Ordering::Relaxed),
-            subscription_ready: self.sub_ready.0.load(Ordering::Relaxed),
-            subscription_error: self.sub_error.0.load(Ordering::Relaxed),
+        };
+
+        MetricsSnapshot {
+            stats,
+            subscription_stats: self
+                .sub_stats
+                .lock()
+                .expect("subscription stats mutex poisoned")
+                .clone(),
+            by_rule: bd.by_rule.map.clone(),
         }
     }
 }

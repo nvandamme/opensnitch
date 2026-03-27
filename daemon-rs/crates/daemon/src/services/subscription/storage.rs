@@ -166,20 +166,51 @@ impl SubscriptionStorage {
             .context("joining subscription storage flush task")?
     }
 
-    /// Returns `(total, ready, errored)` subscription counts.
-    pub fn counts(&self) -> (u64, u64, u64) {
+    /// Returns a `pb::SubscriptionStatistics` snapshot for metrics export.
+    ///
+    /// Computes scalars (total/ready/error) and breakdown maps (by_status,
+    /// by_group, by_node) from the current storage state in a single lock pass.
+    /// The event log and cumulative counters (refresh_count, refresh_errors)
+    /// are supplied by the caller and merged in before returning.
+    pub fn subscription_stats(
+        &self,
+        refresh_count: u64,
+        refresh_errors: u64,
+        events: Vec<pb::SubscriptionEvent>,
+    ) -> pb::SubscriptionStatistics {
         let inner = self.inner.lock().expect("subscription storage poisoned");
         let mut total = 0u64;
         let mut ready = 0u64;
-        let mut errored = 0u64;
+        let mut error = 0u64;
+        let mut by_status: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        let mut by_group:  std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        let mut by_node:   std::collections::HashMap<String, u64> = std::collections::HashMap::new();
         for record in inner.items.values() {
             total += 1;
             match record.status.as_str() {
                 "ready" => ready += 1,
-                "error" => errored += 1,
+                "error" => error += 1,
                 _ => {}
             }
+            *by_status.entry(record.status.clone()).or_default() += 1;
+            for group in &record.groups {
+                *by_group.entry(group.clone()).or_default() += 1;
+            }
+            if !record.node.is_empty() {
+                *by_node.entry(record.node.clone()).or_default() += 1;
+            }
         }
-        (total, ready, errored)
+        pb::SubscriptionStatistics {
+            total,
+            ready,
+            error,
+            refresh_count,
+            refresh_errors,
+            by_status,
+            by_group,
+            by_node,
+            events,
+            rule_subscriptions: vec![],
+        }
     }
 }

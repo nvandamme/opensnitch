@@ -89,7 +89,6 @@ impl CommandFlow {
         let command_control = CommandControlService::default();
         let rule_command = RuleCommandService::default();
         let task_command = TaskCommandService::default();
-
         tokio::spawn(async move {
             let mut task_runtime = task::TaskRuntime::new(
                 task_runtime.clone(),

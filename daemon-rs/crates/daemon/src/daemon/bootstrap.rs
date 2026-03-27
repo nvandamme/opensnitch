@@ -147,11 +147,11 @@ impl Daemon {
             }),
         };
 
-        let (sub_total, sub_ready, sub_error) = daemon.runtime.subscriptions.counts();
+        let list_rule_paths = daemon.runtime.rules.list_rule_data_paths();
         daemon
             .runtime
             .stats
-            .update_subscription_counts(sub_total, sub_ready, sub_error);
+            .update_subscription_stats(daemon.runtime.subscriptions.subscription_stats_with_rules(&list_rule_paths));
 
         daemon.runtime.stats.apply_config(config.stats);
 

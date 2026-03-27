@@ -17,6 +17,48 @@ pub struct TaskNotification {
     pub data: Value,
 }
 
+/// Serde input type for subscription notification `data` JSON payloads.
+///
+/// Used by `SUBSCRIPTION_APPLY`, `SUBSCRIPTION_DELETE`, `SUBSCRIPTION_REFRESH`,
+/// and `SUBSCRIPTION_DEPLOY` notification actions arriving on the daemon's
+/// Notifications gRPC stream.
+#[cfg(feature = "subscriptions")]
+#[derive(Deserialize, Default)]
+pub struct IncomingSubscriptionNotification {
+    #[serde(default)]
+    pub subscriptions: Vec<IncomingSubscription>,
+    #[serde(default)]
+    pub targets: Vec<String>,
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[cfg(feature = "subscriptions")]
+#[derive(Deserialize, Default)]
+pub struct IncomingSubscription {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[cfg(feature = "subscriptions")]
+impl From<IncomingSubscription> for pb::Subscription {
+    fn from(s: IncomingSubscription) -> Self {
+        pb::Subscription {
+            id: s.id,
+            name: s.name,
+            url: s.url,
+            enabled: s.enabled,
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ClientCommand {
     SetInterception {
