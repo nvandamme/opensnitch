@@ -27,6 +27,12 @@ pub(crate) trait WatchWorkerControl: Send + 'static {
     fn targets(&self) -> Vec<PathBuf>;
     fn scan<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
+    /// Called by the trigger task before `scan()` to indicate whether this
+    /// scan was triggered by an inotify event (`true`) or a poll-interval
+    /// tick (`false`).  Implementations can use this to skip redundant I/O
+    /// when the kernel already told us something changed.
+    fn set_inotify_hint(&mut self, _inotify: bool) {}
+
     fn empty_targets_behavior(&self) -> EmptyWatchTargetsBehavior {
         EmptyWatchTargetsBehavior::WarnPollFallback
     }
@@ -141,10 +147,11 @@ impl<S: WatchWorkerControl> GenericWatchWorkerControl<S> {
             self.poll_interval,
             self.targets.clone(),
             self.empty_targets_behavior,
-            move || {
+            move |is_inotify| {
                 let spec = spec_for_trigger.clone();
                 async move {
                     let mut spec = spec.lock().await;
+                    spec.set_inotify_hint(is_inotify);
                     spec.scan().await;
                 }
             },
@@ -176,7 +183,7 @@ pub(crate) fn spawn_scanner_watch_task<F, Fut>(
     on_scan_trigger: F,
 ) -> tokio::task::JoinHandle<()>
 where
-    F: FnMut() -> Fut + Send + 'static,
+    F: FnMut(bool) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
     let mut on_scan_trigger = on_scan_trigger;
@@ -185,8 +192,8 @@ where
         poll_interval,
         targets,
         empty_targets_behavior,
-        move || {
-        Box::pin(on_scan_trigger())
+        move |is_inotify| {
+        Box::pin(on_scan_trigger(is_inotify))
         },
     )
 }
@@ -233,7 +240,7 @@ fn spawn_watch_trigger_task<F>(
     mut on_scan_trigger: F,
 ) -> tokio::task::JoinHandle<()>
 where
-    F: FnMut() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static,
+    F: FnMut(bool) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static,
 {
     tokio::spawn(async move {
         let (_watcher, mut fs_rx_enabled, mut fs_rx) =
@@ -241,6 +248,7 @@ where
 
         loop {
             let mut should_scan = false;
+            let mut is_inotify = false;
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = tokio::time::sleep(poll_interval) => {
@@ -248,7 +256,7 @@ where
                 }
                 event = fs_rx.recv(), if fs_rx_enabled => {
                     match event {
-                        Some(()) => should_scan = true,
+                        Some(()) => { should_scan = true; is_inotify = true; }
                         None => {
                             fs_rx_enabled = false;
                             tracing::warn!(interval = ?poll_interval, "filesystem watch channel closed, continuing with poll-only fallback");
@@ -261,7 +269,7 @@ where
                 continue;
             }
 
-            on_scan_trigger().await;
+            on_scan_trigger(is_inotify).await;
         }
     })
 }

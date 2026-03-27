@@ -88,17 +88,6 @@ where
     drain_try_recv_burst_impl(rx, max_items, should_continue)
 }
 
-pub(crate) fn drain_try_recv_burst_unbounded<T, C>(
-    rx: &mut mpsc::UnboundedReceiver<T>,
-    max_items: usize,
-    should_continue: C,
-) -> TryRecvBurst<T>
-where
-    C: FnMut() -> bool,
-{
-    drain_try_recv_burst_impl(rx, max_items, should_continue)
-}
-
 pub(crate) fn dispatch_kernel_event_with_backoff(
     tx: &mpsc::Sender<KernelEvent>,
     event: KernelEvent,

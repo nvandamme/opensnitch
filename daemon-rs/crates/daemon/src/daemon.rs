@@ -75,8 +75,10 @@ pub(crate) struct DaemonRuntime {
     pub(crate) tunables: RuntimeTunables,
     pub(crate) shutdown: CancellationToken,
     /// Metrics export config loaded from `metrics.json` at startup (§7 baseline JSON layer).
+    #[cfg_attr(not(feature = "metrics-export"), allow(dead_code))]
     pub(crate) metrics_config: crate::models::metrics_config::MetricsConfig,
     /// Metrics CLI overrides supplied via `--metrics-*` flags (§7 highest tier; overrides env vars and JSON).
+    #[cfg_attr(not(feature = "metrics-export"), allow(dead_code))]
     pub(crate) metrics_cli: crate::models::metrics_config::MetricsCliOverrides,
     /// Hot-reload handle for the Prometheus scrape HTTP server.
     ///

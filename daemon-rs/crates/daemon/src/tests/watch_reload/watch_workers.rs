@@ -92,7 +92,27 @@ fn prepare_runtime_watch_fixture(rules_path: &Path, firewall_path: &Path, tasks_
 }
 
 async fn write_rule_file(rules_dir: &Path, name: &str, action: &str) {
-    let rule = RuleFile {
+    let rule = make_test_rule(name, action);
+    tokio::fs::write(
+        rules_dir.join(format!("{name}.json")),
+        serde_json::to_string(&rule).expect("serialize test rule"),
+    )
+    .await
+    .expect("write test rule");
+}
+
+/// Sync variant for use in timed sections — matches Go's synchronous Copy().
+fn write_rule_file_sync(rules_dir: &Path, name: &str, action: &str) {
+    let rule = make_test_rule(name, action);
+    std::fs::write(
+        rules_dir.join(format!("{name}.json")),
+        serde_json::to_string(&rule).expect("serialize test rule"),
+    )
+    .expect("write test rule (sync)");
+}
+
+fn make_test_rule(name: &str, action: &str) -> RuleFile {
+    RuleFile {
         created: String::new(),
         updated: String::new(),
         name: name.to_string(),
@@ -110,14 +130,7 @@ async fn write_rule_file(rules_dir: &Path, name: &str, action: &str) {
             scope: None,
             list: Vec::new(),
         },
-    };
-
-    tokio::fs::write(
-        rules_dir.join(format!("{name}.json")),
-        serde_json::to_string(&rule).expect("serialize test rule"),
-    )
-    .await
-    .expect("write test rule");
+    }
 }
 
 async fn write_lists_rule_file(rules_dir: &Path, name: &str, operand: &str, list_path: &Path) {
@@ -546,8 +559,10 @@ async fn rules_watch_task_matches_go_live_reload_add_then_delete_flow() {
     tokio::time::sleep(Duration::from_secs(1)).await;
     let reload_started = Instant::now();
 
-    write_rule_file(&rules_path, "test-live-reload-remove", "deny").await;
-    write_rule_file(&rules_path, "test-live-reload-delete", "deny").await;
+    // Use sync writes to match Go's synchronous Copy() — avoids measuring
+    // spawn_blocking overhead from tokio::fs in the timed section.
+    write_rule_file_sync(&rules_path, "test-live-reload-remove", "deny");
+    write_rule_file_sync(&rules_path, "test-live-reload-delete", "deny");
 
     // Poll at 5ms: epoll now delivers events near-instantly so a 50ms poll
     // would dominate the measured latency with noise.  5ms ≈ Go's synchronous
@@ -561,11 +576,9 @@ async fn rules_watch_task_matches_go_live_reload_add_then_delete_flow() {
     )
     .await;
 
-    remove_file_async(
-        &rules_path.join("test-live-reload-remove.json"),
-        "delete rule file test-live-reload-remove.json",
-    )
-    .await;
+    // Sync remove to match Go's os.Remove().
+    std::fs::remove_file(rules_path.join("test-live-reload-remove.json"))
+        .expect("delete rule file test-live-reload-remove.json");
     rules_service
         .delete_by_name("test-live-reload-delete")
         .await

@@ -39,6 +39,7 @@ pub enum PushFormatConfig {
     InfluxDb,
 }
 
+#[cfg_attr(not(feature = "metrics-export"), allow(dead_code))]
 impl PushFormatConfig {
     /// Return the canonical kebab-case name used by env vars / CLI.
     pub fn as_str(&self) -> &'static str {

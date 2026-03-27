@@ -9,9 +9,98 @@ Versioning baseline:
 - `v0.3.0`
 - `v0.4.0`
 - `v0.5.0`
-- `v0.5.1`
+- `v0.6.0`
 
-## [v0.5.1] - unreleased
+## [v0.6.0] - 2026-03-27
+
+
+### Added
+- **Persistent file-based hash cache** (`services/process/hash_cache.rs`, `models/hash_cache.rs`):
+  - `PersistentHashCache` stores process binary checksums (md5/sha1/sha256) to disk as JSON,
+    surviving daemon restarts.
+  - Cache key: `(exe_path, inode, mtime_secs, file_size)` — any binary change from a package
+    update, recompile, or manual edit automatically invalidates the cached entry.
+  - `DashMap`-backed in-memory store with periodic JSON flush (60 s) to
+    `/var/cache/opensnitchd/hash_cache.json` (falls back to `$TMPDIR/opensnitchd/`).
+  - Stale-entry GC every 10 minutes: re-stats each cached path and removes entries whose
+    on-disk metadata no longer matches (covers in-flight package upgrades).
+  - Atomic write (tmp file + rename) for crash safety; shutdown hook performs final flush.
+  - `spawn_hash_update` checks persistent cache before computing hashes from file I/O;
+    stores results on cache miss.
+  - Background flush/GC task wired via `spawn_hash_cache_flush_task` in `daemon/tasks.rs`.
+  - 4 new tests: insert/lookup, flush+reload persistence, invalidation on binary size
+    change, GC removes entries for deleted files.
+
+- **Session snapshot copy-on-write** (`services/client/client.rs`, `services/client/session.rs`):
+  - Replaced `owned_snapshot()` + mutate + `publish_snapshot()` pattern with
+    `modify_snapshot(|s| { ... })` using `watch::Sender::send_modify()` + `Arc::make_mut()`.
+  - Under no contention (common case), the inner data is mutated in-place with zero
+    allocation. Under contention, `Arc::make_mut` clones — the minimum necessary for
+    concurrent correctness.
+  - All 4 mutation methods converted: `upsert_session`, `disconnect_session`,
+    `set_session_default_action`, `set_connected_default_action`.
+
+- **AdBlock/AdGuard list format support** (`services/rule/utilities.rs`, `services/rule/storage.rs`):
+  - `normalize_domain_list_entry` parses `||domain^` (AdBlock/AdGuard domain anchor) by
+    stripping `||` and terminating at the first `^`, `$`, or `/`.
+  - Exception rules (`@@||domain^`), cosmetic filters (`##`, `#@#`), header lines
+    (`[Adblock Plus…]`), and `!` comments return `None`.
+  - Wildcard entries (`||*.tracker.net^`) handled by existing `DomainWildcardTrie` path.
+  - `||domain^` now matches both `domain` AND `sub.domain` per AdBlock spec.
+
+- **Unified `lists.domains` cascade** — a single `lists.domains` operator now handles plain
+  domains, `||anchor^` rules, wildcard/glob entries, and `/regex/` patterns from the same
+  mixed file.  Matching cascades: `HashSet` (O(1)) → `DomainWildcardTrie` → `GlobMatcher`
+  → `domains_regex` (Aho/regex, only when all fast-path lookups miss).
+
+### Changed (Performance)
+- **Inotify-hint fast path for rule watch reload** — When the kernel's inotify
+  event tells us the rules directory changed, skip the redundant readdir+stat
+  state-comparison and go straight to reload.  Adds `set_inotify_hint()` to the
+  `WatchWorkerControl` trait, `load_rules_from_path_sync()` / `reload_sync()`
+  methods that batch all file I/O into a single `spawn_blocking` call, and sync
+  writes in the measured parity test section (matching Go's synchronous `Copy()`).
+- **Hot/cold path optimizations** — 7 items (3 HIGH, 4 MEDIUM):
+  - Eliminate per-probe `format!` allocation in `services/connection/owner.rs`.
+  - Replace per-connection `HashSet` with bounded hop-limit loop in DNS alias-cycle detection.
+  - Remove per-rule-eval `String` allocations via `OnceLock<String>` fields in `AttemptDerived`.
+  - Reduce verdict decision key allocation: `DashMap<String, u64>` → `DashMap<u64, u64>`.
+  - Remove `cleanup_expired()` from `inspect()` hot path (background task handles it).
+  - Stack-allocated eBPF key building (`BpfKey { V4, V6 }` enum).
+  - Avoid per-event closure capture in kernel pipeline dispatch.
+  - Remove eager clone before `ask_rule` in verdict flow.
+
+- **Codebase optimization pass** — 14 items (3 HIGH, 6 MEDIUM, 5 LOW):
+  - **HIGH**: Single `/proc/{pid}/stat` read in process inspection; pool gRPC client
+    connections via `GrpcChannelCache` (`ArcSwap` + config fingerprint); shared
+    `build_checksums`/`build_env_map` helpers in proto mapper with `HashMap::with_capacity`.
+  - **MEDIUM**: Bound netlink dispatch channels (`sync_channel(512)` + `try_send`);
+    DNS dedup overflow-only `retain`; narrow task-watch mutex scope (load/apply split);
+    SIEM sinks `Arc<[SinkHandle]>` clone; `SinkFormat` enum precomputed at build time;
+    single-pass socket candidates with priority-tiered buckets.
+  - **LOW**: Coalesce inotify triggers via bounded(1) channel; `connected_sessions_count()`
+    for zero-alloc count; `BufReader` for `/proc/net/packet` and `/proc/net/xdp`;
+    stack buffer `[u64;8]` for `/proc/stat` CPU parsing; session snapshot CoW via
+    `Arc::make_mut`.
+
+- **Cache typed eBPF map handles** in `services/connection/ebpf.rs` — `MapData::from_id`
+  opened once per connection instead of 3× (exact key, wildcard dst, swapped); 2 fd-open
+  syscalls and 2 BTF validations saved per connection.
+- **`BufReader` for `/proc/net/*` fallback** in `services/connection/owner.rs`.
+- **Eliminate Vec allocation in ICMP packet-socket fallback** — `Option<ConnectionOwner>`
+  single-slot tracking replaces `Vec`.
+- **Bound kernel ingress channels** — `channel(capacity)` reusing downstream tunables.
+- **Narrow rules-watch mutex scope** — clone-drop-reacquire pattern.
+- **Parallelise cold-path list file I/O** via `tokio::task::JoinSet`.
+- **Avoid per-event String allocation in `format_event_time`** — stack `[u8; 19]` buffer.
+
+### Fixed
+- `||domain^` entries now match subdomains (`www.example.org`) in addition to the exact
+  domain — `DomainWildcardTrie::insert_domain_and_subdomains` uses `required = labels.len()`
+  instead of `labels.len() + 1`.
+
+
+#### Included from unreleased v0.5.1
 
 ### Added
 - **Prometheus `/metrics` scrape endpoint** (`platform/adapters/stats_exporter_prometheus.rs`,
@@ -383,6 +472,7 @@ Versioning baseline:
 - **Stats exporter moved to Future enhancements**: `StatsExporterPort` extension point
   and `StatsFlow` hook are already wired; concrete Prometheus/push-style adapter
   implementations deferred to a dedicated future feature.
+
 
 ## [v0.5.0] - 2026-03-26
 

@@ -71,6 +71,59 @@ impl RuleService {
         Ok((loaded, temporary_rules))
     }
 
+    /// Synchronous rule loading — batches all file I/O into the caller's
+    /// thread, avoiding per-file `spawn_blocking` roundtrips.  Used by the
+    /// inotify fast-path reload where latency matters.
+    pub(crate) fn load_rules_from_path_sync(
+        path: &Path,
+    ) -> Result<(Vec<RuleRecord>, Vec<(String, RuleDuration)>)> {
+        let mut loaded = Vec::new();
+        let mut temporary_rules = Vec::new();
+
+        let entries = std::fs::read_dir(path)
+            .with_context(|| format!("failed to read rules directory {}", path.display()))?;
+
+        let mut json_paths: Vec<PathBuf> = entries
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        json_paths.sort();
+
+        for file_path in json_paths {
+            let contents = std::fs::read_to_string(&file_path)
+                .with_context(|| format!("failed to read rule file {}", file_path.display()))?;
+            let rule_file: RuleFile = serde_json::from_str(&contents)
+                .with_context(|| format!("failed to parse rule file {}", file_path.display()))?;
+            let record = RuleRecord::from(rule_file);
+            if record.enabled
+                && let Err(err) = Self::validate_operator(&record.operator)
+            {
+                warn!(
+                    file = %file_path.display(),
+                    rule = %record.name,
+                    err = %err,
+                    "skipping invalid enabled rule"
+                );
+                continue;
+            }
+            if record.enabled && rule_duration_temporary_spec(&record.duration).is_some() {
+                temporary_rules.push((record.name.clone(), record.duration.clone()));
+            }
+            loaded.push(record);
+        }
+
+        loaded.sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
+
+        Ok((loaded, temporary_rules))
+    }
+
     pub(crate) async fn load_list_entries_async_plain(path: &Path) -> Result<Vec<String>> {
         let mut entries = Vec::new();
         let storage = StorageService::global();
@@ -314,6 +367,10 @@ struct RuleWatchControl {
     rules: RuleService,
     targets: Vec<PathBuf>,
     last_state: Arc<tokio::sync::Mutex<Option<BTreeMap<String, Option<SystemTime>>>>>,
+    /// When `true`, this scan was triggered by an inotify event — the kernel
+    /// already told us something changed so we skip the redundant readdir+stat
+    /// state-comparison pass and go straight to reload.
+    inotify_hint: bool,
 }
 
 impl WatchWorkerControl for RuleWatchControl {
@@ -329,24 +386,55 @@ impl WatchWorkerControl for RuleWatchControl {
         self.targets.clone()
     }
 
+    fn set_inotify_hint(&mut self, inotify: bool) {
+        self.inotify_hint = inotify;
+    }
+
     fn scan<'a>(
         &'a mut self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         let rules = self.rules.clone();
         let last_state = self.last_state.clone();
+        let forced = self.inotify_hint;
         Box::pin(async move {
             let snapshot = rules.snapshot();
             let path = snapshot.rules_path.as_path();
             StorageService::global().emit_scan("rule", path);
-            // Derive list dirs from the in-memory snapshot to avoid re-reading all
-            // JSON rule files on every scan tick.
+
+            if forced {
+                // inotify told us something changed — skip the readdir+stat
+                // state-comparison and reload directly (single directory pass).
+                let previous_rules = rules.get_proto_snapshot();
+                if let Err(err) = rules.reload_sync().await {
+                    tracing::error!(path = %path.display(), "failed to reload rules after inotify event: {err}");
+                } else {
+                    tracing::info!(path = %path.display(), "rules reloaded after inotify event");
+                }
+
+                // Log removed rules by comparing previous vs new snapshots.
+                let new_snapshot = rules.snapshot();
+                let new_names: std::collections::HashSet<&str> =
+                    new_snapshot.rules.iter().map(|r| r.name.as_str()).collect();
+                for rule in previous_rules.iter() {
+                    if !new_names.contains(rule.name.as_str()) {
+                        tracing::info!("{}", RuleService::format_deleted_rule(rule));
+                        tracing::info!("Rule deleted {}.json", rule.name);
+                    }
+                }
+
+                // Invalidate cached state so the next poll tick re-derives it
+                // without triggering another reload.  This keeps the readdir+stat
+                // off the inotify critical path entirely.
+                *last_state.lock().await = None;
+                return;
+            }
+
+            // Poll-triggered scan: read directory state and compare with
+            // previous to avoid unnecessary reloads.
             let known_list_dirs = RuleService::snapshot_list_dirs(&snapshot.rules);
             let state =
                 RuleService::read_rules_dir_file_state_with_hint(path, &known_list_dirs).await;
 
-            // Clone previous state under a short lock, then drop the lock before
-            // the expensive rules.reload() call — prevents holding the async mutex
-            // across I/O work.
             let previous = last_state.lock().await.clone();
 
             let changed = match (&previous, &state) {
@@ -399,6 +487,7 @@ pub(super) fn start_rule_watch_task(
         rules,
         targets,
         last_state: Arc::new(tokio::sync::Mutex::new(None)),
+        inotify_hint: false,
     }
     .build(shutdown)
 }

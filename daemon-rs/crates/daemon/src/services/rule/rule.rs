@@ -123,6 +123,25 @@ impl RuleService {
         self.load_path(snapshot.rules_path.as_path()).await
     }
 
+    /// Reload using synchronous file I/O batched in a single blocking call.
+    /// Avoids per-file `spawn_blocking` roundtrips on the inotify fast path.
+    pub async fn reload_sync(&self) -> Result<usize> {
+        let _update_guard = self.update_lock.lock().await;
+        let snapshot = self.snapshot();
+        let path = snapshot.rules_path.clone();
+        let (loaded, temporary_rules) =
+            tokio::task::spawn_blocking(move || Self::load_rules_from_path_sync(&path))
+                .await
+                .map_err(|e| anyhow::anyhow!("sync rule load join: {e}"))??;
+        let loaded_count = self
+            .build_and_publish_snapshot(snapshot.rules_path.as_path(), loaded)
+            .await?;
+        for (rule_name, duration) in temporary_rules {
+            self.schedule_temporary_rule(rule_name, duration);
+        }
+        Ok(loaded_count)
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub async fn list_proto(&self) -> Vec<pb::Rule> {
         self.snapshot().proto_rules.as_ref().clone()
