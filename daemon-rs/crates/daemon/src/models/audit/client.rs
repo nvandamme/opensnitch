@@ -2,6 +2,8 @@ use crate::models::command_action::CommandAction;
 
 /// Client service lifecycle transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum ClientLifecycle {
     Initialized,
     Started,
@@ -15,6 +17,8 @@ pub enum ClientLifecycle {
 
 /// Notification-flow lifecycle transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum NotificationFlowLifecycle {
     Started,
     Stopped,
@@ -24,6 +28,8 @@ pub enum NotificationFlowLifecycle {
 
 /// Command-flow lifecycle transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum CommandFlowLifecycle {
     Started,
     Stopped,
@@ -32,6 +38,8 @@ pub enum CommandFlowLifecycle {
 
 /// Control-plane authorization decision outcomes (runtime actions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum ClientAuthorizationAction {
     DeniedOwnerScopeRules {
         notification_id: u64,

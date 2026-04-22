@@ -1,5 +1,7 @@
 /// Cross-cutting event family classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum AuditEventFamily {
     HotPath,
     ColdPath,

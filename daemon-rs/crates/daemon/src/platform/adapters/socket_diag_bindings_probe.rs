@@ -1,4 +1,4 @@
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn probe_netlink_bindings_symbols() {
     use netlink_bindings as _;
 

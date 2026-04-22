@@ -1,5 +1,7 @@
 /// Firewall service lifecycle transitions (including drift-heal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum FirewallLifecycle {
     Initialized,
     Started,
@@ -16,6 +18,8 @@ pub enum FirewallLifecycle {
 /// Firewall service runtime actions (rule and chain management).
 /// `handle` is a nftables handle or iptables rule spec summary.
 #[derive(Debug, Clone)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum FirewallAction {
     EnsureRulesApplied,
     EnsureRulesSkipped,

@@ -44,6 +44,7 @@ pub(crate) fn wire_subscription_from_record(record: &SubscriptionRecord) -> Wire
     record_to_wire(record.clone())
 }
 
+#[allow(dead_code)]
 pub(crate) fn record_from_wire(subscription: WireSubscription) -> SubscriptionRecord {
     let id = ensure_id(&subscription);
     let filename = ensure_filename(&subscription);
@@ -104,6 +105,7 @@ pub(crate) fn record_from_wire(subscription: WireSubscription) -> SubscriptionRe
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn subscription_status_to_str(status: i32) -> String {
     match status {
         SUBSCRIPTION_STATUS_PENDING => "pending",
@@ -151,6 +153,7 @@ pub(crate) fn operation_from_wire_action(
     }
 }
 
+#[allow(dead_code)]
 fn ensure_id(subscription: &WireSubscription) -> String {
     if !subscription.id.is_empty() {
         subscription.id.clone()
@@ -159,6 +162,7 @@ fn ensure_id(subscription: &WireSubscription) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn ensure_filename(subscription: &WireSubscription) -> String {
     if !subscription.filename.is_empty() {
         return subscription.filename.clone();
@@ -166,6 +170,7 @@ fn ensure_filename(subscription: &WireSubscription) -> String {
     derive_filename(subscription)
 }
 
+#[allow(dead_code)]
 fn derive_filename(subscription: &WireSubscription) -> String {
     if !subscription.name.is_empty() {
         return sanitize_ascii_name(&subscription.name);

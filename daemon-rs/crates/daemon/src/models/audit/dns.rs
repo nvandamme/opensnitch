@@ -1,5 +1,7 @@
 /// DNS service lifecycle transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum DnsLifecycle {
     Initialized,
     Started,
@@ -10,6 +12,8 @@ pub enum DnsLifecycle {
 
 /// DNS service runtime actions (cache and resolution).
 #[derive(Debug, Clone)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum DnsAction {
     CacheUpdated {
         entries: u32,

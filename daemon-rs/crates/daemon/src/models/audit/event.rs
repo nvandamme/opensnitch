@@ -4,6 +4,8 @@ use super::{AuditEventFamily, AuditEventKind, AuditSeverity};
 
 /// Audit service lifecycle transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum AuditLifecycle {
     Initialized,
     SinkStarted,

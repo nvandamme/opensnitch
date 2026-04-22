@@ -1,5 +1,7 @@
 /// Configuration service lifecycle transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum ConfigLifecycle {
     Initialized,
     Started,
@@ -11,6 +13,8 @@ pub enum ConfigLifecycle {
 
 /// Configuration service runtime actions.
 #[derive(Debug, Clone)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum ConfigAction {
     RuntimeTunablesLoaded,
     FileRead {

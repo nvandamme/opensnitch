@@ -33,7 +33,6 @@ type RuleSectionMap = HashMap<String, String>;
 /// OpenWrt (`/etc/config/firewall` authority model). It intentionally keeps
 /// persistence semantics outside storage codecs.
 // Staged OpenWrt adapter API surface; production wiring lands in follow-up slices.
-#[allow(dead_code)]
 pub struct OpenWrtUciFirewallAdapter;
 
 pub(crate) struct OpenWrtUciCommandRunner;
@@ -70,7 +69,7 @@ impl OpenWrtUciFirewallAdapter {
         UciStorageFormat.emit_document(&build_firewall_document(sysfw))
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn build_firewall_config_cli_plan(sysfw: &FirewallConfig) -> Result<Vec<String>> {
         let raw = Self::render_firewall_config_to_uci_text(sysfw);
         <Self as FirewallPersistencePort>::build_firewall_persistence_plan(&raw)
@@ -1389,7 +1388,6 @@ fn native_fields_to_parameters(section: &UciSection) -> String {
 }
 
 // Planner helpers stay local to the adapter until production wiring lands.
-#[allow(dead_code)]
 fn build_uci_cli_plan(doc: &UciDocument, package: &str) -> Vec<String> {
     let mut commands = Vec::new();
 
@@ -1400,14 +1398,10 @@ fn build_uci_cli_plan(doc: &UciDocument, package: &str) -> Vec<String> {
     commands.push(format!("uci commit {}", package));
     commands
 }
-
-#[allow(dead_code)]
 fn compile_uci_file_to_cli_plan(input: &str, package: &str) -> Result<Vec<String>, UciCodecError> {
     let doc = UciStorageFormat.parse_document(input)?;
     Ok(build_uci_cli_plan(&doc, package))
 }
-
-#[allow(dead_code)]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }

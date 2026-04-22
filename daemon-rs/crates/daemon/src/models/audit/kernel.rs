@@ -1,5 +1,7 @@
 /// Kernel pipeline runtime action observations (health/pressure).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum KernelAction {
     KernelPipelineDropsObserved {
         dns: u64,
@@ -14,6 +16,8 @@ pub enum KernelAction {
 
 /// Kernel flow lifecycle transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum KernelFlowLifecycle {
     Started,
     Stopped,
@@ -22,6 +26,8 @@ pub enum KernelFlowLifecycle {
 
 /// Kernel flow runtime actions (packet/queue observations).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum KernelFlowAction {
     PacketDropped,
     QueueOverflow { queue: u16 },

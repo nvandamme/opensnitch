@@ -107,12 +107,13 @@ impl Default for DnsService {
 
 #[derive(Default)]
 // Used by native eBPF DNS ringbuf ingestion path.
-#[cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
+#[cfg(feature = "native-ebpf-ringbuf")]
 pub(crate) struct DnsEbpfEventDeduper {
     pub(super) recent_events: HashMap<(String, String), Instant>,
 }
 
 impl DnsService {
+    // Shared eBPF DNS event layout constant retained for optional native ringbuf paths.
     #[allow(dead_code)]
     pub(crate) const EBPF_DNS_EVENT_LEN: usize = ebpf_common::dns::DnsEvent::LEN;
 

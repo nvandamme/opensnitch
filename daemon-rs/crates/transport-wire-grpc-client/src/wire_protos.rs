@@ -258,8 +258,8 @@ pub(crate) fn wire_sys_firewall_from_pb(firewall: pb::SysFirewall) -> WireSysFir
         chains,
     }
 }
-
-#[allow(dead_code)] // retained compatibility helper for external adapter call sites
+// Backward-compatible public conversion alias for external adapter call sites.
+#[allow(dead_code)]
 pub fn wire_sys_firewall_from_proto(firewall: pb::SysFirewall) -> WireSysFirewall {
     wire_sys_firewall_from_pb(firewall)
 }

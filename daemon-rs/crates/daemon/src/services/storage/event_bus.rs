@@ -27,9 +27,12 @@ struct StorageIngressEvent {
 pub(super) struct StorageEventBus {
     ingress_tx: SyncSender<StorageIngressEvent>,
     tx: broadcast::Sender<Arc<StorageEvent>>,
+    // Retained for scoped subscriptions used by selected runtime/test call paths.
+    #[allow(dead_code)]
     path_tx: Arc<DashMap<PathBuf, broadcast::Sender<Arc<StorageEvent>>>>,
+    // Retained for scoped subscriptions used by selected runtime/test call paths.
+    #[allow(dead_code)]
     prefix_tx: Arc<DashMap<PathBuf, broadcast::Sender<Arc<StorageEvent>>>>,
-    #[cfg_attr(not(test), allow(dead_code))]
     subscribers: Arc<AtomicUsize>,
     dropped_ingress_events: Arc<AtomicUsize>,
 }
@@ -92,6 +95,8 @@ impl StorageEventBus {
         }
     }
 
+    // Retained for scoped subscriptions used by selected runtime/test call paths.
+    #[allow(dead_code)]
     fn subscribe_scoped(
         &self,
         map: &Arc<DashMap<PathBuf, broadcast::Sender<Arc<StorageEvent>>>>,
@@ -149,10 +154,14 @@ impl StorageEventBus {
         StorageEventSubscription::new(self.tx.subscribe(), self.subscribers.clone())
     }
 
+    // Retained for scoped subscriptions used by selected runtime/test call paths.
+    #[allow(dead_code)]
     pub(super) fn subscribe_for_path(&self, path: &Path) -> StorageEventSubscription {
         self.subscribe_scoped(&self.path_tx, path)
     }
 
+    // Retained for scoped subscriptions used by selected runtime/test call paths.
+    #[allow(dead_code)]
     pub(super) fn subscribe_for_prefix(&self, path: &Path) -> StorageEventSubscription {
         self.subscribe_scoped(&self.prefix_tx, path)
     }
@@ -173,8 +182,6 @@ impl StorageEventBus {
             }
         }
     }
-
-    #[allow(dead_code)]
     pub(super) fn dropped_ingress_events(&self) -> usize {
         self.dropped_ingress_events.load(Ordering::Relaxed)
     }
@@ -191,8 +198,6 @@ impl StorageEventBus {
         self.emit(domain, StorageOperation::Delete, path);
     }
 }
-
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug)]
 pub(crate) struct StorageEventSubscription {
     receiver: broadcast::Receiver<Arc<StorageEvent>>,
@@ -200,7 +205,6 @@ pub(crate) struct StorageEventSubscription {
 }
 
 impl StorageEventSubscription {
-    #[cfg_attr(not(test), allow(dead_code))]
     fn new(
         receiver: broadcast::Receiver<Arc<StorageEvent>>,
         active_counter: Arc<AtomicUsize>,

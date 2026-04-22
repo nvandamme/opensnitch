@@ -15,7 +15,7 @@ use super::{RuleService, rule_duration_temporary_spec};
 use crate::{
     models::{
         rule_record::{RuleDuration, RuleOperator, RuleRecord},
-        rule_storage::{RuleFile, RuleFileOperator},
+        rule_storage::RuleFile,
     },
     platform::{
         adapters::loadable_state_file_store::FileLoadableStateStoreAdapter,
@@ -108,9 +108,14 @@ impl RuleService {
                     .with_context(|| {
                         format!("failed to parse rule file {}", file_path.display())
                     })?;
-            rule_file.normalize_legacy_operator_lists().with_context(|| {
-                format!("failed to normalize legacy rule list payloads {}", file_path.display())
-            })?;
+            rule_file
+                .normalize_legacy_operator_lists()
+                .with_context(|| {
+                    format!(
+                        "failed to normalize legacy rule list payloads {}",
+                        file_path.display()
+                    )
+                })?;
             let record = RuleRecord::from(rule_file);
             if record.enabled
                 && let Err(err) = Self::validate_operator(&record.operator)
@@ -185,15 +190,14 @@ impl RuleService {
     }
 
     pub(crate) async fn load_network_aliases_map(path: &Path) -> HashMap<String, Vec<String>> {
-        let Ok(Some(map)) = FileLoadableStateStoreAdapter::load_alias_map(path).await
-        else {
+        let Ok(Some(map)) = FileLoadableStateStoreAdapter::load_alias_map(path).await else {
             return HashMap::new();
         };
         map
     }
 
     /// Called only from `read_rules_dir_file_state_async` (which is itself test-only).
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn collect_rule_list_dirs(
         operator: &RuleFileOperator,
         list_dirs: &mut BTreeSet<PathBuf>,
@@ -287,7 +291,7 @@ impl RuleService {
     /// Fallback when no in-memory snapshot is available.
     /// Production code uses [`read_rules_dir_file_state_with_hint`] on the hot path;
     /// this variant is used by tests.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) async fn read_rules_dir_file_state_async(
         path: &Path,
     ) -> Option<BTreeMap<String, Option<SystemTime>>> {

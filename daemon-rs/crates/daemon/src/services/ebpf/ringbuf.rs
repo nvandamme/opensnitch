@@ -1,9 +1,6 @@
 // Ringbuf backend plumbing is retained in no-backend packaging profiles so the
 // public service surface stays stable; it becomes active when ebpf features are on.
-#![cfg_attr(
-    not(any(feature = "aya-ebpf", feature = "libbpf-ebpf")),
-    allow(dead_code)
-)]
+#![cfg(any(feature = "aya-ebpf", feature = "libbpf-ebpf"))]
 
 use std::time::Duration;
 

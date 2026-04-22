@@ -61,10 +61,13 @@ impl RuleFileOperator {
             && self.list.is_empty()
             && !self.data.trim().is_empty()
         {
-            self.list = crate::services::storage::StorageService::parse_with_storage_format_for_path::<
-                Vec<RuleFileOperator>,
-            >(Path::new("legacy-operator-list.json"), &self.data)
-            .map_err(|err| anyhow::anyhow!("invalid legacy list payload in operator data: {err}"))?;
+            self.list =
+                crate::services::storage::StorageService::parse_with_storage_format_for_path::<
+                    Vec<RuleFileOperator>,
+                >(Path::new("legacy-operator-list.json"), &self.data)
+                .map_err(|err| {
+                    anyhow::anyhow!("invalid legacy list payload in operator data: {err}")
+                })?;
             self.data.clear();
 
             for item in &mut self.list {

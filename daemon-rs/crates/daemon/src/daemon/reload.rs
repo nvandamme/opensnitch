@@ -101,6 +101,7 @@ impl ReloadScope {
 #[derive(Debug)]
 pub(crate) enum ReloadError {
     /// Config could not be loaded or parsed.
+    // Retained explicit error variant for config-load stage contract completeness.
     #[allow(dead_code)]
     ConfigLoad(anyhow::Error),
     /// One or more service apply stages failed.
@@ -284,7 +285,11 @@ impl Daemon {
 
         // Reload metrics.json and re-wire the Prometheus scrape server if the
         // listen address has changed (or was newly added / removed).
-        #[cfg(feature = "metrics-export")]
+        #[cfg(any(
+            feature = "metrics-http-serve-text",
+            feature = "metrics-http-serve-openmetrics",
+            feature = "metrics-http-serve-protobuf"
+        ))]
         self.reload_metrics_server();
 
         info!("SIGHUP reload completed");
@@ -302,10 +307,14 @@ impl Daemon {
     ///
     /// Push exporter configuration is not hot-reloaded; a daemon restart is
     /// required for push URL / format / credential changes.
-    #[cfg(feature = "metrics-export")]
+    #[cfg(any(
+        feature = "metrics-http-serve-text",
+        feature = "metrics-http-serve-openmetrics",
+        feature = "metrics-http-serve-protobuf"
+    ))]
     pub(super) fn reload_metrics_server(&self) {
         use crate::models::metrics_config::MetricsConfig;
-        use crate::platform::adapters::stats_exporter_prometheus::{
+        use crate::platform::adapters::stats_exporters::http_serve::{
             PROMETHEUS_ADDR_ENV, PrometheusStatsExporter,
         };
 

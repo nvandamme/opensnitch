@@ -250,8 +250,8 @@ impl CommandControlService {
             }
         }
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Compatibility helper retained for control-path diagnostics and staged callers.
+    #[allow(dead_code)]
     pub(crate) async fn collect_firewall_errors(
         &self,
         firewall_errors: &mut broadcast::Receiver<String>,

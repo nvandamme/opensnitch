@@ -19,6 +19,7 @@ impl ProcessService {
     ///
     /// Prefer [`inspect_process_no_hash`] + background [`compute_process_hashes`] on
     /// the connection hot path to avoid blocking the thread pool on large binaries.
+    // Sync inspector retained for optional call paths that cannot await in hot control flow.
     #[allow(dead_code)]
     pub(super) fn inspect_process(pid: u32) -> Result<ProcessInfo> {
         let mut info = Self::inspect_process_no_hash(pid)?;
@@ -173,8 +174,16 @@ impl ProcessService {
             hasher_sha1.update(&buf[..n]);
         }
         Some((
-            format!("{:x}", hasher_md5.finalize()),
-            format!("{:x}", hasher_sha1.finalize()),
+            hasher_md5
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
+            hasher_sha1
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
         ))
     }
 
@@ -199,9 +208,9 @@ impl ProcessService {
         let digest_sha1 = hasher_sha1.finalize();
         let digest = hasher.finalize();
         Some((
-            format!("{:x}", digest_md5),
-            format!("{:x}", digest_sha1),
-            format!("{:x}", digest),
+            digest_md5.iter().map(|b| format!("{b:02x}")).collect(),
+            digest_sha1.iter().map(|b| format!("{b:02x}")).collect(),
+            digest.iter().map(|b| format!("{b:02x}")).collect(),
         ))
     }
 

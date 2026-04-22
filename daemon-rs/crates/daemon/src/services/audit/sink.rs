@@ -104,7 +104,7 @@ impl AuditSinks {
     }
 
     /// `true` if the log-line (tracing) sink is enabled.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn log_lines_enabled(&self) -> bool {
         self.inner.log_lines
     }

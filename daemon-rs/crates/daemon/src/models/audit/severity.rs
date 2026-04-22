@@ -10,6 +10,8 @@ use super::AuditEventKind;
 /// - [`Info`][AuditSeverity::Info]:    normal operational events (lifecycle transitions, successful actions).
 /// - [`Debug`][AuditSeverity::Debug]:   verbose internal events, only surfaced when the subscriber log level is `debug` or finer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum AuditSeverity {
     Error,
     Warning,

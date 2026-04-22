@@ -131,7 +131,7 @@ impl StatsService {
             unixnano: unix_nano,
         });
     }
-
+    // Retained for optional diagnostics surfaces that expose stats queue contention.
     #[allow(dead_code)]
     pub fn dropped_events_contention_count(&self) -> u64 {
         self.counters

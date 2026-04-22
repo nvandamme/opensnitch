@@ -1,6 +1,7 @@
 use super::*;
 
 impl EbpfWorkerMode {
+    // Convenience mode constant retained for generic worker initialization paths.
     #[allow(dead_code)]
     pub(crate) const ALL: Self = Self {
         enable_dns: true,
@@ -41,6 +42,7 @@ pub struct EbpfWorkerControl {
 }
 
 impl EbpfWorkerControl {
+    // Constructor retained for API parity; some profiles construct via new_with_mode.
     #[allow(dead_code)]
     pub fn new(bus: Bus, daemon_shutdown: CancellationToken, tunables: RuntimeTunables) -> Self {
         Self::new_with_mode(bus, daemon_shutdown, tunables, EbpfWorkerMode::ALL, "ebpf")
@@ -376,8 +378,6 @@ impl EbpfWorkerControl {
             }
         })
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
     fn summarize_bpf_attach_error(err: &str) -> String {
         let mut summary = err;
         if let Some((head, _)) = err.split_once("Verifier output:") {
@@ -388,8 +388,7 @@ impl EbpfWorkerControl {
         }
         summary.to_string()
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_select_dns_explicit_runtime(
         pin_domain: EbpfPinDomain,
         has_legacy_dns_obj: bool,
@@ -417,8 +416,7 @@ impl EbpfWorkerControl {
             DnsExplicitRuntimeKind::Libbpf => "libbpf",
         })
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_select_proc_explicit_runtime(
         pin_domain: EbpfPinDomain,
         has_rust_ebpf_obj: bool,
@@ -443,7 +441,7 @@ impl EbpfWorkerControl {
     }
 
     #[cfg(feature = "native-ebpf-ringbuf")]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_parse_native_proc_kind(
         sample: &[u8],
     ) -> Option<crate::models::proc_event::ProcEventKind> {
@@ -454,7 +452,7 @@ impl EbpfWorkerControl {
     }
 
     #[cfg(feature = "native-ebpf-ringbuf")]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_parse_native_proc_payload(sample: &[u8]) -> Option<EbpfProcStatePayload> {
         match Self::parse_native_sample(sample) {
             Some(NativeQueuedEvent::ProcStateChanged(payload)) => Some(payload),
@@ -463,7 +461,7 @@ impl EbpfWorkerControl {
     }
 
     #[cfg(feature = "native-ebpf-ringbuf")]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_parse_native_dns_payload(sample: &[u8]) -> Option<DnsPayload> {
         match Self::parse_native_sample(sample) {
             Some(NativeQueuedEvent::DnsUpdate(payload)) => Some(payload),
@@ -472,7 +470,7 @@ impl EbpfWorkerControl {
     }
 
     #[cfg(feature = "native-ebpf-ringbuf")]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_should_emit_dns_sequence(events: &[(&str, &str)]) -> Vec<bool> {
         let mut recent = HashMap::<(String, String), Instant>::new();
         let now = Instant::now();

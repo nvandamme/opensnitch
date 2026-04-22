@@ -13,4 +13,4 @@ crate-type = ["cdylib"]
 opensnitch-ebpf-common = { path = "../ebpf-common" }
 
 [target.'cfg(target_arch = "bpf")'.dependencies]
-aya-ebpf = "0.1"
+aya-ebpf = { workspace = true }

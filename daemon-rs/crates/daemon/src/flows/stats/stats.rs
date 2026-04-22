@@ -82,8 +82,18 @@ impl StatsFlow {
     /// do not need to change.
     ///
     /// See `platform::ports::stats_exporter_port::StatsExporterPort`.
-    // Called only inside #[cfg(feature = "metrics-export")] wiring in daemon/tasks.rs; dead in non-metrics builds.
-    #[cfg_attr(not(feature = "metrics-export"), allow(dead_code))]
+    // Called only inside metrics exporter wiring in daemon/tasks.rs; dead when both
+    // metrics endpoint features are disabled.
+    #[cfg(any(
+        feature = "metrics-http-serve-text",
+        feature = "metrics-http-serve-openmetrics",
+        feature = "metrics-http-serve-protobuf",
+        feature = "metrics-http-push-text",
+        feature = "metrics-http-push-openmetrics",
+        feature = "metrics-http-push-protobuf",
+        feature = "metrics-http-push-influxdb",
+        feature = "metrics-syslog"
+    ))]
     pub(crate) fn with_stats_exporter(mut self, exporter: Arc<dyn StatsExporterPort>) -> Self {
         self.stats_exporter = Some(exporter);
         self

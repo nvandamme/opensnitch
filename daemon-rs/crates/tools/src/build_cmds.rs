@@ -68,12 +68,20 @@ pub(crate) fn run_build() -> Result<(), DynError> {
 /// Exits with code 1 when any kernel capability check fails; 0 when all pass.
 /// No built binary is required — the check runs in-process.
 pub(crate) fn run_check_kernel_caps() -> Result<(), DynError> {
+    #[cfg(feature = "kernel-caps-diag")]
+    {
     let diag = opensnitch_kernel_caps::run();
     diag.print_report();
     if !diag.all_pass {
         return Err("kernel capability check reported missing features (see output above)".into());
     }
     Ok(())
+    }
+
+    #[cfg(not(feature = "kernel-caps-diag"))]
+    {
+        Err("check-kernel-caps requires feature `kernel-caps-diag` (build with: cargo build -p tools --features kernel-caps-diag)".into())
+    }
 }
 
 /// `aya-smoke-proc`: run `aya_proc_trace_smoke_reports_explicit_runtime_active`

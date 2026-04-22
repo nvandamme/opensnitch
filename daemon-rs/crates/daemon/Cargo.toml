@@ -5,14 +5,24 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["native-ebpf-ringbuf", "aya-ebpf", "transport-wire-grpc-client", "storage-format-json"]
+default = ["native-ebpf-ringbuf", "aya-ebpf", "transport-wire-grpc-client", "storage-format-json", "metrics-syslog"]
 native-ebpf-ringbuf = []
 libbpf-ebpf = ["dep:libbpf-rs"]
 aya-ebpf = ["dep:aya"]
+cert-gen = ["dep:rcgen"]
+kernel-caps-diag = ["dep:kernel_caps"]
+task-http = ["dep:reqwest"]
 client-transport = []
-transport-wire-grpc-client = ["client-transport", "dep:transport_wire_grpc_client", "transport_wire_grpc_client/subscriptions", "dep:hyper-rustls", "dep:rustls", "dep:rustls-pki-types", "dep:x509-cert"]
-subscriptions = []
-metrics-export = ["dep:hyper", "dep:http-body-util", "dep:flate2", "dep:prost"]
+transport-wire-grpc-client = ["client-transport", "dep:transport_wire_grpc_client", "transport_wire_grpc_client/subscriptions"]
+subscriptions = ["dep:reqwest"]
+metrics-http-serve-text = ["dep:hyper", "dep:http-body-util", "dep:hyper-util", "dep:flate2"]
+metrics-http-serve-openmetrics = ["dep:hyper", "dep:http-body-util", "dep:hyper-util", "dep:flate2"]
+metrics-http-serve-protobuf = ["dep:hyper", "dep:http-body-util", "dep:hyper-util", "dep:flate2", "dep:prost"]
+metrics-http-push-text = ["dep:reqwest", "dep:flate2"]
+metrics-http-push-protobuf = ["dep:reqwest", "dep:flate2", "dep:prost"]
+metrics-http-push-openmetrics = ["dep:reqwest", "dep:flate2"]
+metrics-http-push-influxdb = ["dep:reqwest", "dep:flate2"]
+metrics-syslog = []
 storage-format-json = ["dep:storage_format_json"]
 storage-format-yaml = ["dep:storage_format_yaml"]
 storage-format-toml = ["dep:storage_format_toml"]
@@ -20,48 +30,41 @@ storage-format-uci = ["dep:storage_format_uci"]
 openwrt = ["storage-format-uci", "dep:transport_wire_openwrt_ubus"]
 
 [dependencies]
-tokio = { version = "1.50", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "process", "net", "io-util", "fs"] }
-tokio-stream = "0.1"
-tokio-util = "0.7"
-anyhow = "1.0"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-bincode = "1.3"
-syslog = "7.0"
-nix = { version = "0.31", features = ["user", "socket"] }
-regex = "1.12"
-aho-corasick = "1.1"
-globset = "0.4"
-quick_cache = "0.6"
-dashmap = "6.1"
-arc-swap = "1.9"
-# sha2/sha1/md-5: keep at 0.10 — 0.11.0 (2026-03-25) requires digest 0.11 with breaking API changes
-sha2 = "0.10"
-sha1 = "0.10"
-md-5 = "0.10"
-time = { version = "0.3", features = ["formatting", "parsing", "macros", "local-offset"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time", "process", "net", "io-util", "fs"] }
+tokio-util = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+postcard = { workspace = true, features = ["alloc"] }
+syslog = { workspace = true }
+nix = { workspace = true, features = ["user", "socket"] }
+regex = { workspace = true }
+aho-corasick = { workspace = true }
+globset = { workspace = true }
+quick_cache = { workspace = true }
+dashmap = { workspace = true }
+arc-swap = { workspace = true }
+sha2 = { workspace = true }
+sha1 = { workspace = true }
+md-5 = { workspace = true }
+time = { workspace = true, features = ["formatting", "parsing", "macros", "local-offset"] }
 
 ebpf_common = { package = "opensnitch-ebpf-common", path = "../ebpf-common" }
-libbpf-rs = { version = "0.26", optional = true }
-aya = { version = "0.13", optional = true }
-netlink-bindings = { version = "0.3", features = ["inet-diag", "rt-link", "rt-addr", "nftables"] }
-netlink-socket2 = { version = "0.3", features = ["tokio"] }
-rustix = { version = "1.1", features = ["net", "event", "thread", "system"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
-hyper-rustls = { version = "0.27", default-features = true, features = ["http2"], optional = true }
-hyper-util = { version = "0.1", features = ["tokio"] }
-hyper = { version = "1", features = ["http1", "server"], optional = true }
-http-body-util = { version = "0.1", optional = true }
-flate2 = { version = "1", optional = true }
-prost = { version = "0.14", optional = true }
-rustls = { version = "0.23", optional = true }
-rustls-pki-types = { version = "1.14", optional = true }
-x509-cert = { version = "0.2", default-features = false, features = ["std"], optional = true }
-rcgen = "0.13"
-tower = { version = "0.5", features = ["util"] }
-kernel_caps = { package = "opensnitch-kernel-caps", path = "../kernel-caps" }
+libbpf-rs = { workspace = true, optional = true }
+aya = { workspace = true, optional = true }
+netlink-bindings = { workspace = true, features = ["inet-diag", "rt-link", "rt-addr", "nftables"] }
+netlink-socket2 = { workspace = true, features = ["tokio"] }
+rustix = { workspace = true, features = ["net", "event", "thread", "system"] }
+reqwest = { workspace = true, default-features = false, features = ["rustls"], optional = true }
+hyper-util = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
+kernel_caps = { package = "opensnitch-kernel-caps", path = "../kernel-caps", optional = true }
 transport_wire_core = { package = "opensnitch-transport-wire-core", path = "../transport-wire-core", features = ["subscriptions"] }
 transport_wire_grpc_client = { package = "opensnitch-transport-wire-grpc-client", path = "../transport-wire-grpc-client", optional = true }
 storage_format_core = { package = "opensnitch-storage-format-core", path = "../storage-format-core" }
@@ -74,7 +77,8 @@ transport_wire_openwrt_ubus = { package = "opensnitch-transport-wire-openwrt-ubu
 [dev-dependencies]
 # async-trait is needed only to implement the tonic-generated `Ui` server trait in
 # flow tests; tonic-prost still desugars server traits via #[async_trait].
-async-trait = "0.1"
+async-trait = { workspace = true }
+tokio-stream = { workspace = true }
 tonic = { workspace = true, features = ["tls-webpki-roots", "gzip"] }
 proto = { package = "opensnitch-proto", path = "../proto" }
-ctor = "0.6"
+ctor = { workspace = true }

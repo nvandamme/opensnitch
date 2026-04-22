@@ -22,7 +22,10 @@ impl FirewallService {
             let mut args = vec!["--force"];
             args.extend(tokens.iter().map(String::as_str));
             if !Self::command_status_success("ufw", &args) {
-                return Err(anyhow!("failed to apply ufw rule for chain `{}`", rule.chain));
+                return Err(anyhow!(
+                    "failed to apply ufw rule for chain `{}`",
+                    rule.chain
+                ));
             }
         }
 

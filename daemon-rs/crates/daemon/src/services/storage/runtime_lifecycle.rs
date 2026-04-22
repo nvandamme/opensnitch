@@ -64,13 +64,9 @@ pub(super) fn global_storage_service() -> StorageService {
 pub(super) fn subscribe_global_storage_reload() -> watch::Receiver<u64> {
     StorageRuntimeLifecycle::global().subscribe_reload()
 }
-
-#[allow(dead_code)]
 pub(super) fn replace_global_storage_service(next: StorageService) -> StorageService {
     StorageRuntimeLifecycle::global().replace_service(next)
 }
-
-#[allow(dead_code)]
 pub(super) fn reload_global_storage_service() -> StorageService {
     let current = global_storage_service();
     let audit = current.audit_handle();

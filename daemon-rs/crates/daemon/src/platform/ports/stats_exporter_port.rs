@@ -12,7 +12,7 @@ use crate::models::metrics_snapshot::MetricsSnapshot;
 /// Intended adapter targets:
 /// - Prometheus: convert counters/gauges to text-format and serve via HTTP
 ///   `/metrics` endpoint (prometheus-client or axum-based scrape server).
-/// - Grafana Mimir / InfluxDB: batch-push the snapshot counters on each tick.
+/// - Prometheus push-gateway: batch-push text/protobuf snapshots on each tick.
 /// - Any other pull/push metrics backend.
 ///
 /// Go equivalent: the `daemon/statistics/stats.go` `Serialize()` path feeds

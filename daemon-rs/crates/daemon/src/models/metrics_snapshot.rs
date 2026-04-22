@@ -22,7 +22,17 @@ use transport_wire_core::{WireStatistics, WireSubscriptionStatistics};
 /// - `subscription_stats`: mirrored-shape block (scalars + breakdowns + event log),
 ///   not in `ui.proto` but consumed by the metrics exporters.
 /// - `by_rule`: per-rule hit counts, not in `ui.proto`.
-#[cfg_attr(not(feature = "metrics-export"), allow(dead_code))]
+#[derive(Clone)]
+#[cfg(any(
+    feature = "metrics-http-serve-text",
+    feature = "metrics-http-serve-openmetrics",
+    feature = "metrics-http-serve-protobuf",
+    feature = "metrics-http-push-text",
+    feature = "metrics-http-push-openmetrics",
+    feature = "metrics-http-push-protobuf",
+    feature = "metrics-http-push-influxdb",
+    feature = "metrics-syslog"
+))]
 pub struct MetricsSnapshot {
     pub stats: WireStatistics,
     /// `None` when the subscriptions feature is disabled or no data is available yet.

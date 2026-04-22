@@ -11,8 +11,8 @@ use crate::services::stats::StatsService;
 #[derive(Clone, Default)]
 pub struct SubscriptionService;
 
-#[allow(dead_code)]
 impl SubscriptionService {
+    // Kept for API parity with the enabled subscription service.
     #[allow(dead_code)]
     pub fn new<T, U>(_storage: T, _root_dir: U) -> Self {
         Self
@@ -22,6 +22,8 @@ impl SubscriptionService {
         Self
     }
 
+    // Kept for API parity with the enabled subscription service.
+    #[allow(dead_code)]
     pub async fn handle_wire_command(&self, command: SubscriptionCommand) -> WireSubscriptionReply {
         let operation = match command.operation {
             crate::models::subscription_rpc::SubscriptionOperation::Unspecified => {
@@ -52,6 +54,8 @@ impl SubscriptionService {
         }
     }
 
+    // Kept for API parity with the enabled subscription service.
+    #[allow(dead_code)]
     pub fn subscription_stats(&self) -> WireSubscriptionStatistics {
         WireSubscriptionStatistics::default()
     }
@@ -63,6 +67,8 @@ impl SubscriptionService {
         WireSubscriptionStatistics::default()
     }
 
+    // Kept for API parity with the enabled subscription service.
+    #[allow(dead_code)]
     pub fn build_rule_subscription_entries(
         &self,
         _list_rule_paths: &[(std::sync::Arc<str>, std::path::PathBuf)],
@@ -70,6 +76,8 @@ impl SubscriptionService {
         Vec::new()
     }
 
+    // Kept for API parity with the enabled subscription service.
+    #[allow(dead_code)]
     pub fn spawn_scheduler(
         &self,
         shutdown: CancellationToken,

@@ -25,7 +25,7 @@ fn parse_json_fixture(file: &str) -> serde_json::Value {
 fn parses_yaml_fixture() {
     let raw = std::fs::read_to_string(fixture_path("default-config.example.yaml"))
         .expect("read yaml fixture");
-    let parsed: serde_yaml::Value = YamlStorageFormat
+    let parsed: serde_yml::Value = YamlStorageFormat
         .parse_from_storage(&raw)
         .expect("parse yaml fixture");
     assert!(parsed.is_mapping(), "yaml fixture must decode to mapping");

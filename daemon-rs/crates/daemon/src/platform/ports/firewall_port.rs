@@ -106,7 +106,7 @@ pub(crate) trait FirewallIntrospectionPort {
         queue_num: u16,
         queue_bypass: bool,
     ) -> Pin<Box<dyn Future<Output = Result<InterceptionHealth>> + Send>>;
-
+    // Optional introspection capability retained for backend/profile compatibility.
     #[allow(dead_code)]
     fn introspect_system_firewall() -> Pin<Box<dyn Future<Output = Result<FirewallConfig>> + Send>>;
 }

@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 opensnitch-storage-format-core = { path = "../storage-format-core" }
 serde = { workspace = true, features = ["derive"] }
-serde_yaml = { workspace = true }
+serde_yml = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

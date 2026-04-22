@@ -303,8 +303,10 @@ fn system_rule_expression_supports_nftables_testdata_shapes() {
     // so parity against the Go-side rule shapes remains explicit.
     let fixture = backend_fixture_path("nftables-supported-expressions.example.json");
     let raw = fs::read_to_string(&fixture).expect("read nftables expression fixture");
-    let go_testdata: Vec<String> = crate::services::storage::StorageService::
-        parse_with_storage_format_for_path(&fixture, &raw)
+    let go_testdata: Vec<String> =
+        crate::services::storage::StorageService::parse_with_storage_format_for_path(
+            &fixture, &raw,
+        )
         .expect("decode nftables expression fixture as JSON string array");
 
     assert!(

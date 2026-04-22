@@ -639,9 +639,55 @@ Versioning baseline:
 
 ### Changed
 
+### Changed
+  - `models/hash_cache.rs` → `models/hash_cache_storage.rs`: on-disk JSON cache format types (`HashCacheKey`, `HashCacheEntry`, `HashCacheFile`, `HashCacheRecord`) correctly signal storage intent via file name.
+- **Stats exporter adapter module restructuring**
+  (`crates/daemon/src/platform/adapters/stats_exporters/`,
+  `crates/daemon/src/daemon/tasks.rs`):
+  - Replaced the two flat adapter files `stats_exporter_prometheus.rs` (Prometheus/OpenMetrics HTTP
+    serve) and `stats_exporter_push.rs` (push paths) with a proper
+    `platform/adapters/stats_exporters/` directory module, split by concern:
+    - `http_serve.rs` — Prometheus/OpenMetrics scrape endpoint (`PrometheusStatsExporter`).
+    - `http_push.rs` — generic HTTP push path.
+    - `http_push_influxdb.rs` — InfluxDB line-protocol push adapter.
+    - `syslog_push.rs` — syslog emission adapter.
+    - `multi.rs` — fan-out multiplexer over `Vec<Arc<dyn StatsExporterPort>>`.
+    - `encoder_*.rs` — per-format encoding helpers (Prometheus text, OpenMetrics, protobuf,
+      InfluxDB line-protocol, syslog).
+    - `mod.rs` — thin root re-exporting adapter types.
+  - `daemon/tasks.rs` updated to reference new module paths; feature-guard blocks per adapter
+    now use explicit `use` paths inside each `#[cfg(any(feature = ...))]` block.
+  - Test modules previously `#[path = "..."]`-included from the flat adapter files relocated to
+    `src/tests/metrics/` and `#[path]`-linked from the new module files.
+
+- **Strict item-level `dead_code` warning triage pass**
+  (`crates/daemon/src/{services,platform,workers}/**`):
+  - Replaced all broad module-level `#![cfg_attr(not(...), allow(dead_code))]` suppressions with
+    precise per-item annotations across the daemon crate.
+  - Strategy:
+    - `#[cfg(test)]` for test-probe helpers and test-only constants (removes them from production
+      builds entirely rather than suppressing the diagnostic).
+    - `#[cfg(feature = "...")]` module-level gates for modules that exist only under a feature.
+    - Item-level `#[allow(dead_code)]` only for intentional staged API surfaces (lifecycle hooks,
+      public RPC parity methods, optional port trait methods) with one-line justification comments.
+  - Duplicate `#[cfg(test)]` attributes produced by the `#[cfg_attr]` → `#[cfg]` conversion
+    cleaned up in `firewall_iptables.rs`, `firewall_nftables.rs`, and
+    `firewall_netlink/adapter.rs` (15 instances collapsed).
+  - `NativeQueuedEvent` re-export in `workers/runtime/ebpf/control/mod.rs` narrowed to
+    `#[cfg(all(feature = "native-ebpf-ringbuf", test))]`.
+  - Both default-profile and `--all-features` `cargo check` produce zero warnings after this pass.
+
+- **`StorageService` helper consolidation — `services/storage/ops.rs` removed**
+  (`crates/daemon/src/services/storage/{ops.rs,storage.rs,mod.rs}`):
+  - Deleted `ops.rs`; its non-shim helper `option_if_not_found` moved inline as a private `fn`
+    in `storage.rs`.
+  - `bool_if_not_found` and `exists_if_not_found` removed as one-liner shims per DESIGN_RULES §11
+    no-compatibility-shim rule; their six call sites now inline as
+    `option_if_not_found(...).map(|m| m.is_some())` / `option_if_not_found(...)?.is_some()`.
+  - `mod ops;` declaration removed from `services/storage/mod.rs`.
+
 - **Wire-type naming: `policy_tx`, `hash_cache`, `task_payload` modules renamed** (`crates/daemon/src/models/`):
   - `models/policy_tx.rs` → `models/policy_tx_storage.rs`: `PolicyChangeSet`, `PolicyOwner`, and `TxPhase` are persisted-changeset types; file name now matches the `*_storage.rs` exemption in §4.
-  - `models/hash_cache.rs` → `models/hash_cache_storage.rs`: on-disk JSON cache format types (`HashCacheKey`, `HashCacheEntry`, `HashCacheFile`, `HashCacheRecord`) correctly signal storage intent via file name.
   - `models/task_payload.rs` → `models/task_wire.rs`: `LegacyTaskResultPayload` and `TaskErrorPayload` are outgoing transient IPC frames sent to the UI over gRPC, never stored.  Unused `Deserialize` derive removed from both types; `*_wire.rs` suffix now codified as a §4 exempt file pattern.
   - `models/ebpf_state.rs`: `BpfMap` renamed to `RawBpfMap` to follow the `Raw*` prefix convention for ingress-only serde shapes sourced from kernel/OS state (`bpffs`/`procfs`).
   - All import sites updated (`services/policy_tx/policy_tx.rs`, `services/client/session.rs`, `services/process/hash_cache.rs`, `services/task/reply.rs`, `services/task/runtime_handlers.rs`, `workers/runtime/ebpf/control.rs`).

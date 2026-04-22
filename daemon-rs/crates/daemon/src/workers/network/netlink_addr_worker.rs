@@ -78,7 +78,7 @@ impl NetlinkAddrWorkerControl {
         (handle, local_addr_store)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn snapshot_local_addrs(local_addr_store: &LocalAddrStore) -> Vec<String> {
         let guard = local_addr_store
             .read()

@@ -14,7 +14,8 @@ use crate::{
 use super::FirewallService;
 
 impl FirewallService {
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Retained for optional introspection/recovery paths and backend parity helpers.
+    #[allow(dead_code)]
     pub(super) fn load_system_firewall_from_path(path: &Path) -> Result<Option<FirewallConfig>> {
         Self::load_system_firewall_from_backend_and_path(path, FirewallBackend::Nftables)
     }
@@ -25,8 +26,8 @@ impl FirewallService {
     ) -> Result<Option<FirewallConfig>> {
         FileLoadableStateStoreAdapter::load_firewall(path, backend)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Retained for optional introspection/recovery paths and backend parity helpers.
+    #[allow(dead_code)]
     pub(super) fn save_system_firewall_to_path(path: &Path, sysfw: &FirewallConfig) -> Result<()> {
         Self::save_system_firewall_to_backend_and_path(path, sysfw, FirewallBackend::Nftables)
     }

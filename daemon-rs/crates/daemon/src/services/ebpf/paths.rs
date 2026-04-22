@@ -1,8 +1,5 @@
 // Pin-path helpers are used by ebpf-enabled profiles and retained for API parity.
-#![cfg_attr(
-    not(any(feature = "aya-ebpf", feature = "libbpf-ebpf")),
-    allow(dead_code)
-)]
+#![cfg(any(feature = "aya-ebpf", feature = "libbpf-ebpf"))]
 
 use std::path::{Path, PathBuf};
 
@@ -33,7 +30,9 @@ impl EbpfPinDomain {
         }
     }
 
-    pub(crate) fn proc_root(self) -> &'static str {
+    // Optional helper retained for process-pin profile paths.
+    #[allow(dead_code)]
+    pub(crate) fn proc_root(&self) -> &'static str {
         match self {
             Self::Legacy => LEGACY_PROC_ROOT,
             Self::Aya => AYA_PROC_ROOT,

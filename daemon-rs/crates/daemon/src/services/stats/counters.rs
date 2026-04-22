@@ -54,8 +54,8 @@ impl StatsService {
         self.on_rule_miss();
         self.counters.dropped.fetch_add(1, Ordering::Relaxed);
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Retained for compatibility with accounting paths that report ignored connections.
+    #[allow(dead_code)]
     pub fn on_ignored(&self) {
         self.counters.ignored.fetch_add(1, Ordering::Relaxed);
         self.counters.accepted.fetch_add(1, Ordering::Relaxed);

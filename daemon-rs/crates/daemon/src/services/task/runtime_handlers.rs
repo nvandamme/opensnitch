@@ -4,8 +4,8 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    TaskRuntimePayload, TaskService, naming as task_runtime_naming,
-    reply as task_runtime_reply, socket_monitor,
+    TaskRuntimePayload, TaskService, naming as task_runtime_naming, reply as task_runtime_reply,
+    socket_monitor,
 };
 use crate::{
     models::{
@@ -47,8 +47,12 @@ impl TaskService {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn ioc_schedule_matches_now(&self, data: &TaskRuntimePayload, now: time::OffsetDateTime) -> bool {
+    #[cfg(test)]
+    pub(crate) fn ioc_schedule_matches_now(
+        &self,
+        data: &TaskRuntimePayload,
+        now: time::OffsetDateTime,
+    ) -> bool {
         data.ioc_scanner_config()
             .map(|cfg| Self::ioc_schedule_matches_now_cfg(cfg.as_ref(), now))
             .unwrap_or(false)
@@ -153,7 +157,12 @@ impl TaskService {
     fn downloader_go_result_message(result: &DownloaderResult) -> String {
         let mut message = String::from(task_runtime_reply::DOWNLOADER_SUCCESS_MSG);
         let mut has_errors = false;
-        for err in result.errors.iter().map(|e| e.trim()).filter(|e| !e.is_empty()) {
+        for err in result
+            .errors
+            .iter()
+            .map(|e| e.trim())
+            .filter(|e| !e.is_empty())
+        {
             if !has_errors {
                 message.push_str("\n\nErrors:\n");
                 has_errors = true;
@@ -162,7 +171,11 @@ impl TaskService {
             }
             message.push_str(err);
         }
-        if has_errors { message } else { task_runtime_reply::DOWNLOADER_SUCCESS_MSG.to_string() }
+        if has_errors {
+            message
+        } else {
+            task_runtime_reply::DOWNLOADER_SUCCESS_MSG.to_string()
+        }
     }
 
     fn emit_legacy_downloader_typed_result(data: &str) {
@@ -181,7 +194,7 @@ impl TaskService {
             task_name,
             err.to_string(),
         ))
-            .unwrap_or_else(|_| format!("{{\"Task\":\"{}\",\"Error\":\"{}\"}}", task_name, err))
+        .unwrap_or_else(|_| format!("{{\"Task\":\"{}\",\"Error\":\"{}\"}}", task_name, err))
     }
 
     async fn emit_task_ok(
@@ -260,7 +273,10 @@ impl TaskService {
                                 let tree: Vec<PidMonitorTreeNode> = info
                                     .parent_chain
                                     .iter()
-                                    .map(|n| PidMonitorTreeNode { key: n.path.clone(), value: n.pid })
+                                    .map(|n| PidMonitorTreeNode {
+                                        key: n.path.clone(),
+                                        value: n.pid,
+                                    })
                                     .collect();
                                 let parent_pid =
                                     info.parent_chain.get(1).map(|n| n.pid).unwrap_or(0);
@@ -343,20 +359,22 @@ impl TaskService {
 
                         let info = rustix::system::sysinfo();
                         // APPROVED(json): typed model serialised at transport boundary.
-                        let payload = transport_wire_core::encode_json_notification_payload(&NodeMonitorResult {
-                            uptime: info.uptime,
-                            loads: [info.loads[0], info.loads[1], info.loads[2]],
-                            totalram: info.totalram,
-                            freeram: info.freeram,
-                            sharedram: info.sharedram,
-                            bufferram: info.bufferram,
-                            totalswap: info.totalswap,
-                            freeswap: info.freeswap,
-                            procs: info.procs,
-                            totalhigh: info.totalhigh,
-                            freehigh: info.freehigh,
-                            unit: info.mem_unit,
-                        })
+                        let payload = transport_wire_core::encode_json_notification_payload(
+                            &NodeMonitorResult {
+                                uptime: info.uptime,
+                                loads: [info.loads[0], info.loads[1], info.loads[2]],
+                                totalram: info.totalram,
+                                freeram: info.freeram,
+                                sharedram: info.sharedram,
+                                bufferram: info.bufferram,
+                                totalswap: info.totalswap,
+                                freeswap: info.freeswap,
+                                procs: info.procs,
+                                totalhigh: info.totalhigh,
+                                freehigh: info.freehigh,
+                                unit: info.mem_unit,
+                            },
+                        )
                         .unwrap_or_default();
                         Self::emit_task_ok(
                             &task_reply_tx,
@@ -434,9 +452,11 @@ impl TaskService {
                                             )
                                             .await;
 
-                                        payload.table.push(socket_monitor::socket_monitor_packet_row(
-                                            &pkt, iface_name, pid,
-                                        ));
+                                        payload.table.push(
+                                            socket_monitor::socket_monitor_packet_row(
+                                                &pkt, iface_name, pid,
+                                            ),
+                                        );
                                     }
                                 }
 
@@ -463,8 +483,9 @@ impl TaskService {
                                 }
 
                                 // APPROVED(json): typed model serialised at transport boundary.
-                                let result = transport_wire_core::encode_json_notification_payload(&payload)
-                                    .unwrap_or_default();
+                                let result =
+                                    transport_wire_core::encode_json_notification_payload(&payload)
+                                        .unwrap_or_default();
                                 Self::emit_task_ok(
                                     &task_reply_tx,
                                     task_runtime_naming::TASK_SOCKETS_MONITOR,
@@ -715,6 +736,7 @@ impl TaskService {
         }
     }
 
+    #[cfg(feature = "task-http")]
     async fn run_downloader_once_cfg(cfg: &DownloaderTaskConfig) -> Result<DownloaderResult> {
         let timeout =
             Self::parse_interval_or_default(&cfg.timeout, std::time::Duration::from_secs(5));
@@ -773,6 +795,13 @@ impl TaskService {
             failed: failed as u32,
             errors,
         })
+    }
+
+    #[cfg(not(feature = "task-http"))]
+    async fn run_downloader_once_cfg(_cfg: &DownloaderTaskConfig) -> Result<DownloaderResult> {
+        anyhow::bail!(
+            "downloader task requires feature `task-http` (build with: cargo build -p opensnitchd-rs --features task-http)"
+        )
     }
 
     async fn run_ioc_scanner_once_cfg(cfg: &IocScannerTaskConfig) -> Result<Vec<String>> {

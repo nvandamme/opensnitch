@@ -66,8 +66,6 @@ impl GlobalLruMetrics {
         GLOBAL.get_or_init(GlobalLruMetrics::default)
     }
 }
-
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct DualLayerMetricsSnapshot {
     pub(crate) hits: u64,

@@ -1,12 +1,9 @@
 // Explicit-runtime descriptor types are consumed when ebpf backends are enabled.
-#![cfg_attr(
-    not(any(
-        feature = "aya-ebpf",
-        feature = "libbpf-ebpf",
-        feature = "native-ebpf-ringbuf"
-    )),
-    allow(dead_code)
-)]
+#![cfg(any(
+    feature = "aya-ebpf",
+    feature = "libbpf-ebpf",
+    feature = "native-ebpf-ringbuf"
+))]
 
 use super::*;
 

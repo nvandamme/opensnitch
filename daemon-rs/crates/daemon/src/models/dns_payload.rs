@@ -38,7 +38,7 @@ pub enum DnsPayload {
     /// `0` for `gethostbyname` failures (h_errno is not accessible from a
     /// uretprobe without an additional probe hook).
     // Produced only by specific DNS monitor backends; may be idle in minimal profiles.
-    #[cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
+    #[cfg(feature = "native-ebpf-ringbuf")]
     NxDomain {
         host: Arc<str>,
         error_code: i32,
@@ -62,7 +62,7 @@ impl DnsPayload {
     }
 
     // Constructor used by DNS backends that surface resolver error events.
-    #[cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
+    #[cfg(feature = "native-ebpf-ringbuf")]
     pub fn nxdomain(host: impl Into<Arc<str>>, error_code: i32) -> Self {
         Self::NxDomain {
             host: host.into(),

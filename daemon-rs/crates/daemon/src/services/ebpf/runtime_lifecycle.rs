@@ -5,7 +5,6 @@ use crate::services::lifecycle::{ServiceFactory, ServiceRuntimeControl};
 
 impl EbpfService {
     /// Re-probe eBPF runtime assets and swap the active object set.
-    #[allow(dead_code)]
     pub(crate) fn reload_runtime_objects(&mut self) -> Result<()> {
         let next = Self::load_existing_objects()?;
         self.pin_domain = next.pin_domain;

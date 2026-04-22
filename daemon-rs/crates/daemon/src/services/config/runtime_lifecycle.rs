@@ -6,6 +6,7 @@ use crate::services::lifecycle::{ServiceFactory, ServiceRuntimeControl};
 
 impl ConfigService {
     /// Canonical runtime reload hook for config-backed state.
+    // Canonical reload hook retained as API even when specific callers are profile-gated.
     #[allow(dead_code)]
     pub(crate) async fn reload_runtime(&self) -> Result<Config> {
         self.reload().await

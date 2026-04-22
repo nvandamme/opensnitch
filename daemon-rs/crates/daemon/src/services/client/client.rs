@@ -1,6 +1,6 @@
 // This service surface is shared across profiles; several fields/helpers are only
 // exercised by `client-transport` builds.
-#![cfg_attr(not(feature = "client-transport"), allow(dead_code))]
+#![cfg(feature = "client-transport")]
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
@@ -185,14 +185,14 @@ impl ClientService {
             s.sessions.insert(session.id.clone(), session);
         });
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Session-injection helper retained for test and profile-specific ingress paths.
+    #[allow(dead_code)]
     pub fn connect_local_uid_session(&self, uid: u32) {
         let default_action = self.session.snapshot_rx.borrow().connected_default_action;
         self.upsert_session(ClientSession::for_local_uid(uid, default_action));
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Session-injection helper retained for test and profile-specific ingress paths.
+    #[allow(dead_code)]
     pub fn connect_network_identity_session(&self, identity: impl Into<String>) {
         let default_action = self.session.snapshot_rx.borrow().connected_default_action;
         self.upsert_session(ClientSession::for_network_identity(
@@ -200,8 +200,8 @@ impl ClientService {
             default_action,
         ));
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Session-injection helper retained for test and profile-specific ingress paths.
+    #[allow(dead_code)]
     pub fn connect_ip_fallback_session(&self, ip: std::net::IpAddr) {
         let default_action = self.session.snapshot_rx.borrow().connected_default_action;
         self.upsert_session(ClientSession::for_ip_fallback(ip, default_action));
@@ -212,7 +212,7 @@ impl ClientService {
             s.sessions.remove(session_id);
         });
     }
-
+    // Snapshot helper retained for diagnostics and profile-specific surfaces.
     #[allow(dead_code)]
     pub fn connected_sessions(&self) -> Vec<ClientSession> {
         self.session
@@ -245,8 +245,8 @@ impl ClientService {
             })
             .map(|session| session.owner.clone())
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Session mutation helper retained for profile-specific control paths.
+    #[allow(dead_code)]
     pub fn set_session_default_action(
         &self,
         session_id: &str,
@@ -258,8 +258,8 @@ impl ClientService {
             }
         });
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Session mutation helper retained for profile-specific control paths.
+    #[allow(dead_code)]
     pub fn set_connected(&self, connected: bool) {
         if connected {
             let default_action = self.session.snapshot_rx.borrow().connected_default_action;
@@ -273,8 +273,6 @@ impl ClientService {
             self.disconnect_session(CLIENT_SESSION_ID);
         }
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_connected(&self) -> bool {
         !self.session.snapshot_rx.borrow().sessions.is_empty()
     }
@@ -353,9 +351,8 @@ impl ClientService {
             None
         }
     }
-
-    #[allow(dead_code)]
     #[cfg(feature = "client-transport")]
+    #[allow(dead_code)]
     pub async fn connect(addr: &str) -> Result<Self> {
         let channel = match classify_socket_target(addr) {
             SocketTarget::Tcp(target) => endpoint_with_keepalive(target)?.connect().await?,
@@ -366,9 +363,8 @@ impl ClientService {
         };
         Ok(Self::from_session(channel))
     }
-
-    #[allow(dead_code)]
     #[cfg(not(feature = "client-transport"))]
+    #[allow(dead_code)]
     pub async fn connect(_addr: &str) -> Result<Self> {
         Ok(Self::default())
     }

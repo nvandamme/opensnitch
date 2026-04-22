@@ -95,6 +95,7 @@ impl Daemon {
                 s.verbose_hot_path = v;
             }
         }
+        #[cfg(feature = "kernel-caps-diag")]
         crate::utils::kernel_caps::log(&crate::utils::kernel_caps::run());
         if let Some(status) = crate::tunables::RuntimeTunables::maybe_autotune_on_startup() {
             info!(status = %status, "daemon bootstrap: startup autotune");
@@ -250,7 +251,11 @@ impl Daemon {
                 metrics_cli,
                 audit,
                 audit_sinks,
-                #[cfg(feature = "metrics-export")]
+                #[cfg(any(
+                    feature = "metrics-http-serve-text",
+                    feature = "metrics-http-serve-openmetrics",
+                    feature = "metrics-http-serve-protobuf"
+                ))]
                 metrics_server: std::sync::Mutex::new(None),
             }),
         };

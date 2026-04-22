@@ -123,13 +123,15 @@ impl KernelPipelineCounters {
 }
 
 impl Daemon {
+    // Internal diagnostics accessor retained for staged pipeline observability wiring.
+    #[allow(dead_code)]
     pub(super) fn kernel_pipeline_drop_stats(&self) -> KernelPipelineDropStats {
         self.runtime.kernel_pipeline_counters.drop_stats()
     }
 
     /// Test probe — called from smoke tests to observe kernel-pipeline drop counters
     /// directly without going through the real dispatch path.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_kernel_pipeline_drop_stats(&self) -> KernelPipelineDropStats {
         self.kernel_pipeline_drop_stats()
     }

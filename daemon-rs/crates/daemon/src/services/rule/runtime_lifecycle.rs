@@ -5,6 +5,7 @@ use crate::services::lifecycle::{ServiceFactory, ServiceRuntimeControl};
 
 impl RuleService {
     /// Canonical runtime reload hook for active rules snapshot/caches.
+    // Staged runtime hook retained for explicit snapshot reload orchestration.
     #[allow(dead_code)]
     pub(crate) async fn reload_runtime_snapshot(&self) -> Result<usize> {
         self.reload().await

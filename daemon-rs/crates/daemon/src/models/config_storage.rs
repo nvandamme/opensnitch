@@ -224,10 +224,8 @@ impl RawConfig {
     /// final decode still goes through the storage-format boundary.
     pub fn parse_normalized_for_path(path: &Path, raw: &str) -> Result<Self> {
         let value: serde_json::Value =
-            crate::services::storage::StorageService::parse_with_storage_format_for_path(
-                path, raw,
-            )
-            .with_context(|| format!("failed to parse config from {}", path.display()))?;
+            crate::services::storage::StorageService::parse_with_storage_format_for_path(path, raw)
+                .with_context(|| format!("failed to parse config from {}", path.display()))?;
         let normalized = Self::normalize_config_json_keys(value);
         let normalized_json = JsonStorageFormat
             .convert_to_storage(&normalized)
@@ -244,12 +242,8 @@ impl RawConfig {
             serde_json::Value::Object(obj) => {
                 let mut normalized = serde_json::Map::with_capacity(obj.len());
                 for (key, val) in obj {
-                    let canonical =
-                        Self::canonical_config_json_key(&key).unwrap_or(key.as_str());
-                    normalized.insert(
-                        canonical.to_string(),
-                        Self::normalize_config_json_keys(val),
-                    );
+                    let canonical = Self::canonical_config_json_key(&key).unwrap_or(key.as_str());
+                    normalized.insert(canonical.to_string(), Self::normalize_config_json_keys(val));
                 }
                 serde_json::Value::Object(normalized)
             }

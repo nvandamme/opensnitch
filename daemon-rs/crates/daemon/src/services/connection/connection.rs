@@ -101,10 +101,7 @@ pub struct ConnectionService {
 
 impl ConnectionService {
     // Used by eBPF owner-lookup path; idle when ebpf backends are disabled.
-    #[cfg_attr(
-        not(any(feature = "aya-ebpf", feature = "libbpf-ebpf")),
-        allow(dead_code)
-    )]
+    #[cfg(any(feature = "aya-ebpf", feature = "libbpf-ebpf"))]
     pub(super) fn bpf_map_snapshot(&self) -> &Arc<ArcSwap<HashMap<String, u32>>> {
         &self.runtime.bpf_map_snapshot
     }

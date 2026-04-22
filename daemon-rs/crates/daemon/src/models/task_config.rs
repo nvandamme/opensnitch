@@ -2,8 +2,10 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct DownloaderTaskConfig {
+    #[cfg(feature = "task-http")]
     #[serde(default)]
     pub(crate) timeout: String,
+    #[cfg(feature = "task-http")]
     #[serde(default)]
     pub(crate) urls: Vec<DownloaderUrl>,
     #[serde(default)]
@@ -16,6 +18,7 @@ pub(crate) struct DownloaderNotify {
     pub(crate) enabled: bool,
 }
 
+#[cfg(feature = "task-http")]
 #[derive(Debug, Deserialize)]
 pub(crate) struct DownloaderUrl {
     #[serde(default)]

@@ -7,8 +7,12 @@ pub(crate) const DOWNLOADER_SUCCESS_MSG: &str = "[blocklists] lists updated";
 pub(crate) fn build_legacy_downloader_task_result(data: &str) -> String {
     transport_wire_core::encode_json_notification_payload(&LegacyTaskResultPayload::new(data))
         .unwrap_or_else(|_| {
-        format!(r#"{{"Type":{},"Data":{:?}}}"#, LegacyTaskResultPayload::TYPE_ID, data)
-    })
+            format!(
+                r#"{{"Type":{},"Data":{:?}}}"#,
+                LegacyTaskResultPayload::TYPE_ID,
+                data
+            )
+        })
 }
 
 pub(crate) async fn send_task_event(

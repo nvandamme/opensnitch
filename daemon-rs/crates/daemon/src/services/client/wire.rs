@@ -18,11 +18,12 @@ use transport_wire_core::{
 
 // Future transport profiles may run daemon in server or peer-to-peer mode;
 // keep all role variants explicit now for profile-shape stability.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientTransportRole {
     Client,
+    #[allow(dead_code)]
     Server,
+    #[allow(dead_code)]
     PeerToPeer,
 }
 

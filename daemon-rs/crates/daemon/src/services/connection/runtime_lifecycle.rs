@@ -131,8 +131,6 @@ impl ConnectionService {
             cache.set_capacity(inode_key_cap);
         }
     }
-
-    #[allow(dead_code)]
     pub(crate) fn reset_pid_owner_caches() {
         if let Some(cache) = INODE_TO_PID.get() {
             cache.clear();

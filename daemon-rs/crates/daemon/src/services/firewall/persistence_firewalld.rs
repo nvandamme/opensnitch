@@ -256,7 +256,10 @@ impl FirewallService {
                 continue;
             }
             let new_zone_arg = format!("--new-zone={zone_name}");
-            if !Self::command_status_success("firewall-cmd", &["--permanent", new_zone_arg.as_str()]) {
+            if !Self::command_status_success(
+                "firewall-cmd",
+                &["--permanent", new_zone_arg.as_str()],
+            ) {
                 return Err(anyhow!("failed to create firewalld zone `{zone_name}`"));
             }
             created = true;

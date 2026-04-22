@@ -219,7 +219,8 @@ impl SubscriptionService {
     }
 
     /// Returns the current subscription list, sorted by id.
-    #[allow(dead_code)] // retained for compatibility/test proto list accessors
+    // Public list endpoint retained for subscription command parity.
+    #[allow(dead_code)]
     pub fn list(&self) -> Vec<WireSubscription> {
         self.storage.list()
     }

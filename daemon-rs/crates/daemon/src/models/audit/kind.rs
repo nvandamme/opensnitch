@@ -54,6 +54,8 @@ use super::{
 /// - `*Lifecycle` variants carry service/flow lifecycle events (init, start, stop, reload, fail).
 /// - `*Action`    variants carry domain runtime behavior events (CRUD, I/O, cache, pressure, decisions).
 #[derive(Debug, Clone)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum AuditEventKind {
     // ── Service lifecycles ─────────────────────────────────────────────────
     AuditLifecycle(AuditLifecycle),

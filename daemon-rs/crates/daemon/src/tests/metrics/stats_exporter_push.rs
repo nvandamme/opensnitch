@@ -1,6 +1,6 @@
 //! Correctness tests for the push-style stats exporter adapter.
 //!
-//! This module is declared as a child of `stats_exporter_push` (via `#[path]`
+//! This module is declared as a child of `stats_exporters::http_push` (via `#[path]`
 //! in the adapter file), giving it direct access to all private render helpers
 //! and types without public probe wrappers.
 //!

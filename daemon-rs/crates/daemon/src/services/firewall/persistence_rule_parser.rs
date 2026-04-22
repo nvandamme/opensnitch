@@ -171,9 +171,7 @@ pub(super) fn parse_rule_parameters(rule: &FirewallRule) -> ParsedRuleParameters
                 _ => {}
             }
         }
-        if matches!(name.as_str(), "service" | "app" | "profile")
-            && parsed.service_name.is_none()
-        {
+        if matches!(name.as_str(), "service" | "app" | "profile") && parsed.service_name.is_none() {
             if let Some(value) = statement.values.first() {
                 let data = value.value.trim();
                 if !data.is_empty() {

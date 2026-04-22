@@ -56,7 +56,7 @@ pub(crate) use migration::{
 ///   --migrate-write                         Persist migration changes (default is dry-run).
 ///   --metrics-prometheus-addr  <host:port>  Prometheus /metrics listen address.
 ///   --metrics-push-url         <url>        Push exporter endpoint.
-///   --metrics-push-format      <fmt>        Push format (pushgateway|pushgateway-proto|influxdb).
+///   --metrics-push-format      <fmt>        Push format (pushgateway|pushgateway-proto).
 ///   --metrics-push-job         <name>       Push-gateway job label.
 ///   --metrics-push-token       <token>      Push auth token.
 ///   --metrics-push-gzip                     Enable gzip compression on push bodies.
@@ -131,12 +131,32 @@ pub(crate) struct DaemonRuntime {
     pub(crate) tunables: RuntimeTunables,
     pub(crate) shutdown: CancellationToken,
     /// Metrics export config loaded from `metrics.json` at startup (§7 baseline JSON layer).
-    // Read only inside #[cfg(feature = "metrics-export")] blocks in tasks.rs; dead when the feature is off.
-    #[cfg_attr(not(feature = "metrics-export"), allow(dead_code))]
+    // Read only inside metrics feature-gated blocks in tasks.rs.
+    // blocks in tasks.rs; dead when both metrics features are off.
+    #[cfg(any(
+        feature = "metrics-http-serve-text",
+        feature = "metrics-http-serve-openmetrics",
+        feature = "metrics-http-serve-protobuf",
+        feature = "metrics-http-push-text",
+        feature = "metrics-http-push-openmetrics",
+        feature = "metrics-http-push-protobuf",
+        feature = "metrics-http-push-influxdb",
+        feature = "metrics-syslog"
+    ))]
     pub(crate) metrics_config: crate::models::metrics_config::MetricsConfig,
     /// Metrics CLI overrides supplied via `--metrics-*` flags (§7 highest tier; overrides env vars and JSON).
-    // Read only inside #[cfg(feature = "metrics-export")] blocks in tasks.rs; dead when the feature is off.
-    #[cfg_attr(not(feature = "metrics-export"), allow(dead_code))]
+    // Read only inside metrics feature-gated blocks in tasks.rs.
+    // blocks in tasks.rs; dead when both metrics features are off.
+    #[cfg(any(
+        feature = "metrics-http-serve-text",
+        feature = "metrics-http-serve-openmetrics",
+        feature = "metrics-http-serve-protobuf",
+        feature = "metrics-http-push-text",
+        feature = "metrics-http-push-openmetrics",
+        feature = "metrics-http-push-protobuf",
+        feature = "metrics-http-push-influxdb",
+        feature = "metrics-syslog"
+    ))]
     pub(crate) metrics_cli: crate::models::metrics_config::MetricsCliOverrides,
     /// Hot-reload handle for the Prometheus scrape HTTP server.
     ///
@@ -144,7 +164,11 @@ pub(crate) struct DaemonRuntime {
     /// `reload_metrics_server`.  The exporter inside is kept alive across
     /// server restarts so the stats flow can continue feeding snapshots even
     /// when the listen address changes.
-    #[cfg(feature = "metrics-export")]
+    #[cfg(any(
+        feature = "metrics-http-serve-text",
+        feature = "metrics-http-serve-openmetrics",
+        feature = "metrics-http-serve-protobuf"
+    ))]
     pub(crate) metrics_server: std::sync::Mutex<Option<MetricsServerSlot>>,
 }
 
@@ -153,13 +177,17 @@ pub(crate) struct DaemonRuntime {
 /// Stored inside `DaemonRuntime` and updated by `reload_metrics_server` on SIGHUP.
 /// The `exporter` field is long-lived and shared with the running `StatsFlow`; only
 /// the TCP listener is cancelled and restarted when the listen address changes.
-#[cfg(feature = "metrics-export")]
+#[cfg(any(
+    feature = "metrics-http-serve-text",
+    feature = "metrics-http-serve-openmetrics",
+    feature = "metrics-http-serve-protobuf"
+))]
 pub(crate) struct MetricsServerSlot {
     /// Shared exporter — survives server address changes.  The `StatsFlow` holds
     /// another `Arc` clone and keeps calling `export_snapshot` regardless of
     /// whether the HTTP server is running.
     pub(crate) exporter: std::sync::Arc<
-        crate::platform::adapters::stats_exporter_prometheus::PrometheusStatsExporter,
+        crate::platform::adapters::stats_exporters::http_serve::PrometheusStatsExporter,
     >,
     /// Currently bound address, or `None` when the server is not running.
     pub(crate) effective_addr: Option<std::net::SocketAddr>,

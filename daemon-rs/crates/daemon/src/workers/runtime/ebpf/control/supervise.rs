@@ -1,5 +1,5 @@
 // Supervisor internals are fully exercised in aya-enabled profiles.
-#![cfg_attr(not(feature = "aya-ebpf"), allow(dead_code))]
+#![cfg(feature = "aya-ebpf")]
 
 use super::*;
 
@@ -411,6 +411,8 @@ impl NativeRingbuf {
         self.dns_deduper.should_emit(payload)
     }
 
+    // Retained for profile-specific DNS emit diagnostics/probe paths.
+    #[allow(dead_code)]
     pub(super) fn should_emit_dns_event_at(
         recent_events: &mut HashMap<(String, String), Instant>,
         ip: &str,

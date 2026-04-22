@@ -55,7 +55,11 @@ impl AliasStorePort for FileLoadableStateStoreAdapter {
     fn load_alias_map<'a>(
         path: &'a Path,
     ) -> Pin<
-        Box<dyn std::future::Future<Output = Result<Option<HashMap<String, Vec<String>>>>> + Send + 'a>,
+        Box<
+            dyn std::future::Future<Output = Result<Option<HashMap<String, Vec<String>>>>>
+                + Send
+                + 'a,
+        >,
     > {
         Box::pin(async move {
             if !path.exists() {

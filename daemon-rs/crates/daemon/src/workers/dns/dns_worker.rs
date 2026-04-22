@@ -234,12 +234,12 @@ impl DnsWorkerControl {
         })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_extract_dns_events_from_varlink(value: &Value) -> Vec<DnsPayload> {
         Self::extract_dns_events_from_varlink(value)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_decode_varlink_ip(bytes: &[Value]) -> Option<std::net::IpAddr> {
         Self::decode_varlink_ip(bytes)
     }

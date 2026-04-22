@@ -16,7 +16,6 @@ use storage_format_toml::TomlStorageFormat;
 use storage_format_yaml::YamlStorageFormat;
 
 use super::event_bus::StorageEventBus;
-use super::ops::{bool_if_not_found, exists_if_not_found, option_if_not_found};
 use super::runtime_lifecycle::{
     global_storage_service, reload_global_storage_service, subscribe_global_storage_reload,
 };
@@ -26,6 +25,15 @@ pub(crate) use crate::models::storage_dir_entry::StorageDirEntry;
 pub(crate) use crate::models::storage_event::{StorageEvent, StorageOperation};
 
 use crate::utils::atomic_write::{write_bytes_atomic_async, write_bytes_atomic_sync};
+
+fn option_if_not_found<T>(result: io::Result<T>) -> io::Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
 use crate::{
     models::audit::{AuditEvent, AuditEventKind, StorageAction},
     services::audit::AuditService,
@@ -221,7 +229,6 @@ pub(crate) struct StorageService {
     main_storage_format: Option<StorageFormat>,
 }
 
-#[allow(dead_code)]
 impl StorageService {
     pub(crate) fn new() -> Self {
         Self {
@@ -232,6 +239,7 @@ impl StorageService {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn with_audit(mut self, audit: AuditService) -> Self {
         self.audit = Some(audit);
         self
@@ -285,28 +293,20 @@ impl StorageService {
         current.main_storage_format = storage_format;
         super::runtime_lifecycle::replace_global_storage_service(current)
     }
-
-    #[allow(dead_code)]
     pub(crate) fn reload_global() -> Self {
         reload_global_storage_service()
     }
-
-    #[allow(dead_code)]
     pub(crate) fn subscribe_global_reload() -> tokio::sync::watch::Receiver<u64> {
         subscribe_global_storage_reload()
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn subscribe_events(&self) -> StorageEventSubscription {
         self.events.subscribe()
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn subscribe_events_for_path(&self, path: &Path) -> StorageEventSubscription {
         self.events.subscribe_for_path(path)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn subscribe_events_for_prefix(&self, path: &Path) -> StorageEventSubscription {
         self.events.subscribe_for_prefix(path)
     }
@@ -335,6 +335,7 @@ impl StorageService {
         StorageFormat::from_path(path).unwrap_or(StorageFormat::compiled_default())
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn read_to_string(
         &self,
         _domain: &'static str,
@@ -359,8 +360,7 @@ impl StorageService {
             }
         }
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) async fn read_to_string_if_exists(
         &self,
         _domain: &'static str,
@@ -381,6 +381,7 @@ impl StorageService {
         Ok(maybe_contents)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn read_to_string_sync(
         &self,
         _domain: &'static str,
@@ -389,6 +390,7 @@ impl StorageService {
         std::fs::read_to_string(path)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn read_to_string_sync_and_notify(
         &self,
         domain: &'static str,
@@ -398,8 +400,7 @@ impl StorageService {
         self.emit_storage_read(domain, path);
         Ok(contents)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn read_bytes_sync(
         &self,
         _domain: &'static str,
@@ -418,6 +419,7 @@ impl StorageService {
         Ok(contents)
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn read_and_parse_with_storage_format<T>(
         &self,
         domain: &'static str,
@@ -453,8 +455,7 @@ impl StorageService {
             .parse(&raw)
             .with_context(|| format!("parsing {} file {}", storage_format.label(), path.display()))
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) async fn read_and_parse_with_storage_format_if_exists<T>(
         &self,
         domain: &'static str,
@@ -500,8 +501,7 @@ impl StorageService {
         })?;
         Ok(Some(parsed))
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn read_and_parse_with_storage_format_sync<T>(
         &self,
         domain: &'static str,
@@ -528,14 +528,13 @@ impl StorageService {
             .parse(raw)
             .with_context(|| format!("parsing {} file {}", storage_format.label(), path.display()))
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) async fn remove_file_if_exists(
         &self,
         _domain: &'static str,
         path: &Path,
     ) -> io::Result<bool> {
-        bool_if_not_found(tokio::fs::remove_file(path).await)
+        option_if_not_found(tokio::fs::remove_file(path).await).map(|m| m.is_some())
     }
 
     pub(crate) async fn remove_file_if_exists_and_notify(
@@ -543,14 +542,13 @@ impl StorageService {
         domain: &'static str,
         path: &Path,
     ) -> io::Result<bool> {
-        let deleted = bool_if_not_found(tokio::fs::remove_file(path).await)?;
+        let deleted = option_if_not_found(tokio::fs::remove_file(path).await)?.is_some();
         if deleted {
             self.events.emit_delete(domain, path);
         }
         Ok(deleted)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) async fn remove_path_if_exists(
         &self,
         _domain: &'static str,
@@ -568,6 +566,7 @@ impl StorageService {
         Ok(true)
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn remove_path_if_exists_and_notify(
         &self,
         domain: &'static str,
@@ -585,8 +584,7 @@ impl StorageService {
         self.events.emit_delete(domain, path);
         Ok(true)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) async fn create_dir_all(
         &self,
         _domain: &'static str,
@@ -604,8 +602,7 @@ impl StorageService {
         self.emit_write(domain, path);
         Ok(())
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn create_dir_all_sync(&self, _domain: &'static str, path: &Path) -> io::Result<()> {
         std::fs::create_dir_all(path)
     }
@@ -620,34 +617,34 @@ impl StorageService {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn path_exists(&self, _domain: &'static str, path: &Path) -> io::Result<bool> {
-        exists_if_not_found(tokio::fs::metadata(path).await)
+        option_if_not_found(tokio::fs::metadata(path).await).map(|m| m.is_some())
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) async fn path_exists_and_notify(
         &self,
         domain: &'static str,
         path: &Path,
     ) -> io::Result<bool> {
-        let exists = exists_if_not_found(tokio::fs::metadata(path).await)?;
+        let exists = option_if_not_found(tokio::fs::metadata(path).await)?.is_some();
         if exists {
             self.emit_storage_read(domain, path);
         }
         Ok(exists)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn path_exists_sync(&self, _domain: &'static str, path: &Path) -> io::Result<bool> {
-        exists_if_not_found(std::fs::metadata(path))
+        option_if_not_found(std::fs::metadata(path)).map(|m| m.is_some())
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn path_exists_sync_and_notify(
         &self,
         domain: &'static str,
         path: &Path,
     ) -> io::Result<bool> {
-        let exists = exists_if_not_found(std::fs::metadata(path))?;
+        let exists = option_if_not_found(std::fs::metadata(path))?.is_some();
         if exists {
             self.emit_storage_read(domain, path);
         }
@@ -662,8 +659,7 @@ impl StorageService {
         let maybe_metadata = option_if_not_found(tokio::fs::metadata(path).await)?;
         Ok(maybe_metadata.and_then(|metadata| metadata.modified().ok()))
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) async fn modified_time_if_exists_and_notify(
         &self,
         domain: &'static str,
@@ -689,8 +685,7 @@ impl StorageService {
         }
         Ok(paths)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) async fn list_dir_and_notify(
         &self,
         domain: &'static str,
@@ -718,8 +713,7 @@ impl StorageService {
         }
         Ok(items)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) async fn list_dir_with_metadata_and_notify(
         &self,
         domain: &'static str,
@@ -730,6 +724,7 @@ impl StorageService {
         Ok(items)
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn read_link_if_exists(
         &self,
         _domain: &'static str,
@@ -737,8 +732,7 @@ impl StorageService {
     ) -> io::Result<Option<PathBuf>> {
         option_if_not_found(tokio::fs::read_link(path).await)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) async fn read_link_if_exists_and_notify(
         &self,
         domain: &'static str,
@@ -750,8 +744,7 @@ impl StorageService {
         }
         Ok(maybe_target)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) async fn create_symlink(
         &self,
         _domain: &'static str,
@@ -766,6 +759,7 @@ impl StorageService {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn create_symlink_and_notify(
         &self,
         domain: &'static str,
@@ -781,8 +775,7 @@ impl StorageService {
         self.emit_write(domain, emitted_path.as_path());
         Ok(())
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) async fn write_bytes_atomic(
         &self,
         domain: &'static str,
@@ -855,8 +848,7 @@ impl StorageService {
         self.write_bytes_atomic_and_notify(domain, &temp_path, path, payload.as_bytes())
             .await
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn write_bytes_atomic_sync(
         &self,
         domain: &'static str,

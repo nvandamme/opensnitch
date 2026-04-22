@@ -8,7 +8,7 @@ impl NfqueueMetricsState {
         QUEUE_METRICS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn to_snapshot(
         queue_num: u16,
         metrics: QueueMetrics,
@@ -23,7 +23,7 @@ impl NfqueueMetricsState {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn debug_metrics_snapshot()
     -> Vec<crate::models::queue_metrics_snapshot::QueueMetricsSnapshot> {
         let Ok(metrics_map) = Self::queue_metrics_map().lock() else {

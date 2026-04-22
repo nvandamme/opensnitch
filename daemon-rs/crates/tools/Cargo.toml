@@ -7,7 +7,8 @@ publish = false
 
 [features]
 subscriptions = []
+kernel-caps-diag = ["dep:opensnitch-kernel-caps"]
 
 [dependencies]
-time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
-opensnitch-kernel-caps = { path = "../kernel-caps" }
+time = { workspace = true, features = ["formatting", "local-offset", "macros"] }
+opensnitch-kernel-caps = { path = "../kernel-caps", optional = true }

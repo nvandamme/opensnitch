@@ -1,5 +1,7 @@
 /// Rule service lifecycle transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum RuleLifecycle {
     Initialized,
     Started,
@@ -11,6 +13,8 @@ pub enum RuleLifecycle {
 
 /// Rule service runtime actions (CRUD and load).
 #[derive(Debug, Clone)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum RuleAction {
     RulesLoaded,
     RuleAdded {

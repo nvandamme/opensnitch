@@ -1,7 +1,7 @@
 use anyhow::Result;
+use std::time::Instant;
 use storage_format_core::StorageFormatCodec;
 use storage_format_json::JsonStorageFormat;
-use std::time::Instant;
 use transport_wire_core::{WireRule, WireRuleOperator};
 
 use crate::{

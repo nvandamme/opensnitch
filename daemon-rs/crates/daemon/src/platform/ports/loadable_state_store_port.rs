@@ -1,23 +1,17 @@
-use std::{
-    collections::HashMap,
-    future::Future,
-    path::Path,
-    pin::Pin,
-};
+use std::{collections::HashMap, future::Future, path::Path, pin::Pin};
 
 use anyhow::Result;
 
 use crate::{
     config::Config,
     models::{
-        firewall_config::FirewallConfig,
-        firewall_state::FirewallBackend,
-        rule_storage::RuleFile,
+        firewall_config::FirewallConfig, firewall_state::FirewallBackend, rule_storage::RuleFile,
     },
 };
 
 pub(crate) trait ConfigStorePort {
-    fn load_config<'a>(path: &'a Path) -> Pin<Box<dyn Future<Output = Result<Config>> + Send + 'a>>;
+    fn load_config<'a>(path: &'a Path)
+    -> Pin<Box<dyn Future<Output = Result<Config>> + Send + 'a>>;
 }
 
 pub(crate) trait RuleStorePort {

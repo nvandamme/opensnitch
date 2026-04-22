@@ -5,6 +5,7 @@ pub(crate) enum RuntimeApplyPolicy {
 
 #[derive(Clone, Copy)]
 pub(crate) enum RuntimeApplyMessageContext {
+    // Reserved reload context for config command ingress in staged runtime-apply wiring.
     #[allow(dead_code)]
     ConfigCommand,
     ConfigWatch,

@@ -66,16 +66,16 @@ impl SubscriptionStorage {
             }),
         })
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Public wire-oriented helpers retained for subscription RPC surfaces.
+    #[allow(dead_code)]
     pub fn list(&self) -> Vec<WireSubscription> {
         let inner = self.inner.lock().expect("subscription storage poisoned");
         let mut out: Vec<_> = inner.items.values().cloned().map(record_to_wire).collect();
         sort_by_string_key(&mut out, |item| item.id.as_str());
         out
     }
-
-    #[allow(dead_code)] // used by tests
+    // Public wire-oriented helpers retained for subscription RPC surfaces.
+    #[allow(dead_code)]
     pub fn apply(&self, items: Vec<WireSubscription>) -> Vec<WireSubscription> {
         let records = items.into_iter().map(record_from_wire).collect();
         self.apply_records(records)

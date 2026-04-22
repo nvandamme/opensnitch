@@ -1,5 +1,3 @@
-#![cfg_attr(not(feature = "subscriptions"), allow(dead_code))]
-
 pub fn unix_epoch_nanos() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -7,11 +5,13 @@ pub fn unix_epoch_nanos() -> u128 {
         .unwrap_or(0)
 }
 
+#[cfg(feature = "subscriptions")]
 pub(crate) fn unix_timestamp_now_utc() -> i64 {
     let ts = time::OffsetDateTime::now_utc().unix_timestamp();
     if ts < 0 { 0 } else { ts }
 }
 
+#[cfg(feature = "subscriptions")]
 pub(crate) fn now_rfc3339_utc() -> String {
     use time::format_description::well_known::Rfc3339;
 

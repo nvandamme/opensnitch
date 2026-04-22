@@ -3,6 +3,8 @@ use crate::models::rule_record::RuleAction;
 
 /// Verdict domain runtime actions (decision outcomes and queue observations).
 #[derive(Debug, Clone, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum VerdictAction {
     AskTimeoutFallback {
         request_id: u64,
@@ -21,6 +23,8 @@ pub enum VerdictAction {
 
 /// Typed source label for verdict backpressure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum VerdictSource {
     DefaultAction,
     AskTimeoutAllow,

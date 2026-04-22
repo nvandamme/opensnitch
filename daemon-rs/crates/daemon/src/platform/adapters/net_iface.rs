@@ -19,7 +19,6 @@ fn interface_name_cache() -> &'static ArcSwap<HashMap<u32, String>> {
 pub(crate) struct NetIfaceAdapter;
 
 impl NetIfaceAdapter {
-    #[allow(dead_code)]
     pub(crate) fn clear_interface_name_cache() {
         interface_name_cache().store(Arc::new(HashMap::new()));
     }

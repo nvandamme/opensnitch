@@ -20,6 +20,6 @@ hyper-util = { workspace = true }
 tower = { workspace = true }
 nix = { workspace = true, features = ["socket"] }
 rustls = { workspace = true }
-rustls-pki-types = "1.14"
-sha2 = "0.10"
-x509-cert = { version = "0.2", default-features = false, features = ["std"] }
+rustls-pki-types = { workspace = true }
+sha2 = { workspace = true }
+x509-cert = { workspace = true }

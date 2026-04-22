@@ -77,7 +77,11 @@ fn build_test_daemon_with_tunables(bus: Bus, tunables: RuntimeTunables) -> Daemo
             audit_sinks: crate::services::audit::AuditSinks::from_config(
                 &crate::config::AuditSinkConfig::default(),
             ),
-            #[cfg(feature = "metrics-export")]
+            #[cfg(any(
+                feature = "metrics-http-serve-text",
+                feature = "metrics-http-serve-openmetrics",
+                feature = "metrics-http-serve-protobuf"
+            ))]
             metrics_server: std::sync::Mutex::new(None),
         }),
     }
@@ -345,10 +349,7 @@ async fn runtime_task_start_duplicate_returns_error_without_initial_started_repl
         .send(ClientCommand::StartTask(TaskNotification {
             notification_id: 8,
             name: "pid-monitor".to_string(),
-            data: format!(
-                r#"{{"pid":"{}","interval":"5s"}}"#,
-                std::process::id()
-            ),
+            data: format!(r#"{{"pid":"{}","interval":"5s"}}"#, std::process::id()),
         }))
         .await
         .expect("send duplicate start task");

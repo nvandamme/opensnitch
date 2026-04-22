@@ -22,6 +22,8 @@ use super::{FirewallService, runtime_store::FirewallRuntime};
 use crate::platform::adapters::openwrt_uci_firewall::OpenWrtUciFirewallAdapter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Optional introspection source ordering used by selected diagnostics/control paths.
+#[allow(dead_code)]
 enum FirewallIntrospectionSource {
     Netlink,
     Nftables,
@@ -61,6 +63,8 @@ impl FirewallService {
         Self::persistence_backend_for_generic_linux(preferred)
     }
 
+    // Retained for optional diagnostics/control workflows that inspect backend state.
+    #[allow(dead_code)]
     fn firewall_introspection_sources_for_target(
         preferred: FirewallBackend,
     ) -> Vec<FirewallIntrospectionSource> {
@@ -87,6 +91,8 @@ impl FirewallService {
         order
     }
 
+    // Retained for optional diagnostics/control workflows that inspect backend state.
+    #[allow(dead_code)]
     fn firewall_introspection_source_name(source: FirewallIntrospectionSource) -> &'static str {
         match source {
             FirewallIntrospectionSource::Netlink => "netlink",
@@ -305,7 +311,7 @@ impl FirewallService {
             }
         }
     }
-
+    // Retained for optional diagnostics/control workflows that inspect backend state.
     #[allow(dead_code)]
     pub async fn introspect_system_firewall(&self) -> Result<FirewallConfig> {
         let preferred = self.runtime_snapshot().state.backend;
@@ -344,7 +350,7 @@ impl FirewallService {
 
         Err(last_err.unwrap_or_else(|| anyhow!("no firewall introspection backend available")))
     }
-
+    // Retained for optional diagnostics/control workflows that inspect backend state.
     #[allow(dead_code)]
     pub async fn extract_system_firewall_from_backend(&self) -> Result<FirewallConfig> {
         self.introspect_system_firewall().await

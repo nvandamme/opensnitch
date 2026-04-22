@@ -8,6 +8,7 @@ use crate::models::socket_state::SocketInfo;
 pub(crate) struct SocketDiagAdapter;
 
 impl SocketDiagAdapter {
+    #[cfg(test)]
     fn socket_cookie_bytes(socket: &SocketInfo) -> [u8; 8] {
         let mut cookie = [0_u8; 8];
         cookie[..4].copy_from_slice(&socket.cookie0.to_ne_bytes());
@@ -15,6 +16,7 @@ impl SocketDiagAdapter {
         cookie
     }
 
+    #[cfg(test)]
     fn decode_cookie_words(cookie: [u8; 8]) -> (u32, u32) {
         (
             u32::from_ne_bytes([cookie[0], cookie[1], cookie[2], cookie[3]]),
@@ -60,7 +62,7 @@ impl SocketDiagAdapter {
         exact.extend(relaxed_dst);
         exact
     }
-
+    // Public compatibility helper retained for synchronous socket-diag callers.
     #[allow(dead_code)]
     pub fn dump_sockets(family: u8, protocol: u8) -> Result<Vec<SocketInfo>> {
         super::socket_diag_bindings::SocketDiagBindingsAdapter::dump_sockets(family, protocol)
@@ -99,8 +101,6 @@ impl SocketDiagAdapter {
             &sockets, src, src_port, dst, dst_port,
         ))
     }
-
-    #[allow(dead_code)]
     pub async fn find_socket_candidates_async(
         family: u8,
         protocol: u8,
@@ -123,7 +123,7 @@ impl SocketDiagAdapter {
             family, protocol, socket,
         )
     }
-
+    // Public compatibility helper retained for async socket-destroy call paths.
     #[allow(dead_code)]
     pub async fn kill_socket_async(family: u8, protocol: u8, socket: SocketInfo) -> Result<()> {
         super::socket_diag_bindings::SocketDiagBindingsAdapter::kill_socket_async(
@@ -131,18 +131,15 @@ impl SocketDiagAdapter {
         )
         .await
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_socket_cookie_bytes(socket: &SocketInfo) -> [u8; 8] {
         Self::socket_cookie_bytes(socket)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_decode_cookie_words(cookie: [u8; 8]) -> (u32, u32) {
         Self::decode_cookie_words(cookie)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_select_socket_candidates(
         sockets: &[SocketInfo],
         src: IpAddr,

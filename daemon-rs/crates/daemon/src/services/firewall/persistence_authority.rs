@@ -3,8 +3,7 @@ use std::process::Command as StdCommand;
 use anyhow::Result;
 
 use crate::{
-    config::Config,
-    models::firewall_config::FirewallConfig,
+    config::Config, models::firewall_config::FirewallConfig,
     models::firewall_state::FirewallBackend,
 };
 

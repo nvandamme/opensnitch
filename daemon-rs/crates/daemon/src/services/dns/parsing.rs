@@ -1,5 +1,5 @@
 // eBPF DNS sample parsing is only exercised by native ringbuf-enabled builds.
-#![cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
+#![cfg(feature = "native-ebpf-ringbuf")]
 
 use std::{
     collections::HashMap,

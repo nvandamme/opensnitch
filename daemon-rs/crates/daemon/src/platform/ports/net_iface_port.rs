@@ -20,7 +20,7 @@ impl NetIfacePort {
     pub(crate) async fn interface_name_map_async() -> Result<HashMap<u32, String>> {
         NetIfaceAdapter::interface_name_map_async().await
     }
-
+    // Optional async helper retained for runtime paths that need non-blocking interface snapshots.
     #[allow(dead_code)]
     pub(crate) async fn local_ip_addrs_async() -> Result<HashSet<String>> {
         NetIfaceAdapter::local_ip_addrs_async().await

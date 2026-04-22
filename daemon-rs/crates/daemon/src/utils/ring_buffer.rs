@@ -36,7 +36,7 @@ impl<T> RingBuffer<T> {
     pub(crate) fn is_empty(&self) -> bool {
         self.buf.is_empty()
     }
-
+    // Retained for diagnostics/test surfaces that inspect current ring occupancy.
     #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         self.buf.len()

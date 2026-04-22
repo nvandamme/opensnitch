@@ -149,8 +149,6 @@ impl FirewallIptablesAdapter {
             zones,
         }
     }
-
-    #[allow(dead_code)]
     fn merge_extracted_config(dst: &mut FirewallConfig, src: FirewallConfig) {
         dst.chains.extend(src.chains);
         for src_zone in src.zones {
@@ -161,8 +159,6 @@ impl FirewallIptablesAdapter {
             }
         }
     }
-
-    #[allow(dead_code)]
     async fn capture_save_dump(bin: &str) -> Result<String> {
         let save_bin = format!("{bin}-save");
         let out = Command::new(&save_bin)
@@ -277,21 +273,18 @@ impl FirewallIptablesAdapter {
             policy,
         ])
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_chain_policy_args(chain: &FirewallChain) -> Option<Vec<String>> {
         Self::chain_policy_args(chain)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_iptables_args(rule: &FirewallRule) -> Vec<String> {
         Self::iptables_args(rule)
             .into_iter()
             .map(ToOwned::to_owned)
             .collect()
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_nfqueue_rules(
         queue_num: &str,
         queue_bypass: bool,
@@ -302,15 +295,13 @@ impl FirewallIptablesAdapter {
             dns.into_iter().map(ToOwned::to_owned).collect(),
         )
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_parse_iptables_save_dump(dump: &str, family: &str) -> FirewallConfig {
         Self::parse_iptables_save_dump(dump, family)
     }
 }
 
 impl FirewallIptablesAdapter {
-    #[allow(dead_code)]
     pub async fn extract_system_firewall() -> Result<FirewallConfig> {
         if resolve_command_path(IPTABLES_BIN).is_none() {
             return Err(anyhow::anyhow!("iptables binary not found"));

@@ -1,6 +1,6 @@
 //! Correctness tests for the Prometheus scrape adapter.
 //!
-//! This module is declared as a child of `stats_exporter_prometheus` (via
+//! This module is declared as a child of `stats_exporters::http_serve` (via
 //! `#[path]` in the adapter file), giving it direct access to all private
 //! render helpers and types without requiring public probe wrappers.
 //!

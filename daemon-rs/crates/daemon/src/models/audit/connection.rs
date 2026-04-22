@@ -1,5 +1,7 @@
 /// Connection service lifecycle transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum ConnectionLifecycle {
     Initialized,
     Started,
@@ -10,6 +12,8 @@ pub enum ConnectionLifecycle {
 
 /// Connect-flow lifecycle transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum ConnectFlowLifecycle {
     Started,
     Stopped,
@@ -18,6 +22,8 @@ pub enum ConnectFlowLifecycle {
 
 /// Connect-flow runtime actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum ConnectFlowAction {
     ConnectionTracked,
     ConnectionDropped,
@@ -25,6 +31,8 @@ pub enum ConnectFlowAction {
 
 /// Verdict-flow lifecycle transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum VerdictFlowLifecycle {
     Started,
     Stopped,

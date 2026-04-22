@@ -1,6 +1,6 @@
 // Transport boundary facade: adapter/protocol internals live in
 // opensnitch-transport-wire-grpc-client.
-#![cfg_attr(not(feature = "client-transport"), allow(dead_code))]
+#![cfg(feature = "client-transport")]
 
 #[cfg(feature = "client-transport")]
 use anyhow::Result;

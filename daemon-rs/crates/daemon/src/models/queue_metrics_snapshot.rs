@@ -1,3 +1,5 @@
+// Snapshot type shared with optional NFQUEUE debug/metrics adapters.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QueueMetricsSnapshot {
     pub queue_num: u16,

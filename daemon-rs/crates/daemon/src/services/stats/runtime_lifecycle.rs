@@ -22,8 +22,6 @@ impl StatsService {
             .map(|value| value.clone())
             .unwrap_or_else(|_| GO_BACKEND_COMPAT_VERSION.to_string())
     }
-
-    #[allow(dead_code)]
     pub(crate) fn reload_daemon_version_from_env() {
         let next = Self::resolve_daemon_version();
         let cache = DAEMON_VERSION.get_or_init(|| std::sync::RwLock::new(next.clone()));

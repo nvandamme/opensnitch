@@ -6,10 +6,6 @@ use nix::libc;
 use std::collections::BTreeMap;
 use std::ffi::CStr;
 
-use crate::models::firewall_config::{FirewallChain, FirewallConfig};
-use crate::platform::adapters::firewall_nftables::FirewallNftablesAdapter;
-use crate::utils::conntrack::flush_conntrack_table;
-
 #[cfg(test)]
 use super::ParsedRuleExpression;
 use super::{
@@ -17,6 +13,9 @@ use super::{
     INTERCEPTION_NON_TCP_TAG, INTERCEPTION_TCP_SYN_TAG, NetfilterRuleChain,
     NetfilterTransactionBuilder, NetlinkExecutionSummary, TransactionOutcome,
 };
+use crate::models::firewall_config::{FirewallChain, FirewallConfig};
+use crate::platform::adapters::firewall_nftables::FirewallNftablesAdapter;
+use crate::utils::conntrack::flush_conntrack_table;
 
 impl FirewallNetlinkOperation {
     fn kind(&self) -> &'static str {
@@ -108,10 +107,14 @@ struct DumpRule {
     parameters: String,
 }
 
+// Netlink string helper retained for optional dump/introspection paths.
+#[allow(dead_code)]
 fn cstr_to_string(value: &CStr) -> String {
     value.to_string_lossy().to_string()
 }
 
+// Netlink hook-name helper retained for optional dump/introspection paths.
+#[allow(dead_code)]
 fn hook_num_to_name(num: u32) -> String {
     match num {
         n if n == libc::NF_INET_PRE_ROUTING as u32 => "prerouting".to_string(),
@@ -124,6 +127,8 @@ fn hook_num_to_name(num: u32) -> String {
     }
 }
 
+// Netlink policy-name helper retained for optional dump/introspection paths.
+#[allow(dead_code)]
 fn policy_num_to_name(policy: u32) -> String {
     match policy {
         n if n == nftables::VerdictCode::Accept as u32 => "accept".to_string(),
@@ -132,6 +137,8 @@ fn policy_num_to_name(policy: u32) -> String {
     }
 }
 
+// Zone-name helper retained for optional dump/introspection paths.
+#[allow(dead_code)]
 fn zone_name_from_chain(chain_name: &str) -> Option<String> {
     let name = chain_name.trim();
     if !name.starts_with("zone_") {
@@ -148,6 +155,8 @@ fn zone_name_from_chain(chain_name: &str) -> Option<String> {
     Some(zone.to_string())
 }
 
+// Sysfw tag parser retained for optional dump/introspection paths.
+#[allow(dead_code)]
 fn tagged_uuid_from_userdata(userdata: &[u8]) -> String {
     if !userdata.starts_with(super::SYSFW_TAG_PREFIX) {
         return String::new();
@@ -283,8 +292,6 @@ impl FirewallNetlinkAdapter {
             .await
             .context("execute system firewall clear via compatibility nft executor")
     }
-
-    #[allow(dead_code)]
     pub async fn extract_system_firewall() -> Result<FirewallConfig> {
         Self::probe_netfilter_netlink_socket()
             .context("probe netfilter netlink socket before system firewall extraction")?;
@@ -496,8 +503,7 @@ impl FirewallNetlinkAdapter {
 
         Ok(out)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_compose_dumped_config() -> FirewallConfig {
         Self::compose_dumped_config(
             vec![
@@ -808,40 +814,34 @@ impl FirewallNetlinkAdapter {
     async fn flush_conntrack() {
         let _ = flush_conntrack_table().await;
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_plan_ensure(
         queue_num: u16,
         queue_bypass: bool,
     ) -> Vec<FirewallNetlinkOperation> {
         Self::plan_ensure(queue_num, queue_bypass)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_plan_apply_system_firewall(
         sysfw: &FirewallConfig,
         queue_num: u16,
     ) -> Vec<FirewallNetlinkOperation> {
         Self::plan_apply_system_firewall(sysfw, queue_num)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_plan_clear_system_firewall(
         sysfw: &FirewallConfig,
     ) -> Vec<FirewallNetlinkOperation> {
         Self::plan_clear_system_firewall(sysfw)
     }
-
     #[cfg(test)]
     pub(crate) fn probe_is_system_rule_expression_supported(expression: &str) -> bool {
         ParsedRuleExpression::parse_all(expression).is_some()
     }
-
     #[cfg(test)]
     pub(crate) fn probe_unsupported_expression_family(expression: &str) -> &'static str {
         unsupported_expression_family(expression)
     }
-
     #[cfg(test)]
     pub(crate) fn probe_unsupported_summary_for_ops(
         ops: &[FirewallNetlinkOperation],

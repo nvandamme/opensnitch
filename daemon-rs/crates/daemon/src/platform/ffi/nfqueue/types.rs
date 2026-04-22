@@ -105,7 +105,8 @@ pub(crate) enum PacketVerdict {
     Accept {
         mark: u32,
     },
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Optional verdict variant retained for packet-rewrite paths not active in baseline profiles.
+    #[allow(dead_code)]
     AcceptWithPacket {
         mark: u32,
         packet: Vec<u8>,

@@ -113,14 +113,14 @@ pub(crate) fn monitor_stats_from_counters(
         event_subscribers: event_subscribers.load(Ordering::Relaxed),
     }
 }
-
+// Shared lifecycle trait surface is retained for cross-service API stability.
 #[allow(dead_code)]
 pub(crate) trait ServiceFactory: Sized {
     type FactoryInput: Send;
 
     async fn init(input: Self::FactoryInput) -> anyhow::Result<Self>;
 }
-
+// Shared lifecycle trait surface is retained for cross-service API stability.
 #[allow(dead_code)]
 pub(crate) trait ServiceRuntimeControl {
     type ReloadInput: Send;
@@ -135,7 +135,7 @@ pub(crate) trait ServiceRuntimeControl {
 
     async fn reload(&mut self, input: Self::ReloadInput) -> anyhow::Result<()>;
 }
-
+// Shared lifecycle trait surface is retained for cross-service API stability.
 #[allow(dead_code)]
 pub(crate) trait ServiceLifecycle {
     async fn init(&mut self) -> anyhow::Result<()> {
@@ -157,24 +157,16 @@ pub(crate) trait ServiceLifecycle {
     async fn stop(&mut self) -> anyhow::Result<()> {
         Ok(())
     }
-
-    #[allow(dead_code)]
     async fn reload(&mut self) -> anyhow::Result<()> {
         self.stop().await?;
         self.start().await
     }
-
-    #[allow(dead_code)]
     async fn quiesce(&mut self) -> anyhow::Result<()> {
         self.pause().await
     }
-
-    #[allow(dead_code)]
     async fn drain(&mut self, _timeout: Duration) -> anyhow::Result<()> {
         Ok(())
     }
-
-    #[allow(dead_code)]
     async fn health_check(&self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -182,8 +174,6 @@ pub(crate) trait ServiceLifecycle {
     fn status(&self) -> ServiceStatus {
         ServiceStatus::default()
     }
-
-    #[allow(dead_code)]
     async fn reset(&mut self) -> anyhow::Result<()> {
         Ok(())
     }

@@ -34,7 +34,7 @@ impl NativeSocketDiagPort {
     pub(crate) async fn dump_sockets_async(family: u8, protocol: u8) -> Result<Vec<SocketInfo>> {
         SocketDiagAdapter::dump_sockets_async(family, protocol).await
     }
-
+    // Optional async helper retained for profiles that perform socket ownership checks.
     #[allow(dead_code)]
     pub(crate) async fn find_socket_candidates_async(
         family: u8,

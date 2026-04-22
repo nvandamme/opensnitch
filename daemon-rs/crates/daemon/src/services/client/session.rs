@@ -25,8 +25,6 @@ impl From<ClientPrincipal> for crate::models::policy_tx_storage::PolicyOwner {
         }
     }
 }
-
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ClientPrincipal {
     LocalUid(u32),
@@ -55,8 +53,6 @@ pub struct ClientSession {
     /// capability strings from the matched binding.
     pub capabilities: Vec<String>,
 }
-
-#[cfg_attr(not(test), allow(dead_code))]
 impl ClientSession {
     pub fn for_local_uid(uid: u32, default_action: crate::config::DefaultAction) -> Self {
         Self {

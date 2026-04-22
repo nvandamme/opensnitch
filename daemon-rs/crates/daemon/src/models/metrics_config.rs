@@ -6,8 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use crate::services::storage::StorageService;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Prometheus scrape config
@@ -36,11 +36,16 @@ pub enum PushFormatConfig {
     /// Prometheus protobuf (MetricFamily delimited) posted to
     /// `{url}/metrics/job/{job}`.
     PushgatewayProto,
-    /// InfluxDB line protocol posted to the URL verbatim.
+    /// InfluxDB line protocol posted to the configured write endpoint.
     InfluxDb,
 }
 
-#[cfg_attr(not(feature = "metrics-export"), allow(dead_code))]
+#[cfg(any(
+    feature = "metrics-http-push-text",
+    feature = "metrics-http-push-openmetrics",
+    feature = "metrics-http-push-protobuf",
+    feature = "metrics-http-push-influxdb"
+))]
 impl PushFormatConfig {
     /// Return the canonical kebab-case name used by env vars / CLI.
     pub fn as_str(&self) -> &'static str {
@@ -64,7 +69,7 @@ pub struct PushExportConfig {
     /// Remote push endpoint URL.  Absent/empty disables the push exporter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Output format (default: `pushgateway`).
+    /// Output format (default: `pushgateway`; Prometheus-only).
     #[serde(default)]
     pub format: PushFormatConfig,
     /// Job label for push-gateway / Mimir (default: `"opensnitchd"`).
@@ -85,6 +90,71 @@ pub struct PushExportConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Syslog export config
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyslogProtocolConfig {
+    #[default]
+    Udp,
+    Tcp,
+}
+
+impl SyslogProtocolConfig {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Udp => "udp",
+            Self::Tcp => "tcp",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyslogFormatConfig {
+    Rfc3164,
+    #[default]
+    Rfc5424,
+}
+
+impl SyslogFormatConfig {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Rfc3164 => "rfc3164",
+            Self::Rfc5424 => "rfc5424",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyslogExportConfig {
+    /// Remote syslog target (`host:port`). Absent or empty keeps local syslog mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// Remote transport protocol. Ignored for local syslog mode.
+    #[serde(default)]
+    pub protocol: SyslogProtocolConfig,
+    /// RFC framing used for remote syslog mode.
+    #[serde(default)]
+    pub format: SyslogFormatConfig,
+    /// Syslog app-name / tag. Defaults to `opensnitchd-rs-metrics`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+}
+
+impl Default for SyslogExportConfig {
+    fn default() -> Self {
+        Self {
+            server: None,
+            protocol: SyslogProtocolConfig::Udp,
+            format: SyslogFormatConfig::Rfc5424,
+            tag: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Top-level metrics config
 // ---------------------------------------------------------------------------
 
@@ -95,6 +165,8 @@ pub struct MetricsConfig {
     pub prometheus: PrometheusConfig,
     #[serde(default)]
     pub push: PushExportConfig,
+    #[serde(default)]
+    pub syslog: SyslogExportConfig,
 }
 
 impl MetricsConfig {
@@ -138,6 +210,14 @@ pub struct MetricsCliOverrides {
     pub push_token: Option<String>,
     /// `--metrics-push-gzip` (boolean flag, no argument) — force-enable gzip.
     pub push_gzip: Option<bool>,
+    /// `--metrics-syslog-server <host:port>` — overrides `syslog.server`.
+    pub syslog_server: Option<String>,
+    /// `--metrics-syslog-protocol <udp|tcp>` — overrides `syslog.protocol`.
+    pub syslog_protocol: Option<String>,
+    /// `--metrics-syslog-format <rfc3164|rfc5424>` — overrides `syslog.format`.
+    pub syslog_format: Option<String>,
+    /// `--metrics-syslog-tag <name>` — overrides `syslog.tag`.
+    pub syslog_tag: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

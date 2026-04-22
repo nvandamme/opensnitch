@@ -45,4 +45,3 @@ pub(crate) struct InternalHashCacheRecord {
     pub(crate) sha1: String,
     pub(crate) sha256: String,
 }
-

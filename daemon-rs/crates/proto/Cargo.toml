@@ -5,9 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-tonic = "0.14"
-prost = "0.14"
-tonic-prost = "0.14"
+tonic = { workspace = true }
+prost = { workspace = true }
+tonic-prost = { workspace = true }
 
 [build-dependencies]
-tonic-prost-build = "0.14"
+tonic-prost-build = { workspace = true }

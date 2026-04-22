@@ -35,10 +35,7 @@ fn build_task_key_normalizes_aliases_and_uses_identity_keys() {
     assert_eq!(
         task_runtime_naming::build_task_key(
             "socketsmonitor",
-            &crate::services::task::TaskRuntimePayload::from_task_data(
-                "socketsmonitor",
-                json!({}),
-            ),
+            &crate::services::task::TaskRuntimePayload::from_task_data("socketsmonitor", json!({}),),
         ),
         "sockets-monitor"
     );
@@ -60,14 +57,20 @@ fn build_task_key_uses_instance_suffix_when_data_is_missing() {
     assert_eq!(
         task_runtime_naming::build_task_key(
             "pid-monitor-4242",
-            &crate::services::task::TaskRuntimePayload::from_task_data("pid-monitor-4242", json!({})),
+            &crate::services::task::TaskRuntimePayload::from_task_data(
+                "pid-monitor-4242",
+                json!({})
+            ),
         ),
         "pid-monitor:4242"
     );
     assert_eq!(
         task_runtime_naming::build_task_key(
             "node-monitor-main",
-            &crate::services::task::TaskRuntimePayload::from_task_data("node-monitor-main", json!({})),
+            &crate::services::task::TaskRuntimePayload::from_task_data(
+                "node-monitor-main",
+                json!({})
+            ),
         ),
         "node-monitor:main"
     );
@@ -81,7 +84,10 @@ fn build_task_key_uses_instance_suffix_when_data_is_missing() {
     assert_eq!(
         task_runtime_naming::build_task_key(
             "nodemonitor-edge",
-            &crate::services::task::TaskRuntimePayload::from_task_data("nodemonitor-edge", json!({})),
+            &crate::services::task::TaskRuntimePayload::from_task_data(
+                "nodemonitor-edge",
+                json!({})
+            ),
         ),
         "node-monitor:edge"
     );
@@ -315,10 +321,13 @@ async fn pid_monitor_emits_first_sample_without_waiting_full_interval() {
     let handle = TaskService.spawn_task_monitor_snapshot(
         "pid-monitor",
         11_001,
-        crate::services::task::TaskRuntimePayload::from_task_data("pid-monitor", json!({
-            "pid": "999999",
-            "interval": "5s"
-        })),
+        crate::services::task::TaskRuntimePayload::from_task_data(
+            "pid-monitor",
+            json!({
+                "pid": "999999",
+                "interval": "5s"
+            }),
+        ),
         token.clone(),
         ProcessService::default(),
         tx,
@@ -344,10 +353,13 @@ async fn node_monitor_emits_first_sample_without_waiting_full_interval() {
     let handle = TaskService.spawn_task_monitor_snapshot(
         "node-monitor",
         12_001,
-        crate::services::task::TaskRuntimePayload::from_task_data("node-monitor", json!({
-            "node": "main",
-            "interval": "5s"
-        })),
+        crate::services::task::TaskRuntimePayload::from_task_data(
+            "node-monitor",
+            json!({
+                "node": "main",
+                "interval": "5s"
+            }),
+        ),
         token.clone(),
         ProcessService::default(),
         tx,
@@ -373,7 +385,10 @@ async fn looper_reply_payload_matches_go_interval_string() {
     let handle = TaskService.spawn_task_monitor_snapshot(
         "looper",
         13_001,
-        crate::services::task::TaskRuntimePayload::from_task_data("looper", json!({"interval": "100ms"})),
+        crate::services::task::TaskRuntimePayload::from_task_data(
+            "looper",
+            json!({"interval": "100ms"}),
+        ),
         token.clone(),
         ProcessService::default(),
         tx,
@@ -400,11 +415,14 @@ async fn ioc_scanner_without_schedule_emits_no_periodic_results() {
     let handle = TaskService.spawn_task_monitor_snapshot(
         "ioc-scanner",
         14_001,
-        crate::services::task::TaskRuntimePayload::from_task_data("ioc-scanner", json!({
-            "interval": "100ms",
-            "tools": [],
-            "schedule": []
-        })),
+        crate::services::task::TaskRuntimePayload::from_task_data(
+            "ioc-scanner",
+            json!({
+                "interval": "100ms",
+                "tools": [],
+                "schedule": []
+            }),
+        ),
         token.clone(),
         ProcessService::default(),
         tx,
@@ -430,11 +448,14 @@ async fn downloader_notify_payload_matches_go_success_message_shape() {
     let handle = TaskService.spawn_task_monitor_snapshot(
         "downloader",
         15_001,
-        crate::services::task::TaskRuntimePayload::from_task_data("downloader", json!({
-            "interval": "100ms",
-            "notify": {"enabled": true},
-            "urls": []
-        })),
+        crate::services::task::TaskRuntimePayload::from_task_data(
+            "downloader",
+            json!({
+                "interval": "100ms",
+                "notify": {"enabled": true},
+                "urls": []
+            }),
+        ),
         token.clone(),
         ProcessService::default(),
         tx,

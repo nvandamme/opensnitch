@@ -6,6 +6,7 @@ use crate::services::lifecycle::{ServiceFactory, ServiceRuntimeControl};
 
 impl ClientService {
     /// Rebuild the client transport/runtime from the latest config snapshot.
+    // Staged runtime hook retained for transport hot-reload entrypoints.
     #[allow(dead_code)]
     pub(crate) async fn reload_runtime_transport(&mut self, config: &Config) -> Result<()> {
         *self = Self::connect_with_config(config).await?;
@@ -13,7 +14,6 @@ impl ClientService {
     }
 
     /// Refresh session-derived defaults after a config reload.
-    #[allow(dead_code)]
     pub(crate) fn reload_runtime_defaults(
         &self,
         disconnected_default_action: crate::config::DefaultAction,

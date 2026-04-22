@@ -5,10 +5,11 @@
 //! dependency on the `prometheus-client` crate.
 //!
 //! Used by:
-//! - `platform/adapters/stats_exporter_prometheus` — scrape endpoint proto response
-//! - `platform/adapters/stats_exporter_push`       — push-gateway proto push body
+//! - `platform/adapters/stats_exporters/http_push` — push-gateway proto push body
 //!
-//! Feature-gated: only compiled under `metrics-export` (prost is an optional dep).
+//! Feature-gated: compiled when `metrics-http-serve-protobuf` or
+//! `metrics-http-push-protobuf` is enabled
+//! (prost is an optional dep).
 
 /// A name/value label pair.
 #[derive(Clone, PartialEq, prost::Message)]

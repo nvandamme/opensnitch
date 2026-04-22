@@ -15,7 +15,4 @@ pub mod proto_mapper;
 pub(crate) mod rule_proto;
 pub mod socket_diag;
 pub mod socket_diag_bindings;
-#[cfg(feature = "metrics-export")]
-pub mod stats_exporter_prometheus;
-#[cfg(feature = "metrics-export")]
-pub mod stats_exporter_push;
+pub mod stats_exporters;

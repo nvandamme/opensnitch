@@ -57,6 +57,7 @@ impl NetlinkRequest for KillSocketRequest {
 }
 
 impl SocketDiagBindingsAdapter {
+    // Public compatibility helper retained for synchronous socket dump callers.
     #[allow(dead_code)]
     pub(crate) fn dump_sockets(family: u8, protocol: u8) -> Result<Vec<SocketInfo>> {
         super::netlink_rt::run_on_netlink_rt(Self::dump_sockets_async(family, protocol))
@@ -425,8 +426,7 @@ impl SocketDiagBindingsAdapter {
             _ => [0_u8; 16],
         }
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_build_kill_req_v2(family: u8, protocol: u8, socket: &SocketInfo) -> ReqV2 {
         Self::build_kill_req_v2(family, protocol, socket)
     }

@@ -40,7 +40,7 @@ impl EbpfService {
             Err(_) => EbpfObjectAvailability::default(),
         }
     }
-
+    // Optional helper retained for profile-specific process map introspection paths.
     #[allow(dead_code)]
     pub fn process_pin_root(&self) -> &'static str {
         let Some(obj) = self.process_obj.as_ref() else {

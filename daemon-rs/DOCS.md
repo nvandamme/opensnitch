@@ -47,7 +47,7 @@ The daemon binary package is `opensnitchd-rs` in `crates/daemon`.
 | `native-ebpf-ringbuf` | **on** | Use the native eBPF ring-buffer API for kernel event delivery (requires `aya-ebpf`). |
 | `libbpf-ebpf` | off | Alternative eBPF backend via libbpf-rs. Pulls in `libbpf-rs` and disables aya. |
 | `subscriptions` | off | Subscription management service — remote list download, storage, and rule-layout sync. See [Subscriptions](#subscriptions). |
-| `metrics-export` | off | Prometheus scrape endpoint and push exporter. See [Metrics Export](#metrics-export). |
+| `metrics-export` | off | Metrics export umbrella feature. Enables fine-grained HTTP serve/push formats plus syslog export. See [Metrics Export](#metrics-export). |
 
 Example — build with both optional features:
 
@@ -358,6 +358,15 @@ The file and all its fields are optional; absent fields disable the correspondin
 | `gzip` | bool | `false` | Compress push body (`Content-Encoding: gzip`) |
 | `bucket` | string | `opensnitch` | InfluxDB v2 bucket — appended as `?bucket=…` when not already in the URL. Only used with `format=influxdb`. |
 | `org` | string | — | InfluxDB v2 organisation — appended as `?org=…` when not already in the URL. Only used with `format=influxdb`. |
+
+#### `syslog` object
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `server` | string | *(local syslog)* | Remote `host:port`. Absent or empty keeps local syslog mode. |
+| `protocol` | string | `udp` | `udp` or `tcp`. Only used when `server` is set. |
+| `format` | string | `rfc5424` | `rfc3164` or `rfc5424`. Only used when `server` is set. |
+| `tag` | string | `opensnitchd-rs-metrics` | Syslog app-name / tag used for local and remote messages. |
 
 ### system-fw.json format
 
@@ -752,10 +761,16 @@ Adds two stats export adapters.  Build with:
 cargo build -p opensnitchd-rs --features metrics-export
 ```
 
+`metrics-export` is an umbrella. The concrete transport/wire feature names are:
+`metrics-http-serve-text`, `metrics-http-serve-openmetrics`, `metrics-http-serve-protobuf`,
+`metrics-http-push-text`, `metrics-http-push-openmetrics`, `metrics-http-push-protobuf`,
+`metrics-http-push-influxdb`, and `metrics-syslog`.
+
 Both adapters are configured through (in precedence order, highest → lowest, DESIGN_RULES §7):
 
 1. **CLI flags** — highest precedence; `--metrics-prometheus-addr`, `--metrics-push-url`, `--metrics-push-format`,
-   `--metrics-push-job`, `--metrics-push-token`, `--metrics-push-gzip`.
+  `--metrics-push-job`, `--metrics-push-token`, `--metrics-push-gzip`, `--metrics-syslog-server`,
+  `--metrics-syslog-protocol`, `--metrics-syslog-format`, `--metrics-syslog-tag`.
 2. **Env vars** — mid-tier override; typically used for CI/testing (see below).
 3. **`metrics.json`** — baseline; co-located with the daemon config file (e.g.
    `/etc/opensnitchd/metrics.json`). Full field reference: [metrics.json field reference](#metricsjson-field-reference).
@@ -916,10 +931,60 @@ http://influxdb:8086/api/v2/write?bucket=opensnitch&org=myorg
 The push background task is fail-open — HTTP errors and non-2xx responses are logged at
 `DEBUG` and never stop the daemon.
 
+### Syslog Exporter
+
+Exports the same rich daemon and subscription stats snapshot as the other metrics formats,
+but as one syslog record per metric row. This keeps local syslog readable and lets remote
+syslog receivers ingest the full breakdown set, including per-rule hits and
+rule-to-subscription mappings.
+
+#### `metrics.json` (JSON config layer)
+
+```json
+{
+  "syslog": {
+    "server": "127.0.0.1:514",
+    "protocol": "udp",
+    "format": "rfc5424",
+    "tag": "opensnitchd-rs-metrics"
+  }
+}
+```
+
+If `server` is absent or empty, the exporter writes to local syslog.
+
+#### CLI
+
+```bash
+opensnitchd-rs \
+  --metrics-syslog-server 127.0.0.1:514 \
+  --metrics-syslog-protocol tcp \
+  --metrics-syslog-format rfc5424 \
+  --metrics-syslog-tag opensnitchd-rs-metrics
+```
+
+#### Env vars (CI/testing only)
+
+| Variable | Description |
+|---|---|
+| `OPENSNITCH_METRICS_SYSLOG_SERVER` | Remote `host:port`; unset keeps local syslog mode |
+| `OPENSNITCH_METRICS_SYSLOG_PROTOCOL` | `udp` or `tcp` |
+| `OPENSNITCH_METRICS_SYSLOG_FORMAT` | `rfc3164` or `rfc5424` |
+| `OPENSNITCH_METRICS_SYSLOG_TAG` | Syslog app-name / tag |
+
+#### Transport behavior
+
+- Local mode writes each rendered metric record through the platform syslog socket.
+- Remote mode sends RFC3164 or RFC5424 framed records over UDP or TCP, suitable for
+  rsyslog and syslog-ng collectors.
+- Delivery is fail-open and runs behind a bounded background worker so stats collection
+  does not block on slow remote sinks.
+
 ### Running both adapters simultaneously
 
-When both `prometheus.addr` and `push.url` are configured, a `MultiStatsExporter`
-fan-out is created automatically and each snapshot is delivered to both adapters.
+When any combination of `prometheus.addr`, `push.url`, and `syslog` export is configured,
+a `MultiStatsExporter` fan-out is created automatically and each snapshot is delivered to
+every enabled adapter.
 
 ## Subscriptions
 

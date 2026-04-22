@@ -24,8 +24,6 @@ impl FirewallService {
     pub(crate) fn probe_load_system_firewall(path: &Path) -> Result<Option<FirewallConfig>> {
         Self::load_system_firewall_from_path(path)
     }
-
-    #[allow(dead_code)]
     pub(crate) fn probe_load_system_firewall_for_backend(
         path: &Path,
         backend: FirewallBackend,
@@ -36,8 +34,6 @@ impl FirewallService {
     pub(crate) fn probe_save_system_firewall(path: &Path, fw: &FirewallConfig) -> Result<()> {
         Self::save_system_firewall_to_path(path, fw)
     }
-
-    #[allow(dead_code)]
     pub(crate) fn probe_save_system_firewall_for_backend(
         path: &Path,
         fw: &FirewallConfig,

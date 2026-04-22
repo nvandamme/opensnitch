@@ -1,5 +1,7 @@
 /// Process-monitor service lifecycle transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum ProcessLifecycle {
     Initialized,
     Started,
@@ -10,6 +12,8 @@ pub enum ProcessLifecycle {
 
 /// Process-monitor service runtime actions (tracking).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum ProcessAction {
     ProcessTracked { pid: u32 },
     ProcessEvicted { pid: u32 },

@@ -16,7 +16,7 @@ pub enum KernelEvent {
         kind: ProcEventKind,
     },
     // Emitted only when native eBPF process-state wiring is active.
-    #[cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
+    #[cfg(feature = "native-ebpf-ringbuf")]
     EbpfProcStateChanged(EbpfProcStatePayload),
     FirewallState(FirewallState),
 }

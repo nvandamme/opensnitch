@@ -3,7 +3,6 @@ use serde_json::Value;
 
 use crate::models::rule_record::RuleRecord;
 
-
 #[derive(Debug, Deserialize)]
 pub struct IncomingTaskNotification {
     #[serde(alias = "Name", alias = "NAME")]
@@ -86,7 +85,8 @@ pub enum ClientCommand {
         notification_id: u64,
         rule_names: Vec<String>,
     },
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Reserved command variant for runtime task pausing parity and future UI control hooks.
+    #[allow(dead_code)]
     PauseRuntimeTasks,
     ResumeRuntimeTasks,
     StopRuntimeTasks,

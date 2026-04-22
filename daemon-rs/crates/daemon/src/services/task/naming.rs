@@ -23,10 +23,7 @@ const INTERVAL_VALIDATED_TASK_NAMES: &[&str] = &[
 pub(crate) fn build_task_key(task_name: &str, data: &TaskRuntimePayload) -> String {
     let normalized_name = normalized_task_name(task_name);
     match normalized_name.as_str() {
-        TASK_PID_MONITOR => format!(
-            "{TASK_PID_MONITOR}:{}",
-            data.pid_raw().unwrap_or_default()
-        ),
+        TASK_PID_MONITOR => format!("{TASK_PID_MONITOR}:{}", data.pid_raw().unwrap_or_default()),
         TASK_NODE_MONITOR => format!(
             "{TASK_NODE_MONITOR}:{}",
             data.node_name().unwrap_or("default")
@@ -98,4 +95,3 @@ pub(crate) fn task_instance_suffix(task_name: &str, canonical_name: &str) -> Opt
 
     suffix_after_any_prefix(task_name, prefixes)
 }
-

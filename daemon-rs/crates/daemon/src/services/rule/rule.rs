@@ -170,6 +170,7 @@ impl RuleService {
     /// Reload using synchronous file I/O batched in a single blocking call.
     /// Uses `spawn_blocking` to keep the tokio thread free. Prefer
     /// `reload_inline` on fast paths where the blocking-pool hop is costly.
+    // Compatibility helper retained for synchronous reload call sites.
     #[allow(dead_code)]
     pub async fn reload_sync(&self) -> Result<usize> {
         let _update_guard = self.update_lock.lock().await;
@@ -208,7 +209,7 @@ impl RuleService {
         Ok(loaded_count)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub async fn list_wire(&self) -> Vec<WireRule> {
         self.snapshot().wire_rules.as_ref().clone()
     }
@@ -268,7 +269,7 @@ impl RuleService {
         )
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub async fn match_attempt(
         &self,
         attempt: &ConnectionAttempt,
@@ -279,8 +280,8 @@ impl RuleService {
             .match_attempt_with_rule_name_sync(attempt, process, dst_host)?
             .map(|(decision, _)| decision))
     }
-
-    #[allow(dead_code)] // used by tests; production hook point for gRPC rule upsert
+    // Compatibility helper retained for rule upsert call paths not yet fully wired.
+    #[allow(dead_code)]
     pub async fn upsert_from_wire(&self, rule: &WireRule) -> Result<RuleMatchDecision> {
         self.upsert_rule_record(rule_record_from_wire(rule)).await
     }

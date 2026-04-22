@@ -1,5 +1,6 @@
 pub mod atomic_write;
 pub mod byte_read;
+#[cfg(feature = "cert-gen")]
 pub mod cert_gen;
 pub mod channel_send;
 pub mod command_output;
@@ -9,8 +10,10 @@ pub mod conntrack;
 pub mod daemon_guard;
 pub mod duration_parse;
 pub mod hex_parse;
+#[cfg(feature = "subscriptions")]
 pub mod http_response;
 pub mod json_value;
+#[cfg(feature = "kernel-caps-diag")]
 pub mod kernel_caps;
 pub mod list_shape;
 pub mod lru_cache;

@@ -372,7 +372,7 @@ impl Daemon {
     }
 
     // Test probe — called from smoke tests to inject client commands without running the full gRPC stack.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn spawn_client_command_task(
         &self,
         client_cmd_rx: tokio::sync::mpsc::Receiver<crate::models::command_rpc::ClientCommand>,
@@ -450,147 +450,308 @@ impl Daemon {
             self.runtime.audit.clone(),
         );
 
-        #[cfg(feature = "metrics-export")]
+        #[cfg(any(
+            feature = "metrics-http-serve-text",
+            feature = "metrics-http-serve-openmetrics",
+            feature = "metrics-http-serve-protobuf",
+            feature = "metrics-http-push-text",
+            feature = "metrics-http-push-openmetrics",
+            feature = "metrics-http-push-protobuf",
+            feature = "metrics-http-push-influxdb",
+            feature = "metrics-syslog"
+        ))]
         let flow = {
-            use crate::platform::adapters::stats_exporter_prometheus::{
-                PROMETHEUS_ADDR_ENV, PrometheusStatsExporter,
-            };
-            use crate::platform::adapters::stats_exporter_push::{
-                MultiStatsExporter, PUSH_BUCKET_ENV, PUSH_FORMAT_ENV, PUSH_GZIP_ENV, PUSH_JOB_ENV,
-                PUSH_ORG_ENV, PUSH_TOKEN_ENV, PUSH_URL_ENV, PushConfig, PushFormat,
-                PushStatsExporter,
-            };
             use crate::platform::ports::stats_exporter_port::StatsExporterPort;
 
+            #[allow(unused_variables)]
             let mc = &self.runtime.metrics_config;
+            #[allow(unused_variables)]
             let cli = &self.runtime.metrics_cli;
+            let mut exporters: Vec<Arc<dyn StatsExporterPort>> = Vec::new();
 
-            // §7 resolution: CLI (highest) → env var → JSON config (baseline).
+            #[cfg(any(
+                feature = "metrics-http-serve-text",
+                feature = "metrics-http-serve-openmetrics",
+                feature = "metrics-http-serve-protobuf"
+            ))]
+            {
+                use crate::platform::adapters::stats_exporters::http_serve::{
+                    PROMETHEUS_ADDR_ENV, PrometheusStatsExporter,
+                };
 
-            // ── Prometheus scrape endpoint ───────────────────────────────────────────────
-            let prom_addr_str: Option<String> = cli
-                .prometheus_addr
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .or_else(|| {
-                    std::env::var(PROMETHEUS_ADDR_ENV)
-                        .ok()
-                        .filter(|s| !s.is_empty())
-                })
-                .or_else(|| mc.prometheus.addr.clone().filter(|s| !s.is_empty()));
-
-            let prom_addr: Option<std::net::SocketAddr> = prom_addr_str.and_then(|s| {
-                s.parse::<std::net::SocketAddr>()
-                    .map_err(|e| tracing::warn!(addr = %s, "metrics: invalid prometheus addr: {e}"))
-                    .ok()
-            });
-
-            // Always create the Prometheus exporter so that a SIGHUP hot-reload can
-            // attach a new server without needing to restart the stats flow.
-            let prom_exp = PrometheusStatsExporter::new();
-
-            let server_ct = prom_addr.map(|addr| {
-                let ct = self.runtime.shutdown.child_token();
-                prom_exp.clone().spawn_metrics_server(addr, ct.clone());
-                ct
-            });
-
-            // Store the hot-reload handle so SIGHUP can cancel/rebind as needed.
-            *self.runtime.metrics_server.lock().unwrap() = Some(super::MetricsServerSlot {
-                exporter: prom_exp.clone(),
-                effective_addr: prom_addr,
-                server_ct,
-            });
-
-            let prom: Option<Arc<dyn StatsExporterPort>> =
-                Some(prom_exp as Arc<dyn StatsExporterPort>);
-
-            // ── Push exporter ────────────────────────────────────────────────────────────
-            let push_url: Option<String> = cli
-                .push_url
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .or_else(|| std::env::var(PUSH_URL_ENV).ok().filter(|s| !s.is_empty()))
-                .or_else(|| mc.push.url.clone().filter(|s| !s.is_empty()));
-
-            let push: Option<Arc<dyn StatsExporterPort>> = push_url.map(|url| {
-                // Format: CLI → env var → JSON (non-default).
-                let format_str: Option<String> = cli
-                    .push_format
+                // §7 resolution: CLI (highest) → env var → JSON config (baseline).
+                let prom_addr_str: Option<String> = cli
+                    .prometheus_addr
                     .as_deref()
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
                     .or_else(|| {
-                        std::env::var(PUSH_FORMAT_ENV)
+                        std::env::var(PROMETHEUS_ADDR_ENV)
                             .ok()
                             .filter(|s| !s.is_empty())
                     })
-                    .or_else(|| {
-                        if !mc.push.format.is_default() {
-                            Some(mc.push.format.as_str().to_string())
-                        } else {
-                            None
-                        }
-                    });
-                let format = match format_str.as_deref().unwrap_or("").to_lowercase().as_str() {
-                    "influxdb" | "influx" => PushFormat::InfluxDb,
-                    "pushgateway-proto" | "proto" => PushFormat::PushgatewayProto,
-                    _ => PushFormat::Pushgateway,
-                };
-                // Job label: CLI → env var → JSON.
-                let job = cli
-                    .push_job
-                    .clone()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| std::env::var(PUSH_JOB_ENV).ok().filter(|s| !s.is_empty()))
-                    .or_else(|| mc.push.job.clone().filter(|s| !s.is_empty()))
-                    .unwrap_or_else(|| "opensnitchd".to_string());
-                // Auth token: CLI → env var → JSON.
-                let token = cli
-                    .push_token
-                    .clone()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| std::env::var(PUSH_TOKEN_ENV).ok().filter(|s| !s.is_empty()))
-                    .or_else(|| mc.push.token.clone().filter(|s| !s.is_empty()));
-                // Gzip: CLI flag (highest) → env var → JSON config.
-                let gzip = cli.push_gzip.unwrap_or(false)
-                    || std::env::var(PUSH_GZIP_ENV)
-                        .ok()
-                        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
-                        .unwrap_or(false)
-                    || mc.push.gzip;
-                // InfluxDB-specific: env var → JSON.
-                let bucket = std::env::var(PUSH_BUCKET_ENV)
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| mc.push.bucket.clone().filter(|s| !s.is_empty()))
-                    .unwrap_or_else(|| "opensnitch".to_string());
-                let org = std::env::var(PUSH_ORG_ENV)
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| mc.push.org.clone().filter(|s| !s.is_empty()))
-                    .unwrap_or_default();
-                PushStatsExporter::new(
-                    PushConfig {
-                        url,
-                        format,
-                        job,
-                        token,
-                        gzip,
-                        bucket,
-                        org,
-                    },
-                    self.runtime.shutdown.clone(),
-                ) as Arc<dyn StatsExporterPort>
-            });
+                    .or_else(|| mc.prometheus.addr.clone().filter(|s| !s.is_empty()));
 
-            match (prom, push) {
-                (Some(p), Some(q)) => flow.with_stats_exporter(MultiStatsExporter::new(vec![p, q])),
-                (Some(p), None) => flow.with_stats_exporter(p),
-                (None, Some(q)) => flow.with_stats_exporter(q),
-                (None, None) => flow,
+                let prom_addr: Option<std::net::SocketAddr> = prom_addr_str.and_then(|s| {
+                    s.parse::<std::net::SocketAddr>()
+                        .map_err(
+                            |e| tracing::warn!(addr = %s, "metrics: invalid prometheus addr: {e}"),
+                        )
+                        .ok()
+                });
+
+                // Always create the Prometheus exporter so that a SIGHUP hot-reload can
+                // attach a new server without needing to restart the stats flow.
+                let prom_exp = PrometheusStatsExporter::new();
+
+                let server_ct = prom_addr.map(|addr| {
+                    let ct = self.runtime.shutdown.child_token();
+                    prom_exp.clone().spawn_metrics_server(addr, ct.clone());
+                    ct
+                });
+
+                // Store the hot-reload handle so SIGHUP can cancel/rebind as needed.
+                *self.runtime.metrics_server.lock().unwrap() = Some(super::MetricsServerSlot {
+                    exporter: prom_exp.clone(),
+                    effective_addr: prom_addr,
+                    server_ct,
+                });
+
+                exporters.push(prom_exp as Arc<dyn StatsExporterPort>);
+            }
+
+            // ── Push exporter ────────────────────────────────────────────────────────────
+            #[cfg(any(
+                feature = "metrics-http-push-text",
+                feature = "metrics-http-push-openmetrics",
+                feature = "metrics-http-push-protobuf"
+            ))]
+            {
+                use crate::platform::adapters::stats_exporters::http_push::{
+                    PUSH_FORMAT_ENV, PUSH_GZIP_ENV, PUSH_JOB_ENV, PUSH_TOKEN_ENV, PUSH_URL_ENV,
+                    PushConfig, PushFormat, PushStatsExporter,
+                };
+
+                let push_url: Option<String> = cli
+                    .push_url
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| std::env::var(PUSH_URL_ENV).ok().filter(|s| !s.is_empty()))
+                    .or_else(|| mc.push.url.clone().filter(|s| !s.is_empty()));
+
+                if let Some(url) = push_url {
+                    // Format: CLI → env var → JSON (non-default).
+                    let format_str: Option<String> = cli
+                        .push_format
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .or_else(|| {
+                            std::env::var(PUSH_FORMAT_ENV)
+                                .ok()
+                                .filter(|s| !s.is_empty())
+                        })
+                        .or_else(|| {
+                            if !mc.push.format.is_default() {
+                                Some(mc.push.format.as_str().to_string())
+                            } else {
+                                None
+                            }
+                        });
+                    let format = match format_str.as_deref().unwrap_or("").to_lowercase().as_str() {
+                        "pushgateway-proto" | "proto" => PushFormat::PushgatewayProto,
+                        "influxdb" => PushFormat::InfluxDb,
+                        _ => PushFormat::Pushgateway,
+                    };
+                    // Job label: CLI → env var → JSON.
+                    let job = cli
+                        .push_job
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| std::env::var(PUSH_JOB_ENV).ok().filter(|s| !s.is_empty()))
+                        .or_else(|| mc.push.job.clone().filter(|s| !s.is_empty()))
+                        .unwrap_or_else(|| "opensnitchd".to_string());
+                    // Auth token: CLI → env var → JSON.
+                    let token = cli
+                        .push_token
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| std::env::var(PUSH_TOKEN_ENV).ok().filter(|s| !s.is_empty()))
+                        .or_else(|| mc.push.token.clone().filter(|s| !s.is_empty()));
+                    // Gzip: CLI flag (highest) → env var → JSON config.
+                    let gzip = cli.push_gzip.unwrap_or(false)
+                        || std::env::var(PUSH_GZIP_ENV)
+                            .ok()
+                            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
+                            .unwrap_or(false)
+                        || mc.push.gzip;
+                    match format {
+                        PushFormat::Pushgateway => {
+                            #[cfg(feature = "metrics-http-push-text")]
+                            {
+                                exporters.push(PushStatsExporter::new(
+                                    PushConfig {
+                                        url,
+                                        format,
+                                        job,
+                                        token,
+                                        gzip,
+                                    },
+                                    self.runtime.shutdown.clone(),
+                                )
+                                    as Arc<dyn StatsExporterPort>);
+                            }
+                            #[cfg(not(feature = "metrics-http-push-text"))]
+                            tracing::warn!(
+                                "metrics push format 'pushgateway' requires feature metrics-http-push-text"
+                            );
+                        }
+                        PushFormat::PushgatewayProto => {
+                            #[cfg(feature = "metrics-http-push-protobuf")]
+                            {
+                                exporters.push(PushStatsExporter::new(
+                                    PushConfig {
+                                        url,
+                                        format,
+                                        job,
+                                        token,
+                                        gzip,
+                                    },
+                                    self.runtime.shutdown.clone(),
+                                )
+                                    as Arc<dyn StatsExporterPort>);
+                            }
+                            #[cfg(not(feature = "metrics-http-push-protobuf"))]
+                            tracing::warn!(
+                                "metrics push format 'pushgateway-proto' requires feature metrics-http-push-protobuf"
+                            );
+                        }
+                        PushFormat::InfluxDb => {
+                            tracing::warn!(
+                                "metrics push format 'influxdb' is served by feature metrics-http-push-influxdb"
+                            );
+                        }
+                    }
+                }
+            }
+
+            #[cfg(feature = "metrics-http-push-influxdb")]
+            {
+                use crate::platform::adapters::stats_exporters::http_push_influxdb::{
+                    INFLUX_BUCKET_ENV, INFLUX_GZIP_ENV, INFLUX_ORG_ENV, INFLUX_TOKEN_ENV,
+                    INFLUX_URL_ENV, InfluxDbConfig, InfluxDbStatsExporter,
+                };
+
+                let url = std::env::var(INFLUX_URL_ENV)
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| cli.push_url.clone().filter(|s| !s.is_empty()))
+                    .or_else(|| mc.push.url.clone().filter(|s| !s.is_empty()));
+                if let Some(url) = url {
+                    let token = std::env::var(INFLUX_TOKEN_ENV)
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| cli.push_token.clone().filter(|s| !s.is_empty()))
+                        .or_else(|| mc.push.token.clone().filter(|s| !s.is_empty()));
+                    let gzip = cli.push_gzip.unwrap_or(false)
+                        || std::env::var(INFLUX_GZIP_ENV)
+                            .ok()
+                            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
+                            .unwrap_or(false)
+                        || mc.push.gzip;
+                    let bucket = std::env::var(INFLUX_BUCKET_ENV)
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| mc.push.bucket.clone().filter(|s| !s.is_empty()))
+                        .unwrap_or_else(|| "opensnitch".to_string());
+                    let org = std::env::var(INFLUX_ORG_ENV)
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| mc.push.org.clone().filter(|s| !s.is_empty()))
+                        .unwrap_or_default();
+                    exporters.push(InfluxDbStatsExporter::new(
+                        InfluxDbConfig {
+                            url,
+                            token,
+                            gzip,
+                            bucket,
+                            org,
+                        },
+                        self.runtime.shutdown.clone(),
+                    ));
+                }
+            }
+
+            #[cfg(feature = "metrics-syslog")]
+            {
+                use crate::platform::adapters::stats_exporters::syslog_push::{
+                    SYSLOG_FORMAT_ENV, SYSLOG_PROTOCOL_ENV, SYSLOG_SERVER_ENV, SYSLOG_TAG_ENV,
+                    SyslogConfig, SyslogFormat, SyslogProtocol, SyslogStatsExporter,
+                };
+
+                let server = cli
+                    .syslog_server
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        std::env::var(SYSLOG_SERVER_ENV)
+                            .ok()
+                            .filter(|s| !s.is_empty())
+                    })
+                    .or_else(|| mc.syslog.server.clone().filter(|s| !s.is_empty()));
+
+                let protocol = cli
+                    .syslog_protocol
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(SyslogProtocol::from_str)
+                    .or_else(|| {
+                        std::env::var(SYSLOG_PROTOCOL_ENV)
+                            .ok()
+                            .filter(|s| !s.is_empty())
+                            .map(|s| SyslogProtocol::from_str(&s))
+                    })
+                    .unwrap_or_else(|| SyslogProtocol::from_str(mc.syslog.protocol.as_str()));
+
+                let format = cli
+                    .syslog_format
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(SyslogFormat::from_str)
+                    .or_else(|| {
+                        std::env::var(SYSLOG_FORMAT_ENV)
+                            .ok()
+                            .filter(|s| !s.is_empty())
+                            .map(|s| SyslogFormat::from_str(&s))
+                    })
+                    .unwrap_or_else(|| SyslogFormat::from_str(mc.syslog.format.as_str()));
+
+                let tag = cli
+                    .syslog_tag
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| std::env::var(SYSLOG_TAG_ENV).ok().filter(|s| !s.is_empty()))
+                    .or_else(|| mc.syslog.tag.clone().filter(|s| !s.is_empty()))
+                    .unwrap_or_else(|| SyslogConfig::default().tag);
+
+                exporters.push(SyslogStatsExporter::new(SyslogConfig {
+                    server,
+                    protocol,
+                    format,
+                    tag,
+                }));
+            }
+
+            match exporters.len() {
+                0 => flow,
+                1 => flow.with_stats_exporter(exporters.pop().expect("single exporter exists")),
+                _ => {
+                    use crate::platform::adapters::stats_exporters::multi::MultiStatsExporter;
+                    flow.with_stats_exporter(MultiStatsExporter::new(exporters))
+                }
             }
         };
 

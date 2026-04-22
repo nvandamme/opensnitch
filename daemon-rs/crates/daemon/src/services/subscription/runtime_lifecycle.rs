@@ -9,7 +9,6 @@ use super::subscription::SubscriptionService;
 #[cfg(feature = "subscriptions")]
 impl SubscriptionService {
     /// Canonical runtime reload hook for subscription runtime state/layout.
-    #[allow(dead_code)]
     pub(crate) async fn reload_runtime(&self) -> Result<()> {
         self.sync_layout().await?;
         self.flush_storage_best_effort().await;
@@ -37,7 +36,6 @@ impl ServiceRuntimeControl for SubscriptionService {
 
 #[cfg(not(feature = "subscriptions"))]
 impl SubscriptionService {
-    #[allow(dead_code)]
     pub(crate) async fn reload_runtime(&self) -> Result<()> {
         Ok(())
     }

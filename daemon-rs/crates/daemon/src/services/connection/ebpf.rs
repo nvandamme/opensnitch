@@ -1,9 +1,6 @@
 // Connection eBPF lookup helpers are intentionally compiled even when eBPF backends
 // are disabled; they become active as soon as aya/libbpf features are enabled.
-#![cfg_attr(
-    not(any(feature = "aya-ebpf", feature = "libbpf-ebpf")),
-    allow(dead_code)
-)]
+#![cfg(any(feature = "aya-ebpf", feature = "libbpf-ebpf"))]
 
 use crate::models::{connection_owner::ConnectionOwner, connection_state::TransportProtocol};
 use std::{

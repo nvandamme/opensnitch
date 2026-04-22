@@ -384,55 +384,40 @@ impl FirewallNftablesAdapter {
             values.join(", ")
         )
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn probe_family_or_default(chain: &FirewallChain) -> &str {
         Self::family_or_default(chain)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn probe_table_or_default(chain: &FirewallChain) -> &str {
         Self::table_or_default(chain)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn probe_chain_name_or_default(chain: &FirewallChain) -> &str {
         Self::chain_name_or_default(chain)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn probe_rule_tag(chain: &FirewallChain, rule: &FirewallRule) -> String {
         Self::rule_tag(chain, rule)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn probe_nft_expression(rule: &FirewallRule, queue_num: u16) -> String {
         Self::nft_expression(rule, queue_num)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_nft_rule_lines(value: &str) -> Vec<&str> {
         Self::nft_rule_lines(value)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_parse_nft_handle(line: &str) -> Option<String> {
         Self::parse_nft_handle(line)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_nft_rule_tag(rule_expr: &str) -> &str {
         Self::nft_rule_tag(rule_expr)
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_parse_ruleset_text(ruleset: &str) -> FirewallConfig {
         Self::parse_ruleset_text(ruleset)
     }
 }
 
 impl FirewallNftablesAdapter {
-    #[allow(dead_code)]
     pub async fn extract_system_firewall() -> Result<FirewallConfig> {
         if resolve_command_path("nft").is_none() {
             bail!("nft binary not found");

@@ -1,5 +1,7 @@
 /// Subscription service lifecycle transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum SubscriptionLifecycle {
     Initialized,
     Started,
@@ -11,8 +13,9 @@ pub enum SubscriptionLifecycle {
 }
 
 /// Subscription flow lifecycle transitions and sub-phases.
-#[cfg_attr(not(feature = "subscriptions"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum SubscriptionFlowLifecycle {
     SchedulerStarted,
     StreamStarted,
@@ -23,8 +26,9 @@ pub enum SubscriptionFlowLifecycle {
 }
 
 /// Subscription service runtime actions (refresh outcomes).
-#[cfg_attr(not(feature = "subscriptions"), allow(dead_code))]
 #[derive(Debug, Clone)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum SubscriptionAction {
     RefreshCompleted { name: Box<str> },
     RefreshFailed { reason: Box<str> },

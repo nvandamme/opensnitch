@@ -2,7 +2,7 @@ use super::Daemon;
 
 impl Daemon {
     // Test probe — called from smoke tests to dispatch connection attempts directly into worker channels.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) async fn probe_dispatch_connect_attempt_to_worker(
         worker_txs: &[tokio::sync::mpsc::Sender<
             crate::models::connection_state::ConnectionAttempt,
@@ -21,7 +21,7 @@ impl Daemon {
     }
 
     // Test probe — called from smoke tests to inject kernel pipeline events without running the real eBPF path.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) async fn probe_dispatch_kernel_pipeline_event<T>(
         &self,
         tx: &tokio::sync::mpsc::Sender<T>,
@@ -39,7 +39,7 @@ impl Daemon {
         .await
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_fanout_kernel_ingress_event(
         event: crate::models::kernel_event::KernelEvent,
         dns_ingress_tx: &tokio::sync::mpsc::Sender<crate::models::dns_payload::DnsPayload>,

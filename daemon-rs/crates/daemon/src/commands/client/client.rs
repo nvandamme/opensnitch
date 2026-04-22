@@ -175,8 +175,9 @@ pub(crate) fn parse_task_notification_data(
     notification_id: u64,
     raw_data: &str,
 ) -> Result<TaskNotification, String> {
-    let task = transport_wire_core::decode_json_notification_payload::<IncomingTaskNotification>(raw_data)
-        .map_err(|err| err.to_string())?;
+    let task =
+        transport_wire_core::decode_json_notification_payload::<IncomingTaskNotification>(raw_data)
+            .map_err(|err| err.to_string())?;
     Ok(TaskNotification {
         notification_id,
         name: task.name,
@@ -195,7 +196,8 @@ pub(crate) fn parse_log_level_data(raw_data: &str) -> Option<i32> {
     }
 
     use crate::utils::json_value::object_get_case_insensitive;
-    let parsed = transport_wire_core::decode_json_notification_payload::<serde_json::Value>(raw).ok()?;
+    let parsed =
+        transport_wire_core::decode_json_notification_payload::<serde_json::Value>(raw).ok()?;
     match parsed {
         serde_json::Value::Number(n) => n.as_i64().and_then(|v| i32::try_from(v).ok()),
         serde_json::Value::Object(obj) => {

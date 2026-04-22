@@ -1,39 +1,22 @@
 // The audit model defines the complete event vocabulary for the daemon.
 // Many lifecycle variants and action variants are forward-defined and will
 // gain emit sites as instrumentation coverage grows.
-#[allow(dead_code)]
 pub mod client;
-#[allow(dead_code)]
 pub mod config;
-#[allow(dead_code)]
 pub mod connection;
-#[allow(dead_code)]
 pub mod dns;
-#[allow(dead_code)]
 pub mod event;
-#[allow(dead_code)]
 pub mod family;
-#[allow(dead_code)]
 pub mod firewall;
-#[allow(dead_code)]
 pub mod kernel;
-#[allow(dead_code)]
 pub mod kind;
-#[allow(dead_code)]
 pub mod process;
-#[allow(dead_code)]
 pub mod rule;
-#[allow(dead_code)]
 pub mod severity;
-#[allow(dead_code)]
 pub mod stats;
-#[allow(dead_code)]
 pub mod storage;
-#[allow(dead_code)]
 pub mod subscription;
-#[allow(dead_code)]
 pub mod task;
-#[allow(dead_code)]
 pub mod verdict;
 
 // ── Audit service ──────────────────────────────────────────────────────────

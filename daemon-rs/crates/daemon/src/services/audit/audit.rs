@@ -13,13 +13,10 @@ const DEFAULT_INGRESS_CAPACITY: usize = 1024;
 /// Thread-safe and cheaply cloneable (wraps an `Arc`).  Used by the UI query
 /// path and post-incident drain.  New events silently overwrite the oldest
 /// entry when the ring is full.
-#[allow(dead_code)]
 #[derive(Clone)]
 pub struct AuditRing {
     inner: Arc<Mutex<RingBuffer<Arc<AuditEvent>>>>,
 }
-
-#[allow(dead_code)] // Public ring API is kept for planned UI/query/drain consumers.
 impl AuditRing {
     fn new(capacity: usize) -> Self {
         Self {
@@ -34,6 +31,8 @@ impl AuditRing {
     }
 
     /// Drain and return all buffered events, clearing the ring.
+    // Public ring API is retained for planned query/drain consumers.
+    #[allow(dead_code)]
     pub fn drain_recent(&self) -> Vec<Arc<AuditEvent>> {
         self.inner
             .lock()
@@ -42,10 +41,14 @@ impl AuditRing {
     }
 
     /// Return the number of events currently buffered.
+    // Public ring API is retained for planned query/drain consumers.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.inner.lock().map(|r| r.len()).unwrap_or(0)
     }
 
+    // Public ring API is retained for planned query/drain consumers.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -72,7 +75,8 @@ impl AuditRing {
 pub struct AuditService {
     ingress_tx: SyncSender<AuditEvent>,
     tx: broadcast::Sender<Arc<AuditEvent>>,
-    #[allow(dead_code)] // Kept for planned ring-backed audit query/drain access.
+    // Retained for planned ring-backed audit query/drain access.
+    #[allow(dead_code)]
     ring: AuditRing,
 }
 
@@ -126,7 +130,8 @@ impl AuditService {
     }
 
     /// Access the in-memory ring for UI query or drain.
-    #[allow(dead_code)] // Kept for planned ring-backed audit query/drain access.
+    // Accessor retained for planned ring-backed audit query/drain access.
+    #[allow(dead_code)]
     pub fn ring(&self) -> &AuditRing {
         &self.ring
     }

@@ -42,7 +42,7 @@ mod supervise;
 mod types;
 
 pub(crate) use lifecycle::EbpfWorkerControl;
-#[cfg(feature = "native-ebpf-ringbuf")]
+#[cfg(all(feature = "native-ebpf-ringbuf", test))]
 pub(super) use supervise::NativeQueuedEvent;
 pub(super) use supervise::{EbpfMapPrunePolicy, NativeRingbuf, SupervisorState};
 pub(crate) use types::EbpfWorkerMode;

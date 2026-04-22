@@ -1,5 +1,7 @@
 /// Task service lifecycle transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum TaskLifecycle {
     Initialized,
     Started,
@@ -11,6 +13,8 @@ pub enum TaskLifecycle {
 
 /// Task service runtime actions (managed-task supervision).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum TaskAction {
     RuntimeTasksStarted,
     TaskPanicked {
@@ -35,6 +39,8 @@ pub enum TaskAction {
 
 /// Service lifecycle observer flow lifecycle transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Intentional audit vocabulary API surface; emit sites vary by runtime profile.
+#[allow(dead_code)]
 pub enum ServiceObserverLifecycle {
     ServiceObserversStarted,
     ServiceObserversStopped,

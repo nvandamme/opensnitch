@@ -3,7 +3,8 @@ pub enum FirewallBackend {
     #[default]
     Nftables,
     Iptables,
-    #[cfg_attr(not(feature = "openwrt"), allow(dead_code))]
+    // OpenWrt backend remains an optional target-specific runtime backend.
+    #[allow(dead_code)]
     OpenWrtUci,
 }
 

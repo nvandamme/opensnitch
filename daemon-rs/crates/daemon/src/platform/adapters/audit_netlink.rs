@@ -187,12 +187,12 @@ impl AuditNetlinkSocket {
         (len + 3) & !3
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_build_enable_events_payload() -> [u8; STATUS_MESSAGE_LEN] {
         Self::build_enable_events_payload()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_parse_event_datagram(datagram: &[u8]) -> Result<Option<AuditEventMessage>> {
         Self::parse_event_datagram(datagram)
     }

@@ -15,6 +15,7 @@ const CN_IDX_PROC: u32 = 0x1;
 const CN_VAL_PROC: u32 = 0x1;
 const PROC_CN_MCAST_LISTEN: u32 = 1;
 
+#[cfg(test)]
 pub(crate) const NLMSG_HDR_LEN: usize = 16;
 pub(crate) const CN_MSG_LEN: usize = 20;
 pub(crate) const PROC_EVENT_HEADER_LEN: usize = 16;
@@ -27,6 +28,7 @@ pub(crate) const PROC_EVENT_EXEC: u32 = 0x0000_0002;
 pub(crate) const PROC_EVENT_EXIT: u32 = 0x8000_0000;
 
 pub struct ProcEventSocket {
+    // Request socket retained for staged connector control paths.
     #[allow(dead_code)]
     pub(crate) request_sock: NetlinkSocket,
     pub(crate) event_sock: MulticastSocketRaw,
@@ -60,7 +62,7 @@ impl NetlinkRequest for ProcListenRequest {
 }
 
 impl ProcEventSocket {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn recv_pid_event(&mut self, timeout: Duration) -> Result<Option<ProcPidEvent>> {
         Self::run_netlink_future(self.recv_pid_event_async(timeout))
     }
@@ -79,6 +81,7 @@ impl ProcEventSocket {
         Ok(Self::parse_pid_event_from_payload(payload))
     }
 
+    #[cfg(test)]
     fn connector_payload(frame: &[u8]) -> Option<&[u8]> {
         let payload_offset = NLMSG_HDR_LEN + CN_MSG_LEN;
         let min_len = payload_offset + PROC_EVENT_HEADER_LEN;
@@ -99,6 +102,7 @@ impl ProcEventSocket {
         Some(&payload[..cn_msg_data_len])
     }
 
+    #[cfg(test)]
     fn parse_pid_event(frame: &[u8]) -> Option<ProcPidEvent> {
         let payload = Self::connector_payload(frame)?;
         Self::parse_pid_event_payload(payload)
@@ -213,22 +217,22 @@ impl ProcEventSocket {
         })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_read_u16_ne_at(frame: &[u8], offset: usize) -> Option<u16> {
         read_ne_value_at(frame, offset, u16::from_ne_bytes)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_read_u32_ne_at(frame: &[u8], offset: usize) -> Option<u32> {
         read_ne_value_at(frame, offset, u32::from_ne_bytes)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_connector_payload(frame: &[u8]) -> Option<&[u8]> {
         Self::connector_payload(frame)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn probe_parse_pid_event(frame: &[u8]) -> Option<ProcPidEvent> {
         Self::parse_pid_event(frame)
     }

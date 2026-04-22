@@ -131,7 +131,7 @@ impl PersistentHashCache {
 
         let mut bytes = Vec::with_capacity(HASH_CACHE_MAGIC.len() + 128);
         bytes.extend_from_slice(HASH_CACHE_MAGIC);
-        match bincode::serialize(&cache_file) {
+        match postcard::to_allocvec(&cache_file) {
             Ok(payload) => bytes.extend_from_slice(&payload),
             Err(e) => {
                 tracing::warn!("hash cache serialisation failed: {e}");
@@ -220,7 +220,7 @@ fn read_internal_cache_file(path: &Path) -> Option<InternalHashCacheFile> {
     if &bytes[..HASH_CACHE_MAGIC.len()] != HASH_CACHE_MAGIC {
         return None;
     }
-    bincode::deserialize::<InternalHashCacheFile>(&bytes[HASH_CACHE_MAGIC.len()..]).ok()
+    postcard::from_bytes::<InternalHashCacheFile>(&bytes[HASH_CACHE_MAGIC.len()..]).ok()
 }
 
 /// Write `data` atomically by writing to a temp file and renaming.
@@ -248,4 +248,5 @@ pub(crate) const HASH_CACHE_GC_INTERVAL: Duration = Duration::from_secs(600);
 /// Default cache file location (alongside daemon config).
 pub(crate) const HASH_CACHE_FILENAME: &str = "hash_cache.bin";
 
-const HASH_CACHE_MAGIC: &[u8] = b"OSHASHC1";
+// Bumped from OSHASHC1 (bincode) to OSHASHC2 (postcard) to invalidate old caches.
+const HASH_CACHE_MAGIC: &[u8] = b"OSHASHC2";

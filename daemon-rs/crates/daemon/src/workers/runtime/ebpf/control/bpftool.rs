@@ -1,12 +1,9 @@
 // Explicit runtime selection helpers are retained for ebpf-enabled profiles.
-#![cfg_attr(
-    not(any(
-        feature = "aya-ebpf",
-        feature = "libbpf-ebpf",
-        feature = "native-ebpf-ringbuf"
-    )),
-    allow(dead_code)
-)]
+#![cfg(any(
+    feature = "aya-ebpf",
+    feature = "libbpf-ebpf",
+    feature = "native-ebpf-ringbuf"
+))]
 
 use super::*;
 

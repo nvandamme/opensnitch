@@ -12,7 +12,7 @@ pub(crate) fn nul_terminated_utf8(value: &[u8]) -> Option<&str> {
 }
 
 // Lossy conversion helper is used by eBPF parsers in feature-enabled builds.
-#[cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
+#[cfg(feature = "native-ebpf-ringbuf")]
 pub(crate) fn nul_terminated_utf8_lossy(value: &[u8]) -> String {
     let bytes = nul_terminated_bytes(value);
     if bytes.is_empty() {

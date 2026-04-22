@@ -31,8 +31,11 @@ pub mod proc_net_packet;
 pub mod process_state;
 pub mod process_worker_state;
 /// Prometheus `io.prometheus.client` wire-format types (prost-derived).
-/// Only compiled under the `metrics-export` feature (prost is optional).
-#[cfg(feature = "metrics-export")]
+/// Compiled when either metrics endpoint feature needs protobuf payloads.
+#[cfg(any(
+    feature = "metrics-http-serve-protobuf",
+    feature = "metrics-http-push-protobuf"
+))]
 pub mod prometheus_wire;
 pub mod queue_metrics_snapshot;
 pub mod rule_match_decision;
@@ -44,6 +47,7 @@ pub mod socket_state;
 pub mod storage_dir_entry;
 pub mod storage_event;
 pub mod storage_event_counters;
+#[cfg(feature = "subscriptions")]
 pub mod subscription_refresh;
 pub mod subscription_rpc;
 pub mod subscription_storage;

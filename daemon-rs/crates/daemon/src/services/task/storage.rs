@@ -6,8 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     RuntimeTaskHandles, TaskRuntimePayload, TaskService, TaskStorageRuntime,
-    naming as task_runtime_naming,
-    validation as task_runtime_validation,
+    naming as task_runtime_naming, validation as task_runtime_validation,
 };
 use crate::{
     models::task_storage::{TaskDataFile, TasksListFile},
@@ -27,6 +26,7 @@ use crate::{
 };
 
 impl TaskService {
+    // Retained for optional storage-to-runtime task synchronization flows.
     #[allow(dead_code)]
     pub(crate) async fn sync_storage_tasks(
         &self,
@@ -96,7 +96,11 @@ impl TaskService {
         hasher.update(path.to_string_lossy().as_bytes());
         hasher.update([0]);
         hasher.update(raw_task.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
     pub(crate) async fn load_storage_tasks(

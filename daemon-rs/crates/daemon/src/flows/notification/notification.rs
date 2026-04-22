@@ -749,13 +749,11 @@ impl NotificationFlow {
     }
 
     #[cfg(test)]
-    #[allow(dead_code)] // Test helper retained for flow-level assertions across split test modules.
     pub(crate) fn is_stream_close_notification(action: i32) -> bool {
         is_stream_close_notification_wire(action)
     }
 
     #[cfg(test)]
-    #[allow(dead_code)] // Test helper retained for flow-level assertions across split test modules.
     pub(crate) fn notification_hello_reply() -> transport_wire_core::WireNotificationReply {
         notification_hello_reply_wire()
     }

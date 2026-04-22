@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use crate::{
     models::{
         proc_net_packet::{ProcNetPacketRow, ProcNetXdpRow},
-        socket_monitor_payload::{SocketEntry, SocketId, SocketMonitorProcessEntry, SocketMonitorRow},
+        socket_monitor_payload::{
+            SocketEntry, SocketId, SocketMonitorProcessEntry, SocketMonitorRow,
+        },
         socket_state::SocketInfo,
     },
     services::{connection::ConnectionService, process::ProcessService},
