@@ -21,7 +21,7 @@ use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 
 pub(super) struct ActiveRuleCompiled {
-    pub(super) name: String,
+    pub(super) name: Arc<str>,
     pub(super) operator: RuleOperator,
     pub(super) decision: RuleMatchDecision,
     pub(super) terminal_on_match: bool,
@@ -78,7 +78,7 @@ impl RuleService {
             .map(|rule| {
                 let decision = RuleMatchDecision::from_rule(rule.action, rule.nolog);
                 ActiveRuleCompiled {
-                    name: rule.name.clone(),
+                    name: Arc::from(rule.name.as_str()),
                     operator: rule.operator.clone(),
                     terminal_on_match: rule.precedence || !decision.allow,
                     decision,
@@ -142,8 +142,8 @@ impl RuleService {
         attempt: &ConnectionAttempt,
         process: &ProcessInfo,
         dst_host: Option<&str>,
-    ) -> Result<Option<(RuleMatchDecision, String)>> {
-        let mut decision = None::<(RuleMatchDecision, &str)>;
+    ) -> Result<Option<(RuleMatchDecision, Arc<str>)>> {
+        let mut decision = None::<(RuleMatchDecision, Arc<str>)>;
         let derived = AttemptDerived::from_attempt(attempt);
         derived.prewarm(snapshot.attempt_text_needs);
 
@@ -160,12 +160,12 @@ impl RuleService {
             }
 
             if rule.terminal_on_match {
-                return Ok(Some((rule.decision, rule.name.clone())));
+                return Ok(Some((rule.decision, Arc::clone(&rule.name))));
             }
-            decision = Some((rule.decision, rule.name.as_str()));
+            decision = Some((rule.decision, Arc::clone(&rule.name)));
         }
 
-        Ok(decision.map(|(matched, name)| (matched, name.to_string())))
+        Ok(decision)
     }
 
     pub fn match_attempt_with_rule_name_sync(
@@ -173,7 +173,7 @@ impl RuleService {
         attempt: &ConnectionAttempt,
         process: &ProcessInfo,
         dst_host: Option<&str>,
-    ) -> Result<Option<(RuleMatchDecision, String)>> {
+    ) -> Result<Option<(RuleMatchDecision, Arc<str>)>> {
         let snapshot = self.snapshot();
         Self::match_attempt_with_rule_name_in_snapshot(
             snapshot.as_ref(),

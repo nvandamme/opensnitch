@@ -22,6 +22,11 @@ pub(super) struct AttemptDerived {
     pub(super) dst_addr: Option<IpAddr>,
     src_ip_text: OnceLock<String>,
     dst_ip_text: OnceLock<String>,
+    process_command: OnceLock<String>,
+    process_id: OnceLock<String>,
+    user_id_text: OnceLock<String>,
+    dst_port_text: OnceLock<String>,
+    src_port_text: OnceLock<String>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -37,6 +42,11 @@ impl Default for AttemptDerived {
             dst_addr: None,
             src_ip_text: OnceLock::new(),
             dst_ip_text: OnceLock::new(),
+            process_command: OnceLock::new(),
+            process_id: OnceLock::new(),
+            user_id_text: OnceLock::new(),
+            dst_port_text: OnceLock::new(),
+            src_port_text: OnceLock::new(),
         }
     }
 }
@@ -48,6 +58,11 @@ impl AttemptDerived {
             dst_addr: Some(attempt.dst_addr),
             src_ip_text: OnceLock::new(),
             dst_ip_text: OnceLock::new(),
+            process_command: OnceLock::new(),
+            process_id: OnceLock::new(),
+            user_id_text: OnceLock::new(),
+            dst_port_text: OnceLock::new(),
+            src_port_text: OnceLock::new(),
         }
     }
 
@@ -68,6 +83,36 @@ impl AttemptDerived {
                     .map(|addr| addr.to_string())
                     .unwrap_or_default()
             })
+            .as_str()
+    }
+
+    pub(super) fn process_command<'a>(&'a self, args: &[String]) -> &'a str {
+        self.process_command
+            .get_or_init(|| args.join(" "))
+            .as_str()
+    }
+
+    pub(super) fn process_id_text(&self, pid: u32) -> &str {
+        self.process_id
+            .get_or_init(|| pid.to_string())
+            .as_str()
+    }
+
+    pub(super) fn user_id_text(&self, uid: u32) -> &str {
+        self.user_id_text
+            .get_or_init(|| uid.to_string())
+            .as_str()
+    }
+
+    pub(super) fn dst_port_text(&self, port: u16) -> &str {
+        self.dst_port_text
+            .get_or_init(|| port.to_string())
+            .as_str()
+    }
+
+    pub(super) fn src_port_text(&self, port: u16) -> &str {
+        self.src_port_text
+            .get_or_init(|| port.to_string())
             .as_str()
     }
 
@@ -419,7 +464,10 @@ impl RuleService {
                     process,
                     dst_host,
                 ) else {
-                    return true;
+                    // Hash not yet available (background computation in progress).
+                    // Return false so the rule does not match on an unverified hash —
+                    // the verdict flow will fall through to the configured default action.
+                    return false;
                 };
                 Self::operator_matches_text(&compiled.operator, hash.as_ref(), caches)
             }
@@ -595,7 +643,8 @@ impl RuleService {
             let Some(hash) =
                 Self::operator_operand_value(operator, attempt, derived, process, dst_host)
             else {
-                return true;
+                // Hash not yet available — do not match; fall through to default action.
+                return false;
             };
             return Self::operator_matches_text(operator, hash.as_ref(), caches);
         }
@@ -695,22 +744,22 @@ impl RuleService {
     ) -> Option<Cow<'a, str>> {
         match operator.operand.as_str() {
             "process.path" => Some(Cow::Borrowed(process.path.as_str())),
-            "process.command" => Some(Cow::Owned(process.args.join(" "))),
+            "process.command" => Some(Cow::Borrowed(derived.process_command(&process.args))),
             "process.parent.path" => process
                 .parent_chain
                 .first()
                 .map(|node| Cow::Borrowed(node.path.as_str())),
-            "process.id" => Some(Cow::Owned(process.pid.to_string())),
+            "process.id" => Some(Cow::Borrowed(derived.process_id_text(process.pid))),
             "process.hash.sha1" => process.process_hash_sha1.as_deref().map(Cow::Borrowed),
             "process.hash.md5" => process.process_hash_md5.as_deref().map(Cow::Borrowed),
-            "user.id" => Some(Cow::Owned(attempt.uid.to_string())),
+            "user.id" => Some(Cow::Borrowed(derived.user_id_text(attempt.uid))),
             "dest.ip" => Some(Cow::Borrowed(derived.dst_ip_text())),
             "dest.network" => Some(Cow::Borrowed(derived.dst_ip_text())),
             "dest.host" => dst_host.map(Cow::Borrowed),
-            "dest.port" => Some(Cow::Owned(attempt.dst_port.to_string())),
+            "dest.port" => Some(Cow::Borrowed(derived.dst_port_text(attempt.dst_port))),
             "source.ip" => Some(Cow::Borrowed(derived.src_ip_text())),
             "source.network" => Some(Cow::Borrowed(derived.src_ip_text())),
-            "source.port" => Some(Cow::Owned(attempt.src_port.to_string())),
+            "source.port" => Some(Cow::Borrowed(derived.src_port_text(attempt.src_port))),
             "iface.in" => crate::platform::adapters::net_iface::NetIfaceAdapter::interface_name_by_index(attempt.iface_in_idx).ok().flatten().map(Cow::Owned),
             "iface.out" => crate::platform::adapters::net_iface::NetIfaceAdapter::interface_name_by_index(attempt.iface_out_idx).ok().flatten().map(Cow::Owned),
             "protocol" => Some(Cow::Borrowed(match attempt.protocol {

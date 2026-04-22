@@ -34,7 +34,7 @@ async fn kernel_flow_dns_event_updates_dns_cache() {
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         if let Some(host) = dns.lookup_ip("203.0.113.10".parse().unwrap()) {
-            assert_eq!(host, "kernel.flow.test");
+            assert_eq!(host.as_ref(), "kernel.flow.test");
             break;
         }
         assert!(Instant::now() < deadline, "dns cache update timed out");
@@ -80,7 +80,7 @@ async fn kernel_flow_respects_custom_ingress_dispatch_batch_tunable() {
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         if let Some(host) = dns.lookup_ip("203.0.113.11".parse().unwrap()) {
-            assert_eq!(host, "kernel.flow.tunable.test");
+            assert_eq!(host.as_ref(), "kernel.flow.tunable.test");
             break;
         }
         assert!(Instant::now() < deadline, "dns cache update timed out");

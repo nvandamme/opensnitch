@@ -325,10 +325,21 @@ impl RuntimeHandles {
     }
 
     pub async fn join_all(self) {
+        // Await all spawned tasks concurrently so that tasks whose shutdown
+        // is already complete don't artificially delay those still running.
+        let mut join_set = tokio::task::JoinSet::new();
         for task in self.tasks {
-            match task.handle.await {
-                Ok(()) => info!("task '{}' stopped", task.name),
-                Err(err) => error!("task '{}' join error: {}", task.name, err),
+            join_set.spawn(async move {
+                let name = task.name;
+                match task.handle.await {
+                    Ok(()) => info!("task '{}' stopped", name),
+                    Err(err) => error!("task '{}' join error: {}", name, err),
+                }
+            });
+        }
+        while let Some(result) = join_set.join_next().await {
+            if let Err(err) = result {
+                error!("task join set error: {err}");
             }
         }
 

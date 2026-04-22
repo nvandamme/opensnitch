@@ -1,8 +1,9 @@
 use std::{
-    collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Mutex as StdMutex},
+    sync::Arc,
 };
+
+use dashmap::DashMap;
 
 use opensnitch_proto::pb;
 use tokio::sync::Mutex as AsyncMutex;
@@ -26,7 +27,7 @@ pub struct SubscriptionService {
     pub(super) root_dir: PathBuf,
     pub(super) http: reqwest::Client,
     /// Per-subscription async mutex prevents two concurrent refreshes of the same entry.
-    pub(super) locks: Arc<StdMutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
+    pub(super) locks: Arc<DashMap<String, Arc<AsyncMutex<()>>>>,
 }
 
 impl SubscriptionService {
@@ -40,7 +41,7 @@ impl SubscriptionService {
             storage,
             root_dir: root_dir.into(),
             http,
-            locks: Arc::new(StdMutex::new(HashMap::new())),
+            locks: Arc::new(DashMap::new()),
         }
     }
 

@@ -9,12 +9,29 @@ use crate::services::{
 };
 use crate::utils::notification_reply::{send_notification_reply, status_payload};
 
-#[derive(Clone, Default)]
-pub(crate) struct RuleCommandService;
+#[derive(Clone)]
+pub(crate) struct RuleCommandService {
+    policy_tx: PolicyTxCoordinator,
+}
+
+impl Default for RuleCommandService {
+    fn default() -> Self {
+        Self {
+            policy_tx: global_policy_tx().clone(),
+        }
+    }
+}
 
 impl RuleCommandService {
-    fn policy_tx() -> &'static PolicyTxCoordinator {
-        global_policy_tx()
+    #[cfg(test)]
+    pub(crate) fn with_base_dir(base_dir: std::path::PathBuf) -> Self {
+        Self {
+            policy_tx: PolicyTxCoordinator::new(base_dir),
+        }
+    }
+
+    fn policy_tx(&self) -> &PolicyTxCoordinator {
+        &self.policy_tx
     }
 
     fn owner_from_client(client_service: &ClientService) -> PolicyOwner {
@@ -101,7 +118,7 @@ impl RuleCommandService {
         client_service: &ClientService,
     ) {
         RuleUpdateMode::Enable
-            .apply(notification_id, updated_rules, rules, task_reply_tx, client_service)
+            .apply(self.policy_tx(), notification_id, updated_rules, rules, task_reply_tx, client_service)
             .await;
     }
 
@@ -114,7 +131,7 @@ impl RuleCommandService {
         client_service: &ClientService,
     ) {
         RuleUpdateMode::Disable
-            .apply(notification_id, updated_rules, rules, task_reply_tx, client_service)
+            .apply(self.policy_tx(), notification_id, updated_rules, rules, task_reply_tx, client_service)
             .await;
     }
 
@@ -127,7 +144,7 @@ impl RuleCommandService {
         client_service: &ClientService,
     ) {
         RuleUpdateMode::Upsert
-            .apply(notification_id, updated_rules, rules, task_reply_tx, client_service)
+            .apply(self.policy_tx(), notification_id, updated_rules, rules, task_reply_tx, client_service)
             .await;
     }
 
@@ -142,7 +159,7 @@ impl RuleCommandService {
         let previous_rules = rules.get_proto_snapshot().as_ref().clone();
         let operation_names = rule_names.clone();
         let owner = Self::owner_from_client(client_service);
-        let tx = Self::policy_tx()
+        let tx = self.policy_tx()
             .execute(
                 PolicyTxRequest {
                     idempotency_key: format!(
@@ -280,6 +297,7 @@ impl RuleUpdateMode {
 
     async fn apply(
         self,
+        policy_tx: &PolicyTxCoordinator,
         notification_id: u64,
         updated_rules: Vec<pb::Rule>,
         rules: &RuleService,
@@ -293,7 +311,7 @@ impl RuleUpdateMode {
         }
 
         let owner = RuleCommandService::owner_from_client(client_service);
-        let tx = RuleCommandService::policy_tx()
+        let tx = policy_tx
             .execute(
                 PolicyTxRequest {
                     idempotency_key: format!(

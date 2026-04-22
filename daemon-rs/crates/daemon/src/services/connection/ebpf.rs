@@ -1,89 +1,81 @@
 use crate::models::{connection_owner::ConnectionOwner, connection_state::TransportProtocol};
-use serde_json::Value;
 use std::{
     collections::HashMap,
-    net::{Ipv4Addr, Ipv6Addr},
-    process::Command,
-    time::{Duration, Instant},
+    net::{IpAddr, Ipv4Addr},
+    ops::{Deref, DerefMut},
 };
 
 use super::ConnectionService;
 
-#[derive(Default)]
-pub(super) struct BpfMapIdCache {
-    refreshed_at: Option<Instant>,
-    by_name: HashMap<String, u32>,
+/// Stack-allocated eBPF map key — 12 bytes for IPv4 connections, 36 bytes
+/// for IPv6.  Avoids a `Vec<u8>` heap allocation (one per lookup attempt)
+/// on the kernel event hot path.
+enum BpfKey {
+    V4([u8; 12]),
+    V6([u8; 36]),
 }
 
-impl BpfMapIdCache {
-    fn get_map_id(&mut self, map_name: &str) -> Option<u32> {
-        let now = Instant::now();
-        let stale = self
-            .refreshed_at
-            .map(|ts| now.duration_since(ts) > Duration::from_secs(30))
-            .unwrap_or(true);
-
-        if stale {
-            self.by_name = Self::list_bpf_maps();
-            self.refreshed_at = Some(now);
+impl Deref for BpfKey {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            BpfKey::V4(arr) => arr,
+            BpfKey::V6(arr) => arr,
         }
-
-        self.by_name.get(map_name).copied()
     }
+}
 
-    fn list_bpf_maps() -> HashMap<String, u32> {
-        let out = Command::new("bpftool").args(["-j", "map", "show"]).output();
-        let Ok(out) = out else {
-            return HashMap::new();
-        };
-        if !out.status.success() {
-            return HashMap::new();
+impl DerefMut for BpfKey {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        match self {
+            BpfKey::V4(arr) => arr,
+            BpfKey::V6(arr) => arr,
         }
+    }
+}
 
-        let parsed: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
-        let Some(items) = parsed.as_array() else {
-            return HashMap::new();
-        };
-
+/// Enumerate loaded eBPF maps and return a fresh name → kernel-id table.
+///
+/// Priority order: aya (`loaded_maps()`) → libbpf-rs (`MapInfoIter`).
+/// Returns an empty map when both eBPF crates are disabled (CI/dev builds).
+pub(super) fn list_bpf_maps() -> HashMap<String, u32> {
+    #[cfg(feature = "aya-ebpf")]
+    {
         let mut by_name = HashMap::new();
-        for item in items {
-            let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let Some(id) = item
-                .get("id")
-                .and_then(|v| v.as_u64())
-                .and_then(|v| u32::try_from(v).ok())
-            else {
-                continue;
-            };
-            by_name.insert(name.to_string(), id);
+        for info in aya::maps::loaded_maps().flatten() {
+            if let Some(name) = info.name_as_str() {
+                by_name.insert(name.to_string(), info.id());
+            }
         }
-
-        by_name
+        return by_name;
     }
+
+    #[cfg(all(not(feature = "aya-ebpf"), feature = "libbpf-ebpf"))]
+    {
+        use libbpf_rs::query::MapInfoIter;
+        let mut by_name = HashMap::new();
+        for info in MapInfoIter::default() {
+            by_name.insert(info.name.to_string_lossy().into_owned(), info.id);
+        }
+        return by_name;
+    }
+
+    // Both eBPF crates disabled: no eBPF maps available.
+    #[allow(unreachable_code)]
+    HashMap::new()
 }
 
 impl ConnectionService {
     fn bpf_map_name(
         protocol: TransportProtocol,
-        src_ip: &str,
-        dst_ip: &str,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
     ) -> Option<&'static str> {
+        let is_ipv6 = src_ip.is_ipv6() || dst_ip.is_ipv6();
         match protocol {
-            TransportProtocol::Tcp => {
-                if src_ip.contains(':') || dst_ip.contains(':') {
-                    Some("tcpv6Map")
-                } else {
-                    Some("tcpMap")
-                }
-            }
+            TransportProtocol::Tcp => Some(if is_ipv6 { "tcpv6Map" } else { "tcpMap" }),
             TransportProtocol::Udp | TransportProtocol::UdpLite => {
-                if src_ip.contains(':') || dst_ip.contains(':') {
-                    Some("udpv6Map")
-                } else {
-                    Some("udpMap")
-                }
+                Some(if is_ipv6 { "udpv6Map" } else { "udpMap" })
             }
             TransportProtocol::Sctp | TransportProtocol::Icmp => None,
         }
@@ -91,107 +83,153 @@ impl ConnectionService {
 
     fn build_bpf_key(
         protocol: TransportProtocol,
-        src_ip: &str,
+        src_ip: IpAddr,
         src_port: u16,
-        dst_ip: &str,
+        dst_ip: IpAddr,
         dst_port: u16,
-    ) -> Option<Vec<u8>> {
-        let is_ipv6 = src_ip.contains(':') || dst_ip.contains(':');
+    ) -> Option<BpfKey> {
         match protocol {
             TransportProtocol::Tcp | TransportProtocol::Udp | TransportProtocol::UdpLite => {
-                if is_ipv6 {
-                    let src = src_ip.parse::<Ipv6Addr>().ok()?.octets();
-                    let dst = dst_ip.parse::<Ipv6Addr>().ok()?.octets();
-                    let mut key = vec![0_u8; 36];
-                    key[0..2].copy_from_slice(&src_port.to_ne_bytes());
-                    key[2..18].copy_from_slice(&dst);
-                    key[18..20].copy_from_slice(&dst_port.to_be_bytes());
-                    key[20..36].copy_from_slice(&src);
-                    Some(key)
+                if src_ip.is_ipv6() || dst_ip.is_ipv6() {
+                    let src = match src_ip {
+                        IpAddr::V6(v6) => v6.octets(),
+                        IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+                    };
+                    let dst = match dst_ip {
+                        IpAddr::V6(v6) => v6.octets(),
+                        IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+                    };
+                    let mut arr = [0_u8; 36];
+                    arr[0..2].copy_from_slice(&src_port.to_ne_bytes());
+                    arr[2..18].copy_from_slice(&dst);
+                    arr[18..20].copy_from_slice(&dst_port.to_be_bytes());
+                    arr[20..36].copy_from_slice(&src);
+                    Some(BpfKey::V6(arr))
                 } else {
-                    let src = src_ip.parse::<Ipv4Addr>().ok()?.octets();
-                    let dst = dst_ip.parse::<Ipv4Addr>().ok()?.octets();
-                    let mut key = vec![0_u8; 12];
-                    key[0..2].copy_from_slice(&src_port.to_ne_bytes());
-                    key[2..6].copy_from_slice(&dst);
-                    key[6..8].copy_from_slice(&dst_port.to_be_bytes());
-                    key[8..12].copy_from_slice(&src);
-                    Some(key)
+                    let src = match src_ip {
+                        IpAddr::V4(v4) => v4.octets(),
+                        IpAddr::V6(v6) => v6.to_ipv4().unwrap_or(Ipv4Addr::UNSPECIFIED).octets(),
+                    };
+                    let dst = match dst_ip {
+                        IpAddr::V4(v4) => v4.octets(),
+                        IpAddr::V6(v6) => v6.to_ipv4().unwrap_or(Ipv4Addr::UNSPECIFIED).octets(),
+                    };
+                    let mut arr = [0_u8; 12];
+                    arr[0..2].copy_from_slice(&src_port.to_ne_bytes());
+                    arr[2..6].copy_from_slice(&dst);
+                    arr[6..8].copy_from_slice(&dst_port.to_be_bytes());
+                    arr[8..12].copy_from_slice(&src);
+                    Some(BpfKey::V4(arr))
                 }
             }
             TransportProtocol::Sctp | TransportProtocol::Icmp => None,
         }
     }
 
+    /// Look up the eBPF map entry for `key` in the map identified by `map_id` and
+    /// return `(pid, uid)` if found.
+    ///
+    /// Priority order: aya (`MapData::from_id` + typed [`HashMap`] lookup) →
+    /// libbpf-rs (`MapHandle::from_map_id` + `MapCore::lookup`).
+    /// Returns `None` when both eBPF crates are disabled.
     fn lookup_bpf_owner(map_id: u32, key: &[u8]) -> Option<(u32, u32)> {
-        let mut args = vec![
-            "map".to_string(),
-            "lookup".to_string(),
-            "id".to_string(),
-            map_id.to_string(),
-            "key".to_string(),
-            "hex".to_string(),
-        ];
-        for b in key {
-            args.push(format!("{b:02x}"));
+        #[cfg(feature = "aya-ebpf")]
+        if let Some(result) = Self::aya_lookup_bpf_owner(map_id, key) {
+            return Some(result);
         }
 
-        let out = Command::new("bpftool").args(&args).output().ok()?;
-        if !out.status.success() {
-            return None;
+        #[cfg(feature = "libbpf-ebpf")]
+        {
+            use libbpf_rs::{MapCore, MapFlags, MapHandle};
+            let map = MapHandle::from_map_id(map_id).ok()?;
+            let value_bytes = map.lookup(key, MapFlags::empty()).ok()??;
+            if value_bytes.len() < 16 {
+                return None;
+            }
+            let pid = u64::from_ne_bytes(value_bytes[0..8].try_into().ok()?) as u32;
+            let uid = u64::from_ne_bytes(value_bytes[8..16].try_into().ok()?) as u32;
+            return Some((pid, uid));
         }
 
-        let text = String::from_utf8_lossy(&out.stdout).to_string();
-        let Some(value_bytes) = Self::parse_value_hex_bytes(&text) else {
-            return None;
-        };
-        if value_bytes.len() < 16 {
-            return None;
+        // Both eBPF crates disabled: owner unknown.
+        None
+    }
+
+    /// Direct eBPF map lookup via aya typed [`HashMap`] API.
+    ///
+    /// Dispatches on key length: 12 bytes (IPv4) or 36 bytes (IPv6).  The value layout
+    /// is always 16 bytes: `pid: u64` at bytes [0..8], `uid: u64` at bytes [8..16].
+    #[cfg(feature = "aya-ebpf")]
+    fn aya_lookup_bpf_owner(map_id: u32, key: &[u8]) -> Option<(u32, u32)> {
+        use aya::maps::{HashMap as AyaHashMap, Map, MapData};
+
+        fn decode_pid_uid(bytes: &[u8; 16]) -> (u32, u32) {
+            let pid = u64::from_ne_bytes(bytes[0..8].try_into().unwrap()) as u32;
+            let uid = u64::from_ne_bytes(bytes[8..16].try_into().unwrap()) as u32;
+            (pid, uid)
         }
 
-        let pid = u64::from_ne_bytes(value_bytes[0..8].try_into().ok()?) as u32;
-        let uid = u64::from_ne_bytes(value_bytes[8..16].try_into().ok()?) as u32;
-        Some((pid, uid))
+        match key.len() {
+            12 => {
+                let key_arr: [u8; 12] = key.try_into().ok()?;
+                let map_data = MapData::from_id(map_id).ok()?;
+                let map: AyaHashMap<_, [u8; 12], [u8; 16]> =
+                    Map::HashMap(map_data).try_into().ok()?;
+                let value = map.get(&key_arr, 0).ok()?;
+                Some(decode_pid_uid(&value))
+            }
+            36 => {
+                let key_arr: [u8; 36] = key.try_into().ok()?;
+                let map_data = MapData::from_id(map_id).ok()?;
+                let map: AyaHashMap<_, [u8; 36], [u8; 16]> =
+                    Map::HashMap(map_data).try_into().ok()?;
+                let value = map.get(&key_arr, 0).ok()?;
+                Some(decode_pid_uid(&value))
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn resolve_owner_by_ebpf_map(
         &self,
         protocol: TransportProtocol,
-        src_ip: &str,
+        src_ip: IpAddr,
         src_port: u16,
-        dst_ip: &str,
+        dst_ip: IpAddr,
         dst_port: u16,
     ) -> Option<ConnectionOwner> {
         let map_name = Self::bpf_map_name(protocol, src_ip, dst_ip)?;
-        let map_id = self.bpf_map_ids().lock().ok()?.get_map_id(map_name)?;
+        let map_id = self.bpf_map_snapshot().load().get(map_name).copied()?;
 
         let mut key = Self::build_bpf_key(protocol, src_ip, src_port, dst_ip, dst_port)?;
         if let Some((pid, uid)) = Self::lookup_bpf_owner(map_id, &key) {
             return Some(ConnectionOwner { uid, pid });
         }
 
-        if key.len() == 12 {
-            key[8..12].copy_from_slice(&[0, 0, 0, 0]);
-        } else if key.len() == 36 {
-            key[20..36].copy_from_slice(&[0; 16]);
+        match &mut key {
+            BpfKey::V4(arr) => arr[8..12].fill(0),
+            BpfKey::V6(arr) => arr[20..36].fill(0),
         }
         if let Some((pid, uid)) = Self::lookup_bpf_owner(map_id, &key) {
             return Some(ConnectionOwner { uid, pid });
         }
 
         let mut swapped = Self::build_bpf_key(protocol, src_ip, src_port, dst_ip, dst_port)?;
-        if swapped.len() == 12 {
-            let daddr = [swapped[2], swapped[3], swapped[4], swapped[5]];
-            let saddr = [swapped[8], swapped[9], swapped[10], swapped[11]];
-            swapped[2..6].copy_from_slice(&saddr);
-            swapped[8..12].copy_from_slice(&daddr);
-        } else if swapped.len() == 36 {
-            let mut daddr = [0_u8; 16];
-            daddr.copy_from_slice(&swapped[2..18]);
-            let mut saddr = [0_u8; 16];
-            saddr.copy_from_slice(&swapped[20..36]);
-            swapped[2..18].copy_from_slice(&saddr);
-            swapped[20..36].copy_from_slice(&daddr);
+        match &mut swapped {
+            BpfKey::V4(arr) => {
+                let daddr = [arr[2], arr[3], arr[4], arr[5]];
+                let saddr = [arr[8], arr[9], arr[10], arr[11]];
+                arr[2..6].copy_from_slice(&saddr);
+                arr[8..12].copy_from_slice(&daddr);
+            }
+            BpfKey::V6(arr) => {
+                let mut daddr = [0_u8; 16];
+                daddr.copy_from_slice(&arr[2..18]);
+                let mut saddr = [0_u8; 16];
+                saddr.copy_from_slice(&arr[20..36]);
+                arr[2..18].copy_from_slice(&saddr);
+                arr[20..36].copy_from_slice(&daddr);
+            }
         }
         if let Some((pid, uid)) = Self::lookup_bpf_owner(map_id, &swapped) {
             return Some(ConnectionOwner { uid, pid });
@@ -200,3 +238,4 @@ impl ConnectionService {
         None
     }
 }
+

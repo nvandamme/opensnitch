@@ -7,7 +7,8 @@ use crate::tests::support::TestDir;
 
 #[tokio::test]
 async fn enable_rules_persists_enabled_rules_and_replies_ok() {
-    let svc = RuleCommandService::default();
+    let temp_dir = TestDir::new("opensnitch-rule-command-service");
+    let svc = RuleCommandService::with_base_dir(temp_dir.path.join("policy-tx"));
     let client_service = ClientService::default();
     let temp_dir = TestDir::new("opensnitch-rule-command-service");
     let rules = initialized_rule_service(&temp_dir).await;
@@ -35,7 +36,8 @@ async fn enable_rules_persists_enabled_rules_and_replies_ok() {
 
 #[tokio::test]
 async fn disable_rules_persists_disabled_rules_and_replies_ok() {
-    let svc = RuleCommandService::default();
+    let temp_dir = TestDir::new("opensnitch-rule-command-service");
+    let svc = RuleCommandService::with_base_dir(temp_dir.path.join("policy-tx"));
     let client_service = ClientService::default();
     let temp_dir = TestDir::new("opensnitch-rule-command-service");
     let rules = initialized_rule_service(&temp_dir).await;
@@ -71,7 +73,8 @@ async fn disable_rules_persists_disabled_rules_and_replies_ok() {
 
 #[tokio::test]
 async fn delete_rules_removes_rule_file_and_replies_ok() {
-    let svc = RuleCommandService::default();
+    let temp_dir = TestDir::new("opensnitch-rule-command-service");
+    let svc = RuleCommandService::with_base_dir(temp_dir.path.join("policy-tx"));
     let client_service = ClientService::default();
     let temp_dir = TestDir::new("opensnitch-rule-command-service");
     let rules = initialized_rule_service(&temp_dir).await;

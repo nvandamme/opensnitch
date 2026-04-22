@@ -56,34 +56,52 @@ pub(super) struct StatsCounters {
     pub(super) storage_scans: CacheAlignedAtomicU64,
 }
 
-pub(super) struct StatsInner {
-    pub(super) started_at: Option<Instant>,
+/// Breakdown counters: top-N entries per connection attribute.
+///
+/// Protected by its own mutex so [`StatsService::on_connect_attempt`] and
+/// [`StatsService::on_connection_metadata`] do not contend with the events ring.
+pub(super) struct BreakdownCounters {
     pub(super) by_proto: LimitedCountersString,
     pub(super) by_address: LimitedCountersCopy<IpAddr>,
     pub(super) by_host: LimitedCountersString,
     pub(super) by_port: LimitedCountersCopy<u16>,
     pub(super) by_uid: LimitedCountersCopy<u32>,
     pub(super) by_executable: LimitedCountersString,
-    pub(super) events: RingBuffer<pb::Event>,
-    pub(super) max_events: usize,
     pub(super) max_stats: usize,
-    pub(super) workers: usize,
 }
 
-impl Default for StatsInner {
+impl Default for BreakdownCounters {
     fn default() -> Self {
-        let max_events = STATS_EVENT_RING_CAPACITY.load(Ordering::Relaxed).max(1);
         Self {
-            started_at: Some(Instant::now()),
             by_proto: LimitedCountersString::default(),
             by_address: LimitedCountersCopy::default(),
             by_host: LimitedCountersString::default(),
             by_port: LimitedCountersCopy::default(),
             by_uid: LimitedCountersCopy::default(),
             by_executable: LimitedCountersString::default(),
+            max_stats: 25,
+        }
+    }
+}
+
+/// Events ring buffer and associated metadata.
+///
+/// Protected by its own mutex so [`StatsService::on_event`] does not contend
+/// with breakdown counter updates.
+pub(super) struct EventsState {
+    pub(super) started_at: Option<Instant>,
+    pub(super) events: RingBuffer<pb::Event>,
+    pub(super) max_events: usize,
+    pub(super) workers: usize,
+}
+
+impl Default for EventsState {
+    fn default() -> Self {
+        let max_events = STATS_EVENT_RING_CAPACITY.load(Ordering::Relaxed).max(1);
+        Self {
+            started_at: Some(Instant::now()),
             events: RingBuffer::new(max_events),
             max_events,
-            max_stats: 25,
             workers: 6,
         }
     }

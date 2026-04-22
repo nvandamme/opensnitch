@@ -73,6 +73,53 @@ Policy audit command:
 - `make daemon-rs-async-send-audit`
 - `make daemon-rs-snapshot-clone-audit`
 
+## Optimization Backlog (Rescan 2026-03-26)
+
+Prioritized hot-path findings from full codebase scan. Tracked as actionable items in TODO.md.
+
+**Status as of 2026-03-27: all HIGH/MEDIUM items and two LOW items fully implemented.**
+
+### HIGH priority — ✅ all implemented
+
+| # | Location | Issue | Resolution |
+|---|---|---|---|
+| 1 | `services/connection/owner.rs` | `format!` per inode probe; full /proc scan on miss | `pid_owns_inode_at(&Path)`; one `PathBuf::with_capacity(24)` reused across all /proc candidates |
+| 2 | `services/rule/matching.rs` L702,707 | `args.join(" ")` + 4× numeric `.to_string()` per rule eval | 5 `OnceLock<String>` fields on `AttemptDerived`; `operator_operand_value` returns `Cow::Borrowed` |
+| 3 | `services/dns/cache_ops.rs` L39 | `HashSet` alloc per `lookup_ip` call | Bounded hop-limit loop (`0..8`) — no heap alloc |
+| 4 | `flows/verdict/verdict.rs` L105,118,141 | `format!` + 2× `to_owned()` for decision key per connection | `DashMap<u64, u64>` + `decision_key_hash()` via `DefaultHasher` |
+| 5 | `services/process/inspection.rs` L44 | `cleanup_expired()` (mutex) on every cache miss | Removed from hot path; background task (10 s) handles eviction |
+
+### MEDIUM priority — ✅ all implemented
+
+| # | Location | Issue | Resolution |
+|---|---|---|---|
+| 6 | `services/connection/ebpf.rs` L73 | `Vec<u8>` (12/36 B) per `build_bpf_key` call | `BpfKey { V4([u8;12]), V6([u8;36]) }` enum; `Deref/DerefMut → &[u8]` |
+| 7 | `flows/kernel/kernel.rs` L56 | Per-event Arc clone + closure alloc for on_drop counter | `dispatch_kernel_pipeline_event` takes `&Arc<KernelPipelineCounters>` + `KernelPipeline` directly |
+| 8 | `flows/verdict/verdict.rs` L589 | `pb_conn.get_or_insert_with().clone()` keeps proto alive during gRPC wait | `pb_conn.take().unwrap_or_else(...)` — no backup copy during ask_rule round-trip |
+| 9 | `services/connection/resolution.rs` L96 | Whole attempt cloned before `spawn_blocking` | Deferred (clone is shallow; no observed impact under load) |
+| 10 | `services/dns/parsing.rs` L72 | `ip.to_string()` + `host.to_string()` per event for dedup key | Deferred (DNS parsing not on per-connection hot path) |
+| 11 | `services/rule/matching.rs` L707 | (covered by #2 above) | Resolved as part of item 2 |
+
+### LOW priority — ✅ implemented (2 of 4)
+
+| # | Location | Issue | Resolution |
+|---|---|---|---|
+| 12 | `workers/runtime/control/control.rs` | Sequential `join_all` on shutdown | `tokio::task::JoinSet` for concurrent shutdown awaiting |
+| 13 | `services/storage/event_bus.rs` L64 | Full `StorageEvent` clone per broadcast recipient (including `PathBuf`) | Broadcast `Arc<StorageEvent>` — Arc clone per recipient instead of struct clone |
+| 14 | `services/firewall/config_ops.rs` L14 | Reload/reconcile repeats disk read in separate ops | Deferred — rare operator-triggered path, negligible impact |
+| 15 | `commands/rule/rule.rs` L236 | Sequential async delete/upsert for large rule sets on rollback | Deferred — rollback path only; large rule set counts uncommon |
+
+### Already well-optimized (no action needed)
+
+- `services/connection/connection.rs`: lock-free eBPF map id snapshot via ArcSwap
+- `workers/runtime/connect/dispatch.rs`: `try_send`-first probing across worker lanes
+- `services/rule/rule.rs`: `AttemptDerived` prewarm and compiled rule snapshot
+- `services/rule/matching.rs`: `OnceLock` caching for src/dst ip text
+- `flows/verdict/verdict.rs`: `try_send` fast path with fallback send
+- `services/process/inspection.rs`: deferred hash computation in background task
+- `flows/connect/connect.rs`: pre-sized worker handle/tx vectors and burst draining
+- `services/process/cache.rs`: weighted cache sizing with quick-cache
+
 ## Regression Policy
 
 - Baselines are sourced from the machine-readable keys in this file.

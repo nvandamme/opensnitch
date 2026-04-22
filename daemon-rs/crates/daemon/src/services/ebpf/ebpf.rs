@@ -71,18 +71,6 @@ impl EbpfService {
         )
     }
 
-    pub fn conn_pin_root(&self) -> &'static str {
-        self.pin_domain.conn_root()
-    }
-
-    pub fn proc_pin_root(&self) -> &'static str {
-        self.pin_domain.proc_root()
-    }
-
-    pub fn dns_pin_root(&self) -> &'static str {
-        self.pin_domain.dns_root()
-    }
-
     #[cfg(feature = "aya-ebpf")]
     pub(crate) fn refresh_aya_managed_ringbufs(&mut self) {
         if self.pin_domain != EbpfPinDomain::Aya {

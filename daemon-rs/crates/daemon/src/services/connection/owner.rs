@@ -6,6 +6,7 @@ use crate::platform::ports::socket_diag_port::{NativeSocketDiagPort, SocketDiagP
 use crate::utils::proc_fs::proc_pid_exists;
 use crate::utils::proc_net::read_proc_net_packet_rows;
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 
 use super::ConnectionService;
 
@@ -22,7 +23,14 @@ impl ConnectionService {
     }
 
     fn pid_owns_inode(pid: u32, inode: u32) -> bool {
-        let fd_dir = format!("/proc/{pid}/fd");
+        let mut fd_dir = PathBuf::with_capacity(24);
+        fd_dir.push("/proc");
+        fd_dir.push(pid.to_string());
+        fd_dir.push("fd");
+        Self::pid_owns_inode_at(inode, &fd_dir)
+    }
+
+    fn pid_owns_inode_at(inode: u32, fd_dir: &Path) -> bool {
         let Ok(fds) = std::fs::read_dir(fd_dir) else {
             return false;
         };
@@ -67,14 +75,21 @@ impl ConnectionService {
         }
 
         let proc_entries = std::fs::read_dir("/proc").ok()?;
+        // Pre-allocate once and reuse across all pid candidates to avoid one
+        // format!("/proc/{pid}/fd") heap allocation per iteration.
+        let mut fd_dir = PathBuf::with_capacity(24);
         for entry in proc_entries.flatten() {
-            let file_name = entry.file_name();
-            let pid_str = file_name.to_string_lossy();
-            let Ok(pid) = pid_str.parse::<u32>() else {
+            let name = entry.file_name();
+            let Ok(pid) = name.to_string_lossy().parse::<u32>() else {
                 continue;
             };
 
-            if Self::pid_owns_inode(pid, inode) {
+            fd_dir.clear();
+            fd_dir.push("/proc");
+            fd_dir.push(&name);
+            fd_dir.push("fd");
+
+            if Self::pid_owns_inode_at(inode, &fd_dir) {
                 Self::cache().insert(inode, pid);
                 if let Some(key) = inode_key {
                     Self::key_cache().insert(*key, pid);

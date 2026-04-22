@@ -1,18 +1,19 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{OnceLock, RwLock},
+    sync::{Arc, OnceLock},
 };
 
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use netlink_bindings::{
     rt_addr::{self, Ifaddrmsg},
     rt_link::{self, Ifinfomsg},
 };
 use netlink_socket2::{NetlinkSocket, ReplyError};
 
-fn interface_name_cache() -> &'static RwLock<HashMap<u32, String>> {
-    static CACHE: OnceLock<RwLock<HashMap<u32, String>>> = OnceLock::new();
-    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+fn interface_name_cache() -> &'static ArcSwap<HashMap<u32, String>> {
+    static CACHE: OnceLock<ArcSwap<HashMap<u32, String>>> = OnceLock::new();
+    CACHE.get_or_init(|| ArcSwap::from_pointee(HashMap::new()))
 }
 
 pub(crate) struct NetIfaceAdapter;
@@ -20,9 +21,7 @@ pub(crate) struct NetIfaceAdapter;
 impl NetIfaceAdapter {
     #[allow(dead_code)]
     pub(crate) fn clear_interface_name_cache() {
-        if let Ok(mut cache) = interface_name_cache().write() {
-            cache.clear();
-        }
+        interface_name_cache().store(Arc::new(HashMap::new()));
     }
 
     pub(crate) async fn local_ip_addrs_async() -> Result<HashSet<String>> {
@@ -42,17 +41,14 @@ impl NetIfaceAdapter {
             return Ok(None);
         }
 
-        if let Ok(cache) = interface_name_cache().read()
-            && let Some(name) = cache.get(&index)
-        {
+        let cached = interface_name_cache().load();
+        if let Some(name) = cached.get(&index) {
             return Ok(Some(name.clone()));
         }
 
         let refreshed = Self::interface_name_map()?;
         let hit = refreshed.get(&index).cloned();
-        if let Ok(mut cache) = interface_name_cache().write() {
-            *cache = refreshed;
-        }
+        interface_name_cache().store(Arc::new(refreshed));
         Ok(hit)
     }
 
@@ -61,17 +57,14 @@ impl NetIfaceAdapter {
             return Ok(None);
         }
 
-        if let Ok(cache) = interface_name_cache().read()
-            && let Some(name) = cache.get(&index)
-        {
+        let cached = interface_name_cache().load();
+        if let Some(name) = cached.get(&index) {
             return Ok(Some(name.clone()));
         }
 
         let refreshed = Self::interface_name_map_async().await?;
         let hit = refreshed.get(&index).cloned();
-        if let Ok(mut cache) = interface_name_cache().write() {
-            *cache = refreshed;
-        }
+        interface_name_cache().store(Arc::new(refreshed));
         Ok(hit)
     }
 

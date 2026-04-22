@@ -1,989 +1,250 @@
+//! Thread-safe LRU-approximate cache backed by [`quick_cache::sync::Cache`].
+//!
+//! # Design
+//!
+//! The previous dual-layer design existed to work around `lru::LruCache` being
+//! single-threaded.  `quick_cache::sync::Cache` is natively thread-safe (sharded
+//! internally), so the dual-layer (mutable + snapshot) and the touch-reconciler
+//! background task are no longer needed.
+//!
+//! # Eviction policy
+//!
+//! `quick_cache` v0.6 uses a **hot/cold frequency-aware** eviction algorithm.
+//! Items enter the Hot queue when the hot budget allows, otherwise the Cold queue.
+//! Cold items that have been accessed (referenced > 0) are promoted to Hot on the
+//! next eviction scan; unreferenced Cold items are evicted.  Hit rates are
+//! typically equal to or better than strict LRU in production workloads.
+//!
+//! **Note**: exact LRU eviction order is not guaranteed.  In particular, items
+//! inserted early (while the Hot queue is filling) tend to persist even under
+//! sustained insert pressure, because Hot-list eviction only runs when the Cold
+//! list is empty.  Write-only workloads may not evict the first-inserted items.
+//!
+//! # Strategy extension points
+//!
+//! [`quick_cache`] exposes two optional extension traits for finer-grained
+//! eviction control:
+//!
+//! - [`quick_cache::Weighter`]: assign per-entry weights so the cache budgets
+//!   by bytes (or another domain unit) rather than item count.  **Currently
+//!   used** for the process-info cache via `ProcessInfoWeighter`: process
+//!   entries carry variable-length `env_map` and `args` allocations, and
+//!   unit-weighted capacity would allow a small number of large processes to
+//!   exhaust the memory budget.  DNS and connection caches use the default
+//!   [`UnitWeighter`] because their value types have bounded, uniform sizes.
+//!
+//! - [`quick_cache::Lifecycle`]: hook `on_evict` / `before_evict` / `is_pinned`
+//!   for TTL enforcement, side-effect callbacks on eviction, or pinning hot
+//!   entries that must not be displaced.  Use `before_evict` to zero the weight
+//!   and retain an item (effectively moving it to the zero-weight free list).
+
 use std::{
     borrow::Borrow,
-    collections::{HashMap, HashSet},
     hash::Hash,
+    sync::{Arc, OnceLock},
     sync::atomic::{AtomicU64, Ordering},
-    sync::mpsc::{self as std_mpsc, Receiver as StdReceiver, SyncSender as StdSyncSender},
-    num::NonZeroUsize,
-    sync::{Arc, Mutex, OnceLock, RwLock},
-    thread,
-    time::Instant,
 };
 
-use tokio::sync::{RwLock as AsyncRwLock, mpsc};
+use quick_cache::{
+    DefaultHashBuilder, OptionsBuilder, UnitWeighter, Weighter,
+    sync::{Cache, DefaultLifecycle},
+};
 
-const TOUCH_QUEUE_CAPACITY: usize = 4096;
-const TOUCH_BATCH_MAX: usize = 256;
-const INSERT_MANY_INCREMENTAL_MAX: usize = 64;
+// ---------------------------------------------------------------------------
+// Global hit / miss metrics
+// ---------------------------------------------------------------------------
 
 #[derive(Default)]
-struct DualLayerMetrics {
-    touch_enqueued: AtomicU64,
-    touch_dropped: AtomicU64,
-    touch_reconciled_batches: AtomicU64,
-    touch_reconciled_keys: AtomicU64,
-    publish_full: AtomicU64,
-    publish_incremental: AtomicU64,
-    publish_reconcile_scans: AtomicU64,
-    publish_reconcile_removed: AtomicU64,
-    publish_total_ns: AtomicU64,
+struct GlobalLruMetrics {
+    hits: AtomicU64,
+    misses: AtomicU64,
+}
+
+impl GlobalLruMetrics {
+    fn global() -> &'static GlobalLruMetrics {
+        static GLOBAL: OnceLock<GlobalLruMetrics> = OnceLock::new();
+        GLOBAL.get_or_init(GlobalLruMetrics::default)
+    }
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct DualLayerMetricsSnapshot {
-    pub(crate) touch_enqueued: u64,
-    pub(crate) touch_dropped: u64,
-    pub(crate) touch_reconciled_batches: u64,
-    pub(crate) touch_reconciled_keys: u64,
-    pub(crate) publish_full: u64,
-    pub(crate) publish_incremental: u64,
-    pub(crate) publish_reconcile_scans: u64,
-    pub(crate) publish_reconcile_removed: u64,
-    pub(crate) publish_total_ns: u64,
-}
-
-impl DualLayerMetrics {
-    fn global() -> &'static DualLayerMetrics {
-        static GLOBAL_METRICS: OnceLock<DualLayerMetrics> = OnceLock::new();
-        GLOBAL_METRICS.get_or_init(DualLayerMetrics::default)
-    }
-
-    fn snapshot(&self) -> DualLayerMetricsSnapshot {
-        DualLayerMetricsSnapshot {
-            touch_enqueued: self.touch_enqueued.load(Ordering::Relaxed),
-            touch_dropped: self.touch_dropped.load(Ordering::Relaxed),
-            touch_reconciled_batches: self.touch_reconciled_batches.load(Ordering::Relaxed),
-            touch_reconciled_keys: self.touch_reconciled_keys.load(Ordering::Relaxed),
-            publish_full: self.publish_full.load(Ordering::Relaxed),
-            publish_incremental: self.publish_incremental.load(Ordering::Relaxed),
-            publish_reconcile_scans: self.publish_reconcile_scans.load(Ordering::Relaxed),
-            publish_reconcile_removed: self.publish_reconcile_removed.load(Ordering::Relaxed),
-            publish_total_ns: self.publish_total_ns.load(Ordering::Relaxed),
-        }
-    }
-}
-
-pub(crate) fn global_dual_layer_metrics_snapshot() -> DualLayerMetricsSnapshot {
-    DualLayerMetrics::global().snapshot()
+    pub(crate) hits: u64,
+    pub(crate) misses: u64,
 }
 
 impl DualLayerMetricsSnapshot {
     pub(crate) fn saturating_delta(self, previous: Self) -> Self {
         Self {
-            touch_enqueued: self.touch_enqueued.saturating_sub(previous.touch_enqueued),
-            touch_dropped: self.touch_dropped.saturating_sub(previous.touch_dropped),
-            touch_reconciled_batches: self
-                .touch_reconciled_batches
-                .saturating_sub(previous.touch_reconciled_batches),
-            touch_reconciled_keys: self
-                .touch_reconciled_keys
-                .saturating_sub(previous.touch_reconciled_keys),
-            publish_full: self.publish_full.saturating_sub(previous.publish_full),
-            publish_incremental: self
-                .publish_incremental
-                .saturating_sub(previous.publish_incremental),
-            publish_reconcile_scans: self
-                .publish_reconcile_scans
-                .saturating_sub(previous.publish_reconcile_scans),
-            publish_reconcile_removed: self
-                .publish_reconcile_removed
-                .saturating_sub(previous.publish_reconcile_removed),
-            publish_total_ns: self.publish_total_ns.saturating_sub(previous.publish_total_ns),
+            hits: self.hits.saturating_sub(previous.hits),
+            misses: self.misses.saturating_sub(previous.misses),
         }
     }
 
     pub(crate) fn total(&self) -> u64 {
-        self.publish_full
-            + self.publish_incremental
-            + self.touch_enqueued
-            + self.touch_dropped
-            + self.touch_reconciled_keys
+        self.hits + self.misses
     }
 }
 
-fn elapsed_ns(start: Instant) -> u64 {
-    let nanos = start.elapsed().as_nanos();
-    nanos.min(u128::from(u64::MAX)) as u64
-}
-
-pub(crate) struct LruCache<K, V>
-where
-    K: Eq + Hash + Clone,
-{
-    entries: lru::LruCache<K, V>,
-}
-
-impl<K, V> LruCache<K, V>
-where
-    K: Eq + Hash + Clone,
-{
-    pub(crate) fn new(capacity: usize) -> Self {
-        let cap = NonZeroUsize::new(capacity.max(1)).expect("non-zero capacity");
-        Self {
-            entries: lru::LruCache::new(cap),
-        }
-    }
-
-    pub(crate) fn insert(&mut self, key: K, value: V) {
-        self.entries.put(key, value);
-    }
-
-    pub(crate) fn set_capacity(&mut self, capacity: usize) {
-        let cap = NonZeroUsize::new(capacity.max(1)).expect("non-zero capacity");
-        self.entries.resize(cap);
-    }
-
-    pub(crate) fn remove_by<Q>(&mut self, key: &Q) -> Option<V>
-    where
-        K: Borrow<Q>,
-        Q: Eq + Hash + ?Sized,
-    {
-        self.entries.pop(key)
-    }
-
-    pub(crate) fn get_by<Q>(&mut self, key: &Q) -> Option<&V>
-    where
-        K: Borrow<Q>,
-        Q: Eq + Hash + ?Sized,
-    {
-        self.entries.get(key)
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn peek_by<Q>(&self, key: &Q) -> Option<&V>
-    where
-        K: Borrow<Q>,
-        Q: Eq + Hash + ?Sized,
-    {
-        self.entries.peek(key)
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn clear(&mut self) {
-        self.entries.clear();
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    fn capacity(&self) -> usize {
-        self.entries.cap().get()
-    }
-
-    pub(crate) fn snapshot_entries(&self) -> Vec<(K, V)>
-    where
-        V: Clone,
-    {
-        self.entries
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect()
+pub(crate) fn global_dual_layer_metrics_snapshot() -> DualLayerMetricsSnapshot {
+    let m = GlobalLruMetrics::global();
+    DualLayerMetricsSnapshot {
+        hits: m.hits.load(Ordering::Relaxed),
+        misses: m.misses.load(Ordering::Relaxed),
     }
 }
 
-pub(crate) struct DualLayerLruMap<K, V>
+// ---------------------------------------------------------------------------
+// ConcurrentLruCache
+// ---------------------------------------------------------------------------
+
+/// Thread-safe concurrent cache.
+///
+/// Wraps [`quick_cache::sync::Cache`] behind an `Arc` so instances can be
+/// cheaply cloned and shared across threads.
+///
+/// The default weighter is [`UnitWeighter`] (each entry has weight 1, so
+/// `capacity` is an item count).  Pass a custom [`Weighter`] with
+/// [`ConcurrentLruCache::with_weighter`] to budget by bytes or other domain
+/// units instead.
+pub(crate) struct ConcurrentLruCache<K, V, W = UnitWeighter>
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
+    W: Weighter<K, V> + Clone + Send + Sync + 'static,
 {
-    mutable: Arc<AsyncRwLock<LruCache<K, V>>>,
-    snapshot: Arc<RwLock<Arc<HashMap<K, V>>>>,
-    touch_tx: mpsc::Sender<K>,
-    touch_rx: Arc<RwLock<Option<mpsc::Receiver<K>>>>,
-    touch_reconciler_started: Arc<RwLock<bool>>,
-    metrics: Arc<DualLayerMetrics>,
+    inner: Arc<Cache<K, V, W, DefaultHashBuilder, DefaultLifecycle<K, V>>>,
 }
 
-#[allow(dead_code)]
-impl<K, V> DualLayerLruMap<K, V>
+impl<K, V, W> Clone for ConcurrentLruCache<K, V, W>
+where
+    K: Eq + Hash + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+    W: Weighter<K, V> + Clone + Send + Sync + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+/// Constructor for the default unit-weighted variant (`capacity` = item count).
+impl<K, V> ConcurrentLruCache<K, V, UnitWeighter>
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
 {
     pub(crate) fn new(capacity: usize) -> Self {
-        let (touch_tx, touch_rx) = mpsc::channel(TOUCH_QUEUE_CAPACITY);
         Self {
-            mutable: Arc::new(AsyncRwLock::new(LruCache::new(capacity))),
-            snapshot: Arc::new(RwLock::new(Arc::new(HashMap::new()))),
-            touch_tx,
-            touch_rx: Arc::new(RwLock::new(Some(touch_rx))),
-            touch_reconciler_started: Arc::new(RwLock::new(false)),
-            metrics: Arc::new(DualLayerMetrics::default()),
+            inner: Arc::new(Cache::new(capacity.max(1))),
+        }
+    }
+}
+
+/// Operations and constructors available for any [`Weighter`].
+impl<K, V, W> ConcurrentLruCache<K, V, W>
+where
+    K: Eq + Hash + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+    W: Weighter<K, V> + Clone + Send + Sync + 'static,
+{
+    /// Create a cache capped by a total **weight budget** (e.g. bytes) rather
+    /// than item count.
+    ///
+    /// - `weight_capacity`: maximum sum of all entry weights before eviction.
+    /// - `estimated_items`: expected number of entries (sizes the internal
+    ///   ghost-key tracker — an order-of-magnitude estimate is sufficient).
+    /// - `weighter`: a [`Weighter`] implementation that returns a `u64` weight
+    ///   for each `(key, value)` pair.  Weight must not change after insertion;
+    ///   returning `0` keeps the entry in a non-evictable free list.
+    pub(crate) fn with_weighter(weight_capacity: u64, estimated_items: usize, weighter: W) -> Self {
+        let opts = OptionsBuilder::new()
+            .weight_capacity(weight_capacity)
+            .estimated_items_capacity(estimated_items)
+            .build()
+            .expect("valid OptionsBuilder configuration");
+        Self {
+            inner: Arc::new(Cache::with_options(
+                opts,
+                weighter,
+                DefaultHashBuilder::default(),
+                DefaultLifecycle::default(),
+            )),
         }
     }
 
-    fn try_start_touch_reconciler(&self) {
-        let mut started_guard = self
-            .touch_reconciler_started
-            .write()
-            .expect("touch reconciler state lock poisoned");
-        if *started_guard {
-            return;
-        }
-
-        let Ok(_runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-
-        let mut rx_guard = self
-            .touch_rx
-            .write()
-            .expect("touch receiver state lock poisoned");
-        let Some(mut rx) = rx_guard.take() else {
-            return;
-        };
-
-        *started_guard = true;
-        drop(started_guard);
-        drop(rx_guard);
-
-        let mutable = Arc::clone(&self.mutable);
-        let metrics = Arc::clone(&self.metrics);
-        tokio::spawn(async move {
-            while let Some(first_key) = rx.recv().await {
-                let mut batch = HashSet::new();
-                batch.insert(first_key);
-                while batch.len() < TOUCH_BATCH_MAX {
-                    match rx.try_recv() {
-                        Ok(key) => {
-                            batch.insert(key);
-                        }
-                        Err(_) => break,
-                    }
-                }
-
-                metrics
-                    .touch_reconciled_batches
-                    .fetch_add(1, Ordering::Relaxed);
-                DualLayerMetrics::global()
-                    .touch_reconciled_batches
-                    .fetch_add(1, Ordering::Relaxed);
-                metrics
-                    .touch_reconciled_keys
-                    .fetch_add(batch.len() as u64, Ordering::Relaxed);
-                DualLayerMetrics::global()
-                    .touch_reconciled_keys
-                    .fetch_add(batch.len() as u64, Ordering::Relaxed);
-
-                let mut cache = mutable.write().await;
-                for key in batch {
-                    let _ = cache.get_by(&key);
-                }
-            }
-        });
-    }
-
-    fn publish_incremental_update<F>(&self, updater: F)
-    where
-        F: FnOnce(&mut HashMap<K, V>),
-    {
-        let start = Instant::now();
-        let mut snapshot_guard = self
-            .snapshot
-            .write()
-            .expect("dual-layer snapshot write lock poisoned");
-        let mut next_snapshot = Arc::clone(&snapshot_guard);
-        updater(Arc::make_mut(&mut next_snapshot));
-        *snapshot_guard = next_snapshot;
-        self.metrics
-            .publish_incremental
-            .fetch_add(1, Ordering::Relaxed);
-        DualLayerMetrics::global()
-            .publish_incremental
-            .fetch_add(1, Ordering::Relaxed);
-        self.metrics
-            .publish_total_ns
-            .fetch_add(elapsed_ns(start), Ordering::Relaxed);
-        DualLayerMetrics::global()
-            .publish_total_ns
-            .fetch_add(elapsed_ns(start), Ordering::Relaxed);
-    }
-
-    async fn publish_incremental_insert(&self, key: K, value: V, reconcile_with_mutable: bool) {
-        let start = Instant::now();
-        let mutable_guard = if reconcile_with_mutable {
-            Some(self.mutable.read().await)
-        } else {
-            None
-        };
-
-        let mut snapshot_guard = self
-            .snapshot
-            .write()
-            .expect("dual-layer snapshot write lock poisoned");
-        let mut next_snapshot = Arc::clone(&snapshot_guard);
-        let map = Arc::make_mut(&mut next_snapshot);
-        map.insert(key, value);
-
-        if let Some(cache) = mutable_guard.as_ref() {
-            self.metrics
-                .publish_reconcile_scans
-                .fetch_add(1, Ordering::Relaxed);
-            DualLayerMetrics::global()
-                .publish_reconcile_scans
-                .fetch_add(1, Ordering::Relaxed);
-            let before = map.len();
-            map.retain(|snapshot_key, _| cache.peek_by(snapshot_key).is_some());
-            let removed = before.saturating_sub(map.len()) as u64;
-            self.metrics
-                .publish_reconcile_removed
-                .fetch_add(removed, Ordering::Relaxed);
-            DualLayerMetrics::global()
-                .publish_reconcile_removed
-                .fetch_add(removed, Ordering::Relaxed);
-        }
-
-        *snapshot_guard = next_snapshot;
-        self.metrics
-            .publish_incremental
-            .fetch_add(1, Ordering::Relaxed);
-        DualLayerMetrics::global()
-            .publish_incremental
-            .fetch_add(1, Ordering::Relaxed);
-        self.metrics
-            .publish_total_ns
-            .fetch_add(elapsed_ns(start), Ordering::Relaxed);
-        DualLayerMetrics::global()
-            .publish_total_ns
-            .fetch_add(elapsed_ns(start), Ordering::Relaxed);
-    }
-
-    async fn publish_incremental_insert_many(
-        &self,
-        entries: Vec<(K, V)>,
-        reconcile_with_mutable: bool,
-    ) {
-        let start = Instant::now();
-        let mutable_guard = if reconcile_with_mutable {
-            Some(self.mutable.read().await)
-        } else {
-            None
-        };
-
-        let mut snapshot_guard = self
-            .snapshot
-            .write()
-            .expect("dual-layer snapshot write lock poisoned");
-        let mut next_snapshot = Arc::clone(&snapshot_guard);
-        let map = Arc::make_mut(&mut next_snapshot);
-        for (key, value) in entries {
-            map.insert(key, value);
-        }
-
-        if let Some(cache) = mutable_guard.as_ref() {
-            self.metrics
-                .publish_reconcile_scans
-                .fetch_add(1, Ordering::Relaxed);
-            DualLayerMetrics::global()
-                .publish_reconcile_scans
-                .fetch_add(1, Ordering::Relaxed);
-            let before = map.len();
-            map.retain(|snapshot_key, _| cache.peek_by(snapshot_key).is_some());
-            let removed = before.saturating_sub(map.len()) as u64;
-            self.metrics
-                .publish_reconcile_removed
-                .fetch_add(removed, Ordering::Relaxed);
-            DualLayerMetrics::global()
-                .publish_reconcile_removed
-                .fetch_add(removed, Ordering::Relaxed);
-        }
-
-        *snapshot_guard = next_snapshot;
-        self.metrics
-            .publish_incremental
-            .fetch_add(1, Ordering::Relaxed);
-        DualLayerMetrics::global()
-            .publish_incremental
-            .fetch_add(1, Ordering::Relaxed);
-        self.metrics
-            .publish_total_ns
-            .fetch_add(elapsed_ns(start), Ordering::Relaxed);
-        DualLayerMetrics::global()
-            .publish_total_ns
-            .fetch_add(elapsed_ns(start), Ordering::Relaxed);
-    }
-
-    async fn publish_from_mutable(&self) {
-        let start = Instant::now();
-        let next_snapshot = {
-            let cache = self.mutable.read().await;
-            Arc::new(HashMap::<K, V>::from_iter(cache.snapshot_entries()))
-        };
-
-        let mut snapshot_guard = self
-            .snapshot
-            .write()
-            .expect("dual-layer snapshot write lock poisoned");
-        *snapshot_guard = next_snapshot;
-        self.metrics.publish_full.fetch_add(1, Ordering::Relaxed);
-        DualLayerMetrics::global()
-            .publish_full
-            .fetch_add(1, Ordering::Relaxed);
-        self.metrics
-            .publish_total_ns
-            .fetch_add(elapsed_ns(start), Ordering::Relaxed);
-        DualLayerMetrics::global()
-            .publish_total_ns
-            .fetch_add(elapsed_ns(start), Ordering::Relaxed);
-    }
-
-    pub(crate) async fn insert(&self, key: K, value: V) {
-        let (inserted_key, inserted_value, reconcile_with_mutable) = {
-            let mut cache = self.mutable.write().await;
-            let len_before = cache.len();
-            let capacity = cache.capacity();
-            let existed_before = cache.peek_by(&key).is_some();
-            cache.insert(key.clone(), value.clone());
-            (
-                key,
-                value,
-                !existed_before && len_before >= capacity,
-            )
-        };
-
-        self.publish_incremental_insert(inserted_key, inserted_value, reconcile_with_mutable)
-            .await;
-    }
-
-    pub(crate) async fn insert_many<I>(&self, entries: I)
-    where
-        I: IntoIterator<Item = (K, V)>,
-    {
-        let entries: Vec<(K, V)> = entries.into_iter().collect();
-        if entries.is_empty() {
-            return;
-        }
-
-        if entries.len() > INSERT_MANY_INCREMENTAL_MAX {
-            let mut cache = self.mutable.write().await;
-            for (key, value) in entries {
-                cache.insert(key, value);
-            }
-            drop(cache);
-            self.publish_from_mutable().await;
-            return;
-        }
-
-        let (reconcile_with_mutable, snapshot_entries) = {
-            let mut cache = self.mutable.write().await;
-            let len_before = cache.len();
-            let capacity = cache.capacity();
-            let unique_keys: HashSet<K> = entries.iter().map(|(key, _)| key.clone()).collect();
-            let existing_count = unique_keys
-                .iter()
-                .filter(|key| cache.peek_by(*key).is_some())
-                .count();
-            for (key, value) in entries {
-                cache.insert(key.clone(), value.clone());
-            }
-
-            let new_unique = unique_keys.len().saturating_sub(existing_count);
-            let reconcile_with_mutable = len_before.saturating_add(new_unique) > capacity;
-            let snapshot_entries: Vec<(K, V)> = cache
-                .snapshot_entries()
-                .into_iter()
-                .filter(|(key, _)| unique_keys.contains(key))
-                .collect();
-            (reconcile_with_mutable, snapshot_entries)
-        };
-
-        self.publish_incremental_insert_many(snapshot_entries, reconcile_with_mutable)
-            .await;
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn set_capacity(&self, capacity: usize) {
-        {
-            let mut cache = self.mutable.write().await;
-            cache.set_capacity(capacity);
-        }
-        self.publish_from_mutable().await;
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn remove_by<Q>(&self, key: &Q) -> Option<V>
+    /// Fetch an entry, updating its recency. Increments global hit / miss counter.
+    pub(crate) fn get<Q>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
-        Q: Eq + Hash + ?Sized,
+        Q: Hash + Eq + ?Sized,
     {
-        let removed = {
-            let mut cache = self.mutable.write().await;
-            cache.remove_by(key)
-        };
-        if removed.is_some() {
-            self.publish_incremental_update(|snapshot| {
-                let _ = snapshot.remove(key);
-            });
+        let v = self.inner.get(key);
+        let m = GlobalLruMetrics::global();
+        if v.is_some() {
+            m.hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            m.misses.fetch_add(1, Ordering::Relaxed);
         }
-        removed
+        v
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn clear(&self) {
-        {
-            let mut cache = self.mutable.write().await;
-            cache.clear();
-        }
-        self.publish_incremental_update(|snapshot| snapshot.clear());
-    }
-
-    pub(crate) fn get_snapshot(&self) -> Arc<HashMap<K, V>> {
-        let guard = self
-            .snapshot
-            .read()
-            .expect("dual-layer snapshot read lock poisoned");
-        Arc::clone(&guard)
-    }
-
-    pub(crate) fn get(&self, key: &K) -> Option<V> {
-        let value = self.get_snapshot().get(key).cloned();
-        if value.is_some() {
-            self.try_start_touch_reconciler();
-            match self.touch_tx.try_send(key.clone()) {
-                Ok(_) => {
-                    self.metrics.touch_enqueued.fetch_add(1, Ordering::Relaxed);
-                    DualLayerMetrics::global()
-                        .touch_enqueued
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-                Err(_) => {
-                    self.metrics.touch_dropped.fetch_add(1, Ordering::Relaxed);
-                    DualLayerMetrics::global()
-                        .touch_dropped
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        }
-        value
-    }
-
-    pub(crate) fn peek(&self, key: &K) -> Option<V> {
-        self.get_snapshot().get(key).cloned()
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.get_snapshot().len()
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn len_mutable(&self) -> usize {
-        self.mutable.read().await.len()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn metrics_snapshot(&self) -> DualLayerMetricsSnapshot {
-        self.metrics.snapshot()
-    }
-}
-
-pub(crate) struct SyncDualLayerLruMap<K, V>
-where
-    K: Eq + Hash + Clone + Send + Sync + 'static,
-    V: Clone + Send + Sync + 'static,
-{
-    mutable: Arc<RwLock<LruCache<K, V>>>,
-    snapshot: Arc<RwLock<Arc<HashMap<K, V>>>>,
-    touch_tx: StdSyncSender<K>,
-    touch_rx: Arc<Mutex<Option<StdReceiver<K>>>>,
-    touch_reconciler_started: Arc<RwLock<bool>>,
-    metrics: Arc<DualLayerMetrics>,
-}
-
-#[allow(dead_code)]
-impl<K, V> SyncDualLayerLruMap<K, V>
-where
-    K: Eq + Hash + Clone + Send + Sync + 'static,
-    V: Clone + Send + Sync + 'static,
-{
-    pub(crate) fn new(capacity: usize) -> Self {
-        let (touch_tx, touch_rx) = std_mpsc::sync_channel(TOUCH_QUEUE_CAPACITY);
-        Self {
-            mutable: Arc::new(RwLock::new(LruCache::new(capacity))),
-            snapshot: Arc::new(RwLock::new(Arc::new(HashMap::new()))),
-            touch_tx,
-            touch_rx: Arc::new(Mutex::new(Some(touch_rx))),
-            touch_reconciler_started: Arc::new(RwLock::new(false)),
-            metrics: Arc::new(DualLayerMetrics::default()),
-        }
-    }
-
-    fn try_start_touch_reconciler(&self) {
-        let mut started_guard = self
-            .touch_reconciler_started
-            .write()
-            .expect("touch reconciler state lock poisoned");
-        if *started_guard {
-            return;
-        }
-
-        let mut rx_guard = self
-            .touch_rx
-            .lock()
-            .expect("touch receiver state lock poisoned");
-        let Some(rx) = rx_guard.take() else {
-            return;
-        };
-
-        *started_guard = true;
-        drop(started_guard);
-        drop(rx_guard);
-
-        let mutable = Arc::clone(&self.mutable);
-        let metrics = Arc::clone(&self.metrics);
-        thread::spawn(move || {
-            while let Ok(first_key) = rx.recv() {
-                let mut batch = HashSet::new();
-                batch.insert(first_key);
-                while batch.len() < TOUCH_BATCH_MAX {
-                    match rx.try_recv() {
-                        Ok(key) => {
-                            batch.insert(key);
-                        }
-                        Err(_) => break,
-                    }
-                }
-
-                metrics
-                    .touch_reconciled_batches
-                    .fetch_add(1, Ordering::Relaxed);
-                DualLayerMetrics::global()
-                    .touch_reconciled_batches
-                    .fetch_add(1, Ordering::Relaxed);
-                metrics
-                    .touch_reconciled_keys
-                    .fetch_add(batch.len() as u64, Ordering::Relaxed);
-                DualLayerMetrics::global()
-                    .touch_reconciled_keys
-                    .fetch_add(batch.len() as u64, Ordering::Relaxed);
-
-                let mut cache = mutable.write().expect("dual-layer mutable write lock poisoned");
-                for key in batch {
-                    let _ = cache.get_by(&key);
-                }
-            }
-        });
-    }
-
-    fn publish_incremental_update<F>(&self, updater: F)
+    /// Fetch an entry without affecting its recency.
+    pub(crate) fn peek<Q>(&self, key: &Q) -> Option<V>
     where
-        F: FnOnce(&mut HashMap<K, V>),
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
     {
-        let start = Instant::now();
-        let mut snapshot_guard = self
-            .snapshot
-            .write()
-            .expect("dual-layer snapshot write lock poisoned");
-        let mut next_snapshot = Arc::clone(&snapshot_guard);
-        updater(Arc::make_mut(&mut next_snapshot));
-        *snapshot_guard = next_snapshot;
-        self.metrics
-            .publish_incremental
-            .fetch_add(1, Ordering::Relaxed);
-        DualLayerMetrics::global()
-            .publish_incremental
-            .fetch_add(1, Ordering::Relaxed);
-        self.metrics
-            .publish_total_ns
-            .fetch_add(elapsed_ns(start), Ordering::Relaxed);
-        DualLayerMetrics::global()
-            .publish_total_ns
-            .fetch_add(elapsed_ns(start), Ordering::Relaxed);
-    }
-
-    fn publish_incremental_insert(&self, key: K, value: V, reconcile_with_mutable: bool) {
-        let start = Instant::now();
-        let mutable_guard = if reconcile_with_mutable {
-            Some(
-                self.mutable
-                    .read()
-                    .expect("dual-layer mutable read lock poisoned"),
-            )
-        } else {
-            None
-        };
-
-        let mut snapshot_guard = self
-            .snapshot
-            .write()
-            .expect("dual-layer snapshot write lock poisoned");
-        let mut next_snapshot = Arc::clone(&snapshot_guard);
-        let map = Arc::make_mut(&mut next_snapshot);
-        map.insert(key, value);
-
-        if let Some(cache) = mutable_guard.as_ref() {
-            self.metrics
-                .publish_reconcile_scans
-                .fetch_add(1, Ordering::Relaxed);
-            DualLayerMetrics::global()
-                .publish_reconcile_scans
-                .fetch_add(1, Ordering::Relaxed);
-            let before = map.len();
-            map.retain(|snapshot_key, _| cache.peek_by(snapshot_key).is_some());
-            let removed = before.saturating_sub(map.len()) as u64;
-            self.metrics
-                .publish_reconcile_removed
-                .fetch_add(removed, Ordering::Relaxed);
-            DualLayerMetrics::global()
-                .publish_reconcile_removed
-                .fetch_add(removed, Ordering::Relaxed);
-        }
-
-        *snapshot_guard = next_snapshot;
-        self.metrics
-            .publish_incremental
-            .fetch_add(1, Ordering::Relaxed);
-        DualLayerMetrics::global()
-            .publish_incremental
-            .fetch_add(1, Ordering::Relaxed);
-        self.metrics
-            .publish_total_ns
-            .fetch_add(elapsed_ns(start), Ordering::Relaxed);
-        DualLayerMetrics::global()
-            .publish_total_ns
-            .fetch_add(elapsed_ns(start), Ordering::Relaxed);
-    }
-
-    fn publish_incremental_insert_many(&self, entries: Vec<(K, V)>, reconcile_with_mutable: bool) {
-        let start = Instant::now();
-        let mutable_guard = if reconcile_with_mutable {
-            Some(
-                self.mutable
-                    .read()
-                    .expect("dual-layer mutable read lock poisoned"),
-            )
-        } else {
-            None
-        };
-
-        let mut snapshot_guard = self
-            .snapshot
-            .write()
-            .expect("dual-layer snapshot write lock poisoned");
-        let mut next_snapshot = Arc::clone(&snapshot_guard);
-        let map = Arc::make_mut(&mut next_snapshot);
-        for (key, value) in entries {
-            map.insert(key, value);
-        }
-
-        if let Some(cache) = mutable_guard.as_ref() {
-            self.metrics
-                .publish_reconcile_scans
-                .fetch_add(1, Ordering::Relaxed);
-            DualLayerMetrics::global()
-                .publish_reconcile_scans
-                .fetch_add(1, Ordering::Relaxed);
-            let before = map.len();
-            map.retain(|snapshot_key, _| cache.peek_by(snapshot_key).is_some());
-            let removed = before.saturating_sub(map.len()) as u64;
-            self.metrics
-                .publish_reconcile_removed
-                .fetch_add(removed, Ordering::Relaxed);
-            DualLayerMetrics::global()
-                .publish_reconcile_removed
-                .fetch_add(removed, Ordering::Relaxed);
-        }
-
-        *snapshot_guard = next_snapshot;
-        self.metrics
-            .publish_incremental
-            .fetch_add(1, Ordering::Relaxed);
-        DualLayerMetrics::global()
-            .publish_incremental
-            .fetch_add(1, Ordering::Relaxed);
-        self.metrics
-            .publish_total_ns
-            .fetch_add(elapsed_ns(start), Ordering::Relaxed);
-        DualLayerMetrics::global()
-            .publish_total_ns
-            .fetch_add(elapsed_ns(start), Ordering::Relaxed);
-    }
-
-    fn publish_from_mutable(&self) {
-        let start = Instant::now();
-        let next_snapshot = {
-            let cache = self
-                .mutable
-                .read()
-                .expect("dual-layer mutable read lock poisoned");
-            Arc::new(HashMap::<K, V>::from_iter(cache.snapshot_entries()))
-        };
-
-        let mut snapshot_guard = self
-            .snapshot
-            .write()
-            .expect("dual-layer snapshot write lock poisoned");
-        *snapshot_guard = next_snapshot;
-        self.metrics.publish_full.fetch_add(1, Ordering::Relaxed);
-        DualLayerMetrics::global()
-            .publish_full
-            .fetch_add(1, Ordering::Relaxed);
-        self.metrics
-            .publish_total_ns
-            .fetch_add(elapsed_ns(start), Ordering::Relaxed);
-        DualLayerMetrics::global()
-            .publish_total_ns
-            .fetch_add(elapsed_ns(start), Ordering::Relaxed);
+        self.inner.peek(key)
     }
 
     pub(crate) fn insert(&self, key: K, value: V) {
-        let (inserted_key, inserted_value, reconcile_with_mutable) = {
-            let mut cache = self
-                .mutable
-                .write()
-                .expect("dual-layer mutable write lock poisoned");
-            let len_before = cache.len();
-            let capacity = cache.capacity();
-            let existed_before = cache.peek_by(&key).is_some();
-            cache.insert(key.clone(), value.clone());
-            (
-                key,
-                value,
-                !existed_before && len_before >= capacity,
-            )
-        };
-        self.publish_incremental_insert(inserted_key, inserted_value, reconcile_with_mutable);
+        self.inner.insert(key, value);
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn insert_many<I>(&self, entries: I)
     where
         I: IntoIterator<Item = (K, V)>,
     {
-        let entries: Vec<(K, V)> = entries.into_iter().collect();
-        if entries.is_empty() {
-            return;
+        for (k, v) in entries {
+            self.inner.insert(k, v);
         }
-
-        if entries.len() > INSERT_MANY_INCREMENTAL_MAX {
-            let mut cache = self
-                .mutable
-                .write()
-                .expect("dual-layer mutable write lock poisoned");
-            for (key, value) in entries {
-                cache.insert(key, value);
-            }
-            drop(cache);
-            self.publish_from_mutable();
-            return;
-        }
-
-        let (reconcile_with_mutable, snapshot_entries) = {
-            let mut cache = self
-                .mutable
-                .write()
-                .expect("dual-layer mutable write lock poisoned");
-            let len_before = cache.len();
-            let capacity = cache.capacity();
-            let unique_keys: HashSet<K> = entries.iter().map(|(key, _)| key.clone()).collect();
-            let existing_count = unique_keys
-                .iter()
-                .filter(|key| cache.peek_by(*key).is_some())
-                .count();
-            for (key, value) in entries {
-                cache.insert(key.clone(), value.clone());
-            }
-
-            let new_unique = unique_keys.len().saturating_sub(existing_count);
-            let reconcile_with_mutable = len_before.saturating_add(new_unique) > capacity;
-            let snapshot_entries: Vec<(K, V)> = cache
-                .snapshot_entries()
-                .into_iter()
-                .filter(|(key, _)| unique_keys.contains(key))
-                .collect();
-            (reconcile_with_mutable, snapshot_entries)
-        };
-
-        self.publish_incremental_insert_many(snapshot_entries, reconcile_with_mutable);
     }
 
-    pub(crate) fn set_capacity(&self, capacity: usize) {
-        {
-            let mut cache = self
-                .mutable
-                .write()
-                .expect("dual-layer mutable write lock poisoned");
-            cache.set_capacity(capacity);
-        }
-        self.publish_from_mutable();
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn remove_by<Q>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
-        Q: Eq + Hash + ?Sized,
+        Q: Hash + Eq + ?Sized,
     {
-        let removed = {
-            let mut cache = self
-                .mutable
-                .write()
-                .expect("dual-layer mutable write lock poisoned");
-            cache.remove_by(key)
-        };
-        if removed.is_some() {
-            self.publish_incremental_update(|snapshot| {
-                let _ = snapshot.remove(key);
-            });
-        }
-        removed
+        self.inner.remove(key).map(|(_, v)| v)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn clear(&self) {
-        {
-            let mut cache = self
-                .mutable
-                .write()
-                .expect("dual-layer mutable write lock poisoned");
-            cache.clear();
-        }
-        self.publish_incremental_update(|snapshot| snapshot.clear());
+        self.inner.clear();
     }
 
-    pub(crate) fn get_snapshot(&self) -> Arc<HashMap<K, V>> {
-        let guard = self
-            .snapshot
-            .read()
-            .expect("dual-layer snapshot read lock poisoned");
-        Arc::clone(&guard)
+    /// Resize the cache. If the new capacity is smaller than the current
+    /// weight, items are evicted immediately to fit.
+    pub(crate) fn set_capacity(&self, capacity: usize) {
+        self.inner.set_capacity(capacity.max(1) as u64);
     }
 
-    pub(crate) fn get(&self, key: &K) -> Option<V> {
-        let value = self.get_snapshot().get(key).cloned();
-        if value.is_some() {
-            self.try_start_touch_reconciler();
-            match self.touch_tx.try_send(key.clone()) {
-                Ok(_) => {
-                    self.metrics.touch_enqueued.fetch_add(1, Ordering::Relaxed);
-                    DualLayerMetrics::global()
-                        .touch_enqueued
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-                Err(_) => {
-                    self.metrics.touch_dropped.fetch_add(1, Ordering::Relaxed);
-                    DualLayerMetrics::global()
-                        .touch_dropped
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        }
-        value
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn peek(&self, key: &K) -> Option<V> {
-        self.get_snapshot().get(key).cloned()
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn len(&self) -> usize {
-        self.get_snapshot().len()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn metrics_snapshot(&self) -> DualLayerMetricsSnapshot {
-        self.metrics.snapshot()
+        self.inner.len()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Type aliases for call-site compatibility
+// ---------------------------------------------------------------------------
+
+/// Async-flavoured cache alias (previously a separate type; now identical to
+/// [`SyncDualLayerLruMap`] since all operations are lock-free).
+pub(crate) type DualLayerLruMap<K, V> = ConcurrentLruCache<K, V>;
+
+/// Sync-flavoured cache alias.
+pub(crate) type SyncDualLayerLruMap<K, V> = ConcurrentLruCache<K, V>;
+
+

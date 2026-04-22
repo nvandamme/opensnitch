@@ -199,14 +199,14 @@ pub(crate) async fn remove_file_async(path: &Path, error_context: &str) {
 }
 
 pub(crate) fn assert_storage_event(
-    rx: &mut tokio::sync::broadcast::Receiver<crate::services::storage::StorageEvent>,
+    rx: &mut tokio::sync::broadcast::Receiver<std::sync::Arc<crate::services::storage::StorageEvent>>,
     recv_label: &str,
     domain: &'static str,
     operation: crate::services::storage::StorageOperation,
     path: &Path,
 ) {
     assert_eq!(
-        rx.try_recv().expect(recv_label),
+        *rx.try_recv().expect(recv_label),
         crate::services::storage::StorageEvent {
             domain,
             operation,
@@ -216,7 +216,7 @@ pub(crate) fn assert_storage_event(
 }
 
 pub(crate) fn assert_storage_event_empty(
-    rx: &mut tokio::sync::broadcast::Receiver<crate::services::storage::StorageEvent>,
+    rx: &mut tokio::sync::broadcast::Receiver<std::sync::Arc<crate::services::storage::StorageEvent>>,
 ) {
     assert!(matches!(
         rx.try_recv(),

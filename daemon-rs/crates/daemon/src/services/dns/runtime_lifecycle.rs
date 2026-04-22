@@ -161,8 +161,8 @@ impl ServiceRuntimeControl for DnsService {
     type ReloadInput = ();
 
     async fn reload(&mut self, _input: Self::ReloadInput) -> anyhow::Result<()> {
-        self.ip_lookup.clear().await;
-        self.alias_lookup.clear().await;
+        self.ip_lookup.clear();
+        self.alias_lookup.clear();
         Ok(())
     }
 }

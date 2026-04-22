@@ -1,6 +1,10 @@
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use crate::{daemon::ProcessKernelEvent, models::{dns_payload::DnsPayload, kernel_event::KernelEvent}};
+use crate::{
+    daemon::{KernelPipeline, KernelPipelineCounters, ProcessKernelEvent},
+    models::{dns_payload::DnsPayload, kernel_event::KernelEvent},
+};
 
 const KERNEL_PIPELINE_SEND_RETRIES: usize = 8;
 const KERNEL_PIPELINE_SEND_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
@@ -28,16 +32,13 @@ pub(crate) fn fanout_kernel_ingress_event(
     }
 }
 
-pub(crate) async fn dispatch_kernel_pipeline_event<T, F>(
+pub(crate) async fn dispatch_kernel_pipeline_event<T>(
     tx: &tokio::sync::mpsc::Sender<T>,
     event: T,
     shutdown: &CancellationToken,
-    pipeline: &'static str,
-    mut on_drop: F,
-) -> bool
-where
-    F: FnMut() -> u64,
-{
+    counters: &Arc<KernelPipelineCounters>,
+    pipeline: KernelPipeline,
+) -> bool {
     let pending = event;
 
     for _ in 0..KERNEL_PIPELINE_SEND_RETRIES {
@@ -60,9 +61,9 @@ where
         }
     }
 
-    let dropped = on_drop();
+    let dropped = counters.increment_drop(pipeline);
     tracing::warn!(
-        pipeline,
+        pipeline = pipeline.as_str(),
         dropped_count = dropped,
         "kernel event pipeline queue saturated; dropping event"
     );

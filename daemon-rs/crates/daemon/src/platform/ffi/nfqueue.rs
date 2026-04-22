@@ -12,6 +12,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use dashmap::DashMap;
+
 use anyhow::{Context, Result, bail};
 use nix::libc;
 use rustix::{
@@ -65,7 +67,7 @@ pub(crate) struct RuntimeState {
     uid_support: AtomicU8,
     gid_support: AtomicU8,
     decision_shards: Vec<DecisionShard>,
-    requeue_aliases: Mutex<HashMap<u64, RequeueAlias>>,
+    requeue_aliases: DashMap<u64, RequeueAlias>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -192,7 +194,7 @@ impl NfqueueRuntimeState {
                     cv: Condvar::new(),
                 })
                 .collect(),
-            requeue_aliases: Mutex::new(HashMap::new()),
+            requeue_aliases: DashMap::new(),
         });
     }
 
@@ -421,7 +423,7 @@ impl NfqueueDecisionState {
         hash
     }
 
-    pub(crate) fn prune_requeue_aliases(aliases: &mut HashMap<u64, RequeueAlias>) {
+    pub(crate) fn prune_requeue_aliases(aliases: &DashMap<u64, RequeueAlias>) {
         let now = Instant::now();
         aliases.retain(|_, alias| alias.expires_at > now);
     }
@@ -445,14 +447,10 @@ impl NfqueueDecisionState {
         let Some(runtime) = RUNTIME.get() else {
             return;
         };
-
-        let mut aliases = match runtime.requeue_aliases.lock() {
-            Ok(aliases) => aliases,
-            Err(_) => return,
-        };
-
-        Self::prune_requeue_aliases(&mut aliases);
-        aliases.insert(
+        // Prune expired entries on the write path only (cold path: only requeued packets hit this).
+        // The claim path (called on every repeat-queue packet) is intentionally O(1) — no scan.
+        Self::prune_requeue_aliases(&runtime.requeue_aliases);
+        runtime.requeue_aliases.insert(
             payload_signature,
             RequeueAlias {
                 request_id,
@@ -463,11 +461,12 @@ impl NfqueueDecisionState {
 
     fn claim_requeue_alias(payload_signature: u64) -> Option<u64> {
         let runtime = RUNTIME.get()?;
-        let mut aliases = runtime.requeue_aliases.lock().ok()?;
-        Self::prune_requeue_aliases(&mut aliases);
-        aliases
+        // Atomic remove + TTL check — O(1), no map scan.
+        runtime
+            .requeue_aliases
             .remove(&payload_signature)
-            .map(|alias| alias.request_id)
+            .filter(|(_, alias)| alias.expires_at > Instant::now())
+            .map(|(_, alias)| alias.request_id)
     }
 }
 

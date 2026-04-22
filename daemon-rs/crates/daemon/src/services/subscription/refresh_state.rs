@@ -25,8 +25,8 @@ impl SubscriptionService {
     }
 
     pub(super) fn per_sub_lock(&self, id: &str) -> Arc<AsyncMutex<()>> {
-        let mut map = self.locks.lock().expect("subscription locks poisoned");
-        map.entry(id.to_owned())
+        self.locks
+            .entry(id.to_owned())
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .clone()
     }

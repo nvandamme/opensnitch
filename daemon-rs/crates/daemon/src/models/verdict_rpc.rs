@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 #[derive(Debug, Clone)]
 pub struct VerdictReply {
     pub request_id: u64,
@@ -5,5 +7,5 @@ pub struct VerdictReply {
     pub reject: bool,
     pub count_stats: bool,
     pub source: &'static str,
-    pub rule_name: Option<String>,
+    pub rule_name: Option<Arc<str>>,
 }

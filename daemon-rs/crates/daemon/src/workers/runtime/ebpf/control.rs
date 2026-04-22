@@ -3,7 +3,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, Mutex},
+    sync::Mutex,
     thread,
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -18,7 +18,7 @@ use crate::{
     bus::Bus,
     models::dns_payload::DnsPayload,
     models::ebpf_payload::EbpfProcStatePayload,
-    models::ebpf_state::{BpfMap, BpfProgram},
+    models::ebpf_state::BpfMap,
     models::kernel_event::KernelEvent,
     services::{
         connection::ConnectionService,
@@ -28,9 +28,6 @@ use crate::{
     },
     tunables::RuntimeTunables,
     utils::byte_read::read_ne_value_at,
-    utils::command_path::resolve_command_path,
-    utils::hex_parse::parse_hex_token,
-    utils::path_text::lossy_os,
     workers::runtime::control::{
         WorkerCommandResult, impl_restartable_thread_worker_control,
     },
@@ -594,89 +591,15 @@ impl EbpfWorkerControl {
 impl_restartable_thread_worker_control!(EbpfWorkerControl, "ebpf");
 
 impl EbpfWorkerControl {
-    fn ensure_ebpf_runtime_loaded(runtime: &mut EbpfService, bus: &Bus, mode: EbpfWorkerMode) {
-        let Some(bpftool) = resolve_command_path("bpftool") else {
-            return;
-        };
-
-        let pin_domain = runtime.pin_domain();
-
+    fn ensure_ebpf_runtime_loaded(_runtime: &mut EbpfService, _bus: &Bus, mode: EbpfWorkerMode) {
+        // eBPF object loading is handled natively by the aya/libbpf runtimes.
+        // bpftool subprocess loading has been removed; it is not available on minimal
+        // distros such as Alpine Linux and OpenWrt.
         if (mode.enable_conn || mode.enable_proc) && !Self::ensure_tracefs_ready() {
             warn!(
                 "tracefs not ready; eBPF kprobe/tracepoint attach may fail and trigger worker fallback paths"
             );
         }
-
-        let mut loaded_any = false;
-
-        let has_conn_maps = Path::new(pin_domain.conn_tcp_map_path()).exists();
-        let has_process_events = Path::new(pin_domain.proc_events_path()).exists();
-        let has_dns_events = Path::new(pin_domain.dns_events_path()).exists();
-
-        if mode.enable_conn
-            && let Some(obj) = runtime.conn_obj.as_ref()
-            && !has_conn_maps
-            && Self::try_load_object_with_bpftool(&bpftool, obj, runtime.conn_pin_root())
-        {
-            loaded_any = true;
-        }
-
-        if mode.enable_proc
-            && let Some(obj) = runtime.proc_obj.as_ref()
-            && !has_process_events
-            && Self::try_load_object_with_bpftool(&bpftool, obj, runtime.proc_pin_root())
-        {
-            loaded_any = true;
-        }
-
-        if mode.enable_dns
-            && let Some(obj) = runtime.dns_obj.as_ref()
-            && !has_dns_events
-            && Self::try_load_object_with_bpftool(&bpftool, obj, runtime.dns_pin_root())
-        {
-            loaded_any = true;
-        }
-
-        if loaded_any {
-            let _ = crate::workers::dispatch_kernel_event_with_backoff(
-                &bus.kernel_tx,
-                KernelEvent::EbpfProcessMapHit {
-                    pid: std::process::id(),
-                    uid: 0,
-                    note:
-                        "eBPF runtime attempted object load/attach for missing opensnitch programs"
-                            .to_string(),
-                },
-            );
-        }
-    }
-
-    fn try_load_object_with_bpftool(bpftool: &str, obj: &std::path::Path, pin_root: &str) -> bool {
-        let obj = obj.to_string_lossy();
-        let _ = fs::create_dir_all(pin_root);
-
-        let attempts: &[&[&str]] = &[
-            &["prog", "loadall", &obj, pin_root, "autoattach"],
-            &["prog", "loadall", &obj, pin_root],
-        ];
-
-        for args in attempts {
-            let output = Command::new(bpftool).args(*args).output();
-            let Ok(output) = output else {
-                continue;
-            };
-
-            if output.status.success() || Self::is_already_pinned_error(&output.stderr) {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    fn is_already_pinned_error(stderr: &[u8]) -> bool {
-        let stderr = String::from_utf8_lossy(stderr);
-        stderr.contains("failed to pin at") && stderr.contains("-EEXIST")
     }
 
     fn ensure_tracefs_ready() -> bool {
@@ -1018,7 +941,9 @@ impl EbpfWorkerControl {
         shutdown: &CancellationToken,
         dns_obj: &Path,
     ) -> Result<(), String> {
+        use std::sync::Arc;
         use libbpf_rs::{MapCore, ObjectBuilder, RingBufferBuilder, UprobeOpts};
+        use crate::utils::path_text::lossy_os;
 
         let libc =
             Self::find_libc_path().ok_or_else(|| "failed to resolve libc path".to_string())?;
@@ -1657,249 +1582,180 @@ impl EbpfWorkerControl {
     fn supervise_runtime(bus: &Bus, state: &mut SupervisorState, prune_policy: EbpfMapPrunePolicy) {
         Self::prune_seen_hits(state);
 
-        let Some(bpftool) = resolve_command_path("bpftool") else {
-            return;
-        };
+        #[cfg(feature = "aya-ebpf")]
+        Self::supervise_runtime_aya(bus, state, prune_policy);
+    }
 
-        let programs = Self::list_programs(&bpftool);
-        let maps = Self::list_maps(&bpftool);
+    /// Aya-native supervisor: enumerates loaded kernel programs/maps via the BPF syscall
+    /// iterators (no bpftool subprocess required) and performs typed map prune + hit events.
+    #[cfg(feature = "aya-ebpf")]
+    fn supervise_runtime_aya(
+        bus: &Bus,
+        state: &mut SupervisorState,
+        prune_policy: EbpfMapPrunePolicy,
+    ) {
+        use aya::maps::loaded_maps;
+        use aya::programs::loaded_programs;
 
-        if programs.is_empty() || maps.is_empty() {
-            return;
-        }
-
-        let opensnitch_programs: Vec<&BpfProgram> = programs
-            .iter()
-            .filter(|p| p.name.to_lowercase().contains("opensnitch"))
+        // Collect map IDs associated with opensnitch-named programs.
+        let opensnitch_map_ids: HashSet<u32> = loaded_programs()
+            .flatten()
+            .filter(|p| {
+                p.name_as_str()
+                    .map(|n| n.to_lowercase().contains("opensnitch"))
+                    .unwrap_or(false)
+            })
+            .filter_map(|p| p.map_ids().ok().flatten())
+            .flatten()
             .collect();
 
-        if opensnitch_programs.is_empty() {
+        if opensnitch_map_ids.is_empty() {
             return;
         }
 
-        let map_ids: HashSet<u32> = opensnitch_programs
-            .iter()
-            .flat_map(|p| p.map_ids.iter().copied())
+        // Resolve name + max_entries for each relevant map.
+        let map_metas: HashMap<u32, (String, u32)> = loaded_maps()
+            .flatten()
+            .filter(|m| opensnitch_map_ids.contains(&m.id()))
+            .map(|m| {
+                let name = m.name_as_str().unwrap_or("").to_string();
+                (m.id(), (name, m.max_entries()))
+            })
             .collect();
 
-        if map_ids.is_empty() {
-            return;
-        }
+        let opensnitch_map_count = opensnitch_map_ids.len();
 
-        let mut map_by_id: HashMap<u32, BpfMap> = HashMap::new();
-        for map in maps {
-            map_by_id.insert(map.id, map);
-        }
-
-        for map_id in map_ids {
-            let Some(map_meta) = map_by_id.get(&map_id) else {
+        for map_id in opensnitch_map_ids {
+            let Some((map_name, max_entries)) = map_metas.get(&map_id) else {
                 continue;
             };
 
-            let entries = Self::dump_map(&bpftool, map_id);
-            let entry_count = entries.len() as u32;
-            Self::maybe_emit_pressure(bus, state, map_meta, entry_count);
-            let pruned = Self::prune_map_entries(
-                &bpftool,
-                map_id,
-                map_meta,
-                &entries,
-                entry_count,
-                prune_policy,
-            );
-            if pruned > 0 {
-                let note = format!(
-                    "eBPF map '{}' (id={map_id}) pruned {pruned} entries under pressure",
-                    map_meta.name
-                );
+            // Try v4 key (12 bytes) first, then v6 key (36 bytes).
+            let (hits, deleted, entry_count) =
+                Self::aya_inspect_and_prune_map::<12>(map_id, *max_entries, prune_policy)
+                    .or_else(|| {
+                        Self::aya_inspect_and_prune_map::<36>(map_id, *max_entries, prune_policy)
+                    })
+                    .unwrap_or_default();
+
+            let bpf_map_meta = BpfMap { id: map_id, name: map_name.clone(), max_entries: *max_entries };
+            Self::maybe_emit_pressure(bus, state, &bpf_map_meta, entry_count);
+
+            if deleted > 0 {
                 let _ = crate::workers::dispatch_kernel_event_with_backoff(
                     &bus.kernel_tx,
                     KernelEvent::EbpfProcessMapHit {
                         pid: std::process::id(),
                         uid: 0,
-                        note,
+                        note: format!(
+                            "eBPF map '{}' (id={map_id}) pruned {deleted} entries under pressure",
+                            map_name
+                        ),
                     },
                 );
             }
 
-            for entry in entries {
-                if let Some((pid, uid)) = ConnectionService::extract_ebpf_map_hit_pid_uid(&entry) {
-                    let key = (map_id, pid, uid);
-                    let should_emit = state
-                        .seen_hits
-                        .get(&key)
-                        .map(|seen_at| seen_at.elapsed() >= Duration::from_secs(30))
-                        .unwrap_or(true);
+            for (pid, uid) in hits {
+                let key = (map_id, pid, uid);
+                let should_emit = state
+                    .seen_hits
+                    .get(&key)
+                    .map(|seen_at| seen_at.elapsed() >= Duration::from_secs(30))
+                    .unwrap_or(true);
 
-                    if should_emit {
-                        state.seen_hits.insert(key, Instant::now());
-                        let _ = crate::workers::dispatch_kernel_event_with_backoff(
-                            &bus.kernel_tx,
-                            KernelEvent::EbpfProcessMapHit {
-                                pid,
-                                uid,
-                                note: format!(
-                                    "eBPF map '{}' (id={map_id}) lookup hit",
-                                    map_meta.name
-                                ),
-                            },
-                        );
-                    }
+                if should_emit {
+                    state.seen_hits.insert(key, Instant::now());
+                    let _ = crate::workers::dispatch_kernel_event_with_backoff(
+                        &bus.kernel_tx,
+                        KernelEvent::EbpfProcessMapHit {
+                            pid,
+                            uid,
+                            note: format!(
+                                "eBPF map '{}' (id={map_id}) lookup hit",
+                                map_name
+                            ),
+                        },
+                    );
                 }
             }
         }
 
-        let opensnitch_prog_count = opensnitch_programs.len();
         let _ = crate::workers::dispatch_kernel_event_with_backoff(
             &bus.kernel_tx,
             KernelEvent::EbpfProcessMapHit {
                 pid: std::process::id(),
                 uid: 0,
                 note: format!(
-                    "bpftool supervisor active: {opensnitch_prog_count} opensnitch programs monitored"
+                    "aya supervisor active: {opensnitch_map_count} opensnitch maps monitored"
                 ),
             },
         );
     }
 
-    fn prune_map_entries(
-        bpftool: &str,
+    /// Inspect and prune a BPF HashMap with a fixed key size of `N` bytes.
+    ///
+    /// Returns `Some((hits, deleted, entry_count))` if the map can be opened as
+    /// `HashMap<[u8; N], [u8; 16]>`, or `None` if the key/value size does not match.
+    /// `hits` contains `(pid, uid)` pairs extracted from each map value.
+    #[cfg(feature = "aya-ebpf")]
+    fn aya_inspect_and_prune_map<const N: usize>(
         map_id: u32,
-        map_meta: &BpfMap,
-        entries: &[Value],
-        entry_count: u32,
+        max_entries: u32,
         policy: EbpfMapPrunePolicy,
-    ) -> usize {
-        if !policy.enabled || map_meta.max_entries == 0 {
-            return 0;
+    ) -> Option<(Vec<(u32, u32)>, usize, u32)>
+    where
+        [u8; N]: aya::Pod,
+    {
+        use aya::maps::{HashMap as AyaHashMap, Map, MapData};
+
+        let map_data = MapData::from_id(map_id).ok()?;
+        let mut map: AyaHashMap<_, [u8; N], [u8; 16]> = Map::HashMap(map_data).try_into().ok()?;
+
+        let mut all_keys: Vec<[u8; N]> = Vec::new();
+        let mut hits: Vec<(u32, u32)> = Vec::new();
+
+        for result in map.iter() {
+            let Ok((key, value)) = result else { continue };
+            let pid = u64::from_ne_bytes(value[0..8].try_into().unwrap()) as u32;
+            let uid = u64::from_ne_bytes(value[8..16].try_into().unwrap()) as u32;
+            hits.push((pid, uid));
+            all_keys.push(key);
         }
 
-        let threshold_count =
-            ((map_meta.max_entries as usize * policy.threshold_percent) + 99) / 100;
-        if entry_count as usize <= threshold_count {
-            return 0;
-        }
+        let entry_count = all_keys.len() as u32;
 
-        let target_count = (map_meta.max_entries as usize * policy.target_percent) / 100;
-        if entry_count as usize <= target_count {
-            return 0;
-        }
-
-        let delete_budget = (entry_count as usize).saturating_sub(target_count);
-        if delete_budget == 0 {
-            return 0;
-        }
-
-        let mut deleted = 0;
-        for entry in entries.iter().take(delete_budget) {
-            let Some(key_bytes) = Self::extract_key_bytes(entry) else {
-                continue;
-            };
-            if Self::delete_map_key(bpftool, map_id, &key_bytes) {
-                deleted += 1;
+        let deleted = if policy.enabled && max_entries > 0 {
+            let threshold_count =
+                ((max_entries as usize * policy.threshold_percent) + 99) / 100;
+            if entry_count as usize > threshold_count {
+                let target_count = (max_entries as usize * policy.target_percent) / 100;
+                let delete_budget = (entry_count as usize).saturating_sub(target_count);
+                let mut deleted = 0;
+                for key in all_keys.iter().take(delete_budget) {
+                    if map.remove(key).is_ok() {
+                        deleted += 1;
+                    }
+                }
+                if deleted > 0 {
+                    debug!(
+                        map_id,
+                        deleted,
+                        entry_count,
+                        max_entries,
+                        threshold_percent = policy.threshold_percent,
+                        target_percent = policy.target_percent,
+                        "eBPF map prune applied (aya)"
+                    );
+                }
+                deleted
+            } else {
+                0
             }
-        }
-
-        if deleted > 0 {
-            debug!(
-                map_id,
-                map = %map_meta.name,
-                deleted,
-                entry_count,
-                max_entries = map_meta.max_entries,
-                threshold_percent = policy.threshold_percent,
-                target_percent = policy.target_percent,
-                "eBPF map prune applied"
-            );
-        }
-
-        deleted
-    }
-
-    fn delete_map_key(bpftool: &str, map_id: u32, key_bytes: &[u8]) -> bool {
-        let mut args = vec![
-            "map".to_string(),
-            "delete".to_string(),
-            "id".to_string(),
-            map_id.to_string(),
-            "key".to_string(),
-            "hex".to_string(),
-        ];
-        for b in key_bytes {
-            args.push(format!("{b:02x}"));
-        }
-
-        let Ok(output) = Command::new(bpftool).args(&args).output() else {
-            return false;
+        } else {
+            0
         };
-        output.status.success()
-    }
 
-    fn extract_key_bytes(entry: &Value) -> Option<Vec<u8>> {
-        let key = entry.get("key")?;
-        let mut out = Vec::new();
-        Self::collect_u8_values(key, &mut out);
-        if out.is_empty() { None } else { Some(out) }
-    }
-
-    fn collect_u8_values(node: &Value, out: &mut Vec<u8>) {
-        match node {
-            Value::Number(n) => {
-                if let Some(v) = n.as_u64().and_then(|v| u8::try_from(v).ok()) {
-                    out.push(v);
-                }
-            }
-            Value::Array(values) => {
-                for value in values {
-                    Self::collect_u8_values(value, out);
-                }
-            }
-            Value::Object(map) => {
-                for value in map.values() {
-                    Self::collect_u8_values(value, out);
-                }
-            }
-            Value::String(s) => {
-                if let Some(v) = parse_hex_token::<u8>(s) {
-                    out.push(v);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn run_capture(bin: &str, args: &[&str]) -> Option<String> {
-        let out = Command::new(bin).args(args).output().ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        Some(String::from_utf8_lossy(&out.stdout).to_string())
-    }
-
-    fn run_json_capture(bin: &str, args: &[&str]) -> Option<Value> {
-        let mut argv = vec!["-j"];
-        argv.extend_from_slice(args);
-
-        let out = Self::run_capture(bin, &argv)?;
-        serde_json::from_str(&out).ok()
-    }
-
-    fn list_programs(bpftool: &str) -> Vec<BpfProgram> {
-        Self::run_json_capture(bpftool, &["prog", "show"])
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default()
-    }
-
-    fn list_maps(bpftool: &str) -> Vec<BpfMap> {
-        Self::run_json_capture(bpftool, &["map", "show"])
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default()
-    }
-
-    fn dump_map(bpftool: &str, map_id: u32) -> Vec<Value> {
-        Self::run_json_capture(bpftool, &["map", "dump", "id", &map_id.to_string()])
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default()
+        Some((hits, deleted, entry_count))
     }
 
     fn maybe_emit_pressure(bus: &Bus, state: &mut SupervisorState, map: &BpfMap, entries: u32) {

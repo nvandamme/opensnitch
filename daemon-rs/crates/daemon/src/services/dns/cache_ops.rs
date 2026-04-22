@@ -1,5 +1,4 @@
 use std::{
-    collections::HashSet,
     net::IpAddr,
     sync::{
         Arc,
@@ -28,7 +27,7 @@ impl DnsService {
             return;
         }
 
-        self.ip_lookup.insert_many(entries).await;
+        self.ip_lookup.insert_many(entries);
     }
 
     pub async fn track_alias(&self, alias: impl Into<Arc<str>>, host: impl Into<Arc<str>>) {
@@ -38,21 +37,18 @@ impl DnsService {
             return;
         }
 
-        self.alias_lookup.insert(alias, host).await;
+        self.alias_lookup.insert(alias, host);
     }
 
-    pub fn lookup_ip(&self, ip: IpAddr) -> Option<String> {
+    pub fn lookup_ip(&self, ip: IpAddr) -> Option<Arc<str>> {
         let mut host = self.ip_lookup.get(&ip)?;
-        let mut seen = HashSet::new();
-        seen.insert(Arc::clone(&host));
-
-        while let Some(next) = self.alias_lookup.get(&host) {
-            if !seen.insert(Arc::clone(&next)) {
-                break;
-            }
+        // Follow alias chain with a bounded hop limit instead of a per-lookup heap
+        // HashSet. Real DNS alias chains are ≤ 3 hops; the limit guards against any
+        // injected cycle without allocating.
+        for _ in 0..8 {
+            let Some(next) = self.alias_lookup.get(&host) else { break };
             host = next;
         }
-
-        Some(host.to_string())
+        Some(host)
     }
 }

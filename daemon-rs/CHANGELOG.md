@@ -9,6 +9,235 @@ Versioning baseline:
 - `v0.3.0`
 - `v0.4.0`
 - `v0.5.0`
+- `v0.5.1`
+
+## [v0.5.1] - unreleased
+
+### Added
+
+### Changed
+- **[CRITICAL] eBPF map owner lookup — aya-first**: `services/connection/ebpf.rs` fully
+  migrated.  `list_bpf_maps()` uses `aya::maps::loaded_maps()` first; `lookup_bpf_owner()`
+  uses a new `aya_lookup_bpf_owner()` helper that dispatches on key length (12 → v4,
+  36 → v6) using typed `aya::maps::HashMap<_, [u8;N], [u8;16]>::try_from`.  `bpftool`
+  fallback functions (`bpftool_list_maps`, `bpftool_lookup_owner`) fully removed (not
+  gated — deleted).  Per-connection lookup is now ~1 µs (was 1–5 ms bpftool fork).
+- **[CRITICAL] eBPF supervisor — aya-first**: `workers/runtime/ebpf/control.rs` — added
+  `supervise_runtime_aya()` (dispatch via `loaded_programs()` + `loaded_maps()`) and
+  `aya_inspect_and_prune_map<const N>()` (typed shard-pinned HashMap iteration + TTL
+  prune).  Active under `#[cfg(feature = "aya-ebpf")]`; all bpftool helpers
+  (`prune_map_entries`, `delete_map_key`, `extract_key_bytes`, `collect_u8_values`,
+  `run_capture`, `run_json_capture`, `list_programs`, `list_maps`, `dump_map`),
+  `try_load_object_with_bpftool`, `is_already_pinned_error`, the bpftool supervisor body
+  in `supervise_runtime()`, and the `resolve_command_path` import fully removed.
+  `ensure_ebpf_runtime_loaded()` body stripped to tracefs mount check only.
+- **[HIGH] Smoke tests — bpftool blocks removed**: `aya_conn_trace.rs` and
+  `aya_tunnel_trace.rs` — `map_id_by_name`, `map_dump_keys`, `map_has_entries`,
+  `map_entry_count`: bpftool fallback blocks fully removed (replaced with trivial
+  `Vec::new()` / `None` / `false` / `0` for non-aya builds); `value_to_bytes()` deleted;
+  `#[cfg(not(feature = "aya-ebpf"))] use serde_json::Value` import removed.
+- **[HIGH] libbpf-rs removed from default features**: `libbpf-ebpf` is now opt-in only
+  (`--features libbpf-ebpf`); default build is aya-only with zero bpftool or libbpf
+  subprocess dependency.
+- **[HIGH] Process hash verdict safety**: `services/rule/matching.rs` — `SimpleHashOptional`
+  dispatch in both the compiled path (`operator_matches_against_compiled`) and the
+  uncompiled path (`operator_matches_against_with_derived`) now returns `false` (not
+  `match`) when the process hash is `None`.  Connections where the hash is not yet
+  available fall through to the default action instead of incorrectly matching a
+  hash-based rule.
+- **[HIGH] IMA fast-path for process hashing**: `services/process/details.rs` —
+  `compute_process_hashes` now tries `read_ima_sha256_xattr` first: reads the
+  `security.ima` xattr (type `0x03`, algo `4` = SHA-256), extracts the 32-byte SHA-256
+  digest without a file read.  If IMA is present, only the file-read for MD5 + SHA-1 is
+  needed (`compute_md5_sha1`); otherwise falls back to the full `compute_hashes_from_file`
+  path.
+- **[MEDIUM] DashMap — `pending_decisions` verdict epoch map**: `flows/verdict/verdict.rs`
+  — `Arc<RwLock<HashMap<String, u64>>>` replaced with `Arc<DashMap<String, u64>>`.
+  `begin_decision_epoch`, `is_decision_epoch_current`, and `end_decision_epoch` are now
+  sync (no async lock acquire); check-and-insert in `begin_decision_epoch` is atomic via
+  `DashMap::entry`.  Removes async lock overhead from the interactive AskRule verdict path
+  under concurrent traffic.
+- **[MEDIUM] DashMap — subscription per-id locks**: `services/subscription/subscription.rs`
+  — `Arc<StdMutex<HashMap<String, Arc<AsyncMutex<()>>>>>` replaced with
+  `Arc<DashMap<String, Arc<AsyncMutex<()>>>>`.  `per_sub_lock` now uses `DashMap::entry`
+  directly; eliminates the outer mutex and the `"subscription locks poisoned"` panic path.
+- **[CRITICAL] eBPF map owner lookup (earlier)**: `services/connection/ebpf.rs` — eliminated
+  per-connection `bpftool` subprocess fork (was ~1–5 ms each).  Map-id enumeration now
+  uses `libbpf-rs` `MapInfoIter` (or `aya::maps::loaded_maps()` for aya-only builds)
+  and per-entry lookup uses `libbpf_rs::MapHandle::from_map_id` + `MapCore::lookup`
+  directly, dropping to ~1 µs per call.  Map-id catalogue is refreshed every 30 s by
+  a background tokio task.
+- **[HIGH] IpAddr round-trip removed**: `resolve_owner_by_ebpf_map` now takes `IpAddr`
+  directly (previously converted to `String` then re-parsed inside `bpf_map_name` /
+  `build_bpf_key`).  Eliminates one format + one parse per connection on the eBPF path.
+  Mixed-family (V4 src / V6 dst) handled via `to_ipv6_mapped()` instead of returning
+  `None`.
+- **[HIGH] Stats mutex sharding**: `StatsService::inner` (single `Mutex<StatsInner>`)
+  split into two independent mutexes with a consistent acquisition order
+  (events-state before breakdown):
+  - `Mutex<BreakdownCounters>`: `on_connect_attempt`, `on_connection_metadata` — hot
+    per-connection writes.
+  - `Mutex<EventsState>`: `on_event`, ring-buffer maintenance — hot per-verdict writes.
+  `snapshot()` and `apply_config()` acquire both; all other hot-path callers acquire
+  only one, halving inter-worker contention.
+- **[MEDIUM] `source_label` allocation-free on common paths**: return type changed from
+  `String` to `Cow<'static, str>`.  The `fast-allow`, `fast-drop`, and `default` paths
+  now return `Cow::Borrowed` (zero allocation); only rule-name paths allocate.
+- **[MEDIUM] Rule name cloning eliminated**: `ActiveRuleCompiled.name` changed from
+  `String` to `Arc<str>`; `VerdictReply.rule_name` changed to `Option<Arc<str>>`.
+  Rule-name propagation from match → reply now clones an `Arc` (atomic refcount) instead
+  of allocating a new heap `String`.
+- **[MEDIUM] DNS lookup returns `Arc<str>`**: `DnsService::lookup_ip` changed from
+  `Option<String>` to `Option<Arc<str>>`, avoiding a `.to_string()` clone on every
+  connection that has a reverse-DNS entry.  `ConnectionContext.dst_host` updated to
+  `Option<Arc<str>>`; DNS query fast-path converts via `Arc::from`.
+- **[MEDIUM] Per-verdict log downgraded to `DEBUG`**: `flows/verdict/submit.rs` —
+  changed `tracing::info!` for verdict replies to `tracing::debug!`, gated behind
+  `tracing::enabled!(Level::DEBUG)` so `source_label` is not called at all when DEBUG
+  is disabled.  Eliminates per-verdict log overhead in production INFO-level runs.
+- **[MEDIUM] Process hash computation deferred**: `services/process/inspection.rs` +
+  `details.rs` — initial process inspection (`inspect`, `sync_from_proc_event`) now
+  returns `ProcessInfo` immediately with `process_hash* = None` via the new
+  `inspect_process_no_hash` fast path.  A background `tokio::spawn` +
+  `spawn_blocking(compute_process_hashes)` task patches the cache entry when hashes
+  are ready, unblocking hash-based rule matching on the second connection from the
+  same process.
+- **[MEDIUM] ArcSwap — `bpf_map_snapshot`**: `services/connection/connection.rs` /
+  `ebpf.rs` — `Arc<RwLock<HashMap<String, u32>>>` replaced with
+  `Arc<ArcSwap<HashMap<String, u32>>>`.  The hot per-connection eBPF map-name lookup
+  (`ebpf.rs`) is now a lock-free atomic load (`snapshot.load().get(...)`).  Background
+  30 s refresh publishes a new map via `store(Arc::new(new_map))`; readers are never
+  blocked.
+- **[MEDIUM] ArcSwap — `interface_name_cache`**: `platform/adapters/net_iface.rs` —
+  static `RwLock<HashMap<u32, String>>` replaced with `ArcSwap<HashMap<u32, String>>`.
+  `interface_name_by_index` (called on every incoming packet) reads with a lock-free
+  load; cache-miss refresh uses `store(Arc::new(refreshed_map))`.
+- **[MEDIUM] DashMap + lazy TTL — `requeue_aliases`** (nfqueue): `platform/ffi/nfqueue.rs`
+  — `Mutex<HashMap<u64, RequeueAlias>>` replaced with `DashMap<u64, RequeueAlias>`.
+  O(n) `prune_requeue_aliases` scan moved to `remember_requeue_alias` only (cold write
+  path); `claim_requeue_alias` (hot repeat-queue callback path) is now O(1): atomic
+  `DashMap::remove` + single TTL check, no scan.
+- **[MEDIUM] DashMap — `StorageEventBus` path/prefix maps**: `services/storage/event_bus.rs`
+  — both `path_tx` and `prefix_tx` changed from `Arc<Mutex<HashMap<PathBuf, Sender>>>` to
+  `Arc<DashMap<PathBuf, Sender>>`.  `emit()` for a rule-batch now acquires only the per-
+  path DashMap shard, releasing it before calling `send()`; concurrent events for
+  different paths no longer serialize behind a single global `Mutex`. Eliminates tail
+  latency spikes when a storage worker emits many rule-file events in bulk.
+- **[MEDIUM] ArcSwap — `DualLayerLruMap`/`SyncDualLayerLruMap` snapshot layer**:
+  `utils/lru_cache.rs` — snapshot field changed from
+  `Arc<RwLock<Arc<HashMap<K, V>>>>` to `Arc<ArcSwap<HashMap<K, V>>>` for both async
+  (`DualLayerLruMap`) and sync (`SyncDualLayerLruMap`) variants.  `get_snapshot()` (called
+  on every cache `get()`) is now a lock-free `load_full()`; all `publish_*` writers use a
+  `load_full()` → clone → mutate → `store(Arc::new(next))` pattern, removing the write
+  guard entirely from the publish hot path.
+- **[MEDIUM] `quick-cache` replaces `lru` — dual-layer cache eliminated**:
+  `utils/lru_cache.rs` fully rewritten; `lru = "0.16"` removed and `quick_cache = "0.6"`
+  added.  `DualLayerLruMap<K,V>` and `SyncDualLayerLruMap<K,V>` are now type aliases for
+  `ConcurrentLruCache<K,V>`, a `Arc<quick_cache::sync::Cache<K,V>>` wrapper.  The
+  entire dual-layer split (`mutable` write-lock slab + `snapshot` ArcSwap publish
+  machinery) is gone: `insert`, `remove_by`, `clear`, and `set_capacity` are now
+  synchronous and lock-free under the shard-level sharding of `quick_cache`.  All
+  callers in `dns/cache_ops.rs`, `dns/runtime_lifecycle.rs`, `process/inspection.rs`,
+  `process/cache.rs`, and test support updated to drop all `await` call-sites.
+  `DualLayerMetricsSnapshot` simplified to `{hits, misses}` from a 9-field struct;
+  `stats.rs` updated accordingly.  Eviction semantics use quick_cache's Hot/Cold
+  approximate eviction; bounded-capacity tests updated to drop oldest-item-specific
+  assertions (which relied on strict FIFO order) and retain only `len ≤ capacity` bounds
+  checks.
+- **[MEDIUM] Test isolation — `PolicyTxCoordinator::new(PathBuf)` + `RuleCommandService`
+  restructure**: `services/policy_tx/policy_tx.rs` — explicit `new(base_dir)` constructor
+  added so tests can inject a `TestDir` path rather than relying on the global
+  `/tmp/opensnitchd-rs/` path (which broke after prior root daemon runs).
+  `commands/rule/rule.rs` — `RuleCommandService` changed from a ZST to a struct holding
+  a `PolicyTxCoordinator` field; `Default` uses `global_policy_tx().clone()`;
+  `with_base_dir(PathBuf)` constructor added under `#[cfg(test)]`.  Fixes 8 previously
+  failing `policy_tx` and `rule_command` tests.
+- **[LOW] Semver normalization — all Cargo.toml manifests**: all direct-dependency
+  version strings normalized from exact `x.y.z` pins to proper semver range specifiers
+  (`"1"` for stable 1.x crates, `"0.x"` for pre-1.0 crates).  Lockfile updated via
+  `cargo update` picking up: `aho-corasick 1.1.4`, `aws-lc-rs 1.16.2`,
+  `globset 0.4.18`, `hyper-util 0.1.20`, `regex 1.12.3`, `rustix 1.1.4`,
+  `tower 0.5.3`, `zerocopy 0.8.47`, and other patch updates.  `sha2`/`sha1`/`md-5`
+  intentionally kept at `"0.10"` — sha2 0.11.0 (2026-03-25) requires `digest 0.11`
+  with breaking API changes.
+- **[MEDIUM] `quick_cache::Weighter` — byte-budget process cache**: `ConcurrentLruCache`
+  made generic over `W: Weighter<K, V>` (defaults to `UnitWeighter`); a
+  `with_weighter(weight_capacity, estimated_items, weighter)` constructor added using
+  `OptionsBuilder` + `Cache::with_options`.  `ProcessInfoWeighter` implemented in
+  `services/process/cache.rs`: uses O(1) `.len()` heuristics (`env_map.len() * 64 +
+  args.len() * 48 + parent_chain.len() * 64 + path.len() + 512`) to estimate per-entry
+  heap footprint.  `ProcessCache` created via `with_weighter` with budget
+  `PROCESS_INFO_CACHE_CAPACITY * ESTIMATED_BYTES_PER_ENTRY (4096)`, preventing a small
+  number of processes with oversized `env_map` from exhausting the cache budget.  DNS,
+  connection, and inode caches retain `UnitWeighter` — their value types have uniform,
+  bounded size.  Eviction bound test updated: probe entries now include ~60 env vars
+  (≈ `ESTIMATED_BYTES_PER_ENTRY`) to produce representative weight in the byte budget.
+
+- **[HIGH] Hot-path optimization — owner resolution, DNS, rule matching, verdict, inspection**:
+  - `services/connection/owner.rs`: extracted `pid_owns_inode_at(inode, &Path)`; fallback
+    /proc scan pre-allocates one `PathBuf::with_capacity(24)` reused across all candidate
+    pids via `push`/`clear` — eliminates one `format!("/proc/{pid}/fd")` heap allocation per
+    candidate pid during owner fallback.
+  - `services/dns/cache_ops.rs`: `lookup_ip` alias-cycle guard changed from per-call
+    `HashSet<Arc<str>>` to a bounded hop-limit iteration (`for _ in 0..8`); real chains are
+    ≤ 3 hops, no heap allocation.
+  - `services/rule/matching.rs`: `AttemptDerived` gains 5 `OnceLock<String>` fields
+    (`process_command`, `process_id`, `user_id_text`, `dst_port_text`, `src_port_text`);
+    `operator_operand_value` returns `Cow::Borrowed` pointing into the locks — each string
+    is built at most once per connection across all rule evaluations (was one alloc per
+    rule per connection).
+  - `flows/verdict/verdict.rs`: `pending_decisions` changed from `DashMap<String, u64>` to
+    `DashMap<u64, u64>`; `decision_key_hash()` uses `DefaultHasher` — eliminates one
+    `format!` + two `to_owned()` allocations per decision.  `conn_for_ui` construction
+    changed from `get_or_insert_with().clone()` to `take().unwrap_or_else()` — no backup
+    proto copy kept in `pb_conn` during the gRPC `ask_rule` round-trip.
+  - `services/process/inspection.rs`: `cleanup_expired()` removed from the `inspect()` hot
+    path; background cleanup task (10 s interval, unchanged) handles TTL-based eviction;
+    inspection path reduces to a single `exit_deadline` mutex acquire per cache miss.
+- **[MEDIUM] Hot-path optimization — eBPF key and kernel dispatch**:
+  - `services/connection/ebpf.rs`: `build_bpf_key` return type changed from `Option<Vec<u8>>`
+    to `Option<BpfKey>` where `BpfKey { V4([u8;12]), V6([u8;36]) }` is stack-allocated;
+    `Deref/DerefMut → &[u8]` lets `lookup_bpf_owner` call-site coerce without change;
+    wildcard and swap mutations use typed match arms replacing runtime `.len()` checks.
+    Eliminates two 12–36 byte heap allocations per eBPF owner resolution.
+  - `workers/runtime/kernel/dispatch.rs`: `dispatch_kernel_pipeline_event` generic `F:
+    FnMut() -> u64` on-drop closure parameter replaced with `counters:
+    &Arc<KernelPipelineCounters>` + `pipeline: KernelPipeline`; eliminates one Arc clone
+    and one closure allocation per dispatched kernel event.
+- **[LOW] Cold-path: parallel shutdown, Arc event broadcast**:
+  - `workers/runtime/control/control.rs`: `join_all()` now awaits all spawned tasks
+    concurrently via `tokio::task::JoinSet`; tasks already stopped do not delay others.
+  - `services/storage/event_bus.rs`: broadcast channel carries `Arc<StorageEvent>`; each
+    subscriber now receives an Arc clone (one atomic increment) instead of a full struct
+    clone including `PathBuf`.
+
+### Fixed
+- **[HIGH] Complete bpftool subprocess removal** (db8970e follow-up): `bpftool` is not
+  a standard tool on Alpine Linux, OpenWrt, and other minimal distros.  All remaining
+  bpftool code that was guarded behind `#[cfg(not(feature = "aya-ebpf"))]` gates rather
+  than deleted has now been fully removed:
+  - `models/ebpf_state.rs`: `BpfProgram` struct deleted (bpftool-path only).
+  - `services/ebpf/ebpf.rs`: `conn_pin_root`, `proc_pin_root`, `dns_pin_root` removed
+    (sole caller was the bpftool eBPF object loader).
+  - `tests/firewall/gates.rs`: `bpftool` removed from the required-tool preflight array.
+  - Net: 623 lines deleted; zero warnings; 425 tests passed.
+
+### Notes
+- **eBPF library policy**: aya is the sole default eBPF runtime; `libbpf-ebpf` is opt-in
+  only; `bpftool` subprocess usage is fully and completely eliminated — no bpftool code
+  remains in the codebase under any cfg gate.
+- **Process hash safety**: no-hash verdict outcome is now consistently `false` (do not
+  match → fall through to default action) across all matching paths.
+- **Concurrent-map migration complete**: all evaluated surfaces resolved —
+  `pending_decisions` and subscription `locks` → `DashMap`;
+  `bpf_map_snapshot`, `interface_name_cache` → `ArcSwap<HashMap>`;
+  `DualLayerLruMap`/`SyncDualLayerLruMap` → `quick_cache::sync::Cache` (dual-layer
+  eliminated entirely, `lru` crate removed);
+  `requeue_aliases` → `DashMap` with O(1) claim;
+  `StorageEventBus` path/prefix maps → `DashMap`.
+- **Stats exporter moved to Future enhancements**: `StatsExporterPort` extension point
+  and `StatsFlow` hook are already wired; concrete Prometheus/push-style adapter
+  implementations deferred to a dedicated future feature.
 
 ## [v0.5.0] - 2026-03-26
 

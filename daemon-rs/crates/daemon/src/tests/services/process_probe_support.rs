@@ -37,8 +37,7 @@ impl ProcessService {
                 },
                 starttime: None,
             },
-        )
-            .await;
+        );
     }
 
     pub(crate) async fn probe_cache_len(&self) -> usize {
@@ -50,6 +49,13 @@ impl ProcessService {
     }
 
     pub(crate) async fn probe_insert_cache_entry_for_pid(&self, pid: u32) {
+        // Use ~60 env vars so ProcessInfoWeighter produces ≈ ESTIMATED_BYTES_PER_ENTRY
+        // (512 base + 13 path + 48 args + 60*64 env = 4,453 bytes).
+        // This ensures the byte budget is reached with cap*2 inserts, matching
+        // the eviction-bound assertion in the test.
+        let env_map: HashMap<String, String> = (0..60_u32)
+            .map(|i| (format!("VAR_{i}"), format!("val_{i}")))
+            .collect();
         self.cache
             .entries
             .insert(
@@ -61,7 +67,7 @@ impl ProcessService {
                     args: vec!["true".to_string()],
                     cwd: None,
                     env_preview: Vec::new(),
-                    env_map: HashMap::new(),
+                    env_map,
                     process_hash: None,
                     process_hash_md5: None,
                     process_hash_sha1: None,
@@ -69,8 +75,7 @@ impl ProcessService {
                 },
                 starttime: None,
             },
-        )
-            .await;
+        );
     }
 
     pub(crate) async fn probe_cache_contains_pid(&self, pid: u32) -> bool {

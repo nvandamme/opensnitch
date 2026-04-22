@@ -59,11 +59,8 @@ impl KernelFlow {
                     &dispatch_tx,
                     first,
                     &shutdown,
-                    pipeline.as_str(),
-                    {
-                        let counters = counters.clone();
-                        move || counters.increment_drop(pipeline)
-                    },
+                    &counters,
+                    pipeline,
                 )
                 .await
                 {
@@ -80,11 +77,8 @@ impl KernelFlow {
                         &dispatch_tx,
                         next,
                         &shutdown,
-                        pipeline.as_str(),
-                        {
-                            let counters = counters.clone();
-                            move || counters.increment_drop(pipeline)
-                        },
+                        &counters,
+                        pipeline,
                     )
                     .await
                     {

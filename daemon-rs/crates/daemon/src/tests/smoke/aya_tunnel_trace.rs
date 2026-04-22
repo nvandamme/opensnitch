@@ -7,7 +7,6 @@ use std::{
 };
 
 use nix::libc;
-use serde_json::Value;
 
 fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
@@ -71,105 +70,67 @@ fn command_exists(bin: &str) -> bool {
 }
 
 fn map_id_by_name(name: &str) -> Option<u32> {
-    let out = Command::new("bpftool")
-        .args(["-j", "map", "show"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+    #[cfg(feature = "aya-ebpf")]
+    {
+        return aya::maps::loaded_maps()
+            .flatten()
+            .find(|info| info.name_as_str() == Some(name))
+            .map(|info| info.id());
     }
 
-    let parsed: Value = serde_json::from_slice(&out.stdout).ok()?;
-    let items = parsed.as_array()?;
-    for item in items {
-        let Some(map_name) = item.get("name").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if map_name != name {
-            continue;
-        }
-        let Some(id) = item.get("id").and_then(|v| v.as_u64()) else {
-            continue;
-        };
-        if let Ok(id) = u32::try_from(id) {
-            return Some(id);
-        }
+    #[cfg(not(feature = "aya-ebpf"))]
+    {
+        let _ = name;
+        None
     }
-    None
 }
 
 fn map_dump_keys(id: u32) -> Vec<Vec<u8>> {
-    let out = match Command::new("bpftool")
-        .args(["-j", "map", "dump", "id", &id.to_string()])
-        .output()
+    #[cfg(feature = "aya-ebpf")]
     {
-        Ok(out) if out.status.success() => out,
-        _ => return Vec::new(),
-    };
-
-    let parsed: Value = match serde_json::from_slice(&out.stdout) {
-        Ok(value) => value,
-        Err(_) => return Vec::new(),
-    };
-    let Some(items) = parsed.as_array() else {
-        return Vec::new();
-    };
-
-    let mut keys = Vec::new();
-    for item in items {
-        let Some(raw_key) = item.get("key") else {
-            continue;
-        };
-        if let Some(bytes) = value_to_bytes(raw_key) {
-            keys.push(bytes);
+        use aya::maps::{HashMap as AyaHashMap, Map, MapData};
+        if let Ok(md) = MapData::from_id(id) {
+            if let Ok(m) = AyaHashMap::<_, [u8; 12], [u8; 16]>::try_from(Map::HashMap(md)) {
+                return m.keys().flatten().map(|k| k.to_vec()).collect();
+            }
         }
+        if let Ok(md) = MapData::from_id(id) {
+            if let Ok(m) = AyaHashMap::<_, [u8; 36], [u8; 16]>::try_from(Map::HashMap(md)) {
+                return m.keys().flatten().map(|k| k.to_vec()).collect();
+            }
+        }
+        return Vec::new();
     }
-    keys
+
+    #[cfg(not(feature = "aya-ebpf"))]
+    {
+        let _ = id;
+        Vec::new()
+    }
 }
 
 fn map_entry_count(id: u32) -> usize {
-    let out = match Command::new("bpftool")
-        .args(["-j", "map", "dump", "id", &id.to_string()])
-        .output()
+    #[cfg(feature = "aya-ebpf")]
     {
-        Ok(out) if out.status.success() => out,
-        _ => return 0,
-    };
-
-    let parsed: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
-    parsed.as_array().map(|v| v.len()).unwrap_or(0)
-}
-
-fn value_to_bytes(value: &Value) -> Option<Vec<u8>> {
-    if let Some(arr) = value.as_array() {
-        let mut out = Vec::with_capacity(arr.len());
-        for b in arr {
-            if let Some(v) = b.as_u64() {
-                out.push(u8::try_from(v).ok()?);
-                continue;
+        use aya::maps::{HashMap as AyaHashMap, Map, MapData};
+        if let Ok(md) = MapData::from_id(id) {
+            if let Ok(m) = AyaHashMap::<_, [u8; 12], [u8; 16]>::try_from(Map::HashMap(md)) {
+                return m.keys().count();
             }
-
-            let Some(s) = b.as_str() else {
-                return None;
-            };
-            let trimmed = s.strip_prefix("0x").unwrap_or(s);
-            let parsed = u8::from_str_radix(trimmed, 16).ok()?;
-            out.push(parsed);
         }
-        return Some(out);
+        if let Ok(md) = MapData::from_id(id) {
+            if let Ok(m) = AyaHashMap::<_, [u8; 36], [u8; 16]>::try_from(Map::HashMap(md)) {
+                return m.keys().count();
+            }
+        }
+        return 0;
     }
 
-    if let Some(s) = value.as_str() {
-        let mut out = Vec::new();
-        for tok in s.split_whitespace() {
-            let trimmed = tok.strip_prefix("0x").unwrap_or(tok);
-            let parsed = u8::from_str_radix(trimmed, 16).ok()?;
-            out.push(parsed);
-        }
-        return Some(out);
+    #[cfg(not(feature = "aya-ebpf"))]
+    {
+        let _ = id;
+        0
     }
-
-    None
 }
 
 fn has_udp_dport(keys: &[Vec<u8>], dport_be: [u8; 2]) -> bool {

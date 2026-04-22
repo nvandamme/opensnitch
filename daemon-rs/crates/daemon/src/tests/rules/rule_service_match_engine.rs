@@ -541,7 +541,10 @@ fn process_hash_sha1_operand_matches_expected_hash() {
 }
 
 #[test]
-fn process_hash_operands_match_when_checksums_missing() {
+fn process_hash_operands_do_not_match_when_checksums_missing() {
+    // Safety invariant: hash-based rules must NOT match while the hash is still being
+    // computed in the background.  The verdict flow falls through to the configured
+    // default action, which is the safe side.
     let mut process = probe_process();
     process.process_hash_md5 = None;
     process.process_hash_sha1 = None;
@@ -559,14 +562,14 @@ fn process_hash_operands_match_when_checksums_missing() {
         ..md5_op.clone()
     };
 
-    assert!(RuleService::probe_operator_matches_against(
+    assert!(!RuleService::probe_operator_matches_against(
         &md5_op,
         &probe_attempt("10.0.0.3"),
         &process,
         None,
         &RuleMatchCaches::default(),
     ));
-    assert!(RuleService::probe_operator_matches_against(
+    assert!(!RuleService::probe_operator_matches_against(
         &sha1_op,
         &probe_attempt("10.0.0.3"),
         &process,

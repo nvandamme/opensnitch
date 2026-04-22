@@ -39,14 +39,16 @@ impl VerdictSubmitFlow {
                                     reply.reject,
                                 );
                                 let decision = verdict_dispatch::decision_label(&reply);
-                                let source = verdict_dispatch::source_label(&reply);
-                                tracing::info!(
-                                    id = reply.request_id,
-                                    decision,
-                                    stats = reply.count_stats,
-                                    source = %source,
-                                    "verdict reply"
-                                );
+                                if tracing::enabled!(tracing::Level::DEBUG) {
+                                    let source = verdict_dispatch::source_label(&reply);
+                                    tracing::debug!(
+                                        id = reply.request_id,
+                                        decision,
+                                        stats = reply.count_stats,
+                                        source = %source,
+                                        "verdict reply"
+                                    );
+                                }
                             }
                             None => break,
                         }

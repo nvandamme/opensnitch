@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::models::{
     connection_state::ConnectionAttempt,
@@ -12,9 +13,9 @@ impl ConnectionService {
         let mut attempt = attempt;
         if let Some(owner) = self.resolve_owner_by_ebpf_map(
             attempt.protocol,
-            &attempt.src_addr.to_string(),
+            attempt.src_addr,
             attempt.src_port,
-            &attempt.dst_addr.to_string(),
+            attempt.dst_addr,
             attempt.dst_port,
         ) {
             if attempt.uid == 0 {
@@ -31,8 +32,8 @@ impl ConnectionService {
 
         let process = self.resolve_process_info(&attempt).await;
 
-        let mut dst_host = if attempt.dst_port == 53 {
-            attempt.dns_query.take()
+        let mut dst_host: Option<Arc<str>> = if attempt.dst_port == 53 {
+            attempt.dns_query.take().map(Arc::from)
         } else {
             None
         };

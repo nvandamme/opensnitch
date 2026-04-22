@@ -44,6 +44,12 @@ pub struct PolicyTxCoordinator {
 impl Default for PolicyTxCoordinator {
     fn default() -> Self {
         let base_dir = std::env::temp_dir().join("opensnitchd-rs/policy-tx");
+        Self::new(base_dir)
+    }
+}
+
+impl PolicyTxCoordinator {
+    pub fn new(base_dir: PathBuf) -> Self {
         Self {
             revision: Arc::new(AtomicU64::new(0)),
             apply_lock: Arc::new(Mutex::new(())),
@@ -52,9 +58,7 @@ impl Default for PolicyTxCoordinator {
             base_dir: Arc::new(base_dir),
         }
     }
-}
 
-impl PolicyTxCoordinator {
     pub async fn execute<AFut, RFut, A, R>(
         &self,
         req: PolicyTxRequest,

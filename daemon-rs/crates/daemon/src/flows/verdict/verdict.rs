@@ -1,6 +1,7 @@
 use anyhow::Result;
 use opensnitch_proto::pb;
-use tokio::sync::{RwLock, mpsc};
+use dashmap::DashMap;
+use tokio::sync::mpsc;
 
 use crate::{
     bus::Bus,
@@ -22,7 +23,6 @@ use crate::{
     },
 };
 use std::collections::BTreeSet;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -48,7 +48,7 @@ pub struct VerdictFlow {
     rules: RuleService,
     connections: ConnectionService,
     stats: StatsService,
-    pending_decisions: Arc<RwLock<HashMap<String, u64>>>,
+    pending_decisions: Arc<DashMap<u64, u64>>,
     rule_persist_tx: mpsc::Sender<VerdictRulePersistRequest>,
     /// Optional per-connection event exporter (Loki, remote syslog, JSON sink, etc.)
     event_exporter: Option<Arc<dyn ConnectionEventExporterPort>>,
@@ -102,42 +102,47 @@ impl VerdictFlow {
         }
     }
 
-    fn decision_key(
+    fn decision_key_hash(
         attempt: &ConnectionAttempt,
         proc_info: &crate::models::process_state::ProcessInfo,
         dst_host: Option<&str>,
-    ) -> String {
-        format!(
-            "{}|{}|{}|{}|{}|{}|{:?}|{}",
-            proc_info.path,
-            attempt.uid,
-            attempt.pid,
-            attempt.src_addr,
-            attempt.dst_addr,
-            attempt.dst_port,
-            attempt.protocol,
-            dst_host.unwrap_or_default()
-        )
+    ) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        proc_info.path.hash(&mut h);
+        attempt.uid.hash(&mut h);
+        attempt.pid.hash(&mut h);
+        attempt.src_addr.hash(&mut h);
+        attempt.dst_addr.hash(&mut h);
+        attempt.dst_port.hash(&mut h);
+        attempt.protocol.hash(&mut h);
+        dst_host.unwrap_or_default().hash(&mut h);
+        h.finish()
     }
 
-    async fn begin_decision_epoch(&self, key: &str) -> Option<u64> {
-        let mut pending = self.pending_decisions.write().await;
-        if pending.contains_key(key) {
-            return None;
+    fn begin_decision_epoch(&self, key: u64) -> Option<u64> {
+        match self.pending_decisions.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(_) => None,
+            dashmap::mapref::entry::Entry::Vacant(e) => {
+                e.insert(1);
+                Some(1)
+            }
         }
-        pending.insert(key.to_string(), 1);
-        Some(1)
     }
 
-    async fn is_decision_epoch_current(&self, key: &str, epoch: u64) -> bool {
-        let pending = self.pending_decisions.read().await;
-        pending.get(key).is_some_and(|current| *current == epoch)
+    fn is_decision_epoch_current(&self, key: u64, epoch: u64) -> bool {
+        self.pending_decisions
+            .get(&key)
+            .is_some_and(|current| *current == epoch)
     }
 
-    async fn end_decision_epoch(&self, key: &str, epoch: u64) {
-        let mut pending = self.pending_decisions.write().await;
-        if pending.get(key).is_some_and(|current| *current == epoch) {
-            pending.remove(key);
+    fn end_decision_epoch(&self, key: u64, epoch: u64) {
+        if let dashmap::mapref::entry::Entry::Occupied(e) =
+            self.pending_decisions.entry(key)
+        {
+            if *e.get() == epoch {
+                e.remove();
+            }
         }
     }
 
@@ -274,7 +279,7 @@ impl VerdictFlow {
         let rules_for_worker = rules.clone();
         tokio::spawn(async move {
             while let Some(request) = rule_persist_rx.recv().await {
-                let previous_rules = rules_for_worker.get_proto_snapshot().as_ref().clone();
+                let previous_rules = rules_for_worker.get_proto_snapshot();
                 let rule_for_apply = request.rule.clone();
                 let rule_name = request.rule.name.clone();
 
@@ -318,7 +323,7 @@ impl VerdictFlow {
             rules,
             connections,
             stats,
-            pending_decisions: Arc::new(RwLock::new(HashMap::new())),
+            pending_decisions: Arc::new(DashMap::new()),
             rule_persist_tx,
             event_exporter: None,
         }
@@ -345,7 +350,7 @@ impl VerdictFlow {
         reject: bool,
         count_stats: bool,
         source: &'static str,
-        rule_name: Option<String>,
+        rule_name: Option<Arc<str>>,
     ) -> Option<VerdictReply> {
         let verdict = VerdictReply {
             request_id,
@@ -381,7 +386,7 @@ impl VerdictFlow {
         request_id: u64,
         source: &'static str,
         count_stats: bool,
-        rule_name: Option<String>,
+        rule_name: Option<Arc<str>>,
     ) -> Option<VerdictReply> {
         self.try_send_verdict(request_id, true, false, count_stats, source, rule_name)
     }
@@ -391,7 +396,7 @@ impl VerdictFlow {
         request_id: u64,
         reject: bool,
         source: &'static str,
-        rule_name: Option<String>,
+        rule_name: Option<Arc<str>>,
     ) -> Option<VerdictReply> {
         self.stats.on_fast_deny();
         self.deny_try_send(request_id, reject, source, true, rule_name)
@@ -403,7 +408,7 @@ impl VerdictFlow {
         reject: bool,
         source: &'static str,
         count_stats: bool,
-        rule_name: Option<String>,
+        rule_name: Option<Arc<str>>,
     ) -> Option<VerdictReply> {
         self.try_send_verdict(request_id, false, reject, count_stats, source, rule_name)
     }
@@ -548,8 +553,8 @@ impl VerdictFlow {
             return Ok(());
         }
 
-        let decision_key = Self::decision_key(&attempt, &proc_info, dst_host.as_deref());
-        let Some(decision_epoch) = self.begin_decision_epoch(&decision_key).await else {
+        let decision_key = Self::decision_key_hash(&attempt, &proc_info, dst_host.as_deref());
+        let Some(decision_epoch) = self.begin_decision_epoch(decision_key) else {
             debug!(
                 request_id = attempt.request_id,
                 "ui ask for connection already in progress; applying default action"
@@ -574,17 +579,15 @@ impl VerdictFlow {
                         dst_host.as_deref(),
                     )
                 });
-                self.end_decision_epoch(&decision_key, decision_epoch).await;
+                self.end_decision_epoch(decision_key, decision_epoch);
                 self.apply_default_action_on_ui_miss(attempt.request_id, &proc_info, conn)
                     .await;
                 return Ok(());
             }
         };
-        let conn_for_ui = pb_conn
-            .get_or_insert_with(|| {
-                ProtoMapperAdapter::to_proto_connection(&attempt, &proc_info, dst_host.as_deref())
-            })
-            .clone();
+        let conn_for_ui = pb_conn.take().unwrap_or_else(|| {
+            ProtoMapperAdapter::to_proto_connection(&attempt, &proc_info, dst_host.as_deref())
+        });
         let rule = match client.ask_rule(conn_for_ui).await {
             Ok(rule) => rule,
             Err(err) => {
@@ -596,7 +599,7 @@ impl VerdictFlow {
                         dst_host.as_deref(),
                     )
                 });
-                self.end_decision_epoch(&decision_key, decision_epoch).await;
+                self.end_decision_epoch(decision_key, decision_epoch);
                 self.apply_default_action_on_ui_miss(attempt.request_id, &proc_info, conn)
                     .await;
                 return Ok(());
@@ -604,8 +607,7 @@ impl VerdictFlow {
         };
 
         if !self
-            .is_decision_epoch_current(&decision_key, decision_epoch)
-            .await
+            .is_decision_epoch_current(decision_key, decision_epoch)
         {
             debug!(request_id = attempt.request_id, "stale ui decision ignored");
             let conn = pb_conn.take().unwrap_or_else(|| {
@@ -617,8 +619,8 @@ impl VerdictFlow {
         }
 
         let decision = RuleMatchDecision::from_rule(RuleAction::from_name(&rule.action), rule.nolog);
-        self.end_decision_epoch(&decision_key, decision_epoch).await;
-        let ui_rule_name = rule.name.clone();
+        self.end_decision_epoch(decision_key, decision_epoch);
+        let ui_rule_name: Arc<str> = Arc::from(rule.name.as_str());
         self.enqueue_rule_persist(
             attempt.request_id,
             rule,

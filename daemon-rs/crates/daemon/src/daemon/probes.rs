@@ -31,8 +31,8 @@ impl Daemon {
             tx,
             event,
             shutdown,
-            pipeline.as_str(),
-            || self.increment_kernel_pipeline_drop(pipeline),
+            &self.runtime.kernel_pipeline_counters,
+            pipeline,
         )
         .await
     }

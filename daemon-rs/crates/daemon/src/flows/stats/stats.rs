@@ -246,16 +246,9 @@ impl StatsFlow {
                             let cache_metrics_delta = cache_metrics_total.saturating_delta(last_cache_metrics);
                             if cache_metrics_delta.total() > 0 {
                                 debug!(
-                                    touch_enqueued = cache_metrics_delta.touch_enqueued,
-                                    touch_dropped = cache_metrics_delta.touch_dropped,
-                                    touch_reconciled_batches = cache_metrics_delta.touch_reconciled_batches,
-                                    touch_reconciled_keys = cache_metrics_delta.touch_reconciled_keys,
-                                    publish_incremental = cache_metrics_delta.publish_incremental,
-                                    publish_full = cache_metrics_delta.publish_full,
-                                    publish_reconcile_scans = cache_metrics_delta.publish_reconcile_scans,
-                                    publish_reconcile_removed = cache_metrics_delta.publish_reconcile_removed,
-                                    publish_total_ns = cache_metrics_delta.publish_total_ns,
-                                    "dual-layer cache metrics snapshot"
+                                    hits = cache_metrics_delta.hits,
+                                    misses = cache_metrics_delta.misses,
+                                    "lru cache metrics snapshot"
                                 );
                             }
 

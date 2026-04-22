@@ -3,9 +3,9 @@ use crate::models::{
     connection_worker_state::{ConnectionWorkerState, ConnectionWorkerKind},
     connection_state::ConnectionAttempt,
 };
-use std::sync::{
-    Arc, Mutex,
-};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use arc_swap::ArcSwap;
 use tokio_util::sync::CancellationToken;
 
 use crate::bus::Bus;
@@ -20,18 +20,20 @@ use crate::workers::{
 };
 
 use super::runtime_lifecycle::ConnectionLifecycle;
-use super::ebpf::BpfMapIdCache;
 
 pub struct ConnectionRuntime {
     pub(super) state: Mutex<ConnectionWorkerState>,
-    pub(super) bpf_map_ids: Mutex<BpfMapIdCache>,
+    /// Lock-free snapshot of eBPF map name → kernel id, refreshed every 30 s by a
+    /// background task spawned in [`ConnectionRuntime::init_workers`].  The hot
+    /// connection path reads atomically via ArcSwap — no lock on the read side.
+    pub(super) bpf_map_snapshot: Arc<ArcSwap<HashMap<String, u32>>>,
 }
 
 impl Default for ConnectionRuntime {
     fn default() -> Self {
         Self {
             state: Mutex::new(ConnectionWorkerState::default()),
-            bpf_map_ids: Mutex::new(BpfMapIdCache::default()),
+            bpf_map_snapshot: Arc::new(ArcSwap::from_pointee(HashMap::new())),
         }
     }
 }
@@ -44,6 +46,30 @@ impl ConnectionRuntime {
         tunables: RuntimeTunables,
         ebpf_availability: EbpfObjectAvailability,
     ) -> Vec<Box<dyn WorkerControl>> {
+        // Spawn background eBPF map-id refresh task.  Fires immediately on first tick
+        // (tokio interval tick 0 is instant) and then every 30 s, replacing the snapshot
+        // atomically so the hot connection path never blocks on a refresh.
+        {
+            let snapshot = Arc::clone(&self.bpf_map_snapshot);
+            let ct = daemon_shutdown.clone();
+            tokio::spawn(async move {
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_secs(30));
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            let new_map =
+                                tokio::task::spawn_blocking(super::ebpf::list_bpf_maps)
+                                    .await
+                                    .unwrap_or_default();
+                            snapshot.store(Arc::new(new_map));
+                        }
+                        _ = ct.cancelled() => break,
+                    }
+                }
+            });
+        }
+
         if ebpf_availability.conn_available {
             if let Ok(mut st) = self.state.lock() {
                 st.worker_kind = ConnectionWorkerKind::Ebpf;
@@ -75,8 +101,8 @@ pub struct ConnectionService {
 }
 
 impl ConnectionService {
-    pub(super) fn bpf_map_ids(&self) -> &Mutex<BpfMapIdCache> {
-        &self.runtime.bpf_map_ids
+    pub(super) fn bpf_map_snapshot(&self) -> &Arc<ArcSwap<HashMap<String, u32>>> {
+        &self.runtime.bpf_map_snapshot
     }
 
     pub fn new(process: ProcessService, dns: DnsService) -> Self {

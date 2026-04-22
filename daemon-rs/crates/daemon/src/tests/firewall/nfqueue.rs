@@ -1,8 +1,7 @@
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, time::{Duration, Instant}};
+
+use dashmap::DashMap;
 
 use crate::{
     bus::{BusCaps, BusState},
@@ -113,7 +112,7 @@ fn packet_signature_is_stable_for_same_metadata() {
 
 #[test]
 fn prune_requeue_aliases_removes_expired_entries() {
-    let mut aliases = HashMap::new();
+    let aliases = DashMap::new();
     aliases.insert(
         1,
         RequeueAlias {
@@ -129,7 +128,7 @@ fn prune_requeue_aliases_removes_expired_entries() {
         },
     );
 
-    NfqueueDecisionState::prune_requeue_aliases(&mut aliases);
+    NfqueueDecisionState::prune_requeue_aliases(&aliases);
     assert!(!aliases.contains_key(&1));
     assert_eq!(aliases.get(&2).map(|v| v.request_id), Some(11));
 }

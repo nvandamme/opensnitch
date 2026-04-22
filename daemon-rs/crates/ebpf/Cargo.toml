@@ -1,6 +1,6 @@
 [package]
 name = "opensnitch-ebpf"
-version = "0.5.0"
+version = "0.5.1"
 edition.workspace = true
 license.workspace = true
 publish = false
@@ -13,4 +13,4 @@ crate-type = ["cdylib"]
 opensnitch-ebpf-common = { path = "../ebpf-common" }
 
 [target.'cfg(target_arch = "bpf")'.dependencies]
-aya-ebpf = "0.1.1"
+aya-ebpf = "0.1"

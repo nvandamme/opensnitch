@@ -5,7 +5,7 @@ use time::macros::format_description;
 
 use crate::models::connection_state::ConnectionAttempt;
 
-use super::{internal::StatsInner, stats::StatsService};
+use super::{internal::{BreakdownCounters, EventsState}, stats::StatsService};
 const EVENT_TIME_FORMAT: &[time::format_description::FormatItem<'static>] =
     format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
 
@@ -34,15 +34,16 @@ impl StatsService {
 
     pub(super) fn build_snapshot(
         &self,
-        inner: &mut StatsInner,
+        bd: &mut BreakdownCounters,
+        ev: &mut EventsState,
         rules_count: u64,
     ) -> pb::Statistics {
-        let events = inner.events.drain_all();
+        let events = ev.events.drain_all();
 
         pb::Statistics {
             daemon_version: Self::daemon_version_string(),
             rules: rules_count,
-            uptime: inner
+            uptime: ev
                 .started_at
                 .map(|started| started.elapsed().as_secs())
                 .unwrap_or(0),
@@ -53,27 +54,27 @@ impl StatsService {
             dropped: self.counters.dropped.load(Ordering::Relaxed),
             rule_hits: self.counters.rule_hits.load(Ordering::Relaxed),
             rule_misses: self.counters.rule_misses.load(Ordering::Relaxed),
-            by_proto: inner.by_proto.map.clone(),
-            by_address: inner
+            by_proto: bd.by_proto.map.clone(),
+            by_address: bd
                 .by_address
                 .map
                 .iter()
                 .map(|(addr, count)| (addr.to_string(), *count))
                 .collect(),
-            by_host: inner.by_host.map.clone(),
-            by_port: inner
+            by_host: bd.by_host.map.clone(),
+            by_port: bd
                 .by_port
                 .map
                 .iter()
                 .map(|(port, count)| (port.to_string(), *count))
                 .collect(),
-            by_uid: inner
+            by_uid: bd
                 .by_uid
                 .map
                 .iter()
                 .map(|(uid, count)| (uid.to_string(), *count))
                 .collect(),
-            by_executable: inner.by_executable.map.clone(),
+            by_executable: bd.by_executable.map.clone(),
             events,
             subscription_total: self.sub_total.0.load(Ordering::Relaxed),
             subscription_ready: self.sub_ready.0.load(Ordering::Relaxed),

@@ -60,11 +60,11 @@ fn kernel_harness_preflight() {
         );
     }
 
-    let any_required_tool = ["nft", "iptables", "bpftool"]
+    let any_required_tool = ["nft", "iptables"]
         .iter()
         .any(|bin| resolve_command_path(bin).is_some());
 
     if !any_required_tool && strict_mode() {
-        panic!("kernel integration harness requires at least one of nft/iptables/bpftool in PATH");
+        panic!("kernel integration harness requires at least one of nft/iptables in PATH");
     }
 }

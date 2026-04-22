@@ -1,6 +1,7 @@
 use crate::services::policy_tx::{
     PolicyOwner, PolicyTxCoordinator, PolicyTxError, PolicyTxRequest,
 };
+use crate::tests::support::TestDir;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -9,7 +10,8 @@ use tokio::sync::oneshot;
 
     #[tokio::test]
     async fn duplicate_committed_request_is_rejected() {
-        let tx = PolicyTxCoordinator::default();
+        let dir = TestDir::new("opensnitchd-policy-tx");
+        let tx = PolicyTxCoordinator::new(dir.path.clone());
 
         let request = PolicyTxRequest {
             idempotency_key: "same-key".to_string(),
@@ -35,7 +37,8 @@ use tokio::sync::oneshot;
 
     #[tokio::test]
     async fn duplicate_inflight_request_is_rejected() {
-        let tx = PolicyTxCoordinator::default();
+        let dir = TestDir::new("opensnitchd-policy-tx");
+        let tx = PolicyTxCoordinator::new(dir.path.clone());
 
         let (started_tx, started_rx) = oneshot::channel::<()>();
         let (release_tx, release_rx) = oneshot::channel::<()>();
@@ -84,7 +87,8 @@ use tokio::sync::oneshot;
 
     #[tokio::test]
     async fn requests_from_multiple_users_are_serialized() {
-        let tx = PolicyTxCoordinator::default();
+        let dir = TestDir::new("opensnitchd-policy-tx");
+        let tx = PolicyTxCoordinator::new(dir.path.clone());
         let active = Arc::new(AtomicUsize::new(0));
         let max_active = Arc::new(AtomicUsize::new(0));
 
@@ -141,7 +145,8 @@ use tokio::sync::oneshot;
 
     #[tokio::test]
     async fn apply_failure_is_reported_when_rollback_succeeds() {
-        let tx = PolicyTxCoordinator::default();
+        let dir = TestDir::new("opensnitchd-policy-tx");
+        let tx = PolicyTxCoordinator::new(dir.path.clone());
 
         let result = tx
             .execute(
@@ -164,7 +169,8 @@ use tokio::sync::oneshot;
 
     #[tokio::test]
     async fn rollback_failure_is_reported_when_apply_and_rollback_fail() {
-        let tx = PolicyTxCoordinator::default();
+        let dir = TestDir::new("opensnitchd-policy-tx");
+        let tx = PolicyTxCoordinator::new(dir.path.clone());
 
         let result = tx
             .execute(
