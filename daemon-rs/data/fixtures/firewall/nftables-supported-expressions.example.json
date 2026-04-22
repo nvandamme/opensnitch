@@ -1,0 +1,7 @@
+[
+  "tcp dport 22 accept",
+  "icmp type { echo-request, echo-reply } accept",
+  "icmpv6 type { echo-request, echo-reply } accept",
+  "udp dport 51820 accept",
+  "ct state new queue num 0"
+]

@@ -1,0 +1,11 @@
+config prometheus 'default'
+	option addr '127.0.0.1:9100'
+
+config push 'default'
+	option url 'http://pushgateway.example.com:9091'
+	option format 'pushgateway'
+	option job 'opensnitchd'
+	option token ''
+	option gzip '0'
+	option bucket 'opensnitch'
+	option org ''

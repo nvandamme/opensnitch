@@ -212,7 +212,7 @@ struct AyaSmokeSpec {
 
 fn run_aya_smoke(spec: &AyaSmokeSpec) -> Result<(), DynError> {
     let (daemon_rs, _, _) = common_params()?;
-    let kernel_target = kernel_target_dir(&daemon_rs);
+    let runtime_target = runtime_target_dir(&daemon_rs);
 
     let timeout_secs = env::var("DAEMON_RS_EBPF_SMOKE_TIMEOUT_SECS")
         .ok()
@@ -247,8 +247,8 @@ fn run_aya_smoke(spec: &AyaSmokeSpec) -> Result<(), DynError> {
             "--nocapture",
         ])
         .env("OPENSNITCH_RUN_PRIVILEGED_TESTS", "1")
-        .env("OPENSNITCH_CARGO_TARGET_DIR", &kernel_target)
-        .env("CARGO_TARGET_DIR", &kernel_target);
+        .env("OPENSNITCH_CARGO_TARGET_DIR", &runtime_target)
+        .env("CARGO_TARGET_DIR", &runtime_target);
 
     let mut child = cmd.spawn()?;
     let child_id = child.id();
@@ -410,12 +410,12 @@ fn looks_like_log_timestamp(line: &str) -> bool {
         && b[4] == b'-'
 }
 
-fn kernel_target_dir(daemon_rs: &Path) -> String {
-    env::var("DAEMON_RS_KERNEL_TARGET_DIR")
+fn runtime_target_dir(daemon_rs: &Path) -> String {
+    env::var("DAEMON_RS_RUNTIME_TARGET_DIR")
         .or_else(|_| env::var("CARGO_TARGET_DIR"))
         .unwrap_or_else(|_| {
             daemon_rs
-                .join("target-kernel")
+                .join("target-runtime")
                 .to_string_lossy()
                 .to_string()
         })
@@ -447,46 +447,40 @@ pub(crate) fn run_build_all() -> Result<(), DynError> {
 /// `build-ebpf`: invoke `daemon-rs/scripts/build_ebpf.sh --release`.
 ///
 /// Reads eBPF package/target/toolchain from env (forwarded by the Makefile or
-/// CLI).  Requires root; the script enforces this itself and exits cleanly with
-/// a helpful message if not root.
-///
-/// The privilege routing is handled by the caller (Makefile uses TEST_GUARD).
+/// CLI). Build policy is user-scoped; the script enforces non-root execution.
 pub(crate) fn run_build_ebpf() -> Result<(), DynError> {
-    crate::test_guard::with_guard("build-ebpf", || {
-        let tools_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let daemon_rs = tools_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .ok_or("tools dir missing daemon-rs parent")?
-            .to_path_buf();
+    let tools_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let daemon_rs = tools_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or("tools dir missing daemon-rs parent")?
+        .to_path_buf();
 
-        let script = daemon_rs.join("scripts/build_ebpf.sh");
-        if !script.exists() {
-            return Err(format!("build_ebpf.sh not found at {}", script.display()).into());
-        }
+    let script = daemon_rs.join("scripts/build_ebpf.sh");
+    if !script.exists() {
+        return Err(format!("build_ebpf.sh not found at {}", script.display()).into());
+    }
 
-        let target = kernel_target_dir(&daemon_rs);
-        let pkg =
-            env::var("DAEMON_RS_EBPF_PACKAGE").unwrap_or_else(|_| "opensnitch-ebpf".to_string());
-        let tgt =
-            env::var("DAEMON_RS_EBPF_TARGET").unwrap_or_else(|_| "bpfel-unknown-none".to_string());
-        let toolchain =
-            env::var("DAEMON_RS_EBPF_TOOLCHAIN").unwrap_or_else(|_| "nightly".to_string());
+    let target = env::var("CARGO_TARGET_DIR")
+        .unwrap_or_else(|_| daemon_rs.join("target").to_string_lossy().to_string());
+    let pkg = env::var("DAEMON_RS_EBPF_PACKAGE").unwrap_or_else(|_| "opensnitch-ebpf".to_string());
+    let tgt =
+        env::var("DAEMON_RS_EBPF_TARGET").unwrap_or_else(|_| "bpfel-unknown-none".to_string());
+    let toolchain = env::var("DAEMON_RS_EBPF_TOOLCHAIN").unwrap_or_else(|_| "nightly".to_string());
 
-        let status = Command::new("bash")
-            .arg(&script)
-            .arg("--release")
-            .env("CARGO_TARGET_DIR", &target)
-            .env("DAEMON_RS_EBPF_PACKAGE", &pkg)
-            .env("DAEMON_RS_EBPF_TARGET", &tgt)
-            .env("DAEMON_RS_EBPF_TOOLCHAIN", &toolchain)
-            .status()?;
+    let status = Command::new("bash")
+        .arg(&script)
+        .arg("--release")
+        .env("CARGO_TARGET_DIR", &target)
+        .env("DAEMON_RS_EBPF_PACKAGE", &pkg)
+        .env("DAEMON_RS_EBPF_TARGET", &tgt)
+        .env("DAEMON_RS_EBPF_TOOLCHAIN", &toolchain)
+        .status()?;
 
-        if !status.success() {
-            return Err(format!("build_ebpf.sh failed: {status}").into());
-        }
-        Ok(())
-    }) // with_guard
+    if !status.success() {
+        return Err(format!("build_ebpf.sh failed: {status}").into());
+    }
+    Ok(())
 }
 
 /// `test`: run the three parity test suites in order:
@@ -624,7 +618,7 @@ fn common_params() -> Result<(std::path::PathBuf, String, String), DynError> {
 
     let target = env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| {
         daemon_rs
-            .join("target-kernel")
+            .join("target-runtime")
             .to_string_lossy()
             .to_string()
     });

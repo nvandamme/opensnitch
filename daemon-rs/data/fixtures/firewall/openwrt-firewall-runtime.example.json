@@ -1,0 +1,76 @@
+{
+  "Enabled": true,
+  "Version": 1,
+  "SystemRules": [
+    {
+      "Chains": [
+        {
+          "Name": "filter_input",
+          "Table": "opensnitch",
+          "Family": "inet",
+          "Priority": "",
+          "Type": "filter",
+          "Hook": "input",
+          "Policy": "accept",
+          "Rules": [
+            {
+              "Enabled": true,
+              "Position": "0",
+              "Description": "Allow SSH when input policy is DROP",
+              "Parameters": "",
+              "Expressions": [
+                {
+                  "Statement": {
+                    "Op": "",
+                    "Name": "tcp",
+                    "Values": [
+                      {
+                        "Key": "dport",
+                        "Value": "22"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "Target": "accept",
+              "TargetParameters": ""
+            }
+          ]
+        },
+        {
+          "Name": "mangle_forward",
+          "Table": "opensnitch",
+          "Family": "inet",
+          "Priority": "",
+          "Type": "mangle",
+          "Hook": "forward",
+          "Policy": "accept",
+          "Rules": [
+            {
+              "UUID": "7d7394e1-100d-4b87-a90a-cd68c46edb0b",
+              "Enabled": true,
+              "Position": "0",
+              "Description": "Intercept forwarded connections",
+              "Expressions": [
+                {
+                  "Statement": {
+                    "Op": "",
+                    "Name": "ct",
+                    "Values": [
+                      {
+                        "Key": "state",
+                        "Value": "new"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "Target": "queue",
+              "TargetParameters": "num 0"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -25,6 +25,7 @@ use crate::{
 };
 
 use super::{
+    persistence_authority::FirewallPersistenceAuthority,
     runtime_lifecycle::FirewallLifecycle,
     runtime_store::{FirewallRuntime, FirewallRuntimeStore},
 };
@@ -35,6 +36,9 @@ pub struct FirewallService {
     pub(super) lifecycle: FirewallLifecycle,
     pub(super) error_tx: broadcast::Sender<String>,
     drift_recovery_blocked_until_epoch_ms: Arc<AtomicU64>,
+    /// Authority override used by tests to bypass process-global env detection.
+    /// Always `None` in production builds; set via `with_test_manager` in tests.
+    pub(super) authority_override: Option<FirewallPersistenceAuthority>,
 }
 
 impl FirewallService {
@@ -57,8 +61,9 @@ impl FirewallService {
             queue_num: config.firewall_queue_num,
             queue_bypass: config.firewall_queue_bypass,
             interception_enabled: true,
-            system_firewall: Arc::new(Self::load_system_firewall_from_path(
+            system_firewall: Arc::new(Self::load_system_firewall_from_backend_and_path(
                 &config.firewall_config_path,
+                config.firewall_backend,
             )?),
         });
         let lifecycle = FirewallLifecycle::new(ServiceState::Stopped);
@@ -74,7 +79,25 @@ impl FirewallService {
             lifecycle,
             error_tx,
             drift_recovery_blocked_until_epoch_ms: Arc::new(AtomicU64::new(0)),
+            authority_override: None,
         })
+    }
+
+    /// Tests-only builder that pre-selects a firewall manager authority on the
+    /// returned service instance, bypassing the host-probing logic entirely.
+    /// This avoids any process-global env-var mutation and lets tests run in
+    /// parallel without races.
+    #[cfg(test)]
+    pub(crate) fn with_test_manager(self, manager: &str) -> Self {
+        let authority = match manager.trim().to_ascii_lowercase().as_str() {
+            "firewalld" => FirewallPersistenceAuthority::Firewalld,
+            "ufw" => FirewallPersistenceAuthority::Ufw,
+            _ => FirewallPersistenceAuthority::DirectBackend,
+        };
+        Self {
+            authority_override: Some(authority),
+            ..self
+        }
     }
 
     pub fn subscribe_errors(&self) -> broadcast::Receiver<String> {
@@ -95,6 +118,10 @@ impl FirewallService {
 
     pub fn monitor_stats(&self) -> ServiceMonitorStats {
         ServiceLifecycle::monitor_stats(&self.lifecycle)
+    }
+
+    pub async fn cleanup_runtime_rules_for_shutdown(&self) -> Result<()> {
+        self.disable_rules().await
     }
 
     pub async fn ensure_rules(&self) -> Result<()> {

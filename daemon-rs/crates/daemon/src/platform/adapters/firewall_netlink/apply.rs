@@ -3,10 +3,10 @@ use netlink_bindings::utils::{Rec, finalize_nested_header, push_header, push_nes
 
 use super::{
     NFT_QUEUE_FLAG_BYPASS, NFTA_EXPR_DATA, NFTA_QUEUE_FLAGS, NFTA_QUEUE_NUM, NFTA_QUEUE_TOTAL,
-    NftTransactionBuilder, ParsedRuleExpression, RuleAction, RuleCondition, RuleVerdict,
+    NetfilterTransactionBuilder, ParsedRuleExpression, RuleAction, RuleCondition, RuleVerdict,
 };
 
-impl NftTransactionBuilder {
+impl NetfilterTransactionBuilder {
     pub(super) fn add_system_rule(
         &mut self,
         family: &str,

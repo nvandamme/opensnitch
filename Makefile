@@ -23,8 +23,9 @@ GO_PROTO_BOOTSTRAP := ./scripts/bootstrap_go_proto_tools.sh
 WORKSPACE_ROOT := $(abspath .)
 DAEMON_RS_DIR := $(WORKSPACE_ROOT)/daemon-rs
 DAEMON_RS_MANIFEST := $(DAEMON_RS_DIR)/Cargo.toml
-DAEMON_RS_KERNEL_TARGET_DIR ?= $(DAEMON_RS_DIR)/target-kernel
-DAEMON_RS_CARGO_TARGET_DIR ?= $(DAEMON_RS_KERNEL_TARGET_DIR)
+DAEMON_RS_RUNTIME_TARGET_DIR ?= $(DAEMON_RS_DIR)/target-runtime
+DAEMON_RS_USER_TARGET_DIR ?= $(DAEMON_RS_DIR)/target
+DAEMON_RS_CARGO_TARGET_DIR ?= $(DAEMON_RS_RUNTIME_TARGET_DIR)
 DAEMON_RS_TOOLS_RUN := CARGO_TARGET_DIR=$(DAEMON_RS_CARGO_TARGET_DIR) cargo run --release --manifest-path $(DAEMON_RS_MANIFEST) -p tools --
 DAEMON_GOTOOLS_RUN := cd $(WORKSPACE_ROOT)/daemon && go run ./cmd/gotools
 
@@ -159,7 +160,8 @@ install:
 # Binary lookup path:
 #   native:       $(DAEMON_RS_CARGO_TARGET_DIR)/$(CARGO_PROFILE)/opensnitchd-rs
 #   cross-compile: $(DAEMON_RS_CARGO_TARGET_DIR)/$(CARGO_TARGET_TRIPLE)/$(CARGO_PROFILE)/opensnitchd-rs
-# DAEMON_RS_CARGO_TARGET_DIR defaults to daemon-rs/target-kernel (matches all Makefile builds).
+# DAEMON_RS_CARGO_TARGET_DIR defaults to daemon-rs/target-runtime (used by runtime/test-oriented targets).
+# eBPF build-only target `daemon-rs-ebpf-build` overrides CARGO_TARGET_DIR to DAEMON_RS_USER_TARGET_DIR.
 #
 # Init system detection order (when INIT_SYSTEM is not set):
 #   1. procd    – /etc/openwrt_release or /sbin/procd present  (OpenWrt)
@@ -173,12 +175,12 @@ install:
 #   make install-rs PREFIX=/usr SYSCONFDIR=/etc DESTDIR=<staging>
 #
 # OpenWrt cross-compile install:
-#   CARGO_TARGET_DIR=daemon-rs/target-kernel \
+#   CARGO_TARGET_DIR=daemon-rs/target-runtime \
 #     cargo build --profile release-embedded -p opensnitchd-rs \
 #       --manifest-path daemon-rs/Cargo.toml --target <arch>-unknown-linux-musl
 #   make install-rs PREFIX=/usr BINDIR=sbin CARGO_PROFILE=release-embedded \
 #     CARGO_TARGET_TRIPLE=<arch>-unknown-linux-musl INIT_SYSTEM=procd DESTDIR=<staging>
-# Resolve binary path: respect DAEMON_RS_CARGO_TARGET_DIR (target-kernel/ by default) and
+# Resolve binary path: respect DAEMON_RS_CARGO_TARGET_DIR (target-runtime/ by default) and
 # an optional cross-compile triple so that `make install-rs` always finds what `make build` built.
 _TRIPLE_SEGMENT := $(if $(CARGO_TARGET_TRIPLE),$(CARGO_TARGET_TRIPLE)/,)
 DAEMON_RS_INSTALL_BIN := $(DAEMON_RS_CARGO_TARGET_DIR)/$(_TRIPLE_SEGMENT)$(CARGO_PROFILE)/opensnitchd-rs
@@ -311,21 +313,21 @@ daemon-rs-check-caps: daemon-rs-build
 	  $(DAEMON_RS_TOOLS_RUN) check-kernel-caps
 
 daemon-rs-ebpf-build:
-	@OPENSNITCH_TEST_GUARD_RESTART_SERVICES=0 $(DAEMON_RS_TOOLS_RUN) build-ebpf
+	@CARGO_TARGET_DIR=$(DAEMON_RS_USER_TARGET_DIR) $(DAEMON_RS_TOOLS_RUN) build-ebpf
 
 daemon-rs-ebpf-build-runtime:
-	@$(MAKE) daemon-rs-ebpf-build
+	@CARGO_TARGET_DIR=$(DAEMON_RS_RUNTIME_TARGET_DIR) $(DAEMON_RS_TOOLS_RUN) build-ebpf
 
-daemon-rs-aya-proc-smoke: daemon-rs-build daemon-rs-ebpf-build
+daemon-rs-aya-proc-smoke: daemon-rs-build daemon-rs-ebpf-build-runtime
 	@$(DAEMON_RS_TOOLS_RUN) aya-smoke-proc
 
-daemon-rs-aya-dns-smoke: daemon-rs-build daemon-rs-ebpf-build
+daemon-rs-aya-dns-smoke: daemon-rs-build daemon-rs-ebpf-build-runtime
 	@$(DAEMON_RS_TOOLS_RUN) aya-smoke-dns
 
-daemon-rs-aya-conn-smoke: daemon-rs-build daemon-rs-ebpf-build
+daemon-rs-aya-conn-smoke: daemon-rs-build daemon-rs-ebpf-build-runtime
 	@$(DAEMON_RS_TOOLS_RUN) aya-smoke-conn
 
-daemon-rs-aya-tunnel-smoke: daemon-rs-build daemon-rs-ebpf-build
+daemon-rs-aya-tunnel-smoke: daemon-rs-build daemon-rs-ebpf-build-runtime
 	@$(DAEMON_RS_TOOLS_RUN) aya-smoke-tunnel
 
 daemon-rs-kernel-profile-harness:

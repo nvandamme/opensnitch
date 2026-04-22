@@ -5,6 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     bus::Bus,
+    models::config_runtime::FirewallPersistenceMode,
     services::{
         audit::AuditService,
         client::{AlertBuffer, ClientService},
@@ -62,12 +63,14 @@ pub(crate) use migration::{
 ///   --audit-sink-file          <path>       Append NDJSON audit records to this file.
 ///   --audit-sink-syslog                     Enable local syslog as an audit sink.
 ///   --audit-sink-log                        Enable tracing log-line audit sink (default on).
+///   --firewall-persistence-mode <mode>      Firewall persistence mode override (live-only|durable).
 #[derive(Debug, Default)]
 pub struct CliOverrides {
     pub config_file: Option<std::path::PathBuf>,
     pub rules_path: Option<std::path::PathBuf>,
     pub ui_socket: Option<String>,
     pub auth_mode: Option<String>,
+    pub firewall_persistence_mode: Option<String>,
     pub main_storage_format: Option<String>,
     pub rule_migration: RuleMigrationCliOverrides,
     pub metrics: crate::models::metrics_config::MetricsCliOverrides,
@@ -178,6 +181,32 @@ impl Daemon {
     }
 
     pub async fn stop(&self) {
+        let config = self.runtime.config.get_snapshot();
+        let cleanup_runtime_rules = matches!(
+            config.firewall_persistence_mode,
+            FirewallPersistenceMode::LiveOnly
+        );
+
+        #[cfg(feature = "openwrt")]
+        let cleanup_runtime_rules = cleanup_runtime_rules
+            && !matches!(
+                config.firewall_backend,
+                crate::models::firewall_state::FirewallBackend::OpenWrtUci
+            );
+
+        if cleanup_runtime_rules
+            && let Err(err) = self
+                .runtime
+                .firewall
+                .cleanup_runtime_rules_for_shutdown()
+                .await
+        {
+            tracing::warn!(
+                error = %err,
+                "failed to clean up non-durable runtime firewall rules during shutdown"
+            );
+        }
+
         self.runtime.shutdown.cancel();
     }
 

@@ -8,7 +8,7 @@ use crate::utils::name_parsing::case_folded;
 
 const SYSFW_TAG_PREFIX: &str = "opensnitch-sysfw:";
 
-pub(crate) struct FirewallNftAdapter;
+pub(crate) struct FirewallNftablesAdapter;
 
 #[derive(Debug, Clone, Copy)]
 struct NftInterceptionRuleCounts {
@@ -30,7 +30,160 @@ impl NftInterceptionRuleCounts {
     }
 }
 
-impl FirewallNftAdapter {
+impl FirewallNftablesAdapter {
+    fn zone_name_from_chain(chain_name: &str) -> Option<String> {
+        let name = chain_name.trim();
+        if !name.starts_with("zone_") {
+            return None;
+        }
+
+        let rest = &name["zone_".len()..];
+        let last_sep = rest.rfind('_')?;
+        let zone = rest[..last_sep].trim();
+        if zone.is_empty() {
+            return None;
+        }
+
+        Some(zone.to_string())
+    }
+
+    fn tagged_uuid_from_expression(expr: &str) -> String {
+        let marker = "comment \"";
+        let Some(start) = expr.find(marker) else {
+            return String::new();
+        };
+        let after = &expr[start + marker.len()..];
+        let Some(end) = after.find('"') else {
+            return String::new();
+        };
+        let comment = &after[..end];
+        if let Some(uuid) = comment.strip_prefix(SYSFW_TAG_PREFIX) {
+            return uuid.to_string();
+        }
+        String::new()
+    }
+
+    fn parse_ruleset_text(ruleset: &str) -> FirewallConfig {
+        let mut top_level_chains: Vec<FirewallChain> = Vec::new();
+        let mut zones: Vec<crate::models::firewall_config::FirewallZone> = Vec::new();
+
+        let mut current_family = String::new();
+        let mut current_table = String::new();
+        let mut current_chain: Option<FirewallChain> = None;
+
+        for raw_line in ruleset.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            if let Some(chain) = current_chain.as_mut() {
+                if line == "}" {
+                    let done = current_chain.take().unwrap_or_default();
+                    if let Some(zone_name) = Self::zone_name_from_chain(&done.name) {
+                        if let Some(existing) = zones.iter_mut().find(|z| z.name == zone_name) {
+                            existing.chains.push(done);
+                        } else {
+                            zones.push(crate::models::firewall_config::FirewallZone {
+                                name: zone_name,
+                                chains: vec![done],
+                            });
+                        }
+                    } else {
+                        top_level_chains.push(done);
+                    }
+                    continue;
+                }
+
+                if line.starts_with("type ") {
+                    let tokens = line
+                        .trim_end_matches(';')
+                        .split_whitespace()
+                        .collect::<Vec<_>>();
+                    let mut idx = 0;
+                    while idx < tokens.len() {
+                        match tokens[idx] {
+                            "type" if idx + 1 < tokens.len() => {
+                                chain.r#type = tokens[idx + 1].to_string()
+                            }
+                            "hook" if idx + 1 < tokens.len() => {
+                                chain.hook = tokens[idx + 1].to_string()
+                            }
+                            "priority" if idx + 1 < tokens.len() => {
+                                chain.priority = tokens[idx + 1].trim_end_matches(';').to_string()
+                            }
+                            "policy" if idx + 1 < tokens.len() => {
+                                chain.policy = tokens[idx + 1].trim_end_matches(';').to_string()
+                            }
+                            _ => {}
+                        }
+                        idx += 1;
+                    }
+                    continue;
+                }
+
+                if line.contains("# handle ") {
+                    let expr = line
+                        .split("# handle ")
+                        .next()
+                        .map(str::trim)
+                        .unwrap_or_default();
+                    if expr.is_empty() {
+                        continue;
+                    }
+
+                    let rule = FirewallRule {
+                        table: current_table.clone(),
+                        chain: chain.name.clone(),
+                        uuid: Self::tagged_uuid_from_expression(expr),
+                        enabled: true,
+                        position: (chain.rules.len() as u64) + 1,
+                        description: String::new(),
+                        parameters: expr.to_string(),
+                        expressions: Vec::new(),
+                        target: String::new(),
+                        target_parameters: String::new(),
+                    };
+                    chain.rules.push(rule);
+                }
+                continue;
+            }
+
+            if line.starts_with("table ") && line.ends_with('{') {
+                let tokens = line[..line.len() - 1]
+                    .split_whitespace()
+                    .collect::<Vec<_>>();
+                if tokens.len() >= 3 {
+                    current_family = tokens[1].to_string();
+                    current_table = tokens[2].to_string();
+                }
+                continue;
+            }
+
+            if line.starts_with("chain ") && line.ends_with('{') {
+                let tokens = line[..line.len() - 1]
+                    .split_whitespace()
+                    .collect::<Vec<_>>();
+                if tokens.len() >= 2 {
+                    current_chain = Some(FirewallChain {
+                        name: tokens[1].to_string(),
+                        table: current_table.clone(),
+                        family: current_family.clone(),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+
+        FirewallConfig {
+            enabled: true,
+            version: 0,
+            rules: Vec::new(),
+            chains: top_level_chains,
+            zones,
+        }
+    }
+
     fn family_or_default(chain: &FirewallChain) -> &str {
         if chain.family.is_empty() {
             "inet"
@@ -271,9 +424,37 @@ impl FirewallNftAdapter {
     pub(crate) fn probe_nft_rule_tag(rule_expr: &str) -> &str {
         Self::nft_rule_tag(rule_expr)
     }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn probe_parse_ruleset_text(ruleset: &str) -> FirewallConfig {
+        Self::parse_ruleset_text(ruleset)
+    }
 }
 
-impl FirewallNftAdapter {
+impl FirewallNftablesAdapter {
+    #[allow(dead_code)]
+    pub async fn extract_system_firewall() -> Result<FirewallConfig> {
+        if resolve_command_path("nft").is_none() {
+            bail!("nft binary not found");
+        }
+
+        let out = Command::new("nft")
+            .args(["-a", "list", "ruleset"])
+            .output()
+            .await
+            .context("list nft ruleset for system firewall extraction")?;
+
+        if !out.status.success() {
+            bail!(
+                "nft ruleset extraction failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+
+        let ruleset = String::from_utf8_lossy(&out.stdout).to_string();
+        Ok(Self::parse_ruleset_text(&ruleset))
+    }
+
     pub async fn ensure(queue_num: u16, queue_bypass: bool) -> Result<()> {
         if resolve_command_path("nft").is_none() {
             bail!("nft binary not found");
@@ -413,6 +594,41 @@ impl FirewallNftAdapter {
             }
         }
 
+        for zone in &sysfw.zones {
+            for chain in &zone.chains {
+                Self::ensure_system_chain(chain).await?;
+
+                for rule in &chain.rules {
+                    if !rule.enabled {
+                        continue;
+                    }
+
+                    let expr = Self::nft_expression(rule, queue_num);
+                    if expr.is_empty() {
+                        continue;
+                    }
+
+                    let tag = Self::rule_tag(chain, rule);
+                    if Self::chain_has_tag(chain, &tag).await? {
+                        continue;
+                    }
+
+                    let mut args = vec!["add", "rule"];
+                    args.push(Self::family_or_default(chain));
+                    args.push(Self::table_or_default(chain));
+                    args.push(Self::chain_name_or_default(chain));
+                    for token in expr.split_whitespace() {
+                        args.push(token);
+                    }
+                    args.push("comment");
+                    let comment = format!("\"{tag}\"");
+                    args.push(comment.as_str());
+
+                    Self::run_nft(&args).await?;
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -425,16 +641,22 @@ impl FirewallNftAdapter {
             Self::delete_tagged_rules(chain).await?;
         }
 
+        for zone in &sysfw.zones {
+            for chain in &zone.chains {
+                Self::delete_tagged_rules(chain).await?;
+            }
+        }
+
         Ok(())
     }
 }
 
-impl FirewallNftAdapter {
+impl FirewallNftablesAdapter {
     async fn ensure_rule(chain: &str, rule_expr: &str) -> Result<()> {
         let parts: Vec<&str> = chain.split_whitespace().collect();
         if parts.len() == 3 {
             if let Ok(listing) = Self::list_chain(parts[0], parts[1], parts[2]).await {
-                if listing.contains(FirewallNftAdapter::nft_rule_tag(rule_expr)) {
+                if listing.contains(FirewallNftablesAdapter::nft_rule_tag(rule_expr)) {
                     return Ok(());
                 }
             }
@@ -455,8 +677,8 @@ impl FirewallNftAdapter {
         let input = Self::list_chain("inet", "opensnitch", "filter_input").await?;
         let output = Self::list_chain("inet", "opensnitch", "mangle_output").await?;
 
-        let input_rules = FirewallNftAdapter::nft_rule_lines(&input);
-        let output_rules = FirewallNftAdapter::nft_rule_lines(&output);
+        let input_rules = FirewallNftablesAdapter::nft_rule_lines(&input);
+        let output_rules = FirewallNftablesAdapter::nft_rule_lines(&output);
 
         Ok(NftInterceptionRuleCounts {
             dns_count: Self::count_rules_with_tag(&input_rules, "opensnitch-queue-dns"),
@@ -514,7 +736,7 @@ impl FirewallNftAdapter {
                 continue;
             }
 
-            let Some(handle) = FirewallNftAdapter::parse_nft_handle(line) else {
+            let Some(handle) = FirewallNftablesAdapter::parse_nft_handle(line) else {
                 continue;
             };
 
@@ -570,9 +792,9 @@ impl FirewallNftAdapter {
     }
 
     async fn ensure_system_chain(chain: &FirewallChain) -> Result<()> {
-        let family = FirewallNftAdapter::family_or_default(chain);
-        let table = FirewallNftAdapter::table_or_default(chain);
-        let name = FirewallNftAdapter::chain_name_or_default(chain);
+        let family = FirewallNftablesAdapter::family_or_default(chain);
+        let table = FirewallNftablesAdapter::table_or_default(chain);
+        let name = FirewallNftablesAdapter::chain_name_or_default(chain);
         let hook = if chain.hook.is_empty() {
             "output"
         } else {
@@ -650,18 +872,18 @@ impl FirewallNftAdapter {
 
     async fn chain_has_tag(chain: &FirewallChain, tag: &str) -> Result<bool> {
         let listing = Self::list_chain(
-            FirewallNftAdapter::family_or_default(chain),
-            FirewallNftAdapter::table_or_default(chain),
-            FirewallNftAdapter::chain_name_or_default(chain),
+            FirewallNftablesAdapter::family_or_default(chain),
+            FirewallNftablesAdapter::table_or_default(chain),
+            FirewallNftablesAdapter::chain_name_or_default(chain),
         )
         .await;
         Ok(listing.map(|s| s.contains(tag)).unwrap_or(false))
     }
 
     async fn delete_tagged_rules(chain: &FirewallChain) -> Result<()> {
-        let family = FirewallNftAdapter::family_or_default(chain);
-        let table = FirewallNftAdapter::table_or_default(chain);
-        let chain_name = FirewallNftAdapter::chain_name_or_default(chain);
+        let family = FirewallNftablesAdapter::family_or_default(chain);
+        let table = FirewallNftablesAdapter::table_or_default(chain);
+        let chain_name = FirewallNftablesAdapter::chain_name_or_default(chain);
 
         let _ = Self::delete_rules_matching_line(family, table, chain_name, |line| {
             line.contains(SYSFW_TAG_PREFIX)

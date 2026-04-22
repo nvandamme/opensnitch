@@ -1,6 +1,7 @@
 /// Persistent file-based cache for process binary checksums (md5/sha1/sha256).
 ///
-/// Survives daemon restarts by serialising to a JSON file on disk.
+/// Survives daemon restarts by serialising to an internal binary snapshot
+/// file on disk.
 /// Invalidation: keyed on `(path, inode, mtime_secs, file_size)` — any binary
 /// change from a package update, recompile, or manual edit automatically
 /// invalidates the cached entry because at least one of those metadata fields
@@ -18,7 +19,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::models::hash_cache_storage::{
-    HashCacheEntry, HashCacheFile, HashCacheKey, HashCacheRecord,
+    HashCacheEntry, HashCacheKey, InternalHashCacheFile, InternalHashCacheRecord,
 };
 
 // ---------------------------------------------------------------------------
@@ -37,20 +38,23 @@ impl PersistentHashCache {
     /// (inode/mtime/size) no longer match the current file.
     pub(crate) fn load_or_new(file_path: PathBuf) -> Self {
         let map = DashMap::new();
-        if let Ok(data) = std::fs::read_to_string(&file_path) {
-            if let Ok(cache_file) = serde_json::from_str::<HashCacheFile>(&data) {
-                for record in cache_file.entries {
-                    // Lazy validation: only insert entries whose binary still
-                    // matches the cached metadata (inode+mtime+size).
-                    if stat_matches(&record.key) {
-                        let key = record.key;
-                        let entry = HashCacheEntry {
-                            md5: record.md5,
-                            sha1: record.sha1,
-                            sha256: record.sha256,
-                        };
-                        map.insert(key, entry);
-                    }
+        if let Some(cache_file) = read_internal_cache_file(&file_path) {
+            for record in cache_file.entries {
+                let key = HashCacheKey {
+                    path: record.path,
+                    inode: record.inode,
+                    mtime_secs: record.mtime_secs,
+                    size: record.size,
+                };
+                // Lazy validation: only insert entries whose binary still
+                // matches the cached metadata (inode+mtime+size).
+                if stat_matches(&key) {
+                    let entry = HashCacheEntry {
+                        md5: record.md5,
+                        sha1: record.sha1,
+                        sha256: record.sha256,
+                    };
+                    map.insert(key, entry);
                 }
             }
         }
@@ -97,39 +101,49 @@ impl PersistentHashCache {
         if !self.dirty.swap(false, Ordering::Relaxed) {
             return;
         }
-        let entries: Vec<HashCacheRecord> = self
-            .map
-            .iter()
-            .map(|r| {
-                let key = r.key().clone();
-                let val = r.value();
-                HashCacheRecord {
-                    key,
-                    md5: val.md5.clone(),
-                    sha1: val.sha1.clone(),
-                    sha256: val.sha256.clone(),
-                }
-            })
-            .collect();
-        let cache_file = HashCacheFile {
+        let cache_file = InternalHashCacheFile {
             version: 1,
-            entries,
+            entries: self
+                .map
+                .iter()
+                .map(|r| {
+                    let k = r.key();
+                    let v = r.value();
+                    InternalHashCacheRecord {
+                        path: k.path.clone(),
+                        inode: k.inode,
+                        mtime_secs: k.mtime_secs,
+                        size: k.size,
+                        md5: v.md5.clone(),
+                        sha1: v.sha1.clone(),
+                        sha256: v.sha256.clone(),
+                    }
+                })
+                .collect(),
         };
-        match serde_json::to_string(&cache_file) {
-            Ok(json) => {
-                if let Some(parent) = self.file_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if let Err(e) = atomic_write(&self.file_path, json.as_bytes()) {
-                    tracing::warn!("hash cache flush failed: {e}");
-                    // Restore dirty flag so we retry next interval.
-                    self.dirty.store(true, Ordering::Relaxed);
-                }
-            }
+        if let Some(parent) = self.file_path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!("hash cache parent directory create failed: {e}");
+            self.dirty.store(true, Ordering::Relaxed);
+            return;
+        }
+
+        let mut bytes = Vec::with_capacity(HASH_CACHE_MAGIC.len() + 128);
+        bytes.extend_from_slice(HASH_CACHE_MAGIC);
+        match bincode::serialize(&cache_file) {
+            Ok(payload) => bytes.extend_from_slice(&payload),
             Err(e) => {
                 tracing::warn!("hash cache serialisation failed: {e}");
                 self.dirty.store(true, Ordering::Relaxed);
+                return;
             }
+        }
+
+        if let Err(e) = atomic_write(&self.file_path, &bytes) {
+            tracing::warn!("hash cache flush failed: {e}");
+            // Restore dirty flag so we retry next interval.
+            self.dirty.store(true, Ordering::Relaxed);
         }
     }
 
@@ -198,6 +212,17 @@ fn stat_matches(key: &HashCacheKey) -> bool {
         .unwrap_or(false)
 }
 
+fn read_internal_cache_file(path: &Path) -> Option<InternalHashCacheFile> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() < HASH_CACHE_MAGIC.len() {
+        return None;
+    }
+    if &bytes[..HASH_CACHE_MAGIC.len()] != HASH_CACHE_MAGIC {
+        return None;
+    }
+    bincode::deserialize::<InternalHashCacheFile>(&bytes[HASH_CACHE_MAGIC.len()..]).ok()
+}
+
 /// Write `data` atomically by writing to a temp file and renaming.
 fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
@@ -221,4 +246,6 @@ pub(crate) const HASH_CACHE_FLUSH_INTERVAL: Duration = Duration::from_secs(60);
 pub(crate) const HASH_CACHE_GC_INTERVAL: Duration = Duration::from_secs(600);
 
 /// Default cache file location (alongside daemon config).
-pub(crate) const HASH_CACHE_FILENAME: &str = "hash_cache.json";
+pub(crate) const HASH_CACHE_FILENAME: &str = "hash_cache.bin";
+
+const HASH_CACHE_MAGIC: &[u8] = b"OSHASHC1";

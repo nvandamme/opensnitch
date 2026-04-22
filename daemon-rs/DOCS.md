@@ -231,7 +231,7 @@ Important behavior:
 - `AskTimeoutPolicy` is a daemon safeguard for UI-miss conditions only (UI connect failure, AskRule RPC failure, stale/discarded decision).
 - If the UI returns a concrete rule, that UI rule remains authoritative.
 - In mixed Rust-daemon + Python-UI deployments, Python UI timeout behavior may still default to deny unless UI default action is explicitly changed.
-- Control-plane authorization is separate from verdict fallback: rejecting a privileged UI mutation does not by itself change packet verdict mode. `fail-open` keeps existing UI-miss/default-action fallback behavior, while `drop-fast` keeps strict miss accounting and non-blocking fail-closed packet-path behavior.
+- Privileged-command authorization is separate from verdict fallback: rejecting a privileged UI mutation does not by itself change packet verdict mode. `fail-open` keeps existing UI-miss/default-action fallback behavior, while `drop-fast` keeps strict miss accounting and non-blocking fail-closed packet-path behavior.
 
 ### Multi-user and mutation safety
 
@@ -239,7 +239,7 @@ Important behavior:
 - Rule/firewall/control mutations run through a shared transactional coordinator with rollback and idempotency dedup.
 - Verdict flow uses per-connection decision arbitration and async rule persistence so packet verdict latency stays low while durable policy writes remain transactional.
 
-### Control-plane authorization
+### Privileged-command authorization
 
 The daemon is designed as a background system service, not as a desktop prompt authority. That matters for elevation: the daemon may validate local identity, classify commands, and require elevated authorization for host-wide mutations, but it should defer the ultimate interactive elevation decision to host authorization backends.
 
@@ -726,13 +726,15 @@ contains additional fixtures for all operator types.
 To build eBPF artifacts via the project helper:
 
 ```bash
-sudo ./scripts/build_ebpf.sh
+./scripts/build_ebpf.sh
 ```
 
 Important behavior:
 
-- The helper enforces root execution for consistent artifact ownership.
-- In repository workflows, prefer the root Make targets (`make daemon-rs-ebpf-build` / `make daemon-rs-ebpf-build-runtime`) so output is normalized under `daemon-rs/target-kernel`.
+- The helper enforces user-level execution (it fails when run as root).
+- `make daemon-rs-ebpf-build` writes user build artifacts under `daemon-rs/target`.
+- `make daemon-rs-ebpf-build-runtime` writes runtime-oriented artifacts under `daemon-rs/target-runtime`.
+- Live daemon runs and privileged kernel tests still elevate through the tools test guard; build itself does not.
 
 You can adjust toolchain and target with:
 
@@ -1046,7 +1048,7 @@ Run `cargo ost --help` to print the full reference.
 | **Build** | |
 | `build` | Build daemon crate (release) |
 | `build-all` | Build full daemon-rs workspace (release) |
-| `build-ebpf` | Build eBPF crate (root required; privilege via test guard) |
+| `build-ebpf` | Build eBPF crate (user-level; no privilege escalation) |
 | **Test** | |
 | `test` | Run parity test suites (config, firewall, client) |
 | `test-kernel-it` | Run kernel integration tests (privileged + strict) |
@@ -1069,9 +1071,9 @@ Run `cargo ost --help` to print the full reference.
 | `aya-smoke-tunnel` | aya tunnel eBPF smoke test (root required) |
 | `kernel-profile-harness` | Rust kernel-pressure + sweep harness (N repeats) |
 | **Live daemon** | |
-| `launch-daemon-live-logs` | Start daemon with live log streaming |
-| `stop-daemon-live-logs` | Stop live daemon session |
-| `run-daemon-mock-ui-live-session` | Run daemon with mock Python UI |
+| `launch-daemon-live-logs` | Start daemon with live log streaming (privileged) |
+| `stop-daemon-live-logs` | Stop live daemon session (privileged) |
+| `run-daemon-mock-ui-live-session` | Run daemon with mock Python UI (privileged) |
 
 ### Flags
 

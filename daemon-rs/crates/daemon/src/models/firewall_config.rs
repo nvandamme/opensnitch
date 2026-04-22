@@ -9,9 +9,9 @@
 /// - `rules`  — legacy iptables flat rules (from the deprecated `FwChains.Rule` field).
 /// - `chains` — nftables named chains       (from `FwChains.Chains`).
 ///
-/// Future enhancement: a `zones: Vec<FirewallZone>` field will model the named
-/// zone concept used by firewalld, OpenWrt (`firewall4`/`iptables`), and VyOS
-/// (`zone-policy`).  See `DESIGN_RULES.md §Firewall zone abstraction`.
+/// Zone support is modeled as a separate top-level `zones` field so adapter
+/// boundaries can map zone-native backends (firewalld/OpenWrt/VyOS) without
+/// overloading flat chain/rule paths.
 ///
 /// Conversion directions are implemented in `services/firewall/conversions`:
 /// - File ingress:  `RawFirewallConfig → FirewallConfig`   (JSON file → domain; flattens deprecated group wrapper)
@@ -25,6 +25,15 @@ pub struct FirewallConfig {
     /// Flat iptables rules.  Sourced from the deprecated `FwChains.Rule` proto field.
     pub rules: Vec<FirewallRule>,
     /// Named nftables chains.  Sourced from `FwChains.Chains`.
+    pub chains: Vec<FirewallChain>,
+    /// Zone-oriented firewall groups (nftables/firewalld/OpenWrt adapter boundary).
+    pub zones: Vec<FirewallZone>,
+}
+
+/// A named firewall zone owning one or more chains.
+#[derive(Debug, Clone, Default)]
+pub struct FirewallZone {
+    pub name: String,
     pub chains: Vec<FirewallChain>,
 }
 

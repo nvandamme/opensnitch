@@ -1,4 +1,9 @@
+use std::path::Path;
+
+use anyhow::{Context, Result};
 use serde::Deserialize;
+use storage_format_core::StorageFormatCodec;
+use storage_format_json::JsonStorageFormat;
 
 #[derive(Debug, Default, Deserialize)]
 pub struct RawConfig {
@@ -144,6 +149,8 @@ pub struct RawFwOptions {
     pub queue_num: Option<u16>,
     #[serde(rename = "QueueBypass", default)]
     pub queue_bypass: Option<bool>,
+    #[serde(rename = "PersistenceMode", default)]
+    pub persistence_mode: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -205,4 +212,133 @@ pub struct RawInternalOptions {
     pub gc_percent: Option<i32>,
     #[serde(rename = "FlushConnsOnStart", default)]
     pub flush_conns_on_start: Option<bool>,
+}
+
+impl RawConfig {
+    /// Parse a config file from raw text, applying the canonical key-name
+    /// normalization pass (Go-style TitleCase / case-insensitive variants →
+    /// canonical names) before deserialization.
+    ///
+    /// All callers (file load path, notification payload parse) must go
+    /// through this function so key normalization remains centralized and
+    /// final decode still goes through the storage-format boundary.
+    pub fn parse_normalized_for_path(path: &Path, raw: &str) -> Result<Self> {
+        let value: serde_json::Value =
+            crate::services::storage::StorageService::parse_with_storage_format_for_path(
+                path, raw,
+            )
+            .with_context(|| format!("failed to parse config from {}", path.display()))?;
+        let normalized = Self::normalize_config_json_keys(value);
+        let normalized_json = JsonStorageFormat
+            .convert_to_storage(&normalized)
+            .with_context(|| format!("failed to normalize config JSON from {}", path.display()))?;
+        crate::services::storage::StorageService::parse_with_storage_format_for_path(
+            Path::new("normalized-config.json"),
+            &normalized_json,
+        )
+        .with_context(|| format!("failed to deserialize config from {}", path.display()))
+    }
+
+    fn normalize_config_json_keys(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(obj) => {
+                let mut normalized = serde_json::Map::with_capacity(obj.len());
+                for (key, val) in obj {
+                    let canonical =
+                        Self::canonical_config_json_key(&key).unwrap_or(key.as_str());
+                    normalized.insert(
+                        canonical.to_string(),
+                        Self::normalize_config_json_keys(val),
+                    );
+                }
+                serde_json::Value::Object(normalized)
+            }
+            serde_json::Value::Array(items) => serde_json::Value::Array(
+                items
+                    .into_iter()
+                    .map(Self::normalize_config_json_keys)
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    fn canonical_config_json_key(key: &str) -> Option<&'static str> {
+        use crate::utils::name_parsing::case_folded;
+        let lowered = case_folded(key);
+        match lowered.as_str() {
+            "server" => Some("Server"),
+            "loglevel" => Some("LogLevel"),
+            "logutc" => Some("LogUTC"),
+            "logmicro" => Some("LogMicro"),
+            "defaultaction" => Some("DefaultAction"),
+            "asktimeoutpolicy" => Some("AskTimeoutPolicy"),
+            "defaultduration" => Some("DefaultDuration"),
+            "interceptunknown" => Some("InterceptUnknown"),
+            "procmonitormethod" => Some("ProcMonitorMethod"),
+            "firewall" => Some("Firewall"),
+            "fwoptions" => Some("FwOptions"),
+            "rules" => Some("Rules"),
+            "tasksoptions" => Some("TasksOptions"),
+            "tasks" => Some("Tasks"),
+            "audit" => Some("Audit"),
+            "ebpf" => Some("Ebpf"),
+            "stats" => Some("Stats"),
+            "internal" => Some("Internal"),
+            "address" => Some("Address"),
+            "authentication" => Some("Authentication"),
+            "logfile" => Some("LogFile"),
+            "loggers" => Some("Loggers"),
+            "mode" => Some("Mode"),
+            "type" => Some("Type"),
+            "tlsoptions" => Some("TLSOptions"),
+            "cacert" => Some("CACert"),
+            "servercert" => Some("ServerCert"),
+            "serverkey" => Some("ServerKey"),
+            "clientcert" => Some("ClientCert"),
+            "clientkey" => Some("ClientKey"),
+            "clientauthtype" => Some("ClientAuthType"),
+            "skipverify" => Some("SkipVerify"),
+            "allowedprincipals" => Some("AllowedPrincipals"),
+            "allowedusers" => Some("AllowedUsers"),
+            "allowedgroups" => Some("AllowedGroups"),
+            "remoteprincipalbindings" => Some("RemotePrincipalBindings"),
+            "certfingerprint" => Some("CertFingerprint"),
+            "certsubject" => Some("CertSubject"),
+            "certsan" => Some("CertSAN"),
+            "localprincipal" => Some("LocalPrincipal"),
+            "localuser" => Some("LocalUser"),
+            "capabilities" => Some("Capabilities"),
+            "uid" => Some("UID"),
+            "gid" => Some("GID"),
+            "name" => Some("Name"),
+            "format" => Some("Format"),
+            "protocol" => Some("Protocol"),
+            "writetimeout" => Some("WriteTimeout"),
+            "connecttimeout" => Some("ConnectTimeout"),
+            "tag" => Some("Tag"),
+            "workers" => Some("Workers"),
+            "maxconnectattempts" => Some("MaxConnectAttempts"),
+            "monitorinterval" => Some("MonitorInterval"),
+            "configpath" => Some("ConfigPath"),
+            "queuenum" => Some("QueueNum"),
+            "queuebypass" => Some("QueueBypass"),
+            "persistencemode" => Some("PersistenceMode"),
+            "path" => Some("Path"),
+            "enablechecksums" => Some("EnableChecksums"),
+            "networkaliasesfile" => Some("NetworkAliasesFile"),
+            "audispsocketpath" => Some("AudispSocketPath"),
+            "sinkfile" => Some("SinkFile"),
+            "sinksyslog" => Some("SinkSyslog"),
+            "sinkloglines" => Some("SinkLogLines"),
+            "verbosehotpath" => Some("VerboseHotPath"),
+            "minseverity" => Some("MinSeverity"),
+            "modulespath" => Some("ModulesPath"),
+            "maxevents" => Some("MaxEvents"),
+            "maxstats" => Some("MaxStats"),
+            "gcpercent" => Some("GCPercent"),
+            "flushconnsonstart" => Some("FlushConnsOnStart"),
+            _ => None,
+        }
+    }
 }

@@ -2,18 +2,23 @@ use transport_wire_core;
 
 use crate::models::firewall_config::{
     FirewallChain, FirewallConfig, FirewallExpression, FirewallRule, FirewallStatement,
-    FirewallStatementValue,
+    FirewallStatementValue, FirewallZone,
 };
 use crate::models::firewall_state::FirewallBackend;
 use crate::models::firewall_storage::{
     PersistedFirewallChain, PersistedFirewallExpression, PersistedFirewallRule,
-    PersistedFirewallStatement, PersistedFirewallStatementValue, RawFirewallChain,
-    RawFirewallExpression, RawFirewallRule, RawFirewallStatement, RawFirewallStatementValue,
+    PersistedFirewallStatement, PersistedFirewallStatementValue, PersistedFirewallZone,
+    RawFirewallChain, RawFirewallExpression, RawFirewallRule, RawFirewallStatement,
+    RawFirewallStatementValue, RawFirewallZone,
 };
 use crate::utils::name_parsing::normalized_name;
 
 pub(crate) fn parse_firewall_backend(name: &str) -> FirewallBackend {
     match normalized_name(name).as_str() {
+        #[cfg(feature = "openwrt")]
+        "openwrt" | "openwrtuci" | "openwrt-uci" | "firewall4" | "uci" => {
+            FirewallBackend::OpenWrtUci
+        }
         "iptables" => FirewallBackend::Iptables,
         _ => FirewallBackend::Nftables,
     }
@@ -23,6 +28,7 @@ pub(crate) fn firewall_backend_name(backend: FirewallBackend) -> &'static str {
     match backend {
         FirewallBackend::Nftables => "nftables",
         FirewallBackend::Iptables => "iptables",
+        FirewallBackend::OpenWrtUci => "openwrt-uci",
     }
 }
 
@@ -63,6 +69,15 @@ impl From<RawFirewallChain> for FirewallChain {
             hook: value.hook,
             policy: value.policy,
             rules,
+        }
+    }
+}
+
+impl From<RawFirewallZone> for FirewallZone {
+    fn from(value: RawFirewallZone) -> Self {
+        Self {
+            name: value.name,
+            chains: value.chains.into_iter().map(FirewallChain::from).collect(),
         }
     }
 }
@@ -231,6 +246,19 @@ impl From<FirewallChain> for PersistedFirewallChain {
                 .rules
                 .into_iter()
                 .map(PersistedFirewallRule::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<FirewallZone> for PersistedFirewallZone {
+    fn from(value: FirewallZone) -> Self {
+        Self {
+            name: value.name,
+            chains: value
+                .chains
+                .into_iter()
+                .map(PersistedFirewallChain::from)
                 .collect(),
         }
     }

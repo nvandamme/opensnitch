@@ -10,9 +10,9 @@ toolchain=${DAEMON_RS_EBPF_TOOLCHAIN:-nightly}
 target=${DAEMON_RS_EBPF_TARGET:-bpfel-unknown-none}
 package=${DAEMON_RS_EBPF_PACKAGE:-opensnitch-ebpf}
 
-if [[ "$(id -u)" != "0" ]]; then
-    echo "eBPF build requires root to keep artifact ownership consistent under target-kernel." >&2
-    echo "rerun with sudo, for example: sudo make daemon-rs-ebpf-build" >&2
+if [[ "$(id -u)" == "0" ]]; then
+    echo "eBPF build is user-scoped; do not run as root." >&2
+    echo "rerun as your regular user, for example: make daemon-rs-ebpf-build" >&2
     exit 1
 fi
 
@@ -20,19 +20,6 @@ resolve_bpf_linker() {
     if command -v bpf-linker >/dev/null 2>&1; then
         command -v bpf-linker
         return 0
-    fi
-
-    # When invoked via `sudo make ...`, secure_path may hide the caller's cargo bin.
-    if [[ -n "${SUDO_USER:-}" ]]; then
-        local sudo_home
-        sudo_home=$(getent passwd "$SUDO_USER" | cut -d: -f6 || true)
-        if [[ -n "$sudo_home" ]]; then
-            local candidate="$sudo_home/.cargo/bin/bpf-linker"
-            if [[ -x "$candidate" ]]; then
-                printf '%s\n' "$candidate"
-                return 0
-            fi
-        fi
     fi
 
     return 1
@@ -46,11 +33,10 @@ fi
 if ! bpf_linker_bin=$(resolve_bpf_linker); then
     echo "missing linker 'bpf-linker'." >&2
     echo "install it with: cargo install bpf-linker" >&2
-    echo "if you run via sudo, either preserve user PATH or install bpf-linker for the sudo target user." >&2
     exit 1
 fi
 
-# Pin linker path explicitly so bpf builds work even under sudo secure_path.
+# Pin linker path explicitly so bpf builds stay deterministic across shell PATH differences.
 export CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER="$bpf_linker_bin"
 
 if ! rustup toolchain list | grep -Eq "^${toolchain}([- ].*)?$"; then

@@ -7,14 +7,14 @@ use anyhow::{Context, Result};
 
 use super::{
     AskFallbackPolicy, AuditSinkConfig, AuthMode, ClientAuthConfig, ClientAuthType,
-    ClientTlsOptions, Config, DefaultAction, DefaultDuration, LoggerSinkConfig, ProcMonitorMethod,
-    StatsConfig,
+    ClientTlsOptions, Config, DefaultAction, DefaultDuration, FirewallPersistenceMode,
+    LoggerSinkConfig, ProcMonitorMethod, StatsConfig,
 };
 use crate::{
     models::{audit::AuditSeverity, config_storage::RawConfig, firewall_state::FirewallBackend},
     services::firewall::parse_firewall_backend,
-    services::storage::{StorageFormat, StorageService},
-    utils::name_parsing::{case_folded, normalized_name},
+    services::storage::StorageFormat,
+    utils::name_parsing::normalized_name,
 };
 
 impl Default for Config {
@@ -48,6 +48,7 @@ impl Default for Config {
             firewall_monitor_interval: "10s".to_string(),
             firewall_queue_num: 0,
             firewall_queue_bypass: true,
+            firewall_persistence_mode: FirewallPersistenceMode::default(),
             firewall_config_path,
             rules_path,
             network_aliases_path,
@@ -64,107 +65,6 @@ impl Default for Config {
 }
 
 impl Config {
-    fn canonical_config_json_key(key: &str) -> Option<&'static str> {
-        let lowered = case_folded(key);
-        match lowered.as_str() {
-            "server" => Some("Server"),
-            "loglevel" => Some("LogLevel"),
-            "logutc" => Some("LogUTC"),
-            "logmicro" => Some("LogMicro"),
-            "defaultaction" => Some("DefaultAction"),
-            "asktimeoutpolicy" => Some("AskTimeoutPolicy"),
-            "defaultduration" => Some("DefaultDuration"),
-            "interceptunknown" => Some("InterceptUnknown"),
-            "procmonitormethod" => Some("ProcMonitorMethod"),
-            "firewall" => Some("Firewall"),
-            "fwoptions" => Some("FwOptions"),
-            "rules" => Some("Rules"),
-            "tasksoptions" => Some("TasksOptions"),
-            "tasks" => Some("Tasks"),
-            "audit" => Some("Audit"),
-            "ebpf" => Some("Ebpf"),
-            "stats" => Some("Stats"),
-            "internal" => Some("Internal"),
-            "address" => Some("Address"),
-            "authentication" => Some("Authentication"),
-            "logfile" => Some("LogFile"),
-            "loggers" => Some("Loggers"),
-            "mode" => Some("Mode"),
-            "type" => Some("Type"),
-            "tlsoptions" => Some("TLSOptions"),
-            "cacert" => Some("CACert"),
-            "servercert" => Some("ServerCert"),
-            "serverkey" => Some("ServerKey"),
-            "clientcert" => Some("ClientCert"),
-            "clientkey" => Some("ClientKey"),
-            "clientauthtype" => Some("ClientAuthType"),
-            "skipverify" => Some("SkipVerify"),
-            "allowedprincipals" => Some("AllowedPrincipals"),
-            "allowedusers" => Some("AllowedUsers"),
-            "remoteprincipalbindings" => Some("RemotePrincipalBindings"),
-            "certfingerprint" => Some("CertFingerprint"),
-            "certsubject" => Some("CertSubject"),
-            "certsan" => Some("CertSAN"),
-            "localprincipal" => Some("LocalPrincipal"),
-            "localuser" => Some("LocalUser"),
-            "capabilities" => Some("Capabilities"),
-            "allowedgroups" => Some("AllowedGroups"),
-            "uid" => Some("UID"),
-            "gid" => Some("GID"),
-            "name" => Some("Name"),
-            "format" => Some("Format"),
-            "protocol" => Some("Protocol"),
-            "writetimeout" => Some("WriteTimeout"),
-            "connecttimeout" => Some("ConnectTimeout"),
-            "tag" => Some("Tag"),
-            "workers" => Some("Workers"),
-            "maxconnectattempts" => Some("MaxConnectAttempts"),
-            "monitorinterval" => Some("MonitorInterval"),
-            "configpath" => Some("ConfigPath"),
-            "queuenum" => Some("QueueNum"),
-            "queuebypass" => Some("QueueBypass"),
-            "path" => Some("Path"),
-            "enablechecksums" => Some("EnableChecksums"),
-            "networkaliasesfile" => Some("NetworkAliasesFile"),
-            "audispsocketpath" => Some("AudispSocketPath"),
-            "sinkfile" => Some("SinkFile"),
-            "sinksyslog" => Some("SinkSyslog"),
-            "sinkloglines" => Some("SinkLogLines"),
-            "verbosehotpath" => Some("VerboseHotPath"),
-            "minseverity" => Some("MinSeverity"),
-            "modulespath" => Some("ModulesPath"),
-            "maxevents" => Some("MaxEvents"),
-            "maxstats" => Some("MaxStats"),
-            "gcpercent" => Some("GCPercent"),
-            "flushconnsonstart" => Some("FlushConnsOnStart"),
-            _ => None,
-        }
-    }
-
-    fn normalize_config_json_keys(value: serde_json::Value) -> serde_json::Value {
-        match value {
-            serde_json::Value::Object(obj) => {
-                let mut normalized = serde_json::Map::with_capacity(obj.len());
-                for (key, value) in obj {
-                    let normalized_key =
-                        Self::canonical_config_json_key(&key).unwrap_or(key.as_str());
-                    normalized.insert(
-                        normalized_key.to_string(),
-                        Self::normalize_config_json_keys(value),
-                    );
-                }
-                serde_json::Value::Object(normalized)
-            }
-            serde_json::Value::Array(values) => serde_json::Value::Array(
-                values
-                    .into_iter()
-                    .map(Self::normalize_config_json_keys)
-                    .collect::<Vec<_>>(),
-            ),
-            _ => value,
-        }
-    }
-
     fn resolve_runtime_path(configured: &str, dev_fallback_rel: &str) -> PathBuf {
         let configured = configured.trim();
         if !configured.is_empty() {
@@ -251,12 +151,7 @@ impl Config {
     }
 
     pub fn from_raw_json(path: &Path, raw_json: String) -> Result<Self> {
-        let parsed_value: serde_json::Value =
-            StorageService::parse_with_storage_format_for_path(path, &raw_json)
-                .with_context(|| format!("failed to parse config file {}", path.display()))?;
-        let normalized_value = Self::normalize_config_json_keys(parsed_value);
-        let raw: RawConfig = serde_json::from_value(normalized_value)
-            .with_context(|| format!("failed to parse config file {}", path.display()))?;
+        let raw = RawConfig::parse_normalized_for_path(path, &raw_json)?;
         let local_control_allowed_principals =
             Self::parse_local_control_allowed_principals(&raw.server.authentication);
         let local_control_allowed_group_gids =
@@ -339,6 +234,9 @@ impl Config {
             },
             firewall_queue_num: raw.fw_options.queue_num.unwrap_or(0),
             firewall_queue_bypass: raw.fw_options.queue_bypass.unwrap_or(true),
+            firewall_persistence_mode: FirewallPersistenceMode::from_name(
+                &raw.fw_options.persistence_mode,
+            ),
             firewall_config_path: Self::resolve_runtime_path(
                 &raw.fw_options.config_path,
                 "daemon/data/system-fw.json",
@@ -429,6 +327,34 @@ impl Config {
         if let Some(path) = rules_path {
             self.rules_path = path.to_path_buf();
         }
+        self
+    }
+
+    /// Override `firewall_persistence_mode` with `--firewall-persistence-mode`.
+    ///
+    /// Accepted values (case-insensitive):
+    /// - `durable` (`persistent`, `persist`, `system`, `system-wide`)
+    /// - `live-only` (`live`, `liveonly`, `runtime`, `runtime-only`)
+    pub fn with_firewall_persistence_mode_override(mut self, mode: Option<&str>) -> Self {
+        let Some(mode) = mode.filter(|value| !value.trim().is_empty()) else {
+            return self;
+        };
+
+        match normalized_name(mode).as_str() {
+            "durable" | "persistent" | "persist" | "system" | "system-wide" => {
+                self.firewall_persistence_mode = FirewallPersistenceMode::Durable;
+            }
+            "live" | "liveonly" | "live-only" | "runtime" | "runtime-only" => {
+                self.firewall_persistence_mode = FirewallPersistenceMode::LiveOnly;
+            }
+            _ => {
+                tracing::warn!(
+                    mode,
+                    "ignoring unsupported --firewall-persistence-mode value; keeping config-defined mode"
+                );
+            }
+        }
+
         self
     }
 }

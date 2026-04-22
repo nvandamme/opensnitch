@@ -52,12 +52,14 @@ mod ebpf_ringbuf;
 mod ebpf_runtime_mode;
 #[path = "workers/ebpf_service.rs"]
 mod ebpf_service;
+#[path = "firewall/firewall_backend_fixtures.rs"]
+mod firewall_backend_fixtures;
 #[path = "firewall/firewall_iptables.rs"]
 mod firewall_iptables;
-#[path = "firewall/firewall_nft.rs"]
-mod firewall_nft;
-#[path = "firewall/firewall_nft_netlink.rs"]
-mod firewall_nft_netlink;
+#[path = "firewall/firewall_netlink.rs"]
+mod firewall_netlink;
+#[path = "firewall/firewall_nftables.rs"]
+mod firewall_nftables;
 #[path = "firewall/firewall_privileged.rs"]
 mod firewall_privileged;
 #[path = "firewall/firewall_service.rs"]
@@ -82,6 +84,9 @@ mod nfqueue;
 mod nfqueue_netlink_adapter;
 #[path = "flows/notification_flow.rs"]
 mod notification_flow;
+#[path = "firewall/openwrt_uci_firewall_adapter.rs"]
+#[cfg(feature = "openwrt")]
+mod openwrt_uci_firewall_adapter;
 #[path = "parsing/pid_resolver.rs"]
 mod pid_resolver;
 #[path = "parsing/proc_connector.rs"]

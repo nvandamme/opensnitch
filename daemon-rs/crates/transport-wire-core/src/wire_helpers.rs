@@ -397,3 +397,42 @@ pub enum WireSubscriptionAction {
 pub fn status_payload(status: &str) -> String {
     serde_json::json!({"status": status}).to_string()
 }
+
+/// Decode a wire JSON notification payload into a typed `T`.
+/// All command/notification JSON decoding in the daemon must go through this
+/// function so the wire format is encapsulated in the transport-wire lib.
+pub fn decode_json_notification_payload<T>(raw: &str) -> Result<T, serde_json::Error>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_str(raw)
+}
+
+/// Decode an already-parsed JSON value into a typed `T`.
+///
+/// This keeps JSON conversion logic inside the transport-wire boundary so
+/// daemon service/runtime layers do not invoke `serde_json::from_value`
+/// directly.
+pub fn decode_json_value_payload<T>(value: serde_json::Value) -> Result<T, serde_json::Error>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_value(value)
+}
+
+/// Encode a typed payload as a JSON string for wire transport.
+///
+/// Keeps JSON serialization at the transport-wire boundary so daemon runtime
+/// layers do not call `serde_json::to_string` directly for wire frames.
+pub fn encode_json_notification_payload<T>(value: &T) -> Result<String, serde_json::Error>
+where
+    T: serde::Serialize,
+{
+    serde_json::to_string(value)
+}
+
+/// Build a reply payload with `status` and an integer `logLevel` field.
+/// Used by config-command handlers that need to echo back the applied log level.
+pub fn status_with_log_level_payload(status: &str, log_level: i32) -> String {
+    serde_json::json!({"status": status, "logLevel": log_level}).to_string()
+}

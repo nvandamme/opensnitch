@@ -16,7 +16,8 @@ fn render_ndjson_produces_valid_line() {
 
     // Must be valid JSON.
     let parsed: serde_json::Value =
-        serde_json::from_str(line.trim_end()).expect("ndjson line is not valid JSON");
+        transport_wire_core::decode_json_notification_payload(line.trim_end())
+            .expect("ndjson line is not valid JSON");
     assert_eq!(parsed["path"], "cold");
     assert_eq!(parsed["level"], "info");
 }

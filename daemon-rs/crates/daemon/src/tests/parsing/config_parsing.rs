@@ -3,7 +3,8 @@ use std::fs;
 use nix::unistd::{Uid, User};
 
 use crate::config::{
-    AskFallbackPolicy, AuthMode, ClientAuthType, Config, DefaultAction, ProcMonitorMethod,
+    AskFallbackPolicy, AuthMode, ClientAuthType, Config, DefaultAction, FirewallPersistenceMode,
+    ProcMonitorMethod,
 };
 use crate::{
     models::{audit::AuditSeverity, firewall_state::FirewallBackend},
@@ -53,7 +54,8 @@ fn from_raw_json_parses_expected_config_values() {
 "MonitorInterval": "7s",
 "ConfigPath": "{fw}",
 "QueueNum": 7,
-"QueueBypass": false
+"QueueBypass": false,
+"PersistenceMode": "live-only"
 }},
 "Rules": {{"Path": "{rules}"}},
 "TasksOptions": {{"ConfigPath": "{tasks}"}},
@@ -105,6 +107,10 @@ fn from_raw_json_parses_expected_config_values() {
     assert_eq!(cfg.firewall_monitor_interval, "7s");
     assert_eq!(cfg.firewall_queue_num, 7);
     assert!(!cfg.firewall_queue_bypass);
+    assert!(matches!(
+        cfg.firewall_persistence_mode,
+        FirewallPersistenceMode::LiveOnly
+    ));
     assert_eq!(cfg.firewall_config_path, fw_path);
     assert_eq!(cfg.rules_path, rules_path);
     assert_eq!(cfg.tasks_config_path, tasks_path);
@@ -131,6 +137,38 @@ fn from_raw_json_invalid_proc_monitor_falls_back_to_proc() {
 
     let cfg = Config::from_raw_json(&config_path, raw).expect("parse config");
     assert!(matches!(cfg.proc_monitor_method, ProcMonitorMethod::Proc));
+}
+
+#[cfg(feature = "openwrt")]
+#[test]
+fn from_raw_json_parses_openwrt_firewall_backend() {
+    let dir = TestDir::new("opensnitch-config-openwrt-firewall-backend");
+    let config_path = dir.path.join("default-config.json");
+
+    let raw = r#"{
+"Server": {"Address": "http://127.0.0.1:50051"},
+"Firewall": "openwrt-uci"
+}"#
+    .to_string();
+
+    let cfg = Config::from_raw_json(&config_path, raw).expect("parse config");
+    assert!(matches!(cfg.firewall_backend, FirewallBackend::OpenWrtUci));
+}
+
+#[cfg(not(feature = "openwrt"))]
+#[test]
+fn from_raw_json_openwrt_firewall_backend_falls_back_to_nftables_without_feature() {
+    let dir = TestDir::new("opensnitch-config-openwrt-firewall-backend-no-feature");
+    let config_path = dir.path.join("default-config.json");
+
+    let raw = r#"{
+"Server": {"Address": "http://127.0.0.1:50051"},
+"Firewall": "openwrt-uci"
+}"#
+    .to_string();
+
+    let cfg = Config::from_raw_json(&config_path, raw).expect("parse config");
+    assert!(matches!(cfg.firewall_backend, FirewallBackend::Nftables));
 }
 
 #[test]
@@ -547,4 +585,29 @@ fn with_auth_mode_override_ignores_invalid_values() {
     let cfg = Config::default().with_auth_mode_override(Some("local-only"));
     let cfg = cfg.with_auth_mode_override(Some("unsupported-mode"));
     assert!(matches!(cfg.auth_mode, AuthMode::LocalOnly));
+}
+
+#[test]
+fn with_firewall_persistence_mode_override_applies_cli_mode() {
+    let cfg = Config::default().with_firewall_persistence_mode_override(Some("live-only"));
+    assert!(matches!(
+        cfg.firewall_persistence_mode,
+        FirewallPersistenceMode::LiveOnly
+    ));
+
+    let cfg = cfg.with_firewall_persistence_mode_override(Some("durable"));
+    assert!(matches!(
+        cfg.firewall_persistence_mode,
+        FirewallPersistenceMode::Durable
+    ));
+}
+
+#[test]
+fn with_firewall_persistence_mode_override_ignores_invalid_values() {
+    let cfg = Config::default().with_firewall_persistence_mode_override(Some("live-only"));
+    let cfg = cfg.with_firewall_persistence_mode_override(Some("unsupported-mode"));
+    assert!(matches!(
+        cfg.firewall_persistence_mode,
+        FirewallPersistenceMode::LiveOnly
+    ));
 }

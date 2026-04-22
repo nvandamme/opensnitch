@@ -1,17 +1,25 @@
+use std::{fs, path::PathBuf};
+
 use crate::models::firewall_config::{FirewallChain, FirewallConfig, FirewallRule};
-use crate::platform::adapters::firewall_nft::FirewallNftAdapter;
-use crate::platform::adapters::firewall_nft_netlink::{
-    FirewallNftNetlinkAdapter, NftNetlinkOperation, NftRuleChain,
+use crate::platform::adapters::firewall_netlink::{
+    FirewallNetlinkAdapter, FirewallNetlinkOperation, NetfilterRuleChain,
 };
+use crate::platform::adapters::firewall_nftables::FirewallNftablesAdapter;
+
+fn backend_fixture_path(file: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../data/fixtures/firewall")
+        .join(file)
+}
 
 #[test]
 fn ensure_plan_contains_expected_interception_rules() {
-    let ops = FirewallNftNetlinkAdapter::probe_plan_ensure(7, true);
+    let ops = FirewallNetlinkAdapter::probe_plan_ensure(7, true);
 
     assert_eq!(ops.len(), 4);
     assert_eq!(
         ops[0],
-        NftNetlinkOperation::EnsureBaseChains {
+        FirewallNetlinkOperation::EnsureBaseChains {
             queue_num: 7,
             queue_bypass: true,
         }
@@ -19,8 +27,8 @@ fn ensure_plan_contains_expected_interception_rules() {
 
     assert!(matches!(
         &ops[1],
-        NftNetlinkOperation::EnsureInterceptionRule {
-            chain: NftRuleChain::FilterInput,
+        FirewallNetlinkOperation::EnsureInterceptionRule {
+            chain: NetfilterRuleChain::FilterInput,
             expression,
             tag,
         } if expression.contains("queue num 7 bypass")
@@ -30,8 +38,8 @@ fn ensure_plan_contains_expected_interception_rules() {
 
     assert!(matches!(
         &ops[2],
-        NftNetlinkOperation::EnsureInterceptionRule {
-            chain: NftRuleChain::MangleOutput,
+        FirewallNetlinkOperation::EnsureInterceptionRule {
+            chain: NetfilterRuleChain::MangleOutput,
             expression,
             tag,
         } if expression.contains("opensnitch-queue-connections-non-tcp")
@@ -40,8 +48,8 @@ fn ensure_plan_contains_expected_interception_rules() {
 
     assert!(matches!(
         &ops[3],
-        NftNetlinkOperation::EnsureInterceptionRule {
-            chain: NftRuleChain::MangleOutput,
+        FirewallNetlinkOperation::EnsureInterceptionRule {
+            chain: NetfilterRuleChain::MangleOutput,
             expression,
             tag,
         } if expression.contains("opensnitch-queue-connections-tcp-syn")
@@ -86,12 +94,12 @@ fn apply_system_firewall_plan_skips_disabled_and_empty_rules() {
         ..Default::default()
     };
 
-    let ops = FirewallNftNetlinkAdapter::probe_plan_apply_system_firewall(&sysfw, 0);
+    let ops = FirewallNetlinkAdapter::probe_plan_apply_system_firewall(&sysfw, 0);
 
     assert_eq!(ops.len(), 2);
     assert!(matches!(
         &ops[0],
-        NftNetlinkOperation::EnsureSystemChain {
+        FirewallNetlinkOperation::EnsureSystemChain {
             family,
             table,
             name,
@@ -108,7 +116,7 @@ fn apply_system_firewall_plan_skips_disabled_and_empty_rules() {
 
     assert!(matches!(
         &ops[1],
-        NftNetlinkOperation::ApplySystemRule {
+        FirewallNetlinkOperation::ApplySystemRule {
             family,
             table,
             chain,
@@ -142,15 +150,24 @@ fn clear_system_firewall_plan_targets_each_chain() {
                 ..Default::default()
             },
         ],
+        zones: vec![crate::models::firewall_config::FirewallZone {
+            name: "lan".to_string(),
+            chains: vec![FirewallChain {
+                family: "inet".to_string(),
+                table: "opensnitch".to_string(),
+                name: "zone_lan_output".to_string(),
+                ..Default::default()
+            }],
+        }],
         ..Default::default()
     };
 
-    let ops = FirewallNftNetlinkAdapter::probe_plan_clear_system_firewall(&sysfw);
-    assert_eq!(ops.len(), 2);
+    let ops = FirewallNetlinkAdapter::probe_plan_clear_system_firewall(&sysfw);
+    assert_eq!(ops.len(), 3);
 
     assert!(matches!(
         &ops[0],
-        NftNetlinkOperation::ClearTaggedSystemRules {
+        FirewallNetlinkOperation::ClearTaggedSystemRules {
             family,
             table,
             chain,
@@ -158,11 +175,70 @@ fn clear_system_firewall_plan_targets_each_chain() {
     ));
     assert!(matches!(
         &ops[1],
-        NftNetlinkOperation::ClearTaggedSystemRules {
+        FirewallNetlinkOperation::ClearTaggedSystemRules {
             family,
             table,
             chain,
         } if family == "ip" && table == "filter" && chain == "output"
+    ));
+    assert!(matches!(
+        &ops[2],
+        FirewallNetlinkOperation::ClearTaggedSystemRules {
+            family,
+            table,
+            chain,
+        } if family == "inet" && table == "opensnitch" && chain == "zone_lan_output"
+    ));
+}
+
+#[test]
+fn apply_system_firewall_plan_includes_zone_chains() {
+    let sysfw = FirewallConfig {
+        enabled: true,
+        version: 0,
+        rules: Vec::new(),
+        chains: Vec::new(),
+        zones: vec![crate::models::firewall_config::FirewallZone {
+            name: "wan".to_string(),
+            chains: vec![FirewallChain {
+                family: "inet".to_string(),
+                table: "opensnitch".to_string(),
+                name: "zone_wan_input".to_string(),
+                hook: "input".to_string(),
+                policy: "accept".to_string(),
+                r#type: "filter".to_string(),
+                rules: vec![FirewallRule {
+                    enabled: true,
+                    uuid: "zone-rule-1".to_string(),
+                    parameters: "ip protocol tcp".to_string(),
+                    target: "accept".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        }],
+    };
+
+    let ops = FirewallNetlinkAdapter::probe_plan_apply_system_firewall(&sysfw, 0);
+    assert_eq!(ops.len(), 2);
+    assert!(matches!(
+        &ops[0],
+        FirewallNetlinkOperation::EnsureSystemChain {
+            family,
+            table,
+            name,
+            ..
+        } if family == "inet" && table == "opensnitch" && name == "zone_wan_input"
+    ));
+    assert!(matches!(
+        &ops[1],
+        FirewallNetlinkOperation::ApplySystemRule {
+            family,
+            table,
+            chain,
+            expression,
+            ..
+        } if family == "inet" && table == "opensnitch" && chain == "zone_wan_input" && expression == "ip protocol tcp accept"
     ));
 }
 
@@ -195,7 +271,7 @@ fn system_rule_expression_supports_safe_netlink_subset() {
 
     for expression in supported {
         assert!(
-            FirewallNftNetlinkAdapter::probe_is_system_rule_expression_supported(expression),
+            FirewallNetlinkAdapter::probe_is_system_rule_expression_supported(expression),
             "expected expression to be supported: {expression}"
         );
     }
@@ -215,27 +291,30 @@ fn system_rule_expression_supports_shipped_system_firewall_shapes() {
 
     for expression in shipped {
         assert!(
-            FirewallNftNetlinkAdapter::probe_is_system_rule_expression_supported(expression),
+            FirewallNetlinkAdapter::probe_is_system_rule_expression_supported(expression),
             "expected shipped system-fw expression to be supported: {expression}"
         );
     }
 }
 
 #[test]
-fn system_rule_expression_supports_go_nftables_testdata_shapes() {
+fn system_rule_expression_supports_nftables_testdata_shapes() {
     // Keep aligned with daemon/firewall/nftables/testdata/test-sysfw-conf.json
     // so parity against the Go-side rule shapes remains explicit.
-    let go_testdata = [
-        "tcp dport 22 accept",
-        "icmp type { echo-request, echo-reply } accept",
-        "icmpv6 type { echo-request, echo-reply } accept",
-        "udp dport 51820 accept",
-        "ct state new queue num 0",
-    ];
+    let fixture = backend_fixture_path("nftables-supported-expressions.example.json");
+    let raw = fs::read_to_string(&fixture).expect("read nftables expression fixture");
+    let go_testdata: Vec<String> = crate::services::storage::StorageService::
+        parse_with_storage_format_for_path(&fixture, &raw)
+        .expect("decode nftables expression fixture as JSON string array");
+
+    assert!(
+        !go_testdata.is_empty(),
+        "expression fixture must not be empty"
+    );
 
     for expression in go_testdata {
         assert!(
-            FirewallNftNetlinkAdapter::probe_is_system_rule_expression_supported(expression),
+            FirewallNetlinkAdapter::probe_is_system_rule_expression_supported(&expression),
             "expected Go testdata expression to be supported: {expression}"
         );
     }
@@ -314,11 +393,13 @@ fn apply_plan_generated_expressions_are_netlink_supported() {
         ..Default::default()
     };
 
-    let ops = FirewallNftNetlinkAdapter::probe_plan_apply_system_firewall(&sysfw, 0);
+    let ops = FirewallNetlinkAdapter::probe_plan_apply_system_firewall(&sysfw, 0);
     let expressions: Vec<&str> = ops
         .iter()
         .filter_map(|op| match op {
-            NftNetlinkOperation::ApplySystemRule { expression, .. } => Some(expression.as_str()),
+            FirewallNetlinkOperation::ApplySystemRule { expression, .. } => {
+                Some(expression.as_str())
+            }
             _ => None,
         })
         .collect();
@@ -330,10 +411,31 @@ fn apply_plan_generated_expressions_are_netlink_supported() {
 
     for expression in expressions {
         assert!(
-            FirewallNftNetlinkAdapter::probe_is_system_rule_expression_supported(expression),
+            FirewallNetlinkAdapter::probe_is_system_rule_expression_supported(expression),
             "planned ApplySystemRule expression is not netlink-supported: {expression}"
         );
     }
+}
+
+#[test]
+fn native_dump_composition_reflects_chains_rules_and_zones() {
+    let cfg = FirewallNetlinkAdapter::probe_compose_dumped_config();
+
+    assert!(cfg.enabled);
+    assert_eq!(cfg.chains.len(), 1);
+    assert_eq!(cfg.zones.len(), 1);
+
+    let chain = &cfg.chains[0];
+    assert_eq!(chain.name, "filter_input");
+    assert_eq!(chain.rules.len(), 1);
+    assert_eq!(chain.rules[0].uuid, "ssh");
+    assert_eq!(chain.rules[0].parameters, "meta l4proto tcp");
+
+    let zone = &cfg.zones[0];
+    assert_eq!(zone.name, "wan");
+    assert_eq!(zone.chains.len(), 1);
+    assert_eq!(zone.chains[0].name, "zone_wan_input");
+    assert_eq!(zone.chains[0].rules.len(), 1);
 }
 
 #[test]
@@ -362,9 +464,9 @@ fn apply_plan_keeps_unsupported_expression_for_fallback_path() {
         ..Default::default()
     };
 
-    let ops = FirewallNftNetlinkAdapter::probe_plan_apply_system_firewall(&sysfw, 0);
+    let ops = FirewallNetlinkAdapter::probe_plan_apply_system_firewall(&sysfw, 0);
     let planned_expression = ops.iter().find_map(|op| match op {
-        NftNetlinkOperation::ApplySystemRule { expression, .. } => Some(expression.as_str()),
+        FirewallNetlinkOperation::ApplySystemRule { expression, .. } => Some(expression.as_str()),
         _ => None,
     });
 
@@ -372,7 +474,7 @@ fn apply_plan_keeps_unsupported_expression_for_fallback_path() {
         planned_expression.expect("expected planned ApplySystemRule expression");
     assert_eq!(planned_expression, "meta nfproto ipv4 accept");
     assert!(
-        !FirewallNftNetlinkAdapter::probe_is_system_rule_expression_supported(planned_expression),
+        !FirewallNetlinkAdapter::probe_is_system_rule_expression_supported(planned_expression),
         "expected unsupported expression to remain unsupported for netlink execution"
     );
 }
@@ -432,9 +534,9 @@ fn cli_normalized_expression_support_matrix_stays_explicit() {
     ];
 
     for (rule, expected_supported) in cases {
-        let expression = FirewallNftAdapter::probe_nft_expression(&rule, 0);
+        let expression = FirewallNftablesAdapter::probe_nft_expression(&rule, 0);
         let supported =
-            FirewallNftNetlinkAdapter::probe_is_system_rule_expression_supported(&expression);
+            FirewallNetlinkAdapter::probe_is_system_rule_expression_supported(&expression);
         assert_eq!(
             supported, expected_supported,
             "unexpected support state for CLI-normalized expression: {expression}"
@@ -460,7 +562,7 @@ fn system_rule_expression_shipped_coverage_audit_report() {
     let mut supported = 0usize;
     let mut unsupported = Vec::new();
     for expression in shipped_like {
-        if FirewallNftNetlinkAdapter::probe_is_system_rule_expression_supported(expression) {
+        if FirewallNetlinkAdapter::probe_is_system_rule_expression_supported(expression) {
             supported += 1;
         } else {
             unsupported.push(expression);
@@ -508,7 +610,7 @@ fn unsupported_expression_family_classifier_is_stable() {
     ];
 
     for (expression, expected_family) in cases {
-        let family = FirewallNftNetlinkAdapter::probe_unsupported_expression_family(expression);
+        let family = FirewallNetlinkAdapter::probe_unsupported_expression_family(expression);
         assert_eq!(
             family, expected_family,
             "unexpected classifier family for expression: {expression}"
@@ -519,7 +621,7 @@ fn unsupported_expression_family_classifier_is_stable() {
 #[test]
 fn unsupported_summary_shape_is_stable() {
     let ops = vec![
-        NftNetlinkOperation::EnsureSystemChain {
+        FirewallNetlinkOperation::EnsureSystemChain {
             family: "inet".to_string(),
             table: "opensnitch".to_string(),
             name: "mangle_output".to_string(),
@@ -528,29 +630,29 @@ fn unsupported_summary_shape_is_stable() {
             policy: "accept".to_string(),
             chain_type: "route".to_string(),
         },
-        NftNetlinkOperation::ApplySystemRule {
+        FirewallNetlinkOperation::ApplySystemRule {
             family: "inet".to_string(),
             table: "opensnitch".to_string(),
             chain: "mangle_output".to_string(),
             expression: "meta nfproto ipv4 accept".to_string(),
             tag: "opensnitch-sysfw:nfproto".to_string(),
         },
-        NftNetlinkOperation::ApplySystemRule {
+        FirewallNetlinkOperation::ApplySystemRule {
             family: "inet".to_string(),
             table: "opensnitch".to_string(),
             chain: "mangle_output".to_string(),
             expression: "ip6 daddr 2001:db8::/64 accept".to_string(),
             tag: "opensnitch-sysfw:cidr".to_string(),
         },
-        NftNetlinkOperation::EnsureInterceptionRule {
-            chain: NftRuleChain::MangleOutput,
+        FirewallNetlinkOperation::EnsureInterceptionRule {
+            chain: NetfilterRuleChain::MangleOutput,
             expression: "queue bogus 3".to_string(),
             tag: "opensnitch-queue-connections".to_string(),
         },
     ];
 
     let (unsupported_ops, unsupported_expression_families) =
-        FirewallNftNetlinkAdapter::probe_unsupported_summary_for_ops(&ops);
+        FirewallNetlinkAdapter::probe_unsupported_summary_for_ops(&ops);
 
     assert_eq!(
         unsupported_ops,
@@ -578,7 +680,7 @@ fn system_rule_expression_rejects_unsupported_forms() {
 
     for expression in unsupported {
         assert!(
-            !FirewallNftNetlinkAdapter::probe_is_system_rule_expression_supported(expression),
+            !FirewallNetlinkAdapter::probe_is_system_rule_expression_supported(expression),
             "expected expression to be unsupported: {expression}"
         );
     }

@@ -106,3 +106,36 @@ fn nfqueue_rules_omit_bypass_flag_when_disabled() {
     assert!(!conn.contains(&"--queue-bypass".to_string()));
     assert!(!dns.contains(&"--queue-bypass".to_string()));
 }
+
+#[test]
+fn parse_iptables_save_dump_extracts_chains_rules_and_zone_grouping() {
+    let dump = r#"
+*filter
+:INPUT ACCEPT [0:0]
+:zone_wan_input DROP [0:0]
+-A INPUT -p tcp --dport 22 -j ACCEPT
+-A zone_wan_input -s 198.51.100.0/24 -j DROP
+COMMIT
+"#;
+
+    let parsed = FirewallIptablesAdapter::probe_parse_iptables_save_dump(dump, "ip");
+    assert!(parsed.enabled);
+    assert_eq!(parsed.chains.len(), 1);
+    assert_eq!(parsed.zones.len(), 1);
+
+    let input = &parsed.chains[0];
+    assert_eq!(input.name, "INPUT");
+    assert_eq!(input.table, "filter");
+    assert_eq!(input.family, "ip");
+    assert_eq!(input.policy, "accept");
+    assert_eq!(input.rules.len(), 1);
+    assert_eq!(input.rules[0].parameters, "-p tcp --dport 22");
+    assert_eq!(input.rules[0].target, "ACCEPT");
+
+    let zone = &parsed.zones[0];
+    assert_eq!(zone.name, "wan");
+    assert_eq!(zone.chains.len(), 1);
+    assert_eq!(zone.chains[0].name, "zone_wan_input");
+    assert_eq!(zone.chains[0].rules.len(), 1);
+    assert_eq!(zone.chains[0].rules[0].target, "DROP");
+}

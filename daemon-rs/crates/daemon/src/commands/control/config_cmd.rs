@@ -159,11 +159,7 @@ impl CommandControlService {
             task_reply_tx,
             notification_id,
             transport_wire_core::WireNotificationReplyCode::Ok,
-            serde_json::json!({
-                "status": "ok",
-                "logLevel": level,
-            })
-            .to_string(),
+            transport_wire_core::status_with_log_level_payload("ok", level),
             CONTROL_COMMAND_NOTIFICATION_LABEL,
         )
         .await;

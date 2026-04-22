@@ -1,0 +1,7 @@
+config task 'downloader'
+	option configfile '/etc/opensnitchd/tasks/downloader/downloader.json'
+	option enabled '0'
+
+config task 'ioc-scanner'
+	option configfile '/etc/opensnitchd/tasks/iocscanner/iocscanner.json'
+	option enabled '0'

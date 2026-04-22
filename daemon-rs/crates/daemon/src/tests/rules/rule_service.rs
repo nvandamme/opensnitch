@@ -1,4 +1,6 @@
 use anyhow::Result;
+use storage_format_core::StorageFormatCodec;
+use storage_format_json::JsonStorageFormat;
 use std::time::Instant;
 use transport_wire_core::{WireRule, WireRuleOperator};
 
@@ -84,7 +86,7 @@ async fn write_rule_file(
 
     tokio::fs::write(
         rules_dir.join(format!("{name}.json")),
-        serde_json::to_string(&rule)?,
+        JsonStorageFormat.convert_to_storage(&rule)?,
     )
     .await?;
 

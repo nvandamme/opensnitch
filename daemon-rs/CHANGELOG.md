@@ -16,6 +16,139 @@ Versioning baseline:
 
 ### Added
 
+- **OpenWrt UCI co-management reconciliation hardening + terminology governance update**
+  (`crates/daemon/src/platform/adapters/openwrt_uci_firewall.rs`,
+  `crates/daemon/src/tests/firewall/{firewall_service.rs,openwrt_uci_firewall_adapter.rs}`,
+  `DESIGN_RULES.md`):
+  - OpenWrt managed section naming now uses an explicit `opensnitch_` prefix and removes non-standard UCI rule options (`opensnitch_managed`, `uuid`) from generated firewall sections.
+  - Added sidecar rule-section identity mapping (`<firewall path>.opensnitch.rule-map.json`) so reconcile logic can keep tracking daemon-managed rules even when section names are renamed externally via LuCI/UCI.
+  - Reconcile plan now prefers in-place updates for matched managed sections (including sidecar-map matches), preserves unknown/non-daemon fields on those sections, and only deletes stale managed sections no longer present in desired state.
+  - Added adapter regression coverage for in-place unknown-field preservation, renamed-section reconciliation via sidecar map, and updated managed-section command expectations.
+  - Added terminology governance rule banning metaphor-based infrastructure wording (for example `sidecar`, `control plane`) and requiring concrete technical wording (`metadata`, `client`, `transport`, `wire`, `runtime`, `storage`, `rule-section mapping`) in code/docs/review artifacts.
+
+- **Firewall persistence authority routing — manager-based durable persistence with zone/app-profile expression support, stale-rule removal, and live-only shutdown cleanup**
+  (`crates/daemon/src/daemon.rs`,
+  `crates/daemon/src/daemon/bootstrap.rs`,
+  `crates/daemon/src/config/{config.rs,enums.rs,mod.rs}`,
+  `crates/daemon/src/models/{config_runtime.rs,config_storage.rs}`,
+  `crates/daemon/src/main.rs`,
+  `crates/daemon/src/services/firewall/{config_ops.rs,firewall.rs,mod.rs,persistence_authority.rs,storage.rs}`,
+  `crates/daemon/src/utils/config_reload.rs`,
+  `crates/daemon/src/tests/firewall/{firewall_probe_support.rs,firewall_service.rs}`,
+  `crates/daemon/src/tests/parsing/config_parsing.rs`,
+  `TODO.md`):
+  - Added `FirewallPersistenceMode` enum (`LiveOnly` | `Durable`) with `from_name`/`as_name`
+    round-trip helpers and `Durable` as the default; wired as a first-class config field across
+    `Config`, `ConfigStorage`, bootstrap CLI override (`--firewall-persistence-mode`), and
+    config-reload plumbing.
+  - Added `FirewallPersistenceAuthority` (`Firewalld` | `Ufw` | `DirectBackend`) — the host-probing
+    resolution layer that selects the active system firewall manager at persist time by checking
+    `firewall-cmd --state`, `systemctl is-active firewalld`, and `ufw status` in order; OpenWrt
+    with `FirewallBackend::OpenWrtUci` always resolves to `Durable`/`DirectBackend`.
+  - Added instance-level `authority_override: Option<FirewallPersistenceAuthority>` and
+    `#[cfg(test)] with_test_manager(manager: &str)` builder on `FirewallService` so parallel tests
+    can pin a manager without mutating process-global state.
+  - **Firewalld durable path**: applies firewall rules as `--direct` IPv4/IPv6 rules and as rich
+    rules when a zone is present or the rule carries a service-name expression; ensures named zones
+    exist (creating them with `--permanent --new-zone` when missing); removes stale rules on config
+    update by diffing current vs. previous rich rules via a sidecar `.firewalld.rich.rules` state
+    file (tab-separated `zone\trule` entries, saved after each successful persist); both runtime
+    and permanent forms are applied/removed so a `--reload` brings them into permanent state.
+  - **UFW durable path**: clears only OpenSnitch-tagged rules by scanning `ufw status numbered` for
+    `opensnitch-sysfw:` comment tags, deleting by numeric ID in reverse order, then re-applying all
+    enabled rules; supports app-profile expression via `ufw allow ... app <profile>` token form.
+  - **Live-only mode** (`FirewallPersistenceMode::LiveOnly`): `Daemon::stop()` calls
+    `cleanup_runtime_rules_for_shutdown()` before cancelling the runtime token, removing all
+    runtime-applied firewall rules so they do not outlive the daemon process; skipped for
+    `FirewallBackend::OpenWrtUci` under the `openwrt` feature.
+  - `config_ops.rs` now guards `save_system_firewall_to_backend_and_path` behind
+    `effective_firewall_persistence_mode == Durable`; `LiveOnly` mode takes the
+    `reconcile_with_system_firewall` path instead, applying rules at runtime without touching
+    the on-disk state.
+  - Authority is resolved on the Tokio async thread before entering `spawn_blocking` so the
+    per-instance override remains visible across the thread boundary.
+  - **OpenWrt/UCI durable path**: persistence now reconciles daemon-managed UCI sections against
+    the current firewall file by deleting stale OpenSnitch-managed sections before recreating the
+    desired managed set, then running `uci commit firewall` and runtime reload. This closes stale
+    rule removal parity for the daemon-owned OpenWrt section set while preserving non-OpenSnitch
+    firewall sections.
+  - Added 5 new firewall service tests (23 total, all pass): zone rich-rule expression,
+    `--zone` argument injection, stale rich-rule removal via sidecar diff, UFW manager
+    activation, and UFW app-profile token form; all parallel-safe via `with_test_manager`.
+  - Added concrete `persistence_authority.rs` (868 lines) split plan to `TODO.md` §2 to
+    satisfy DESIGN_RULES 500-line gate without blocking this commit.
+
+- **Runtime target split rename and privilege/build boundary cleanup**
+  (`Makefile`, `daemon-rs/DOCS.md`, `daemon-rs/TODO.md`,
+  `daemon-rs/scripts/build_ebpf.sh`, `daemon-rs/crates/tools/src/{build_cmds.rs,main.rs,cli.rs,harness_cmds.rs}`):
+  - Renamed the runtime/test artifact split from `target-kernel` to `target-runtime`
+    across Make defaults, tools environment defaults, and docs/tracker guidance.
+  - Kept eBPF build user-scoped (`build_ebpf.sh` now rejects root execution), while
+    preserving elevated daemon live-session and privileged kernel test paths.
+  - Removed next-release compatibility shim/fallbacks for `DAEMON_RS_KERNEL_TARGET_DIR`
+    so runtime target selection now uses the `DAEMON_RS_RUNTIME_TARGET_DIR` path only.
+
+- **Firewall zone baseline before OpenWrt expansion**
+  (`crates/daemon/src/models/firewall_config.rs`,
+  `crates/daemon/src/models/firewall_storage.rs`,
+  `crates/daemon/src/services/firewall/{conversions.rs,storage.rs}`,
+  `crates/daemon/src/platform/adapters/{firewall_nftables.rs,firewall_iptables.rs,firewall_netlink/adapter.rs}`,
+  `crates/daemon/src/tests/firewall/{firewall_netlink.rs,firewall_service.rs}`,
+  `DESIGN_RULES.md`, `TODO.md`):
+  - Added top-level `FirewallConfig.zones: Vec<FirewallZone>` as the canonical zone domain surface.
+  - Extended storage ingress/egress to load and persist `Zones` payloads.
+  - Extended nftables (CLI + netlink planner) and iptables apply/clear paths to process zone-owned chains.
+  - Added tests for zone planner behavior and zone storage round-trip coverage.
+
+- **Firewall backend extraction into canonical DTO model**
+  (`crates/daemon/src/platform/adapters/{firewall_nftables.rs,firewall_netlink/adapter.rs,firewall_iptables.rs}`,
+  `crates/daemon/src/platform/ports/firewall_port.rs`,
+  `crates/daemon/src/services/firewall/runtime.rs`,
+  `crates/daemon/src/tests/firewall/{firewall_nftables.rs,firewall_iptables.rs}`):
+  - Added backend snapshot extraction APIs for nftables and iptables so runtime rules can be reflected
+    into `FirewallConfig` DTOs.
+  - Wired nftables extraction through the netlink+fallback port path and implemented native netlink
+    chain/rule dump translation (`op_getchain_dump` + `op_getrule_dump`) into canonical DTOs.
+  - Added parser coverage for zone-chain grouping (`zone_<name>_*`) and top-level chain/rule extraction.
+
+- **Explicit OpenWrt runtime firewall backend branch**
+  (`crates/daemon/src/models/firewall_state.rs`,
+  `crates/daemon/src/services/firewall/{conversions.rs,runtime.rs}`,
+  `crates/daemon/src/tests/{firewall/firewall_service.rs,parsing/config_parsing.rs}`):
+  - Added `FirewallBackend::OpenWrtUci` as an explicit runtime backend marker.
+  - Feature-guarded OpenWrt config/backend parsing aliases (`openwrt-uci`, `openwrt`, `firewall4`, `uci`) and authority-mode handling behind `openwrt`.
+  - Updated firewall runtime backend resolution to preserve OpenWrt authority mode while continuing runtime
+    interception/health/extraction through the nftables/netlink path, and to route to generic Linux
+    backend resolution when `openwrt` is not enabled.
+  - Added focused regression tests for OpenWrt backend parsing and runtime backend resolution.
+
+- **Netlink-first firewall introspection promotion**
+  (`crates/daemon/src/services/firewall/runtime.rs`,
+  `crates/daemon/src/tests/firewall/firewall_service.rs`):
+  - Promoted firewall introspection/live state extraction into a detached netlink-first domain independent
+    from persistence backend ownership.
+  - Added target-scoped fallback extraction order:
+    generic Linux (`netlink` -> `nftables` -> `iptables`), OpenWrt (`netlink` -> `openwrt-uci`).
+  - Introduced consistent service naming with `introspect_system_firewall()` while keeping
+    `extract_system_firewall_from_backend()` as a compatibility wrapper.
+
+- **Formatting normalization for OpenWrt/UCI touched slices**
+  (`crates/daemon/src/{platform/adapters/mod.rs,platform/ports/openwrt_uci_firewall_port.rs,tests/mod.rs,tests/firewall/*}`,
+  `crates/storage-format-uci/src/{parser.rs,serde_bridge.rs,tests/storage_format_uci.rs}`):
+  - Applied `cargo fmt` normalization to previously modified OpenWrt/UCI adapter,
+    parser bridge, and related test files so commit-time formatting hygiene stays
+    aligned with the project pre-commit checklist.
+
+- **OpenWrt UCI planner ownership correction**
+  (`crates/daemon/src/platform/adapters/openwrt_uci_firewall.rs`,
+  `crates/daemon/src/tests/firewall/openwrt_uci_firewall_adapter.rs`,
+  `crates/daemon/Cargo.toml`, `Cargo.toml`, `TODO.md`):
+  - Moved firewall UCI CLI plan compilation fully into the daemon platform adapter layer.
+  - Removed the intermediate `transport-wire-openwrt-uci` crate so UCI CLI admin/control
+    semantics no longer sit in a transport-wire boundary.
+  - Kept UCI file parsing in `storage-format-uci` and ubus runtime wire concerns in
+    `transport-wire-openwrt-ubus`.
+
 - **Transport-wire test ownership and daemon stub-first flow coverage**
   (`DESIGN_RULES.md`,
   `crates/daemon/src/tests/{mod.rs,flows/notification_flow.rs,flows/stats_flow.rs,flows/verdict_flow.rs}`,
@@ -524,7 +657,7 @@ Versioning baseline:
   - Documented `Rules.NetworkAliasesFile` and runtime alias-cache rebuild behavior.
   - Documented that explicit firewall reloads, nftables netlink events, and drift-heal recovery all refresh rule caches.
 
-- **Control-plane authorization docs updated** (`DOCS.md`, `TODO.md`, `DESIGN_RULES.md`):
+- **Privileged-command authorization docs updated** (`DOCS.md`, `TODO.md`, `DESIGN_RULES.md`):
   - Added `Server.Authentication.Mode`, `AllowedPrincipals`, `AllowedUsers`, and `AllowedGroups`
     to config documentation.
   - Documented conservative owner-scope enforcement, elevated-only command classes, and loopback

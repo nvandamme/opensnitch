@@ -61,6 +61,7 @@ impl Daemon {
         }
         .with_client_addr_override(cli.ui_socket.as_deref())
         .with_auth_mode_override(cli.auth_mode.as_deref())
+        .with_firewall_persistence_mode_override(cli.firewall_persistence_mode.as_deref())
         .with_rules_path_override(cli.rules_path.as_deref());
         // §7: apply env var + CLI overrides for audit sinks
         // Priority: CLI flags > env vars > config file SinkFile/SinkSyslog/SinkLogLines

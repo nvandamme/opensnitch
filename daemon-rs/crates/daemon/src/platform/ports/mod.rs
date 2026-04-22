@@ -2,10 +2,13 @@ pub mod audit_netlink_port;
 pub mod connection_event_exporter_port;
 pub mod firewall_port;
 pub mod local_addr_port;
+pub mod loadable_state_store_port;
 pub mod net_iface_port;
 pub mod nfqueue_netlink_port;
 pub mod nfqueue_runtime_port;
 pub mod nft_monitor_port;
+#[cfg(feature = "openwrt")]
+pub mod openwrt_uci_firewall_port;
 pub mod proc_connector_port;
 pub mod proto_mapper_port;
 pub mod socket_diag_port;

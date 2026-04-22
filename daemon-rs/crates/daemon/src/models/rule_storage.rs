@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -41,4 +43,35 @@ pub struct RuleFile {
     pub nolog: bool,
     #[serde(default)]
     pub operator: RuleFileOperator,
+}
+
+impl RuleFile {
+    pub fn normalize_legacy_operator_lists(&mut self) -> anyhow::Result<()> {
+        self.operator.normalize_legacy_list_data()
+    }
+}
+
+impl RuleFileOperator {
+    fn normalize_legacy_list_data(&mut self) -> anyhow::Result<()> {
+        for item in &mut self.list {
+            item.normalize_legacy_list_data()?;
+        }
+
+        if self.r#type.eq_ignore_ascii_case("list")
+            && self.list.is_empty()
+            && !self.data.trim().is_empty()
+        {
+            self.list = crate::services::storage::StorageService::parse_with_storage_format_for_path::<
+                Vec<RuleFileOperator>,
+            >(Path::new("legacy-operator-list.json"), &self.data)
+            .map_err(|err| anyhow::anyhow!("invalid legacy list payload in operator data: {err}"))?;
+            self.data.clear();
+
+            for item in &mut self.list {
+                item.normalize_legacy_list_data()?;
+            }
+        }
+
+        Ok(())
+    }
 }

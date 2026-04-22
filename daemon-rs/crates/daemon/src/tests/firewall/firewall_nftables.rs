@@ -1,22 +1,25 @@
 use crate::models::firewall_config::{
     FirewallChain, FirewallExpression, FirewallRule, FirewallStatement, FirewallStatementValue,
 };
-use crate::platform::adapters::firewall_nft::FirewallNftAdapter;
+use crate::platform::adapters::firewall_nftables::FirewallNftablesAdapter;
 
 #[test]
 fn chain_defaults_and_rule_tag_match_expected_values() {
     let chain = FirewallChain::default();
-    assert_eq!(FirewallNftAdapter::probe_family_or_default(&chain), "inet");
     assert_eq!(
-        FirewallNftAdapter::probe_table_or_default(&chain),
+        FirewallNftablesAdapter::probe_family_or_default(&chain),
+        "inet"
+    );
+    assert_eq!(
+        FirewallNftablesAdapter::probe_table_or_default(&chain),
         "opensnitch"
     );
     assert_eq!(
-        FirewallNftAdapter::probe_chain_name_or_default(&chain),
+        FirewallNftablesAdapter::probe_chain_name_or_default(&chain),
         "mangle_output"
     );
 
-    let fallback_tag = FirewallNftAdapter::probe_rule_tag(
+    let fallback_tag = FirewallNftablesAdapter::probe_rule_tag(
         &chain,
         &FirewallRule {
             position: 7,
@@ -29,7 +32,7 @@ fn chain_defaults_and_rule_tag_match_expected_values() {
         "opensnitch-sysfw:opensnitch:mangle_output:7:allow dns"
     );
 
-    let uuid_tag = FirewallNftAdapter::probe_rule_tag(
+    let uuid_tag = FirewallNftablesAdapter::probe_rule_tag(
         &chain,
         &FirewallRule {
             uuid: "uuid-1".to_string(),
@@ -49,7 +52,7 @@ fn nft_expression_prefers_parameters_and_appends_target_parts() {
     };
 
     assert_eq!(
-        FirewallNftAdapter::probe_nft_expression(&rule, 0),
+        FirewallNftablesAdapter::probe_nft_expression(&rule, 0),
         "tcp dport 443 accept comment \"https\""
     );
 }
@@ -73,7 +76,7 @@ fn nft_expression_builds_from_statements_and_rewrites_queue_num() {
     };
 
     assert_eq!(
-        FirewallNftAdapter::probe_nft_expression(&rule, 42),
+        FirewallNftablesAdapter::probe_nft_expression(&rule, 42),
         "meta l4proto == tcp queue num 42 bypass"
     );
 }
@@ -87,22 +90,22 @@ chain mangle_output {
 }
 "#;
 
-    let lines = FirewallNftAdapter::probe_nft_rule_lines(listing);
+    let lines = FirewallNftablesAdapter::probe_nft_rule_lines(listing);
     assert_eq!(lines.len(), 2);
     assert_eq!(
-        FirewallNftAdapter::probe_parse_nft_handle(lines[0]).as_deref(),
+        FirewallNftablesAdapter::probe_parse_nft_handle(lines[0]).as_deref(),
         Some("5")
     );
     assert_eq!(
-        FirewallNftAdapter::probe_parse_nft_handle(lines[1]).as_deref(),
+        FirewallNftablesAdapter::probe_parse_nft_handle(lines[1]).as_deref(),
         Some("7")
     );
     assert_eq!(
-        FirewallNftAdapter::probe_nft_rule_tag(lines[0]),
+        FirewallNftablesAdapter::probe_nft_rule_tag(lines[0]),
         "opensnitch-queue-dns"
     );
     assert_eq!(
-        FirewallNftAdapter::probe_nft_rule_tag(lines[1]),
+        FirewallNftablesAdapter::probe_nft_rule_tag(lines[1]),
         "opensnitch-queue-connections-tcp-syn"
     );
 }
@@ -113,11 +116,11 @@ fn nft_rule_tag_detects_non_tcp_and_fallback_connection_tags() {
     let fallback = "meta l4proto tcp queue num 0 comment \"unrelated\" # handle 10";
 
     assert_eq!(
-        FirewallNftAdapter::probe_nft_rule_tag(non_tcp),
+        FirewallNftablesAdapter::probe_nft_rule_tag(non_tcp),
         "opensnitch-queue-connections-non-tcp"
     );
     assert_eq!(
-        FirewallNftAdapter::probe_nft_rule_tag(fallback),
+        FirewallNftablesAdapter::probe_nft_rule_tag(fallback),
         "opensnitch-queue-connections"
     );
 }
@@ -133,10 +136,10 @@ table inet opensnitch {
 }
 "#;
 
-    let lines = FirewallNftAdapter::probe_nft_rule_lines(listing);
+    let lines = FirewallNftablesAdapter::probe_nft_rule_lines(listing);
     assert_eq!(lines.len(), 1);
     assert_eq!(
-        FirewallNftAdapter::probe_parse_nft_handle(lines[0]).as_deref(),
+        FirewallNftablesAdapter::probe_parse_nft_handle(lines[0]).as_deref(),
         Some("21")
     );
 }
@@ -181,7 +184,7 @@ fn nft_expression_skips_empty_statement_parts() {
     };
 
     assert_eq!(
-        FirewallNftAdapter::probe_nft_expression(&rule, 0),
+        FirewallNftablesAdapter::probe_nft_expression(&rule, 0),
         "meta mark 0x1 accept"
     );
 }
@@ -205,7 +208,7 @@ fn nft_expression_does_not_rewrite_non_queue_target_parameters() {
     };
 
     assert_eq!(
-        FirewallNftAdapter::probe_nft_expression(&rule, 42),
+        FirewallNftablesAdapter::probe_nft_expression(&rule, 42),
         "meta l4proto == tcp accept num 0"
     );
 }
@@ -229,7 +232,7 @@ fn nft_expression_keeps_queue_num_zero_when_runtime_queue_is_zero() {
     };
 
     assert_eq!(
-        FirewallNftAdapter::probe_nft_expression(&rule, 0),
+        FirewallNftablesAdapter::probe_nft_expression(&rule, 0),
         "meta l4proto == udp queue num 0 bypass"
     );
 }
@@ -237,11 +240,11 @@ fn nft_expression_keeps_queue_num_zero_when_runtime_queue_is_zero() {
 #[test]
 fn parse_nft_handle_returns_none_when_marker_missing_or_empty() {
     assert_eq!(
-        FirewallNftAdapter::probe_parse_nft_handle("meta mark 0x1"),
+        FirewallNftablesAdapter::probe_parse_nft_handle("meta mark 0x1"),
         None
     );
     assert_eq!(
-        FirewallNftAdapter::probe_parse_nft_handle("meta mark 0x1 # handle   "),
+        FirewallNftablesAdapter::probe_parse_nft_handle("meta mark 0x1 # handle   "),
         None
     );
 }
@@ -265,7 +268,7 @@ fn nft_expression_with_parameters_ignores_statement_fallback() {
     };
 
     assert_eq!(
-        FirewallNftAdapter::probe_nft_expression(&rule, 0),
+        FirewallNftablesAdapter::probe_nft_expression(&rule, 0),
         "ip protocol tcp accept"
     );
 }
@@ -279,8 +282,48 @@ fn nft_expression_normalizes_icmp_type_lists_in_parameters() {
     };
 
     assert_eq!(
-        FirewallNftAdapter::probe_nft_expression(&rule, 0),
+        FirewallNftablesAdapter::probe_nft_expression(&rule, 0),
         "icmp type { echo-request, echo-reply, destination-unreachable } accept"
+    );
+}
+
+#[test]
+fn parse_nft_ruleset_extracts_top_level_and_zone_chains() {
+    let ruleset = r#"
+table inet opensnitch {
+    chain filter_input {
+        type filter hook input priority filter; policy accept;
+        tcp dport 22 accept comment "opensnitch-sysfw:ssh" # handle 3
+    }
+    chain zone_wan_input {
+        type filter hook input priority filter; policy drop;
+        ip saddr 198.51.100.0/24 drop # handle 9
+    }
+}
+"#;
+
+    let parsed = FirewallNftablesAdapter::probe_parse_ruleset_text(ruleset);
+    assert!(parsed.enabled);
+    assert_eq!(parsed.chains.len(), 1);
+    assert_eq!(parsed.zones.len(), 1);
+
+    let chain = &parsed.chains[0];
+    assert_eq!(chain.name, "filter_input");
+    assert_eq!(chain.table, "opensnitch");
+    assert_eq!(chain.family, "inet");
+    assert_eq!(chain.rules.len(), 1);
+    assert_eq!(chain.rules[0].uuid, "ssh");
+    assert!(chain.rules[0].parameters.contains("tcp dport 22"));
+
+    let zone = &parsed.zones[0];
+    assert_eq!(zone.name, "wan");
+    assert_eq!(zone.chains.len(), 1);
+    assert_eq!(zone.chains[0].name, "zone_wan_input");
+    assert_eq!(zone.chains[0].rules.len(), 1);
+    assert!(
+        zone.chains[0].rules[0]
+            .parameters
+            .contains("198.51.100.0/24")
     );
 }
 
@@ -302,7 +345,7 @@ fn nft_expression_normalizes_icmp_type_lists_from_statements() {
     };
 
     assert_eq!(
-        FirewallNftAdapter::probe_nft_expression(&rule, 0),
+        FirewallNftablesAdapter::probe_nft_expression(&rule, 0),
         "icmp type { echo-request, echo-reply, destination-unreachable } accept"
     );
 }
@@ -337,7 +380,7 @@ fn nft_expression_normalizes_python_firewall_payload_shape() {
     };
 
     assert_eq!(
-        FirewallNftAdapter::probe_nft_expression(&rule, 0),
+        FirewallNftablesAdapter::probe_nft_expression(&rule, 0),
         "meta l4proto { tcp, udp } th dport 88 accept"
     );
 }
@@ -351,7 +394,7 @@ fn nft_expression_normalizes_meta_dport_parameters() {
     };
 
     assert_eq!(
-        FirewallNftAdapter::probe_nft_expression(&rule, 0),
+        FirewallNftablesAdapter::probe_nft_expression(&rule, 0),
         "meta l4proto { tcp, udp } th dport 88 accept"
     );
 }
@@ -365,10 +408,16 @@ fn chain_defaults_use_explicit_values_when_present() {
         ..Default::default()
     };
 
-    assert_eq!(FirewallNftAdapter::probe_family_or_default(&chain), "ip");
-    assert_eq!(FirewallNftAdapter::probe_table_or_default(&chain), "filter");
     assert_eq!(
-        FirewallNftAdapter::probe_chain_name_or_default(&chain),
+        FirewallNftablesAdapter::probe_family_or_default(&chain),
+        "ip"
+    );
+    assert_eq!(
+        FirewallNftablesAdapter::probe_table_or_default(&chain),
+        "filter"
+    );
+    assert_eq!(
+        FirewallNftablesAdapter::probe_chain_name_or_default(&chain),
         "output"
     );
 }
@@ -382,7 +431,7 @@ fn chain_rule_tag_uses_explicit_table_chain_and_position_when_uuid_missing() {
         ..Default::default()
     };
 
-    let tag = FirewallNftAdapter::probe_rule_tag(
+    let tag = FirewallNftablesAdapter::probe_rule_tag(
         &chain,
         &FirewallRule {
             position: 12,
@@ -403,11 +452,11 @@ fn nft_rule_tag_detects_dns_and_tcp_syn_tags() {
     let tcp_syn = "tcp flags & (fin|syn|rst|ack) == syn queue num 0 comment \"opensnitch-queue-connections-tcp-syn\" # handle 2";
 
     assert_eq!(
-        FirewallNftAdapter::probe_nft_rule_tag(dns),
+        FirewallNftablesAdapter::probe_nft_rule_tag(dns),
         "opensnitch-queue-dns"
     );
     assert_eq!(
-        FirewallNftAdapter::probe_nft_rule_tag(tcp_syn),
+        FirewallNftablesAdapter::probe_nft_rule_tag(tcp_syn),
         "opensnitch-queue-connections-tcp-syn"
     );
 }
@@ -419,19 +468,22 @@ fn nft_expression_returns_target_only_when_no_predicates_exist() {
         ..Default::default()
     };
 
-    assert_eq!(FirewallNftAdapter::probe_nft_expression(&rule, 0), "drop");
+    assert_eq!(
+        FirewallNftablesAdapter::probe_nft_expression(&rule, 0),
+        "drop"
+    );
 }
 
 #[test]
 fn nft_expression_returns_empty_string_when_rule_is_empty() {
     let rule = FirewallRule::default();
-    assert_eq!(FirewallNftAdapter::probe_nft_expression(&rule, 0), "");
+    assert_eq!(FirewallNftablesAdapter::probe_nft_expression(&rule, 0), "");
 }
 
 #[test]
 fn nft_rule_lines_trim_whitespace_before_filtering_handles() {
     let listing = "\n   udp sport 53 queue num 0 comment \"opensnitch-queue-dns\" # handle 15\n";
-    let lines = FirewallNftAdapter::probe_nft_rule_lines(listing);
+    let lines = FirewallNftablesAdapter::probe_nft_rule_lines(listing);
     assert_eq!(lines.len(), 1);
     assert!(lines[0].starts_with("udp sport 53"));
 }
@@ -440,7 +492,7 @@ fn nft_rule_lines_trim_whitespace_before_filtering_handles() {
 fn parse_nft_handle_trims_whitespace_around_handle_value() {
     let line = "udp sport 53 queue num 0 comment \"x\" # handle   44   ";
     assert_eq!(
-        FirewallNftAdapter::probe_parse_nft_handle(line).as_deref(),
+        FirewallNftablesAdapter::probe_parse_nft_handle(line).as_deref(),
         Some("44")
     );
 }
@@ -448,7 +500,7 @@ fn parse_nft_handle_trims_whitespace_around_handle_value() {
 #[test]
 fn rule_tag_with_empty_description_keeps_position_component() {
     let chain = FirewallChain::default();
-    let tag = FirewallNftAdapter::probe_rule_tag(
+    let tag = FirewallNftablesAdapter::probe_rule_tag(
         &chain,
         &FirewallRule {
             position: 5,
@@ -464,7 +516,7 @@ fn rule_tag_with_empty_description_keeps_position_component() {
 fn nft_rule_tag_dns_takes_priority_when_multiple_known_tags_present() {
     let mixed = "comment \"opensnitch-queue-dns opensnitch-queue-connections-tcp-syn\" # handle 1";
     assert_eq!(
-        FirewallNftAdapter::probe_nft_rule_tag(mixed),
+        FirewallNftablesAdapter::probe_nft_rule_tag(mixed),
         "opensnitch-queue-dns"
     );
 }

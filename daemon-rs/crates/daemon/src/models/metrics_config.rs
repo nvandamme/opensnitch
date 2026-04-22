@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use crate::services::storage::StorageService;
 
 // ---------------------------------------------------------------------------
 // Prometheus scrape config
@@ -109,7 +110,7 @@ impl MetricsConfig {
         }
         let raw = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
-        serde_json::from_str::<Self>(&raw)
+        StorageService::parse_with_storage_format_for_path::<Self>(&path, &raw)
             .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))
     }
 }

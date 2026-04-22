@@ -17,6 +17,10 @@ use crate::{
         rule_record::{RuleDuration, RuleOperator, RuleRecord},
         rule_storage::{RuleFile, RuleFileOperator},
     },
+    platform::{
+        adapters::loadable_state_file_store::FileLoadableStateStoreAdapter,
+        ports::loadable_state_store_port::{AliasStorePort, RuleStorePort},
+    },
     services::storage::StorageService,
     utils::path_text::file_name_lossy,
     utils::transient_files::is_transient_artifact_name,
@@ -44,8 +48,7 @@ impl RuleService {
                 continue;
             }
 
-            let rule_file: RuleFile = storage
-                .read_and_parse_with_storage_format_and_notify("rule", &file_path)
+            let rule_file: RuleFile = FileLoadableStateStoreAdapter::load_rule_file(&file_path)
                 .await
                 .with_context(|| format!("failed to load rule file {}", file_path.display()))?;
             let record = RuleRecord::from(rule_file);
@@ -100,11 +103,14 @@ impl RuleService {
         for file_path in rule_paths {
             let contents = std::fs::read_to_string(&file_path)
                 .with_context(|| format!("failed to read rule file {}", file_path.display()))?;
-            let rule_file: RuleFile =
+            let mut rule_file: RuleFile =
                 StorageService::parse_with_storage_format_for_path(&file_path, &contents)
                     .with_context(|| {
                         format!("failed to parse rule file {}", file_path.display())
                     })?;
+            rule_file.normalize_legacy_operator_lists().with_context(|| {
+                format!("failed to normalize legacy rule list payloads {}", file_path.display())
+            })?;
             let record = RuleRecord::from(rule_file);
             if record.enabled
                 && let Err(err) = Self::validate_operator(&record.operator)
@@ -179,12 +185,7 @@ impl RuleService {
     }
 
     pub(crate) async fn load_network_aliases_map(path: &Path) -> HashMap<String, Vec<String>> {
-        if !path.exists() {
-            return HashMap::new();
-        }
-        let Ok(Some(map)) = StorageService::global()
-            .read_and_parse_with_storage_format_if_exists_and_notify("rule", path)
-            .await
+        let Ok(Some(map)) = FileLoadableStateStoreAdapter::load_alias_map(path).await
         else {
             return HashMap::new();
         };

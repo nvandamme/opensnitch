@@ -1,12 +1,12 @@
 use std::{collections::HashMap, io::ErrorKind, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::Result;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    RuntimeTaskHandles, TaskService, TaskStorageRuntime, naming as task_runtime_naming,
+    RuntimeTaskHandles, TaskRuntimePayload, TaskService, TaskStorageRuntime,
+    naming as task_runtime_naming,
     validation as task_runtime_validation,
 };
 use crate::{
@@ -44,7 +44,7 @@ impl TaskService {
     /// the I/O phase so the caller can narrow mutex scope.
     pub(crate) fn apply_storage_task_diff(
         &self,
-        desired: HashMap<String, (String, Arc<Value>, String)>,
+        desired: HashMap<String, (String, TaskRuntimePayload, String)>,
         task_handles: &mut RuntimeTaskHandles,
         process: ProcessService,
         task_reply_tx: tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
@@ -101,7 +101,7 @@ impl TaskService {
 
     pub(crate) async fn load_storage_tasks(
         tasks_file: &std::path::Path,
-    ) -> Result<HashMap<String, (String, Arc<Value>, String)>> {
+    ) -> Result<HashMap<String, (String, TaskRuntimePayload, String)>> {
         let storage = StorageService::global();
         tracing::debug!(
             "[tasks] Loader.Load() config file: {}",
@@ -158,7 +158,10 @@ impl TaskService {
                 Ok(Some(raw_task)) => raw_task,
                 Ok(None) | Err(_) => continue,
             };
-            let parsed = match serde_json::from_str::<TaskDataFile>(&raw_task) {
+            let parsed = match StorageService::parse_with_storage_format_for_path::<TaskDataFile>(
+                &config_path,
+                &raw_task,
+            ) {
                 Ok(parsed) => parsed,
                 Err(_) => continue,
             };
@@ -184,7 +187,11 @@ impl TaskService {
 
             loaded.insert(
                 format!("disk-task:{instance_name}"),
-                (task_name, Arc::new(parsed.data), fingerprint),
+                (
+                    task_name.clone(),
+                    TaskRuntimePayload::from_task_data(&task_name, parsed.data),
+                    fingerprint,
+                ),
             );
         }
 

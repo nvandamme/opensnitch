@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use storage_format_core::StorageFormatCodec;
+use storage_format_json::JsonStorageFormat;
 use tokio::sync::Mutex;
 
 pub use crate::models::policy_tx_storage::{PolicyChangeSet, PolicyOwner, TxPhase};
@@ -254,9 +256,6 @@ impl PolicyTxCoordinator {
     }
 
     async fn ensure_base_dirs(&self) -> Result<(), PolicyTxError> {
-        tokio::fs::create_dir_all(self.base_dir.join("changesets"))
-            .await
-            .map_err(|err| PolicyTxError::PersistFailed(err.to_string()))?;
         tokio::fs::create_dir_all(self.base_dir.join("audit"))
             .await
             .map_err(|err| PolicyTxError::PersistFailed(err.to_string()))?;
@@ -264,14 +263,12 @@ impl PolicyTxCoordinator {
     }
 
     async fn persist_change_set(&self, change_set: &PolicyChangeSet) -> Result<(), PolicyTxError> {
-        self.ensure_base_dirs().await?;
         let path = self
             .base_dir
             .join("changesets")
             .join(format!("{}.json", change_set.tx_id));
-        let payload = serde_json::to_vec_pretty(change_set)
-            .map_err(|err| PolicyTxError::PersistFailed(err.to_string()))?;
-        tokio::fs::write(path, payload)
+        crate::services::storage::StorageService::global()
+            .convert_and_write_with_storage_format_to_path_and_notify("policy-tx", &path, change_set, true)
             .await
             .map_err(|err| PolicyTxError::PersistFailed(err.to_string()))
     }
@@ -282,7 +279,10 @@ impl PolicyTxCoordinator {
     ) -> Result<(), PolicyTxError> {
         self.ensure_base_dirs().await?;
         let path = self.base_dir.join("audit").join("policy_tx.jsonl");
-        let line = serde_json::to_string(change_set)
+        // APPROVED(json): append-only JSONL audit trail — format is explicitly JSON
+        // by design (not loadable-state format-pluggable); StorageService has no append path.
+            let line = JsonStorageFormat
+                .convert_to_storage(change_set)
             .map_err(|err| PolicyTxError::PersistFailed(err.to_string()))?
             + "\n";
 

@@ -817,6 +817,7 @@ fn firewall_config_from_wire(value: WireSysFirewall) -> FirewallConfig {
             .into_iter()
             .map(firewall_chain_from_wire)
             .collect(),
+        zones: Vec::new(),
     }
 }
 

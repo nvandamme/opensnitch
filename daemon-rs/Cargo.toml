@@ -9,23 +9,16 @@ members = [
     "crates/tools",
     "crates/transport-wire-core",
     "crates/transport-wire-grpc-client",
+    "crates/transport-wire-openwrt-ubus",
     "crates/storage-format-json",
     "crates/storage-format-core",
     "crates/storage-format-yaml",
-    "crates/storage-format-toml"
+    "crates/storage-format-toml",
+    "crates/storage-format-uci"
 ]
 default-members = [
-    "crates/ebpf-common",
-    "crates/kernel-caps",
-    "crates/proto",
     "crates/daemon",
-    "crates/tools",
-    "crates/transport-wire-core",
-    "crates/transport-wire-grpc-client",
-    "crates/storage-format-json",
-    "crates/storage-format-core",
-    "crates/storage-format-yaml",
-    "crates/storage-format-toml"
+    "crates/tools"
 ]
 
 [workspace.package]

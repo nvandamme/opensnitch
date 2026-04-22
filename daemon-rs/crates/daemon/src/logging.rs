@@ -252,11 +252,7 @@ impl LoggingState {
     }
 
     pub fn forward_task_notification(task_name: &str, data: &str, is_error: bool) {
-        let payload = serde_json::json!({
-            "Name": task_name,
-            "Data": data,
-        })
-        .to_string();
+        let payload = format!(r#"{{"Name":{:?},"Data":{:?}}}"#, task_name, data);
 
         if is_error {
             tracing::error!(

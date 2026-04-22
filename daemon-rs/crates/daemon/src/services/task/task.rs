@@ -1,10 +1,8 @@
-use std::sync::Arc;
-
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    RuntimeTaskHandles, TaskLifecycleEvent, TaskService, TaskStorageRuntime,
+    RuntimeTaskHandles, TaskLifecycleEvent, TaskRuntimePayload, TaskService, TaskStorageRuntime,
     runtime_lifecycle::TaskLifecycle,
 };
 use crate::{
@@ -84,7 +82,11 @@ impl TaskRuntime {
             return;
         }
 
-        if let Err(message) = super::validation::validate_task_start_input(&task.name, &task.data) {
+        let task_data_snapshot = TaskRuntimePayload::from_task_data_raw(&task.name, &task.data);
+
+        if let Err(message) =
+            super::validation::validate_task_start_input(&task.name, &task_data_snapshot)
+        {
             let _ = send_notification_reply(
                 &self.task_reply_tx,
                 task.notification_id,
@@ -96,7 +98,7 @@ impl TaskRuntime {
             return;
         }
 
-        let task_key = super::naming::build_task_key(&task.name, &task.data);
+        let task_key = super::naming::build_task_key(&task.name, &task_data_snapshot);
         if self.task_handles.contains_key(&task_key) {
             let _ = send_notification_reply(
                 &self.task_reply_tx,
@@ -110,7 +112,6 @@ impl TaskRuntime {
         }
 
         let token = CancellationToken::new();
-        let task_data_snapshot = Arc::new(task.data);
         let handle = self.task_service.spawn_task_monitor_snapshot(
             &task.name,
             task.notification_id,
@@ -134,7 +135,8 @@ impl TaskRuntime {
             return;
         }
 
-        let task_key = super::naming::build_task_key(&task.name, &task.data);
+        let task_data_snapshot = TaskRuntimePayload::from_task_data_raw(&task.name, &task.data);
+        let task_key = super::naming::build_task_key(&task.name, &task_data_snapshot);
         if let Some(runtime) = self.task_handles.remove(&task_key) {
             runtime.stop();
             self.emit_lifecycle_event(TaskLifecycleEvent::Removed {

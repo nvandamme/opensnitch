@@ -210,9 +210,9 @@ impl NotificationFlow {
     }
 
     pub(super) fn firewall_matches_owner_scope(firewall: &FirewallConfig, owner_uid: u32) -> bool {
-        // nftables chains require elevated access; only iptables-style flat rules
-        // can be owner-scoped transparently.
-        if !firewall.chains.is_empty() {
+        // nftables chains/zones require elevated access; only iptables-style
+        // flat rules can be owner-scoped transparently.
+        if !firewall.chains.is_empty() || !firewall.zones.is_empty() {
             return false;
         }
         if firewall.rules.is_empty() {

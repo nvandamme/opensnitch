@@ -1,0 +1,24 @@
+{
+  "Enabled": true,
+  "Version": 3,
+  "SystemRules": [
+    {
+      "Rule": {
+        "UUID": "pos-string",
+        "Enabled": true,
+        "Position": "13",
+        "Target": "ACCEPT"
+      },
+      "Chains": []
+    },
+    {
+      "Rule": {
+        "UUID": "pos-invalid",
+        "Enabled": true,
+        "Position": "not-a-number",
+        "Target": "DROP"
+      },
+      "Chains": []
+    }
+  ]
+}

@@ -1,4 +1,7 @@
+use std::path::Path;
+
 use crate::models::rule_storage::RuleFile;
+use crate::services::storage::StorageService;
 
 #[test]
 fn operator_list_null_deserializes_as_empty() {
@@ -31,7 +34,9 @@ fn operator_list_null_deserializes_as_empty() {
                 }
                 "#;
 
-    let parsed: RuleFile = serde_json::from_str(raw).expect("deserialize rule with null list");
+    let parsed: RuleFile =
+        StorageService::parse_with_storage_format_for_path(Path::new("rule.json"), raw)
+            .expect("deserialize rule with null list");
     assert_eq!(parsed.operator.list.len(), 1);
     assert!(parsed.operator.list[0].list.is_empty());
 }

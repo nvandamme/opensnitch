@@ -1,0 +1,21 @@
+package firewall
+
+config system_fw 'system_fw'
+	option enabled '1'
+	option version '1'
+	option is_synced '0'
+
+config chain 'filter_input'
+	option table 'filter'
+	option chain 'INPUT'
+	option enabled '1'
+	option target 'ACCEPT'
+
+config rule
+	option name 'Allow-DNS'
+	option table 'filter'
+	option chain 'INPUT'
+	option enabled '1'
+	option target 'queue'
+	option target_parameters 'num 0 bypass'
+	list expression_statement 'udp dport 53'

@@ -87,16 +87,33 @@ import grpc
 
 def _add_proto_path() -> None:
     repo_root = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(repo_root))
     proto_dir = repo_root / "ui" / "opensnitch" / "proto"
+    proto_pre3200_dir = proto_dir / "pre3200"
     sys.path.insert(0, str(proto_dir))
+    if proto_pre3200_dir.exists():
+        sys.path.insert(0, str(proto_pre3200_dir))
 
 
 _add_proto_path()
 
-import subscriptions_pb2  # type: ignore  # noqa: E402
-import subscriptions_pb2_grpc  # type: ignore  # noqa: E402
-import ui_pb2  # type: ignore  # noqa: E402
-import ui_pb2_grpc  # type: ignore  # noqa: E402
+try:
+    import ui_pb2  # type: ignore  # noqa: E402
+    import ui_pb2_grpc  # type: ignore  # noqa: E402
+except Exception:
+    from ui.opensnitch.proto.pre3200 import ui_pb2  # type: ignore  # noqa: E402
+    from ui.opensnitch.proto.pre3200 import ui_pb2_grpc  # type: ignore  # noqa: E402
+
+try:
+    import subscriptions_pb2  # type: ignore  # noqa: E402
+    import subscriptions_pb2_grpc  # type: ignore  # noqa: E402
+except Exception:
+    try:
+        from ui.opensnitch.proto import subscriptions_pb2  # type: ignore  # noqa: E402
+        from ui.opensnitch.proto import subscriptions_pb2_grpc  # type: ignore  # noqa: E402
+    except Exception:
+        subscriptions_pb2 = None
+        subscriptions_pb2_grpc = None
 
 # ── notification data payloads ────────────────────────────────────────────────
 
@@ -741,99 +758,101 @@ class MockUiService(ui_pb2_grpc.UIServicer):
         )
 
 
-class MockSubscriptionsService(subscriptions_pb2_grpc.SubscriptionsServicer):
-    """Mock handler for the Subscriptions gRPC service.
+if subscriptions_pb2 is not None and subscriptions_pb2_grpc is not None:
 
-    Registered on the same socket as MockUiService.  The daemon calls these
-    endpoints proactively using the same gRPC channel as the UI service:
-      - List  — called at handshake to sync subscription state with the UI.
-      - Apply/Delete/Refresh/Deploy — called after local subscription operations
-        to report results back to the UI.
-    Each handler prints a unique marker used by live-session orchestration.
-    """
+    class MockSubscriptionsService(subscriptions_pb2_grpc.SubscriptionsServicer):
+        """Mock handler for the Subscriptions gRPC service.
 
-    def _accepted_reply(
-        self, request: subscriptions_pb2.SubscriptionRequest
-    ) -> subscriptions_pb2.SubscriptionReply:
-        return subscriptions_pb2.SubscriptionReply(
-            operation=request.operation,
-            accepted=True,
-            message="mock-ui-ok",
-        )
-
-    def List(self, request, context):
-        print(
-            f"MOCK_UI SubscriptionsList targets={list(request.targets)}",
-            flush=True,
-        )
-        return self._accepted_reply(request)
-
-    def Apply(self, request, context):
-        print(
-            f"MOCK_UI SubscriptionsApply"
-            f" count={len(request.subscriptions)} targets={list(request.targets)}",
-            flush=True,
-        )
-        return self._accepted_reply(request)
-
-    def Delete(self, request, context):
-        print(
-            f"MOCK_UI SubscriptionsDelete targets={list(request.targets)}",
-            flush=True,
-        )
-        return self._accepted_reply(request)
-
-    def Refresh(self, request, context):
-        print(
-            f"MOCK_UI SubscriptionsRefresh"
-            f" targets={list(request.targets)} force={request.force}",
-            flush=True,
-        )
-        return self._accepted_reply(request)
-
-    def Deploy(self, request, context):
-        print(
-            f"MOCK_UI SubscriptionsDeploy"
-            f" count={len(request.subscriptions)} targets={list(request.targets)}",
-            flush=True,
-        )
-        return self._accepted_reply(request)
-
-    def Commands(self, request_iterator, context):
-        """Bidi stream: yields SubscriptionCommand items to the daemon and reads
-        SubscriptionCommandAck items back in a background thread.
-
-        Called by the daemon's SubscriptionCommandFlow on every connect attempt.
-        The daemon (gRPC client) sends acks after processing each command; the
-        daemon (gRPC server-streaming side) reads commands from this generator.
+        Registered on the same socket as MockUiService.  The daemon calls these
+        endpoints proactively using the same gRPC channel as the UI service:
+          - List  — called at handshake to sync subscription state with the UI.
+          - Apply/Delete/Refresh/Deploy — called after local subscription operations
+            to report results back to the UI.
+        Each handler prints a unique marker used by live-session orchestration.
         """
-        cmd_id = 0
 
-        def _cmd(action: int, data: str = "") -> subscriptions_pb2.SubscriptionCommand:
-            nonlocal cmd_id
-            cmd_id += 1
-            print(f"MOCK_UI SubscriptionsCommandSend id={cmd_id} action={action}", flush=True)
-            return subscriptions_pb2.SubscriptionCommand(id=cmd_id, action=action, data=data)
+        def _accepted_reply(
+            self, request: subscriptions_pb2.SubscriptionRequest
+        ) -> subscriptions_pb2.SubscriptionReply:
+            return subscriptions_pb2.SubscriptionReply(
+                operation=request.operation,
+                accepted=True,
+                message="mock-ui-ok",
+            )
 
-        def _drain_acks() -> None:
-            try:
-                for ack in request_iterator:
-                    print(
-                        f"MOCK_UI SubscriptionsCommandAck"
-                        f" id={ack.id} action={ack.action}"
-                        f" accepted={ack.accepted} msg={ack.message!r}",
-                        flush=True,
-                    )
-            except Exception as exc:
-                print(f"MOCK_UI SubscriptionsCommandAckError {exc}", flush=True)
+        def List(self, request, context):
+            print(
+                f"MOCK_UI SubscriptionsList targets={list(request.targets)}",
+                flush=True,
+            )
+            return self._accepted_reply(request)
 
-        threading.Thread(target=_drain_acks, daemon=True).start()
+        def Apply(self, request, context):
+            print(
+                f"MOCK_UI SubscriptionsApply"
+                f" count={len(request.subscriptions)} targets={list(request.targets)}",
+                flush=True,
+            )
+            return self._accepted_reply(request)
 
-        yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_LIST)
-        yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_APPLY,   _SUBSCRIPTION_APPLY_DATA)
-        yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_DELETE,  _SUBSCRIPTION_DELETE_DATA)
-        yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_REFRESH, _SUBSCRIPTION_REFRESH_DATA)
-        yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_DEPLOY)
+        def Delete(self, request, context):
+            print(
+                f"MOCK_UI SubscriptionsDelete targets={list(request.targets)}",
+                flush=True,
+            )
+            return self._accepted_reply(request)
+
+        def Refresh(self, request, context):
+            print(
+                f"MOCK_UI SubscriptionsRefresh"
+                f" targets={list(request.targets)} force={request.force}",
+                flush=True,
+            )
+            return self._accepted_reply(request)
+
+        def Deploy(self, request, context):
+            print(
+                f"MOCK_UI SubscriptionsDeploy"
+                f" count={len(request.subscriptions)} targets={list(request.targets)}",
+                flush=True,
+            )
+            return self._accepted_reply(request)
+
+        def Commands(self, request_iterator, context):
+            """Bidi stream: yields SubscriptionCommand items to the daemon and reads
+            SubscriptionCommandAck items back in a background thread.
+
+            Called by the daemon's SubscriptionCommandFlow on every connect attempt.
+            The daemon (gRPC client) sends acks after processing each command; the
+            daemon (gRPC server-streaming side) reads commands from this generator.
+            """
+            cmd_id = 0
+
+            def _cmd(action: int, data: str = "") -> subscriptions_pb2.SubscriptionCommand:
+                nonlocal cmd_id
+                cmd_id += 1
+                print(f"MOCK_UI SubscriptionsCommandSend id={cmd_id} action={action}", flush=True)
+                return subscriptions_pb2.SubscriptionCommand(id=cmd_id, action=action, data=data)
+
+            def _drain_acks() -> None:
+                try:
+                    for ack in request_iterator:
+                        print(
+                            f"MOCK_UI SubscriptionsCommandAck"
+                            f" id={ack.id} action={ack.action}"
+                            f" accepted={ack.accepted} msg={ack.message!r}",
+                            flush=True,
+                        )
+                except Exception as exc:
+                    print(f"MOCK_UI SubscriptionsCommandAckError {exc}", flush=True)
+
+            threading.Thread(target=_drain_acks, daemon=True).start()
+
+            yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_LIST)
+            yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_APPLY, _SUBSCRIPTION_APPLY_DATA)
+            yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_DELETE, _SUBSCRIPTION_DELETE_DATA)
+            yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_REFRESH, _SUBSCRIPTION_REFRESH_DATA)
+            yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_DEPLOY)
 
 
 def main() -> int:
@@ -867,6 +886,16 @@ def main() -> int:
     )
 
     args = parser.parse_args()
+    effective_subscriptions = args.subscriptions
+    if effective_subscriptions and (
+        subscriptions_pb2 is None or subscriptions_pb2_grpc is None
+    ):
+        print(
+            "MOCK_UI subscriptions requested but subscriptions proto modules are unavailable; continuing without subscriptions service",
+            flush=True,
+        )
+        effective_subscriptions = False
+
     sock_path = Path(args.socket)
     endpoint = f"unix://{sock_path}"
 
@@ -884,8 +913,8 @@ def main() -> int:
         sock_path.unlink()
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
-    ui_pb2_grpc.add_UIServicer_to_server(MockUiService(enable_subscriptions=args.subscriptions), server)
-    if args.subscriptions:
+    ui_pb2_grpc.add_UIServicer_to_server(MockUiService(enable_subscriptions=effective_subscriptions), server)
+    if effective_subscriptions:
         subscriptions_pb2_grpc.add_SubscriptionsServicer_to_server(MockSubscriptionsService(), server)
     bound = server.add_insecure_port(endpoint)
     if bound == 0:

@@ -3,34 +3,12 @@ use crate::models::{
     connection_state::{ConnectionAttempt, TransportProtocol},
 };
 use nix::libc;
-use serde_json::Value;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::ConnectionService;
-use crate::utils::{hex_parse::parse_hex_token, json_value::find_numeric_for_keys};
+use crate::utils::hex_parse::parse_hex_token;
 
 impl ConnectionService {
-    pub(crate) fn extract_ebpf_map_hit_pid_uid(entry: &Value) -> Option<(u32, u32)> {
-        let value = entry.get("value").unwrap_or(entry);
-        let pid = Self::find_numeric(value, &["pid", "tgid"])? as u32;
-
-        let uid = Self::find_numeric(value, &["uid"])
-            .map(|v| v as u32)
-            .or_else(|| {
-                Self::find_numeric(value, &["uid_gid"]).map(|v| {
-                    let lo = v & 0xFFFF_FFFF;
-                    lo as u32
-                })
-            })
-            .unwrap_or(0);
-
-        Some((pid, uid))
-    }
-
-    pub(crate) fn find_numeric(node: &Value, wanted_keys: &[&str]) -> Option<u64> {
-        find_numeric_for_keys(node, wanted_keys)
-    }
-
     pub(super) fn parse_proc_addr_port(value: &str) -> Option<(IpAddr, u16)> {
         let mut parts = value.split(':');
         let addr_hex = parts.next()?;

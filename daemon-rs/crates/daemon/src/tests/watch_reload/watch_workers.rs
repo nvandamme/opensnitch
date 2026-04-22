@@ -4,6 +4,8 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use storage_format_core::StorageFormatCodec;
+use storage_format_json::JsonStorageFormat;
 
 use crate::{
     config::{Config, DefaultAction, ProcMonitorMethod},
@@ -95,7 +97,9 @@ async fn write_rule_file(rules_dir: &Path, name: &str, action: &str) {
     let rule = make_test_rule(name, action);
     tokio::fs::write(
         rules_dir.join(format!("{name}.json")),
-        serde_json::to_string(&rule).expect("serialize test rule"),
+        JsonStorageFormat
+            .convert_to_storage(&rule)
+            .expect("serialize test rule"),
     )
     .await
     .expect("write test rule");
@@ -106,7 +110,9 @@ fn write_rule_file_sync(rules_dir: &Path, name: &str, action: &str) {
     let rule = make_test_rule(name, action);
     std::fs::write(
         rules_dir.join(format!("{name}.json")),
-        serde_json::to_string(&rule).expect("serialize test rule"),
+        JsonStorageFormat
+            .convert_to_storage(&rule)
+            .expect("serialize test rule"),
     )
     .expect("write test rule (sync)");
 }
@@ -156,7 +162,9 @@ async fn write_lists_rule_file(rules_dir: &Path, name: &str, operand: &str, list
 
     tokio::fs::write(
         rules_dir.join(format!("{name}.json")),
-        serde_json::to_string(&rule).expect("serialize lists test rule"),
+        JsonStorageFormat
+            .convert_to_storage(&rule)
+            .expect("serialize lists test rule"),
     )
     .await
     .expect("write lists test rule");
@@ -202,7 +210,9 @@ async fn write_nested_lists_rule_file(rules_dir: &Path, name: &str, list_path: &
 
     tokio::fs::write(
         rules_dir.join(format!("{name}.json")),
-        serde_json::to_string(&rule).expect("serialize nested lists test rule"),
+        JsonStorageFormat
+            .convert_to_storage(&rule)
+            .expect("serialize nested lists test rule"),
     )
     .await
     .expect("write nested lists test rule");

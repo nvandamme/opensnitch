@@ -133,16 +133,6 @@ impl From<&RuleRecord> for RuleFile {
 
 impl From<RuleFileOperator> for RuleOperator {
     fn from(operator: RuleFileOperator) -> Self {
-        let mut operator = operator;
-        if case_folded(&operator.r#type) == "list"
-            && operator.list.is_empty()
-            && !operator.data.trim().is_empty()
-            && let Ok(decoded) = serde_json::from_str::<Vec<RuleFileOperator>>(&operator.data)
-        {
-            operator.list = decoded;
-            operator.data.clear();
-        }
-
         Self {
             type_name: operator.r#type,
             operand: operator.operand,

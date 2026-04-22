@@ -1,17 +1,13 @@
-use serde_json::Value;
-
 use crate::models::{task_wire::LegacyTaskResultPayload, ui_alert::UiAlert};
 use crate::services::client::{AlertBuffer, enqueue_alert, error_alert, info_alert};
 use crate::utils::notification_reply::{is_ok_reply_code, send_notification_reply};
 
 pub(crate) const DOWNLOADER_SUCCESS_MSG: &str = "[blocklists] lists updated";
 
-pub(crate) fn build_legacy_downloader_task_result(data: &str) -> Value {
-    serde_json::to_value(LegacyTaskResultPayload::new(data)).unwrap_or_else(|_| {
-        serde_json::json!({
-            "Type": LegacyTaskResultPayload::TYPE_ID,
-            "Data": data,
-        })
+pub(crate) fn build_legacy_downloader_task_result(data: &str) -> String {
+    transport_wire_core::encode_json_notification_payload(&LegacyTaskResultPayload::new(data))
+        .unwrap_or_else(|_| {
+        format!(r#"{{"Type":{},"Data":{:?}}}"#, LegacyTaskResultPayload::TYPE_ID, data)
     })
 }
 

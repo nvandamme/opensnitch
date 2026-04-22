@@ -10,6 +10,7 @@ use tracing::warn;
 
 use crate::models::effective_tunables::RuntimeTunables;
 use crate::models::runtime_tunables::RawRuntimeTunables;
+use crate::services::storage::StorageService;
 use crate::utils::systemd_notify::{NotifyState, notify};
 
 impl RuntimeTunables {
@@ -304,6 +305,6 @@ impl RuntimeTunables {
 
     pub(super) fn load_raw_tunables(path: &Path) -> anyhow::Result<RawRuntimeTunables> {
         let raw_json = fs::read_to_string(path)?;
-        Ok(serde_json::from_str::<RawRuntimeTunables>(&raw_json)?)
+        StorageService::parse_with_storage_format_for_path::<RawRuntimeTunables>(path, &raw_json)
     }
 }

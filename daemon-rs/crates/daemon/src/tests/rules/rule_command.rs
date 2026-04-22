@@ -27,7 +27,7 @@ async fn enable_rules_persists_enabled_rules_and_replies_ok() {
     let reply = task_reply_rx.recv().await.expect("reply");
     assert_eq!(reply.id, 7);
     assert_eq!(reply.code, WireNotificationReplyCode::Ok as i32);
-    assert_eq!(reply.data, serde_json::json!({"status": "ok"}).to_string());
+    assert_eq!(reply.data, transport_wire_core::status_payload("ok"));
 
     let rules_list = rules.list_wire().await;
     assert_eq!(rules_list.len(), 1);

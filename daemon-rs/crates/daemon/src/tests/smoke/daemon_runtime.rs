@@ -271,7 +271,7 @@ async fn runtime_task_commands_ignore_unsupported_names_without_immediate_reply(
         .send(ClientCommand::StartTask(TaskNotification {
             notification_id: 1,
             name: "unknown-task".to_string(),
-            data: serde_json::json!({}),
+            data: "{}".to_string(),
         }))
         .await
         .expect("send start task");
@@ -287,7 +287,7 @@ async fn runtime_task_commands_ignore_unsupported_names_without_immediate_reply(
         .send(ClientCommand::StopTask(TaskNotification {
             notification_id: 2,
             name: "unknown-task".to_string(),
-            data: serde_json::json!({}),
+            data: "{}".to_string(),
         }))
         .await
         .expect("send stop task");
@@ -329,10 +329,7 @@ async fn runtime_task_start_duplicate_returns_error_without_initial_started_repl
         .send(ClientCommand::StartTask(TaskNotification {
             notification_id: 7,
             name: "pid-monitor".to_string(),
-            data: serde_json::json!({
-                "pid": pid,
-                "interval": "5s",
-            }),
+            data: format!(r#"{{"pid":"{}","interval":"5s"}}"#, pid),
         }))
         .await
         .expect("send initial start task");
@@ -348,10 +345,10 @@ async fn runtime_task_start_duplicate_returns_error_without_initial_started_repl
         .send(ClientCommand::StartTask(TaskNotification {
             notification_id: 8,
             name: "pid-monitor".to_string(),
-            data: serde_json::json!({
-                "pid": std::process::id().to_string(),
-                "interval": "5s",
-            }),
+            data: format!(
+                r#"{{"pid":"{}","interval":"5s"}}"#,
+                std::process::id()
+            ),
         }))
         .await
         .expect("send duplicate start task");

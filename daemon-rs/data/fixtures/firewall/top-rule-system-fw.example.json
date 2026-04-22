@@ -1,0 +1,21 @@
+{
+  "Enabled": true,
+  "Version": 2,
+  "SystemRules": [
+    {
+      "Rule": {
+        "Table": "filter",
+        "Chain": "OUTPUT",
+        "UUID": "rule-only-uuid",
+        "Enabled": true,
+        "Position": 9,
+        "Description": "top-level-rule",
+        "Parameters": "-p udp --dport 53",
+        "Expressions": [],
+        "Target": "ACCEPT",
+        "TargetParameters": ""
+      },
+      "Chains": []
+    }
+  ]
+}

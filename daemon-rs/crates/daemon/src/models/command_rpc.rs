@@ -3,6 +3,7 @@ use serde_json::Value;
 
 use crate::models::rule_record::RuleRecord;
 
+
 #[derive(Debug, Deserialize)]
 pub struct IncomingTaskNotification {
     #[serde(alias = "Name", alias = "NAME")]
@@ -15,7 +16,9 @@ pub struct IncomingTaskNotification {
 pub struct TaskNotification {
     pub notification_id: u64,
     pub name: String,
-    pub data: Value,
+    /// Raw JSON string decoded from the wire notification payload.
+    /// Opaque bag-of-bytes: do not parse inside this struct or the channel layer.
+    pub data: String,
 }
 
 /// Serde input type for subscription notification `data` JSON payloads.

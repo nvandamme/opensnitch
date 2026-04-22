@@ -1,6 +1,6 @@
 use transport_wire_core::{
     WireSubscription, WireSubscriptionAction, WireSubscriptionCommand, WireSubscriptionCommandAck,
-    WireSubscriptionRequest,
+    WireSubscriptionRequest, decode_json_notification_payload,
 };
 
 use crate::{
@@ -138,8 +138,8 @@ struct ParsedData {
 }
 
 fn parse_command_data(raw_data: &str) -> ParsedData {
-    let data =
-        serde_json::from_str::<IncomingSubscriptionNotification>(raw_data).unwrap_or_default();
+    let data = decode_json_notification_payload::<IncomingSubscriptionNotification>(raw_data)
+        .unwrap_or_default();
     ParsedData {
         subscriptions: data
             .subscriptions

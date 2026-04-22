@@ -7,6 +7,7 @@ This document defines maintenance rules for tracker, compatibility, and design d
 - [daemon-rs/TODO.md](TODO.md): active tracker only (status snapshot, active backlog, concise dated entries).
 - [daemon-rs/COMPATIBILITY.md](COMPATIBILITY.md): full parity/compatibility reference (all large tables and rationale).
 - [daemon-rs/DESIGN_RULES.md](DESIGN_RULES.md): governance rules for how tracker and compatibility docs are maintained.
+- [daemon-rs/OPENWRT.md](OPENWRT.md): OpenWrt-specific platform guidance (build/SDK assumptions, packaging model, ubus/uhttpd/rpcd integration constraints, and adapter ownership expectations).
 - [daemon-rs/CHANGELOG.md](CHANGELOG.md): archived version-by-version notes.
 - [daemon-rs/PERF.md](PERF.md): performance/stress baselines and perf history.
 
@@ -138,11 +139,33 @@ module surfaces are bounded.
 - `storage-format-core` is the unified storage codec core crate with mandatory internal separation:
 	- `codec` submodule: trait contracts only (`StorageFormatCodec` and closely-related generic codec contract surfaces).
 	- Core codec contracts stay format-agnostic; JSON/YAML/TOML/UCI-specific parsing details belong in dedicated `storage-format-*` adapter crates, not in daemon services or the core crate root.
+- OpenWrt storage split rule:
+	- `storage-format-uci` owns UCI file-format parse/dump for OpenWrt config files and daemon storables except firewall.
+	- OpenWrt-specific semantic mapping belongs in adapter/mapping layers above file syntax, not in a separate file-format crate.
+	- Firewall configuration must remain aligned with OpenWrt firewall ownership; firewall is not treated as a regular daemon-owned UCI storable.
+	- Firewall runtime introspection truth is kernel netfilter state via netlink (netlink-canonical view), not CLI text format ownership.
+	- Persistence ownership follows target authority/capability, not one global backend assumption:
+		- generic Linux: nftables-first persistence path,
+		- compatibility fallback: iptables persistence path,
+		- OpenWrt: UCI-owned persistence (`/etc/config/firewall`) through adapter command plans.
+	- Firewall persistence must be durable/file-backed in the owner format, not runtime-only kernel mutation:
+		- nftables persistence: treat `/etc/nftables.conf` as the canonical distro loader entrypoint; managed include files under conventions such as `/etc/nftables/*.nft`, `/etc/nftables.d/*.nft`, or `/etc/nftables/rules.d/*.nft` are valid only when that root config already includes them (or the adapter explicitly provisions/validates the include contract) rather than assuming such directories are loader-active by default,
+		- iptables persistence: use distro-native persistent restore files/services (platform-specific path contract; adapter must detect and target the active authority),
+		- OpenWrt persistence: prefer UCI CLI/ubus command plans (`set`/`add`/`add_list` + `commit`/`apply`) as the mutator path; persistent authority remains UCI/firewall4-owned `/etc/config/firewall` so LuCI/ubus/rpcd observe the same state.
+	- Distinguish persistence authority from runtime observation: distro/platform owners (for example firewalld or OpenWrt UCI) remain the persistence authority, while live runtime drift/introspection uses netlink-canonical state.
 - `transport-wire-*` and `storage-format-*` adapter crates must keep a thin crate root:
 	- `src/lib.rs` is a linker/re-export surface only.
 	- Protocol/format-specific implementation lives in dedicated sibling modules such as `codec.rs`, `rpc.rs`, `transport.rs`, `tls.rs`, `wire_protos.rs`, or `error.rs`.
 	- When an adapter exposes both public API and transport/format-specific internals, keep public surface re-exports stable in `lib.rs` and move concrete behavior into sibling modules rather than expanding the crate root.
 	- Adapter test trees must enter through `src/tests/mod.rs` so the crate root follows the same linker-only rule as daemon `mod.rs` files.
+	- OpenWrt runtime adapters follow the same ownership boundary: ubus runtime/wire behavior belongs in `transport-wire-openwrt-ubus`; LuCI/uhttpd-mod-ubus behavior belongs in `transport-wire-openwrt-luci`.
+	- OpenWrt ubus event posting is transport-wire-owned behavior (session/topic/retry/payload mapping) and must not be implemented as daemon service/flow protocol logic.
+	- OpenWrt ubus integration is explicitly bidirectional at the adapter boundary: outbound live-event publish/subscribe and inbound RPC method handling for service-scoped command paths (including console/script consumers).
+	- Treat ubus as both an object/method RPC bus and an event bus; adapter contracts should map these primitives explicitly (method invocation analogous to `ubus call`, event watch/publish analogous to `ubus listen`/`ubus send`, and object notifications analogous to `ubus subscribe`).
+	- OpenWrt ubus transport specifics (`ubusd`, Unix socket connection, TLV message framing, `libubus` client/runtime mechanics) are adapter internals and must not leak into daemon service or flow APIs.
+	- OpenWrt service exposure should align to namespace/path/method semantics from ubus registration; daemon policy layers should not invent parallel transport-specific command models for the same capability.
+	- OpenWrt ubus object routing must support dynamic object paths (for example `network.interface.<name>` from netifd); do not assume all ubus object names are static at compile time.
+	- Adapter code that relies on `file.*` ubus methods must treat `rpcd-mod-file` as an explicit capability/dependency and fail with a clear feature-missing error when unavailable.
 
 #### Transport/Wire Decoupling Rule
 
@@ -288,8 +311,30 @@ module surfaces are bounded.
 - External API stability can still be anchored on protobuf or JSON file compatibility, but internal refactors must preserve domain-model ownership and avoid bleeding wire-only fields into core runtime structs.
 - **OpenWrt target notes:** UCI config files use a flat INI-like text format; ubus uses a JSON-over-Unix-socket RPC protocol.  When these adapters are introduced:
   - UCI ingress must parse into `RawUci*` wire types then map to domain models via an explicit conversion function, analogous to `rule_record_from_proto` for protobuf.
+	- UCI surfaces are split by boundary and must stay split:
+	- storage/file syntax (`config`/`option`/`list`, including export-style static snapshots) is owned by `storage-format-uci`,
+	- imperative UCI command/RPC operations (`set`/`add`/`delete`/`commit`/`apply`/`rollback`) belong to transport/runtime adapter boundaries (CLI/ubus command ingress), not storage codecs.
+	- Boundary classification rule: if an integration surface is fundamentally an imperative runtime surface (CLI subcommands, IPC method calls, RPC requests/responses, event-bus operations, interactive control channels), it stays transport/runtime-adapter owned even when its arguments or responses mirror UCI/file syntax or JSON storage semantics.
+	- UCI CLI runtime output is text-derived from UCI file semantics (for example `show`/`export`), while ubus runtime output is JSON/JSON-RPC; both are runtime adapter concerns, not file-format codec concerns.
+	- Runtime parser rule: `uci` CLI output parsing must treat input as UCI-derived text semantics, not as JSON; only ubus responses are parsed as JSON/JSON-RPC payloads.
+	- Firewall-specific OpenWrt UCI semantics are authority-owned by the native firewall stack; daemon code must not model firewall UCI as a regular daemon-owned storable.
+	- For OpenWrt firewall4 targets, persistence authority is UCI/firewall4 apply semantics. Direct nft/netlink/syscall mutations are runtime-only and must not be treated as persistent configuration writes.
+	- Runtime direct-kernel paths (netlink/syscalls) are allowed for observation, drift/health detection, and controlled fallback only; persistent firewall intent must flow through adapter-owned UCI-compatible command paths.
   - ubus RPC handlers must parse their JSON arguments into `RawUbus*` types at the adapter boundary; the same domain policy functions (owner scope, authorization, classification) apply unchanged.
+	- ubus adapter surfaces must expose both event channels (subscribe/watch live events) and RPC method channels (invoke service command paths) through adapter contracts, not direct daemon protocol wiring.
+	- ubus adapter compatibility should include script/console-oriented behavior parity for the core interaction model (`list`/`call`/`listen`/`send`/`subscribe`) through stable adapter-facing method and event contracts.
+	- Web-facing OpenWrt integration must treat `uhttpd-mod-ubus` `/ubus` JSON-RPC 2.0 as the compatibility contract; no secondary REST or WebSocket layers exist in the standard OpenWrt IPC/RPC stack.
+	- Authentication/authorization for web-facing ubus access must align with `rpcd` session login/access semantics and ACL role files under `/usr/share/rpcd/acl.d/*.json`; adapter code may translate this model, but daemon policy must not hard-code webserver-specific ACL behavior.
+	- ACL role identity is defined by top-level keys inside ACL JSON content, not by ACL filenames; adapter behavior and tests must not couple authorization semantics to filename conventions.
+	- Preserve authorization error semantics from ubus responses: status code `6` (`UBUS_STATUS_PERMISSION_DENIED`) must be mapped as permission denial, not collapsed into generic transport/runtime failure.
+	- Session token `00000000000000000000000000000000` is a null-session token with unauthenticated rights only (typically `session.login`); adapters must not treat it as an authenticated control session.
+	- LuCI transport adapters must map request/response/event payloads through adapter-local wire contracts (`RawLuci*`/`IncomingLuci*`) before entering daemon policy paths.
   - No UCI or ubus format assumptions must leak into `services/`, `flows/`, or `models/` domain types.
+	- No LuCI/uhttpd protocol assumptions may leak into `services/`, `flows/`, or `models/`; those details are adapter-owned.
+	- OpenWrt init/procd integration code must be build-host safe: guard target-only side effects using `IPKG_INSTROOT` checks because init scripts can run during package/image build-time enable/disable actions.
+	- Fixture-class split is mandatory for firewall coverage:
+	- UCI syntax fixtures (`data/*.uci`, `data/rules/*.uci`) are storage-format tests only,
+	- firewall runtime semantics fixtures must live under `data/fixtures/firewall/*.json` and be consumed by firewall runtime/adapter tests.
 
 
 ### 5. Refactor Safety Rule
@@ -427,12 +472,12 @@ above and take precedence within their domain.
 	`RuleService` cache rebuilds (`RuleMatchCaches::network_aliases`), not during per-verdict matching.
 	Rebuild triggers must include explicit firewall reload commands, firewall drift recovery, and nftables netlink
 	rule-change notifications so the rule engine sees updated alias inputs whenever firewall state changes.
-- **Future `FirewallZone` concept** (firewalld / OpenWrt / VyOS style): when zone-based firewall support is
-  added, introduce a `FirewallZone` domain type in `models/firewall_config.rs` as a separate top-level field
-  on `FirewallConfig` (do not repurpose `FirewallChain` or add zone-semantics fields to existing types).
-  Zone-aware adapters (firewalld D-Bus, OpenWrt ubus, VyOS NETCONF) belong in `platform/adapters/` and must
-  map their zone concepts into and out of `FirewallZone` at their own adapter boundary without touching the
-  iptables or nftables flat-rule path.
+- **`FirewallZone` domain rule** (firewalld / OpenWrt / VyOS style): zone support must use the dedicated
+	`FirewallConfig.zones: Vec<FirewallZone>` top-level field in `models/firewall_config.rs`.
+	Do not repurpose `FirewallChain` with zone-only semantics and do not inject zone metadata into flat rules.
+	Zone-aware adapters (firewalld D-Bus, OpenWrt ubus, VyOS NETCONF, nftables/iptables adapter planners)
+	must map their zone concepts into/out of `FirewallZone` at their own boundary while preserving existing
+	flat chain/rule paths for non-zone payloads.
 
 
 ### 8. UI, Client Transport And Authorization Domain
@@ -451,6 +496,8 @@ above and take precedence within their domain.
 - Use `client` terminology for client session, authorization, and privileged-mutation behavior in code, logs, comments, and docs.
 - Do not introduce legacy privileged-transport wording for client authorization/session concerns; treat prior terminology as deprecated vocabulary in this repository.
 - Naming guidance: prefer `client_*` or `*_client` symbols over `control_*` when the behavior is specifically about client-originated command authorization.
+- Lingo violation: do not use metaphor-based infrastructure wording such as `sidecar`, `control plane`, or other layer/car analogies in code, docs, comments, commit messages, or review discussion.
+- Required replacement policy: use concrete technical terms that describe the actual mechanism, for example `metadata file`, `metadata map`, `client`, `transport`, `wire`, `runtime`, `storage`, or `rule-section mapping`.
 
 
 #### Privileged Control Boundary Rule
@@ -646,7 +693,7 @@ service Auth {
 
 #### Verdict Fallback Interaction Rule
 
-- Control-plane authorization hardening must preserve the daemon's selected packet-verdict fallback strategy; auth denial is not allowed to silently create a third, implicit fallback mode.
+- Privileged-command authorization hardening must preserve the daemon's selected packet-verdict fallback strategy; auth denial is not allowed to silently create a third, implicit fallback mode.
 - Required alignment with runtime verdict policy:
 	- when `nfqueue_overload_policy = fail-open`, denial of privileged client mutations must remain scoped to the mutation itself; packet verdict handling must continue to use existing UI-miss / default-action fallback behavior and must not become fail-closed just because a privileged command was rejected,
 	- when `nfqueue_overload_policy = drop-fast`, auth-related slow paths must not introduce blocking/retry behavior in the hot packet path; rejected or unavailable privileged control must preserve the existing fail-closed/strict-accounting posture for verdict misses,
@@ -905,8 +952,8 @@ Before every commit in `daemon-rs/`, verify all of the following:
 
 1. **`cargo fmt`** — run `cargo fmt` in `daemon-rs/` to normalize formatting. Python or
    other text-based patching tools produce non-canonical indentation and import ordering.
-   Commit the fmt diff in the same commit or as a separate formatting commit immediately
-   before the feature commit.
+	Pure formatting-only (`cargo fmt`) changes must be folded/amended into the related
+	functional commit; do not keep standalone formatting-only commits.
 
 2. **`cargo build` with zero warnings** — the build must be warning-free (`cargo build 2>&1 |
    grep '^warning'`). Unused imports, dead code, and type annotation gaps introduced by
@@ -949,8 +996,15 @@ Before every commit in `daemon-rs/`, verify all of the following:
 6. **Tools CLI orchestration harness regression** — run the tools-crate orchestration smoke
 	harness exposed via CLI pathways on every commit:
 	- `cargo test -p tools --test orchestration_smoke -- --nocapture`
+	- **Working directory requirement for direct Cargo calls**: run direct Cargo commands from
+	  `opensnitch/daemon-rs/` (or pass `--manifest-path daemon-rs/Cargo.toml` explicitly when
+	  invoking from repo root). Running direct Cargo commands from repo root without an explicit
+	  manifest path is invalid (`Cargo.toml` not found).
 	- Repo-level equivalents for most tools test/harness flows are preferred when available:
 	  `cargo ost <command>` (from repo root) or root Makefile wrappers (`make <target>`).
+	- **Working directory requirement for invocation handlers**: run `cargo ost` and root Make
+	  wrappers from repo root `opensnitch/`. Running `cargo ost` from `opensnitch/daemon-rs/`
+	  is invalid because `cargo-ost` resolves `daemon-rs/Cargo.toml` relative to repo root.
 	  Keep the direct `cargo test -p tools --test orchestration_smoke -- --nocapture`
 	  invocation for this specific smoke test.
 	- This validates that commit-time changes did not regress test orchestration behavior that
@@ -960,7 +1014,13 @@ Before every commit in `daemon-rs/`, verify all of the following:
    regressions between orchestration, live session control, and perf pipelines:
 	- `cargo ost run-daemon-mock-ui-live-session` or `make daemon-rs-mock-ui-session`
 	- `cargo ost update-run-perf` or `make update-run-perf`
+	- `run-daemon-mock-ui-live-session` timeout policy: daemon compile/startup latency is governed
+	  by `OPENSNITCH_MOCK_UI_DAEMON_START_TIMEOUT_SECS` (default `180`) and must not consume
+	  handshake/session marker timeout budgets.
+	- Path requirement: these launcher commands are repo-root commands (`opensnitch/`).
 	- Direct crate-level fallback remains valid:
 	  - `cargo run --release -p tools -- run-daemon-mock-ui-live-session`
 	  - `cargo run --release -p tools -- update-run-perf`
+	- Path requirement for direct fallback: run from `opensnitch/daemon-rs/` (or pass explicit
+	  `--manifest-path daemon-rs/Cargo.toml` when launched from repo root).
    - Treat failures in either command as release-blocking until triaged or fixed.

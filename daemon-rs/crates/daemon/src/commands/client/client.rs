@@ -1,4 +1,3 @@
-use serde_json::Value;
 use tokio::sync::mpsc;
 use transport_wire_core::{WireNotificationReply, WireNotificationReplyCode};
 
@@ -9,7 +8,7 @@ use crate::{
         firewall_config::FirewallConfig,
         rule_record::RuleRecord,
     },
-    utils::{channel_send::send_with_backpressure, json_value::object_get_case_insensitive},
+    utils::channel_send::send_with_backpressure,
 };
 
 const CLIENT_COMMAND_NOTIFICATION_LABEL: &str = "client command notification";
@@ -176,12 +175,12 @@ pub(crate) fn parse_task_notification_data(
     notification_id: u64,
     raw_data: &str,
 ) -> Result<TaskNotification, String> {
-    let task = serde_json::from_str::<IncomingTaskNotification>(raw_data)
+    let task = transport_wire_core::decode_json_notification_payload::<IncomingTaskNotification>(raw_data)
         .map_err(|err| err.to_string())?;
     Ok(TaskNotification {
         notification_id,
         name: task.name,
-        data: task.data,
+        data: task.data.to_string(),
     })
 }
 
@@ -195,14 +194,15 @@ pub(crate) fn parse_log_level_data(raw_data: &str) -> Option<i32> {
         return Some(value);
     }
 
-    let parsed = serde_json::from_str::<Value>(raw).ok()?;
+    use crate::utils::json_value::object_get_case_insensitive;
+    let parsed = transport_wire_core::decode_json_notification_payload::<serde_json::Value>(raw).ok()?;
     match parsed {
-        Value::Number(n) => n.as_i64().and_then(|v| i32::try_from(v).ok()),
-        Value::Object(obj) => {
+        serde_json::Value::Number(n) => n.as_i64().and_then(|v| i32::try_from(v).ok()),
+        serde_json::Value::Object(obj) => {
             let candidate = object_get_case_insensitive(&obj, &["log_level", "level"])?;
             match candidate {
-                Value::Number(n) => n.as_i64().and_then(|v| i32::try_from(v).ok()),
-                Value::String(s) => s.parse::<i32>().ok(),
+                serde_json::Value::Number(n) => n.as_i64().and_then(|v| i32::try_from(v).ok()),
+                serde_json::Value::String(s) => s.parse::<i32>().ok(),
                 _ => None,
             }
         }

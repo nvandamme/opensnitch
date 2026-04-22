@@ -101,7 +101,7 @@ fn apply_tools_env_defaults() -> Result<(), DynError> {
         .ok_or("tools dir missing daemon-rs parent")?;
 
     // Keep cargo-run behavior aligned with Makefile defaults.
-    let default_target = daemon_rs_dir.join("target-kernel");
+    let default_target = daemon_rs_dir.join("target-runtime");
     if env::var_os("CARGO_TARGET_DIR").is_none() {
         unsafe {
             env::set_var("CARGO_TARGET_DIR", &default_target);

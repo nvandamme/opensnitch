@@ -1,0 +1,6 @@
+firewall.@rule[0]=rule
+firewall.@rule[0].name='Allow-DNS'
+firewall.@rule[0].enabled='1'
+firewall.@rule[0].target='ACCEPT'
+firewall.@rule[0].proto='udp'
+firewall.@rule[0].dest_port='53'

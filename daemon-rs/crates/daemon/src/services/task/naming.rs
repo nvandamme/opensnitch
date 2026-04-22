@@ -1,7 +1,6 @@
-use serde_json::Value;
-
-use crate::utils::json_value;
 use crate::utils::name_parsing::{AliasRule, canonicalize_alias, suffix_after_any_prefix};
+
+use super::TaskRuntimePayload;
 
 pub(crate) const TASK_PID_MONITOR: &str = "pid-monitor";
 pub(crate) const TASK_NODE_MONITOR: &str = "node-monitor";
@@ -21,17 +20,16 @@ const INTERVAL_VALIDATED_TASK_NAMES: &[&str] = &[
     TASK_IOC_SCANNER,
 ];
 
-pub(crate) fn build_task_key(task_name: &str, data: &Value) -> String {
+pub(crate) fn build_task_key(task_name: &str, data: &TaskRuntimePayload) -> String {
     let normalized_name = normalized_task_name(task_name);
     match normalized_name.as_str() {
         TASK_PID_MONITOR => format!(
             "{TASK_PID_MONITOR}:{}",
-            data_or_suffix(data, "pid", task_name, TASK_PID_MONITOR).unwrap_or_default()
+            data.pid_raw().unwrap_or_default()
         ),
         TASK_NODE_MONITOR => format!(
             "{TASK_NODE_MONITOR}:{}",
-            data_or_suffix(data, "node", task_name, TASK_NODE_MONITOR)
-                .unwrap_or_else(|| "default".to_string())
+            data.node_name().unwrap_or("default")
         ),
         TASK_SOCKETS_MONITOR => TASK_SOCKETS_MONITOR.to_string(),
         _ => normalized_name,
@@ -101,12 +99,3 @@ pub(crate) fn task_instance_suffix(task_name: &str, canonical_name: &str) -> Opt
     suffix_after_any_prefix(task_name, prefixes)
 }
 
-pub(crate) fn data_or_suffix(
-    data: &Value,
-    key: &str,
-    task_name: &str,
-    canonical_name: &str,
-) -> Option<String> {
-    json_value::field_string_or_u64(data, key)
-        .or_else(|| task_instance_suffix(task_name, canonical_name))
-}

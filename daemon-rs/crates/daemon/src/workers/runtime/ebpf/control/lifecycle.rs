@@ -378,15 +378,6 @@ impl EbpfWorkerControl {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn probe_extract_pid_uid(entry: &Value) -> Option<(u32, u32)> {
-        ConnectionService::extract_ebpf_map_hit_pid_uid(entry)
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn probe_find_numeric(node: &Value, wanted_keys: &[&str]) -> Option<u64> {
-        ConnectionService::find_numeric(node, wanted_keys)
-    }
-
     fn summarize_bpf_attach_error(err: &str) -> String {
         let mut summary = err;
         if let Some((head, _)) = err.split_once("Verifier output:") {

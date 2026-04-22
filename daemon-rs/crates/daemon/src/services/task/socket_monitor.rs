@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use crate::{
     models::{
         proc_net_packet::{ProcNetPacketRow, ProcNetXdpRow},
+        socket_monitor_payload::{SocketEntry, SocketId, SocketMonitorProcessEntry, SocketMonitorRow},
         socket_state::SocketInfo,
     },
     services::{connection::ConnectionService, process::ProcessService},
@@ -20,7 +21,7 @@ pub(super) const AF_XDP_FAMILY: u8 = 44;
 
 pub(super) async fn ensure_process_entry(
     process: &ProcessService,
-    process_map: &mut serde_json::Map<String, serde_json::Value>,
+    process_map: &mut HashMap<String, SocketMonitorProcessEntry>,
     pid: Option<u32>,
 ) {
     let key = pid
@@ -41,39 +42,39 @@ pub(super) async fn ensure_process_entry(
                 .to_string();
             process_map.insert(
                 key,
-                serde_json::json!({
-                    "Pid": pid,
-                    "Path": process_path,
-                    "Comm": comm,
-                    "Args": info.args,
-                    "CWD": info.cwd.unwrap_or_default(),
-                }),
+                SocketMonitorProcessEntry {
+                    pid: pid as i32,
+                    path: process_path,
+                    comm,
+                    args: info.args,
+                    cwd: info.cwd.unwrap_or_default(),
+                },
             );
             return;
         }
 
         process_map.insert(
             key,
-            serde_json::json!({
-                "Pid": pid,
-                "Path": "",
-                "Comm": "",
-                "Args": [],
-                "CWD": "",
-            }),
+            SocketMonitorProcessEntry {
+                pid: pid as i32,
+                path: String::new(),
+                comm: String::new(),
+                args: Vec::new(),
+                cwd: String::new(),
+            },
         );
         return;
     }
 
     process_map.insert(
         key,
-        serde_json::json!({
-            "Pid": -1,
-            "Path": "",
-            "Comm": "",
-            "Args": [],
-            "CWD": "",
-        }),
+        SocketMonitorProcessEntry {
+            pid: -1,
+            path: String::new(),
+            comm: String::new(),
+            args: Vec::new(),
+            cwd: String::new(),
+        },
     );
 }
 
@@ -144,7 +145,7 @@ pub(super) async fn fetch_iface_name_map_rtnetlink() -> Option<HashMap<u32, Stri
 
 pub(super) async fn prepare_socket_monitor_row(
     process: &ProcessService,
-    process_map: &mut serde_json::Map<String, serde_json::Value>,
+    process_map: &mut HashMap<String, SocketMonitorProcessEntry>,
     inode_pid_cache: &mut HashMap<u32, Option<u32>>,
     iface_cache: &mut HashMap<u32, String>,
     rtnl_iface_map: Option<&HashMap<u32, String>>,
@@ -157,10 +158,10 @@ pub(super) async fn prepare_socket_monitor_row(
     (pid, iface_name)
 }
 
-// ── JSON row builders ─────────────────────────────────────────────────────
+// ── Row builders ─────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn socket_monitor_row_json(
+pub(super) fn socket_monitor_row(
     source: &str,
     destination: &str,
     cookie: [u32; 2],
@@ -180,41 +181,41 @@ pub(super) fn socket_monitor_row_json(
     pid: Option<u32>,
     mark: u32,
     proto: u32,
-) -> serde_json::Value {
-    serde_json::json!({
-        "Socket": {
-            "ID": {
-                "Source": source,
-                "Destination": destination,
-                "Cookie": cookie,
-                "Interface": iface,
-                "SourcePort": source_port,
-                "DestinationPort": destination_port,
+) -> SocketMonitorRow {
+    SocketMonitorRow {
+        socket: SocketEntry {
+            id: SocketId {
+                source: source.to_string(),
+                destination: destination.to_string(),
+                cookie,
+                interface: iface,
+                source_port,
+                destination_port,
             },
-            "Expires": expires,
-            "RQueue": rqueue,
-            "WQueue": wqueue,
-            "UID": uid,
-            "INode": inode,
-            "Family": family,
-            "State": state,
-            "Timer": timer,
-            "Retrans": retrans,
+            expires,
+            rqueue,
+            wqueue,
+            uid,
+            inode,
+            family,
+            state,
+            timer,
+            retrans,
         },
-        "Iface": iface_name,
-        "PID": pid.map(|value| value as i32).unwrap_or(-1),
-        "Mark": mark,
-        "Proto": proto,
-    })
+        iface: iface_name,
+        pid: pid.map(|v| v as i32).unwrap_or(-1),
+        mark,
+        proto,
+    }
 }
 
-pub(super) fn socket_monitor_diag_row_json(
+pub(super) fn socket_monitor_diag_row(
     socket: &SocketInfo,
     iface_name: String,
     pid: Option<u32>,
     proto: u32,
-) -> serde_json::Value {
-    socket_monitor_row_json(
+) -> SocketMonitorRow {
+    socket_monitor_row(
         socket.src.to_string().as_str(),
         socket.dst.to_string().as_str(),
         [socket.cookie0, socket.cookie1],
@@ -237,13 +238,13 @@ pub(super) fn socket_monitor_diag_row_json(
     )
 }
 
-pub(super) fn socket_monitor_packet_row_json(
+pub(super) fn socket_monitor_packet_row(
     packet: &ProcNetPacketRow,
     iface_name: String,
     pid: Option<u32>,
-) -> serde_json::Value {
+) -> SocketMonitorRow {
     // Keep Go parity: /proc fallback packet sockets are tagged as raw.
-    socket_monitor_row_json(
+    socket_monitor_row(
         "",
         "",
         [0, 0],
@@ -266,12 +267,12 @@ pub(super) fn socket_monitor_packet_row_json(
     )
 }
 
-pub(super) fn socket_monitor_xdp_row_json(
+pub(super) fn socket_monitor_xdp_row(
     xdp: &ProcNetXdpRow,
     iface_name: String,
     pid: Option<u32>,
-) -> serde_json::Value {
-    socket_monitor_row_json(
+) -> SocketMonitorRow {
+    socket_monitor_row(
         "",
         "",
         [xdp.cookie0, xdp.cookie1],

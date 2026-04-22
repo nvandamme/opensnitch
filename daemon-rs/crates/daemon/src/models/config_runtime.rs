@@ -3,6 +3,12 @@ use std::path::PathBuf;
 use crate::models::audit::AuditSeverity;
 use crate::models::firewall_state::FirewallBackend;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirewallPersistenceMode {
+    LiveOnly,
+    Durable,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LocalPrincipal {
     pub uid: u32,
@@ -179,6 +185,7 @@ pub struct Config {
     pub firewall_monitor_interval: String,
     pub firewall_queue_num: u16,
     pub firewall_queue_bypass: bool,
+    pub firewall_persistence_mode: FirewallPersistenceMode,
     pub firewall_config_path: PathBuf,
     pub rules_path: PathBuf,
     pub network_aliases_path: PathBuf,

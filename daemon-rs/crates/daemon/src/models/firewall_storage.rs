@@ -8,6 +8,16 @@ pub struct RawFirewallConfig {
     pub version: u32,
     #[serde(rename = "SystemRules", default)]
     pub system_rules: Vec<RawFirewallGroup>,
+    #[serde(rename = "Zones", default)]
+    pub zones: Vec<RawFirewallZone>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct RawFirewallZone {
+    #[serde(rename = "Name", default)]
+    pub name: String,
+    #[serde(rename = "Chains", default)]
+    pub chains: Vec<RawFirewallChain>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -98,6 +108,16 @@ pub struct PersistedFirewallConfig {
     pub version: u32,
     #[serde(rename = "SystemRules")]
     pub system_rules: Vec<PersistedFirewallGroup>,
+    #[serde(rename = "Zones")]
+    pub zones: Vec<PersistedFirewallZone>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PersistedFirewallZone {
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "Chains")]
+    pub chains: Vec<PersistedFirewallChain>,
 }
 
 #[derive(Debug, Serialize)]

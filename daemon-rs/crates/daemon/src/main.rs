@@ -15,6 +15,9 @@ mod workers;
 
 use anyhow::Result;
 
+#[cfg(all(feature = "openwrt", not(feature = "storage-format-uci")))]
+compile_error!("feature `openwrt` requires feature `storage-format-uci`");
+
 use daemon::CliOverrides;
 
 /// Parse a minimal set of CLI flags from argv, mirroring the Go daemon's flag package:
@@ -23,6 +26,7 @@ use daemon::CliOverrides;
 ///   --config-file <path>   Override the config file path.
 ///   --ui-socket   <addr>   Override the UI gRPC socket address.
 ///   --auth-mode   <mode>   Override client authorization mode.
+///   --firewall-persistence-mode <mode> Override firewall persistence mode (live-only|durable).
 ///   --main-storage-format <format> Override main storage format (json|yaml|toml).
 ///   --migrate-ownerless-rules        Run one-shot legacy ownerless rule migration.
 ///   --migrate-owner-uid <uid>        Target owner UID for migration mode.
@@ -68,6 +72,7 @@ fn parse_cli_overrides() -> CliOverrides {
             "config-file" => overrides.config_file = value.map(std::path::PathBuf::from),
             "ui-socket" => overrides.ui_socket = value,
             "auth-mode" => overrides.auth_mode = value,
+            "firewall-persistence-mode" => overrides.firewall_persistence_mode = value,
             "main-storage-format" => overrides.main_storage_format = value,
             "migrate-ownerless-rules" => overrides.rule_migration.ownerless_rules = true,
             "migrate-owner-uid" => overrides.rule_migration.owner_uid = value,

@@ -2,11 +2,11 @@ use crate::{
     models::{
         config_runtime::{
             AskFallbackPolicy, AuthMode, ClientAuthType, DefaultAction, DefaultDuration,
-            LoggerSinkConfig, ProcMonitorMethod, StatsConfig,
+            FirewallPersistenceMode, LoggerSinkConfig, ProcMonitorMethod, StatsConfig,
         },
-        config_storage::RawLoggerConfig,
+        config_storage::{RawConfig, RawLoggerConfig},
     },
-    utils::{json_value::object_get_case_insensitive, name_parsing::normalized_name},
+    utils::name_parsing::normalized_name,
 };
 
 impl Default for ClientAuthType {
@@ -107,13 +107,13 @@ impl DefaultAction {
     }
 
     pub fn from_raw_config_json(raw_config_json: &str) -> Option<Self> {
-        let raw = serde_json::from_str::<serde_json::Value>(raw_config_json).ok()?;
-        let action = raw
-            .as_object()
-            .and_then(|obj| object_get_case_insensitive(obj, &["DefaultAction"]))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        Some(Self::from_name(action))
+        // wire notification payloads are always JSON; use a canonical .json path for format detection
+        let raw = RawConfig::parse_normalized_for_path(
+            std::path::Path::new("notification-payload.json"),
+            raw_config_json,
+        )
+        .ok()?;
+        Some(Self::from_name(&raw.default_action))
     }
 
     pub fn allows(self) -> bool {
@@ -173,5 +173,32 @@ impl ProcMonitorMethod {
 
     pub fn from_name(name: &str) -> Self {
         Self::parse_from_name(name)
+    }
+}
+
+impl Default for FirewallPersistenceMode {
+    fn default() -> Self {
+        Self::Durable
+    }
+}
+
+impl FirewallPersistenceMode {
+    fn parse_from_name(name: &str) -> Self {
+        match normalized_name(name).as_str() {
+            "live" | "liveonly" | "live-only" | "runtime-only" | "runtime" => Self::LiveOnly,
+            "durable" | "persistent" | "persist" | "system" | "system-wide" => Self::Durable,
+            _ => Self::default(),
+        }
+    }
+
+    pub fn from_name(name: &str) -> Self {
+        Self::parse_from_name(name)
+    }
+
+    pub fn as_name(self) -> &'static str {
+        match self {
+            Self::LiveOnly => "live-only",
+            Self::Durable => "durable",
+        }
     }
 }

@@ -4,11 +4,11 @@ use netlink_socket2::NetlinkSocket;
 use nix::libc;
 
 use super::{
-    GenerationId, INTERCEPTION_DNS_TAG, INTERCEPTION_NON_TCP_TAG, INTERCEPTION_TCP_SYN_TAG,
-    NftNetlinkOperation, NftRuleChain, NftTransactionBuilder, SYSFW_TAG_PREFIX,
+    FirewallNetlinkOperation, GenerationId, INTERCEPTION_DNS_TAG, INTERCEPTION_NON_TCP_TAG,
+    INTERCEPTION_TCP_SYN_TAG, NetfilterRuleChain, NetfilterTransactionBuilder, SYSFW_TAG_PREFIX,
 };
 
-impl NftTransactionBuilder {
+impl NetfilterTransactionBuilder {
     pub(super) fn new(sock: &mut NetlinkSocket, genid: GenerationId) -> Self {
         let seq = sock.reserve_seq(256);
         let mut inner = nftables::Chained::new(seq);
@@ -30,18 +30,18 @@ impl NftTransactionBuilder {
     pub(super) async fn apply_operation(
         &mut self,
         sock: &mut NetlinkSocket,
-        op: &NftNetlinkOperation,
+        op: &FirewallNetlinkOperation,
     ) -> Result<bool> {
         match op {
-            NftNetlinkOperation::EnsureBaseChains { .. } => {
+            FirewallNetlinkOperation::EnsureBaseChains { .. } => {
                 self.ensure_base_chains();
                 Ok(true)
             }
-            NftNetlinkOperation::DisableBaseTable => {
+            FirewallNetlinkOperation::DisableBaseTable => {
                 self.delete_table("inet", "opensnitch");
                 Ok(true)
             }
-            NftNetlinkOperation::EnsureSystemChain {
+            FirewallNetlinkOperation::EnsureSystemChain {
                 family,
                 table,
                 name,
@@ -54,7 +54,7 @@ impl NftTransactionBuilder {
                 self.ensure_base_chain(family, table, name, hook, priority, policy, chain_type)?;
                 Ok(true)
             }
-            NftNetlinkOperation::ApplySystemRule {
+            FirewallNetlinkOperation::ApplySystemRule {
                 family,
                 table,
                 chain,
@@ -80,7 +80,7 @@ impl NftTransactionBuilder {
                 }
                 Ok(supported)
             }
-            NftNetlinkOperation::ClearTaggedSystemRules {
+            FirewallNetlinkOperation::ClearTaggedSystemRules {
                 family,
                 table,
                 chain,
@@ -88,17 +88,17 @@ impl NftTransactionBuilder {
                 self.clear_tagged_system_rules(sock, family, table, chain)
                     .await
             }
-            NftNetlinkOperation::ValidateInterceptionRules => {
+            FirewallNetlinkOperation::ValidateInterceptionRules => {
                 self.validate_interception_rules(sock).await
             }
-            NftNetlinkOperation::EnsureInterceptionRule {
+            FirewallNetlinkOperation::EnsureInterceptionRule {
                 chain,
                 expression,
                 tag,
             } => {
                 let (family, table, chain_name) = match chain {
-                    NftRuleChain::FilterInput => ("inet", "opensnitch", "filter_input"),
-                    NftRuleChain::MangleOutput => ("inet", "opensnitch", "mangle_output"),
+                    NetfilterRuleChain::FilterInput => ("inet", "opensnitch", "filter_input"),
+                    NetfilterRuleChain::MangleOutput => ("inet", "opensnitch", "mangle_output"),
                 };
 
                 if self

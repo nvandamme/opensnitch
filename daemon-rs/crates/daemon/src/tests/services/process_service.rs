@@ -270,7 +270,7 @@ fn temp_hash_cache_dir(tag: &str) -> std::path::PathBuf {
 #[test]
 fn persistent_hash_cache_insert_and_lookup() {
     let dir = temp_hash_cache_dir("insert_lookup");
-    let path = dir.join("hash_cache.json");
+    let path = dir.join("hash_cache.bin");
     let cache = crate::services::process::hash_cache::PersistentHashCache::load_or_new(path);
 
     // Current binary as a real file to stat against.
@@ -288,7 +288,7 @@ fn persistent_hash_cache_insert_and_lookup() {
 #[test]
 fn persistent_hash_cache_survives_flush_and_reload() {
     let dir = temp_hash_cache_dir("flush_reload");
-    let path = dir.join("hash_cache.json");
+    let path = dir.join("hash_cache.bin");
 
     let exe = std::env::current_exe().unwrap();
 
@@ -316,7 +316,7 @@ fn persistent_hash_cache_survives_flush_and_reload() {
 #[test]
 fn persistent_hash_cache_invalidates_on_size_change() {
     let dir = temp_hash_cache_dir("invalidate_size");
-    let path = dir.join("hash_cache.json");
+    let path = dir.join("hash_cache.bin");
     let target = dir.join("fake_binary");
 
     // Create a file, insert hash, flush.
@@ -341,7 +341,7 @@ fn persistent_hash_cache_invalidates_on_size_change() {
 #[test]
 fn persistent_hash_cache_gc_removes_deleted_files() {
     let dir = temp_hash_cache_dir("gc_deleted");
-    let path = dir.join("hash_cache.json");
+    let path = dir.join("hash_cache.bin");
     let target = dir.join("ephemeral");
 
     std::fs::write(&target, b"temp").unwrap();

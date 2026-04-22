@@ -253,7 +253,7 @@ This appendix is intentionally scoped to high-risk runtime paths. It is not a fu
 | `platform/adapters/audit_netlink.rs` + `workers/process/audit_worker.rs` | `procmon/audit/*` | 1:N | Audit event ingestion and decode path |
 | `platform/adapters/socket_diag.rs` + `platform/adapters/socket_diag_bindings.rs` + `services/connection/connection.rs` | `netstat/find.go` + `netstat/parse.go` + `netstat/parse_packet.go` | N:N | Connection identity/socket state resolution |
 | `platform/adapters/net_iface.rs` + `workers/network/netlink_addr_worker.rs` | `netlink/ifaces.go` | 1:N | Interface/address inventory and refresh |
-| `platform/adapters/firewall_nft_netlink.rs` + `services/firewall/firewall.rs` + `flows/verdict/verdict.rs` | `firewall/rules.go` + `netfilter/queue.go` | N:N | Verdict enforcement and rule synchronization |
+| `platform/adapters/firewall_netlink/` + `services/firewall/firewall.rs` + `flows/verdict/verdict.rs` | `firewall/rules.go` + `netfilter/queue.go` | N:N | Verdict enforcement and rule synchronization |
 | `platform/adapters/nfqueue_netlink.rs` | `netfilter/queue.go` | 1:1 (impl-different) | Primary NFQUEUE packet I/O path |
 | `platform/ffi/nfqueue.rs` | `netfilter/queue.go` | 1:1 (fallback) | Legacy C FFI NFQUEUE compatibility path |
 | `services/dns/dns.rs` + `workers/dns/dns_worker.rs` | `dns/track.go` + `dns/parse.go` | N:N | DNS monitor and parser behavior |

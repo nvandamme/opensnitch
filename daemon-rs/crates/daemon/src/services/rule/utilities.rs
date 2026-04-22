@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use regex::Regex;
 
-use crate::models::{rule_record::RuleOperator, rule_storage::RuleFileOperator};
+use crate::models::rule_record::RuleOperator;
 use crate::utils::duration_parse::{DurationParseOptions, parse_human_duration};
 use crate::utils::name_parsing::case_folded;
 
@@ -277,14 +277,6 @@ impl RuleService {
                     );
                 }
             }
-        }
-
-        if Self::operator_type_is(operator.type_name.as_str(), "list")
-            && operator.list.is_empty()
-            && !operator.data.trim().is_empty()
-            && serde_json::from_str::<Vec<RuleFileOperator>>(&operator.data).is_err()
-        {
-            anyhow::bail!("invalid legacy list payload in operator data");
         }
 
         for sub in &operator.list {

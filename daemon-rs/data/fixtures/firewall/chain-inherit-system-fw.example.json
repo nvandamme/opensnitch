@@ -1,0 +1,30 @@
+{
+  "Enabled": true,
+  "Version": 1,
+  "SystemRules": [
+    {
+      "Chains": [
+        {
+          "Name": "mangle_output",
+          "Table": "opensnitch",
+          "Family": "inet",
+          "Priority": "",
+          "Type": "mangle",
+          "Hook": "output",
+          "Policy": "accept",
+          "Rules": [
+            {
+              "UUID": "inherit-uuid",
+              "Enabled": true,
+              "Position": "0",
+              "Description": "no table/chain in source",
+              "Expressions": [],
+              "Target": "accept",
+              "TargetParameters": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

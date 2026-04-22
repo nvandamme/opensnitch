@@ -31,6 +31,7 @@ async fn build_subscribe_config_keeps_expected_payload_fields() {
         version: 3,
         rules: Vec::new(),
         chains: Vec::new(),
+        zones: Vec::new(),
     });
 
     let subscribe = ClientService::build_subscribe_config_from_snapshots(

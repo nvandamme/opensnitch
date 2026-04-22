@@ -723,7 +723,7 @@ fn daemon_rs_manifest_path() -> Result<PathBuf, DynError> {
 }
 
 fn daemon_rs_release_test_binary_path(repo_root: &Path) -> Result<PathBuf, DynError> {
-    // When the harness runs with CARGO_TARGET_DIR (e.g. daemon-rs/target-kernel), the
+    // When the harness runs with CARGO_TARGET_DIR (e.g. daemon-rs/target-runtime), the
     // prebuild writes the test binary there — NOT in the default daemon-rs/target dir.
     // Use the env var so both paths stay in sync.
     let target_dir = if let Ok(dir) = env::var("CARGO_TARGET_DIR") {

@@ -19,13 +19,13 @@ pub(super) const CT_STATE_NEW: u32 = 8;
 pub(super) const CT_STATE_UNTRACKED: u32 = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NftRuleChain {
+pub(crate) enum NetfilterRuleChain {
     FilterInput,
     MangleOutput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum NftNetlinkOperation {
+pub(crate) enum FirewallNetlinkOperation {
     EnsureBaseChains {
         queue_num: u16,
         queue_bypass: bool,
@@ -33,7 +33,7 @@ pub(crate) enum NftNetlinkOperation {
     DisableBaseTable,
     ValidateInterceptionRules,
     EnsureInterceptionRule {
-        chain: NftRuleChain,
+        chain: NetfilterRuleChain,
         expression: String,
         tag: String,
     },
@@ -63,7 +63,7 @@ pub(crate) enum NftNetlinkOperation {
 // This adapter owns netlink-oriented planning and compatibility checks.
 // Unsupported operations intentionally return partial handling so the
 // compatibility nft path can execute the remainder safely.
-pub(crate) struct FirewallNftNetlinkAdapter;
+pub(crate) struct FirewallNetlinkAdapter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct GenerationId(pub(super) u32);
@@ -81,7 +81,7 @@ pub(super) struct NetlinkExecutionSummary {
     pub(super) unsupported_expression_families: Vec<(&'static str, usize)>,
 }
 
-pub(super) struct NftTransactionBuilder {
+pub(super) struct NetfilterTransactionBuilder {
     pub(super) inner: nftables::Chained<'static>,
     pub(super) has_operation: bool,
 }

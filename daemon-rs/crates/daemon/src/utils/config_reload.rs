@@ -135,6 +135,7 @@ pub(crate) fn has_firewall_runtime_change(
 ) -> bool {
     crate::services::firewall::firewall_backend_name(previous.firewall_backend)
         != crate::services::firewall::firewall_backend_name(updated.firewall_backend)
+        || previous.firewall_persistence_mode != updated.firewall_persistence_mode
         || previous.firewall_config_path != updated.firewall_config_path
         || previous.firewall_queue_num != updated.firewall_queue_num
         || previous.firewall_queue_bypass != updated.firewall_queue_bypass

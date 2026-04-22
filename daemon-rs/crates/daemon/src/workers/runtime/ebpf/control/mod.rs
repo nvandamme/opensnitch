@@ -11,7 +11,6 @@ pub(super) use std::{
 
 #[cfg(any(feature = "aya-ebpf", feature = "libbpf-ebpf"))]
 pub(super) use ebpf_common::maps::EVENTS_MAP_NAME;
-pub(super) use serde_json::Value;
 pub(super) use tokio_util::sync::CancellationToken;
 pub(super) use tracing::{debug, info, trace, warn};
 
@@ -22,7 +21,6 @@ pub(super) use crate::models::dns_payload::DnsPayload;
 pub(super) use crate::models::ebpf_payload::EbpfProcStatePayload;
 pub(super) use crate::models::ebpf_state::RawBpfMap;
 pub(super) use crate::models::kernel_event::KernelEvent;
-pub(super) use crate::services::connection::ConnectionService;
 #[cfg(feature = "native-ebpf-ringbuf")]
 pub(super) use crate::services::dns::{DnsEbpfEventDeduper, DnsService};
 #[cfg(feature = "native-ebpf-ringbuf")]

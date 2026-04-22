@@ -39,6 +39,7 @@ pub mod rule_match_decision;
 pub mod rule_record;
 pub mod rule_storage;
 pub mod runtime_tunables;
+pub mod socket_monitor_payload;
 pub mod socket_state;
 pub mod storage_dir_entry;
 pub mod storage_event;
