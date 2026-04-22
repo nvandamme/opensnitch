@@ -3,6 +3,12 @@ name = "opensnitchd-rs"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["native-ebpf-ringbuf"]
+native-ebpf-ringbuf = ["dep:libbpf-rs"]
+aya-ebpf = []
+integration-kernel-tests = []
+
 [dependencies]
 tokio = { version = "1.50.0", features = ["full"] }
 tokio-stream = "0.1.18"
@@ -17,6 +23,15 @@ thiserror = "2.0.18"
 crossbeam-channel = "0.5.15"
 nix = "0.31.2"
 regex = "1.12.2"
-time = { version = "0.3.44", features = ["formatting", "parsing"] }
+sha2 = "0.10.9"
+time = { version = "0.3.47", features = ["formatting", "parsing"] }
 
 opensnitch-proto = { path = "../proto" }
+libbpf-rs = { version = "0.26.1", optional = true }
+rtnetlink = "0.20.0"
+audit = "0.7.3"
+netlink-packet-sock-diag = "0.4.2"
+netlink-packet-core = "0.7.0"
+netlink-sys = "0.8.8"
+rustix = { version = "1.1.2", features = ["net", "event", "thread", "system"] }
+reqwest = { version = "0.12.23", default-features = false, features = ["rustls-tls"] }

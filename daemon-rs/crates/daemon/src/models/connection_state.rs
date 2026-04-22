@@ -2,6 +2,9 @@
 pub enum TransportProtocol {
     Tcp,
     Udp,
+    UdpLite,
+    Sctp,
+    Icmp,
 }
 
 #[derive(Debug, Clone)]
@@ -12,7 +15,7 @@ pub struct ConnectionAttempt {
     pub src_port: u16,
     pub dst_ip: String,
     pub dst_port: u16,
+    pub dns_query: Option<String>,
     pub pid: u32,
     pub uid: u32,
-    pub gid: u32,
 }

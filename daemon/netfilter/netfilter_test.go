@@ -23,6 +23,7 @@ Each test runs in a separate subprocess inside an isolated network namespace:
  4. Host network is completely unaffected
 
 For detailed information about capabilities, safety, and testing modes, see:
+
 	daemon/internal/testutil/network.go
 */
 package netfilter
@@ -32,6 +33,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sync"
 	"testing"
 	"time"
 
@@ -569,13 +571,16 @@ func TestMultipleQueues(t *testing.T) {
 
 	// Handle packets from each queue
 	received := make(map[uint16]int)
+	var receivedMu sync.Mutex
 	receivedLock := make(chan bool, 3)
 
 	for _, queue := range queues {
 		go func(qid uint16, q *Queue) {
 			pkt := <-q.Packets()
 			pkt.SetVerdictAndMark(NF_ACCEPT, uint32(qid))
+			receivedMu.Lock()
 			received[qid]++
+			receivedMu.Unlock()
 			receivedLock <- true
 		}(queue.id, queue.q)
 	}
@@ -603,8 +608,11 @@ func TestMultipleQueues(t *testing.T) {
 
 	// Verify each queue received exactly one packet
 	for _, queue := range queues {
-		if received[queue.id] != 1 {
-			t.Errorf("queue %d received %d packets, want 1", queue.id, received[queue.id])
+		receivedMu.Lock()
+		count := received[queue.id]
+		receivedMu.Unlock()
+		if count != 1 {
+			t.Errorf("queue %d received %d packets, want 1", queue.id, count)
 		}
 	}
 }

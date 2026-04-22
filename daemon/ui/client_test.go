@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/evilsocket/opensnitch/daemon/core"
-	"github.com/evilsocket/opensnitch/daemon/firewall/iptables"
 	"github.com/evilsocket/opensnitch/daemon/log"
 	"github.com/evilsocket/opensnitch/daemon/log/loggers"
 	"github.com/evilsocket/opensnitch/daemon/procmon"
@@ -70,10 +69,10 @@ func validateConfig(t *testing.T, uiClient *Client, cfg *config.Config) {
 		t.Errorf("not expected InterceptUnknown value: %v, expected: %v", uiClient.InterceptUnknown(), cfg.InterceptUnknown)
 	}
 	if uiClient.DefaultAction() != rule.Action(cfg.DefaultAction) {
-		t.Errorf("not expected DefaultAction value: %s, expected: %s", clientDisconnectedRule.Action, cfg.DefaultAction)
+		t.Errorf("not expected DefaultAction value: %s, expected: %s", uiClient.DefaultAction(), cfg.DefaultAction)
 	}
 	if uiClient.DefaultDuration() != rule.Duration(cfg.DefaultDuration) {
-		t.Errorf("not expected DefaultDuration value: %s, expected: %s", clientDisconnectedRule.Duration, cfg.DefaultDuration)
+		t.Errorf("not expected DefaultDuration value: %s, expected: %s", uiClient.DefaultDuration(), cfg.DefaultDuration)
 	}
 	if uiClient.config.Server.Address != cfg.Server.Address {
 		t.Errorf("not expected Server.Address value: %s, expected: %s", uiClient.config.Server.Address, cfg.Server.Address)
@@ -93,14 +92,20 @@ func validateInvalidProcMonConfig(t *testing.T, uiClient *Client, cfg *config.Co
 		t.Errorf("not expected InterceptUnknown value: %v, expected: %v", uiClient.InterceptUnknown(), cfg.InterceptUnknown)
 	}
 	if uiClient.DefaultAction() != rule.Action(cfg.DefaultAction) {
-		t.Errorf("not expected DefaultAction value: %s, expected: %s", clientDisconnectedRule.Action, cfg.DefaultAction)
+		t.Errorf("not expected DefaultAction value: %s, expected: %s", uiClient.DefaultAction(), cfg.DefaultAction)
 	}
 	if uiClient.DefaultDuration() != rule.Duration(cfg.DefaultDuration) {
-		t.Errorf("not expected DefaultDuration value: %s, expected: %s", clientDisconnectedRule.Duration, cfg.DefaultDuration)
+		t.Errorf("not expected DefaultDuration value: %s, expected: %s", uiClient.DefaultDuration(), cfg.DefaultDuration)
 	}
 	if uiClient.config.Server.Address != cfg.Server.Address {
 		t.Errorf("not expected Server.Address value: %s, expected: %s", uiClient.config.Server.Address, cfg.Server.Address)
 	}
+}
+
+func forceDisconnectedClient(uiClient *Client) {
+	// Ensure tests validate disconnected defaults regardless of any running UI service.
+	uiClient.setSocketPath("")
+	uiClient.disconnect()
 }
 
 func TestClientDefaultConfig(t *testing.T) {
@@ -115,6 +120,7 @@ func TestClientDefaultConfig(t *testing.T) {
 	stats := statistics.New(rules)
 	loggerMgr := loggers.NewLoggerManager()
 	uiClient := NewClient("unix:///tmp/osui.sock", cfgFile, stats, rules, loggerMgr)
+	forceDisconnectedClient(uiClient)
 
 	t.Run("validate-load-config", func(t *testing.T) {
 		validateConfig(t, uiClient, defaultConfig)
@@ -134,6 +140,7 @@ func TestClientReloadingConfig(t *testing.T) {
 	stats := statistics.New(rules)
 	loggerMgr := loggers.NewLoggerManager()
 	uiClient := NewClient("unix:///tmp/osui.sock", cfgFile, stats, rules, loggerMgr)
+	forceDisconnectedClient(uiClient)
 
 	t.Run("validate-load-config", func(t *testing.T) {
 		validateConfig(t, uiClient, defaultConfig)
@@ -144,7 +151,6 @@ func TestClientReloadingConfig(t *testing.T) {
 		//reloadConfig.ProcMonitorMethod = procmon.MethodProc
 		reloadConfig.DefaultAction = string(rule.Deny)
 		reloadConfig.InterceptUnknown = true
-		reloadConfig.Firewall = iptables.Name
 		reloadConfig.FwOptions.QueueBypass = true
 		reloadConfig.Server.Address = "unix:///run/user/1000/opensnitch/osui.sock"
 
@@ -157,6 +163,7 @@ func TestClientReloadingConfig(t *testing.T) {
 		}
 		// wait for the config to load
 		time.Sleep(time.Second * 10)
+		forceDisconnectedClient(uiClient)
 
 		validateConfig(t, uiClient, &reloadConfig)
 	})
@@ -176,6 +183,7 @@ func TestClientInvalidProcMon(t *testing.T) {
 	stats := statistics.New(rules)
 	loggerMgr := loggers.NewLoggerManager()
 	uiClient := NewClient("unix:///tmp/osui.sock", cfgFile, stats, rules, loggerMgr)
+	forceDisconnectedClient(uiClient)
 
 	t.Run("validate-invalid-config", func(t *testing.T) {
 		validateInvalidProcMonConfig(t, uiClient, &uiClient.config)

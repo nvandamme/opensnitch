@@ -1,3 +1,5 @@
+use crate::utils::name_parsing::{ParseFromName, normalized_name};
+
 #[derive(Debug, Clone, Copy, Default)]
 pub enum FirewallBackend {
     #[default]
@@ -7,16 +9,22 @@ pub enum FirewallBackend {
 
 impl FirewallBackend {
     pub fn from_name(name: &str) -> Self {
-        match name.trim().to_ascii_lowercase().as_str() {
-            "iptables" => Self::Iptables,
-            _ => Self::Nftables,
-        }
+        <Self as ParseFromName>::parse_from_name(name)
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Nftables => "nftables",
             Self::Iptables => "iptables",
+        }
+    }
+}
+
+impl ParseFromName for FirewallBackend {
+    fn parse_from_name(name: &str) -> Self {
+        match normalized_name(name).as_str() {
+            "iptables" => Self::Iptables,
+            _ => Self::Nftables,
         }
     }
 }

@@ -1,24 +1,24 @@
-mod daemon;
+mod adapters;
 mod bus;
 mod client;
-mod flows;
-mod services;
-mod workers;
-mod models;
-mod adapters;
-mod ffi;
+mod commands;
 mod config;
-mod error;
-mod runtime;
+mod daemon;
+mod ffi;
+mod flows;
+#[cfg(all(test, feature = "integration-kernel-tests"))]
+mod integration_kernel_tests;
+mod logging;
+mod models;
+mod services;
+mod utils;
+mod workers;
 
 use anyhow::Result;
-use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    logging::init();
 
     let client_addr = std::env::var("OPENSNITCH_CLIENT_ADDR").ok();
 

@@ -7,3 +7,11 @@ Cargo.lock
 .vscode/
 .idea/
 .DS_Store
+
+# Generated protocol/test artifacts from local Go suite runs
+daemon/ui/protocol/ui.pb.go
+daemon/ui/protocol/ui_grpc.pb.go
+ui/opensnitch/proto/ui_pb2.py
+ui/opensnitch/proto/ui_pb2_grpc.py
+ui/opensnitch/proto/ui_pb2.pyi
+daemon/ui/testdata/default-config.json

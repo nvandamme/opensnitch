@@ -1,58 +1,91 @@
 use opensnitch_proto::pb;
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+
+use crate::utils::name_parsing::{ParseFromName, normalized_name};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleAction {
     Allow,
     Deny,
+    Reject,
 }
 
 impl RuleAction {
     pub fn from_name(name: &str) -> Self {
-        match name.trim().to_ascii_lowercase().as_str() {
-            "deny" | "reject" => Self::Deny,
-            _ => Self::Allow,
-        }
+        <Self as ParseFromName>::parse_from_name(name)
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Allow => "allow",
             Self::Deny => "deny",
+            Self::Reject => "reject",
         }
     }
 
     pub fn allows(self) -> bool {
         matches!(self, Self::Allow)
     }
+
+    pub fn rejects(self) -> bool {
+        matches!(self, Self::Reject)
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl ParseFromName for RuleAction {
+    fn parse_from_name(name: &str) -> Self {
+        match normalized_name(name).as_str() {
+            "reject" => Self::Reject,
+            "deny" => Self::Deny,
+            _ => Self::Allow,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleDuration {
     Once,
     UntilRestart,
     Permanent,
+    Temporary(String),
 }
 
 impl RuleDuration {
     pub fn from_name(name: &str) -> Self {
-        match name.trim().to_ascii_lowercase().as_str() {
-            "always" | "permanent" => Self::Permanent,
-            "until restart" | "restart" => Self::UntilRestart,
-            _ => Self::Once,
-        }
+        <Self as ParseFromName>::parse_from_name(name)
     }
 
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Once => "once",
             Self::UntilRestart => "until restart",
             Self::Permanent => "always",
+            Self::Temporary(value) => value.as_str(),
         }
     }
 
-    pub fn persists_to_disk(self) -> bool {
+    pub fn persists_to_disk(&self) -> bool {
         matches!(self, Self::Permanent)
+    }
+
+    pub fn temporary_spec(&self) -> Option<&str> {
+        match self {
+            Self::Temporary(value) => Some(value.as_str()),
+            _ => None,
+        }
+    }
+}
+
+impl ParseFromName for RuleDuration {
+    fn parse_from_name(name: &str) -> Self {
+        let normalized = name.trim();
+        match normalized_name(normalized).as_str() {
+            "always" | "permanent" => Self::Permanent,
+            "until restart" | "restart" => Self::UntilRestart,
+            "once" => Self::Once,
+            _ if normalized.is_empty() => Self::Once,
+            _ => Self::Temporary(normalized.to_string()),
+        }
     }
 }
 
@@ -127,7 +160,10 @@ impl RuleRecord {
 
     pub fn to_proto(&self) -> pb::Rule {
         pb::Rule {
-            created: self.created_at.map(|value| value.unix_timestamp()).unwrap_or(0),
+            created: self
+                .created_at
+                .map(|value| value.unix_timestamp())
+                .unwrap_or(0),
             name: self.name.clone(),
             description: self.description.clone(),
             enabled: self.enabled,
