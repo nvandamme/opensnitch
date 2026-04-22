@@ -1,12 +1,34 @@
-use std::{path::Path, time::Duration};
+use std::time::Duration;
+
+#[cfg(feature = "libbpf-ebpf")]
+use std::path::Path;
 
 use anyhow::Result;
+use opensnitch_ebpf_common::maps::{EVENTS_MAP_MAX_ENTRIES, EVENTS_MAP_NAME};
+
+#[cfg(feature = "aya-ebpf")]
+use std::os::fd::{AsRawFd, BorrowedFd};
 
 #[cfg(feature = "libbpf-ebpf")]
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "libbpf-ebpf")]
 use libbpf_rs::{MapType, query::MapInfoIter};
+
+#[cfg(feature = "aya-ebpf")]
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
+
+#[cfg(feature = "aya-ebpf")]
+use super::AyaManagedRingbufAsset;
+use super::EbpfPinDomain;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EbpfRuntimeMode {
+    AyaManagedRs,
+    AyaLegacyCompat,
+    LibbpfLegacyCompat,
+    UserspaceFallback,
+}
 
 #[derive(Debug)]
 pub(crate) enum EbpfRingbufBackendKind {
@@ -17,8 +39,52 @@ pub(crate) enum EbpfRingbufBackendKind {
 }
 
 pub(crate) struct EbpfRingbufConsumer {
+    runtime_mode: EbpfRuntimeMode,
     backend_kind: EbpfRingbufBackendKind,
     inner: BackendInner,
+}
+
+#[derive(Clone, Copy)]
+struct RingbufMapCandidate {
+    id: u32,
+    is_ringbuf: bool,
+    name_matches: bool,
+    max_entries: u32,
+}
+
+fn select_opensnitch_ringbuf_map_id(
+    candidates: impl IntoIterator<Item = RingbufMapCandidate>,
+) -> Option<u32> {
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            candidate.is_ringbuf
+            && candidate.name_matches
+                && candidate.max_entries == EVENTS_MAP_MAX_ENTRIES
+        })
+        .map(|candidate| candidate.id)
+        .max()
+}
+
+#[cfg(feature = "aya-ebpf")]
+fn aya_poll_has_readable_samples(poll_rc: usize, revents: PollFlags) -> bool {
+    poll_rc > 0 && revents.contains(PollFlags::IN)
+}
+
+fn runtime_fallback_chain(pin_domain: EbpfPinDomain) -> &'static [EbpfRuntimeMode] {
+    match pin_domain {
+        EbpfPinDomain::Aya => &[
+            EbpfRuntimeMode::AyaManagedRs,
+            EbpfRuntimeMode::AyaLegacyCompat,
+            EbpfRuntimeMode::LibbpfLegacyCompat,
+            EbpfRuntimeMode::UserspaceFallback,
+        ],
+        EbpfPinDomain::Legacy => &[
+            EbpfRuntimeMode::AyaLegacyCompat,
+            EbpfRuntimeMode::LibbpfLegacyCompat,
+            EbpfRuntimeMode::UserspaceFallback,
+        ],
+    }
 }
 
 fn describe_map_candidates(map_paths: &[&str]) -> String {
@@ -29,41 +95,107 @@ fn describe_map_candidates(map_paths: &[&str]) -> String {
     map_paths.join(", ")
 }
 
+#[cfg(test)]
+pub(crate) fn probe_select_opensnitch_ringbuf_map_id(
+    candidates: &[(u32, bool, bool, u32)],
+) -> Option<u32> {
+    select_opensnitch_ringbuf_map_id(candidates.iter().copied().map(
+        |(id, is_ringbuf, name_matches, max_entries)| RingbufMapCandidate {
+            id,
+            is_ringbuf,
+            name_matches,
+            max_entries,
+        },
+    ))
+}
+
+#[cfg(all(test, feature = "aya-ebpf"))]
+pub(crate) fn probe_aya_poll_has_readable_samples(poll_rc: usize, revents: PollFlags) -> bool {
+    aya_poll_has_readable_samples(poll_rc, revents)
+}
+
+#[cfg(test)]
+pub(crate) fn probe_runtime_fallback_chain(pin_domain: EbpfPinDomain) -> Vec<EbpfRuntimeMode> {
+    runtime_fallback_chain(pin_domain).to_vec()
+}
+
 impl EbpfRingbufConsumer {
     pub(crate) fn try_open_with_diagnostics(
-        map_paths: &[&str],
+        pin_domain: EbpfPinDomain,
+        #[cfg(feature = "aya-ebpf")] managed_aya_ringbuf: Option<AyaManagedRingbufAsset>,
+        managed_map_paths: &[&str],
+        legacy_map_paths: &[&str],
     ) -> Result<(Self, Vec<String>), String> {
         let mut errors: Vec<String> = Vec::new();
-
+        let managed_paths_present = managed_map_paths.iter().any(|path| std::path::Path::new(path).exists());
         #[cfg(feature = "aya-ebpf")]
-        {
-            match AyaRingbuf::try_open(map_paths) {
-                Ok(inner) => {
-                    return Ok((
-                        Self {
-                            backend_kind: EbpfRingbufBackendKind::Aya,
-                            inner: BackendInner::Aya(inner),
-                        },
-                        errors,
-                    ));
-                }
-                Err(err) => errors.push(format!("aya backend: {err}")),
-            }
-        }
+        let mut managed_aya_ringbuf = managed_aya_ringbuf;
 
-        #[cfg(feature = "libbpf-ebpf")]
-        {
-            match LibbpfRingbuf::try_open(map_paths) {
-                Ok(inner) => {
-                    return Ok((
-                        Self {
-                            backend_kind: EbpfRingbufBackendKind::Libbpf,
-                            inner: BackendInner::Libbpf(inner),
-                        },
-                        errors,
-                    ));
+        for runtime_mode in runtime_fallback_chain(pin_domain) {
+            match runtime_mode {
+                #[cfg(feature = "aya-ebpf")]
+                EbpfRuntimeMode::AyaManagedRs => match AyaRingbuf::try_open_managed(
+                    managed_aya_ringbuf.take(),
+                    managed_map_paths,
+                ) {
+                    Ok(inner) => {
+                        return Ok((
+                            Self {
+                                runtime_mode: *runtime_mode,
+                                backend_kind: EbpfRingbufBackendKind::Aya,
+                                inner: BackendInner::Aya(inner),
+                            },
+                            errors,
+                        ));
+                    }
+                    Err(err) => errors.push(format!("aya managed-rs: {err}")),
+                },
+
+                #[cfg(feature = "aya-ebpf")]
+                EbpfRuntimeMode::AyaLegacyCompat => match AyaRingbuf::try_open_legacy_compat(
+                    legacy_map_paths,
+                    managed_paths_present,
+                ) {
+                    Ok(inner) => {
+                        return Ok((
+                            Self {
+                                runtime_mode: *runtime_mode,
+                                backend_kind: EbpfRingbufBackendKind::Aya,
+                                inner: BackendInner::Aya(inner),
+                            },
+                            errors,
+                        ));
+                    }
+                    Err(err) => errors.push(format!("aya legacy-compat: {err}")),
+                },
+
+                #[cfg(feature = "libbpf-ebpf")]
+                EbpfRuntimeMode::LibbpfLegacyCompat => match LibbpfRingbuf::try_open_legacy_compat(
+                    legacy_map_paths,
+                    managed_paths_present,
+                ) {
+                    Ok(inner) => {
+                        return Ok((
+                            Self {
+                                runtime_mode: *runtime_mode,
+                                backend_kind: EbpfRingbufBackendKind::Libbpf,
+                                inner: BackendInner::Libbpf(inner),
+                            },
+                            errors,
+                        ));
+                    }
+                    Err(err) => errors.push(format!("libbpf legacy-compat: {err}")),
+                },
+
+                EbpfRuntimeMode::UserspaceFallback => {
+                    errors.push("userspace fallback: native ringbuf unavailable".to_string());
                 }
-                Err(err) => errors.push(format!("libbpf backend: {err}")),
+
+                #[cfg(not(feature = "aya-ebpf"))]
+                EbpfRuntimeMode::AyaManagedRs | EbpfRuntimeMode::AyaLegacyCompat => {}
+
+                #[cfg(not(feature = "libbpf-ebpf"))]
+                EbpfRuntimeMode::LibbpfLegacyCompat => {}
             }
         }
 
@@ -86,6 +218,10 @@ impl EbpfRingbufConsumer {
     pub(crate) fn backend_kind(&self) -> &EbpfRingbufBackendKind {
         &self.backend_kind
     }
+
+    pub(crate) fn runtime_mode(&self) -> EbpfRuntimeMode {
+        self.runtime_mode
+    }
 }
 
 enum BackendInner {
@@ -104,10 +240,15 @@ struct LibbpfRingbuf {
 
 #[cfg(feature = "libbpf-ebpf")]
 impl LibbpfRingbuf {
-    fn try_open(map_paths: &[&str]) -> Result<Self, String> {
+    fn try_open_legacy_compat(map_paths: &[&str], managed_paths_present: bool) -> Result<Self, String> {
         let map = if let Some(map_path) = map_paths.iter().find(|path| Path::new(path).exists()) {
             libbpf_rs::MapHandle::from_pinned_path(map_path)
                 .map_err(|err| format!("open pinned ringbuf map failed ({map_path}): {err}"))?
+        } else if managed_paths_present {
+            return Err(
+                "opensnitch-rs managed pin paths are present; refusing legacy direct ringbuf autodiscovery"
+                    .to_string(),
+            );
         } else if let Some(map_id) = Self::discover_loaded_ringbuf_map_id() {
             libbpf_rs::MapHandle::from_map_id(map_id)
                 .map_err(|err| format!("open loaded ringbuf map by id failed (id={map_id}): {err}"))?
@@ -144,21 +285,12 @@ impl LibbpfRingbuf {
     }
 
     fn discover_loaded_ringbuf_map_id() -> Option<u32> {
-        let mut candidate_ids: Vec<u32> = Vec::new();
-
-        for info in MapInfoIter::default() {
-            if info.ty != MapType::RingBuf {
-                continue;
-            }
-
-            // Go-side loader consumes an in-memory map named `events` directly
-            // from the loaded collection. Reuse the same kernel map shape here.
-            if info.name.to_string_lossy() == "events" && info.max_entries == (1 << 24) {
-                candidate_ids.push(info.id);
-            }
-        }
-
-        candidate_ids.into_iter().max()
+        select_opensnitch_ringbuf_map_id(MapInfoIter::default().map(|info| RingbufMapCandidate {
+            id: info.id,
+            is_ringbuf: info.ty == MapType::RingBuf,
+            name_matches: info.name.to_string_lossy() == EVENTS_MAP_NAME,
+            max_entries: info.max_entries,
+        }))
     }
 
     fn poll_samples(&mut self, timeout: Duration) -> Result<Vec<Vec<u8>>, String> {
@@ -177,31 +309,109 @@ impl LibbpfRingbuf {
 
 #[cfg(feature = "aya-ebpf")]
 struct AyaRingbuf {
-    _map_path: String,
+    source: String,
+    ringbuf: aya::maps::RingBuf<aya::maps::MapData>,
 }
 
 #[cfg(feature = "aya-ebpf")]
 impl AyaRingbuf {
-    fn try_open(map_paths: &[&str]) -> Result<Self, String> {
-        let map_path = map_paths
-            .iter()
-            .find(|path| Path::new(path).exists())
-            .ok_or_else(|| {
-                format!(
-                    "no pinned opensnitch ringbuf map found (checked: {})",
-                    describe_map_candidates(map_paths)
-                )
-            })?
-            .to_string();
+    fn try_open_managed(
+        managed_ringbuf: Option<AyaManagedRingbufAsset>,
+        map_paths: &[&str],
+    ) -> Result<Self, String> {
+        let Some(AyaManagedRingbufAsset { source, map_data }) = managed_ringbuf else {
+            return Err(format!(
+                "no managed opensnitch-rs ringbuf handle available (expected one of: {})",
+                describe_map_candidates(map_paths)
+            ));
+        };
 
-        // Aya backend scaffold only for now. Selection order prefers Aya first,
-        // then automatically falls back to libbpf when Aya init is unavailable.
-        Err(format!(
-            "aya backend scaffold active but ringbuf polling is not implemented yet (map: {map_path})"
-        ))
+        let map = aya::maps::Map::RingBuf(map_data);
+        let ringbuf = aya::maps::RingBuf::try_from(map)
+            .map_err(|err| format!("attach aya ringbuf reader failed ({source}): {err}"))?;
+
+        Ok(Self {
+            source,
+            ringbuf,
+        })
     }
 
-    fn poll_samples(&mut self, _timeout: Duration) -> Result<Vec<Vec<u8>>, String> {
-        Ok(Vec::new())
+    fn try_open_legacy_compat(
+        map_paths: &[&str],
+        managed_paths_present: bool,
+    ) -> Result<Self, String> {
+        if let Some(map_path) = map_paths.iter().find(|path| std::path::Path::new(path).exists()) {
+            let map_data = aya::maps::MapData::from_pin(map_path)
+                .map_err(|err| format!("open pinned ringbuf map failed ({map_path}): {err}"))?;
+
+            let map = aya::maps::Map::RingBuf(map_data);
+            let ringbuf = aya::maps::RingBuf::try_from(map)
+                .map_err(|err| format!("attach aya ringbuf reader failed ({map_path}): {err}"))?;
+
+            return Ok(Self {
+                source: (*map_path).to_string(),
+                ringbuf,
+            });
+        }
+
+        if managed_paths_present {
+            return Err(
+                "opensnitch-rs managed pin paths are present; refusing legacy direct ringbuf autodiscovery"
+                    .to_string(),
+            );
+        }
+
+        let Some(map_id) = Self::discover_loaded_ringbuf_map_id() else {
+            return Err(format!(
+                "no opensnitch ringbuf map found (checked pinned: {}; loaded map scan: none)",
+                describe_map_candidates(map_paths)
+            ));
+        };
+
+        let map_data = aya::maps::MapData::from_id(map_id)
+            .map_err(|err| format!("open loaded ringbuf map by id failed (id={map_id}): {err}"))?;
+
+        let map = aya::maps::Map::RingBuf(map_data);
+        let ringbuf = aya::maps::RingBuf::try_from(map)
+            .map_err(|err| format!("attach aya ringbuf reader failed (id={map_id}): {err}"))?;
+
+        Ok(Self {
+            source: format!("id={map_id}"),
+            ringbuf,
+        })
+    }
+
+    fn discover_loaded_ringbuf_map_id() -> Option<u32> {
+        select_opensnitch_ringbuf_map_id(
+            aya::maps::loaded_maps().flatten().filter_map(|info| {
+                let map_type = info.map_type().ok()?;
+                Some(RingbufMapCandidate {
+                    id: info.id(),
+                    is_ringbuf: map_type == aya::maps::MapType::RingBuf,
+                    name_matches: info.name_as_str() == Some(EVENTS_MAP_NAME),
+                    max_entries: info.max_entries(),
+                })
+            }),
+        )
+    }
+
+    fn poll_samples(&mut self, timeout: Duration) -> Result<Vec<Vec<u8>>, String> {
+        // SAFETY: fd originates from Aya ringbuf map and remains valid while self.ringbuf lives.
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(self.ringbuf.as_raw_fd()) };
+        let mut pfd = [PollFd::new(&borrowed_fd, PollFlags::IN)];
+        let timeout_ts = Timespec::try_from(timeout).ok();
+        let poll_rc = poll(&mut pfd, timeout_ts.as_ref())
+            .map_err(|err| format!("aya ringbuf poll failed ({}): {err}", self.source))?;
+
+        if !aya_poll_has_readable_samples(poll_rc, pfd[0].revents()) {
+            return Ok(Vec::new());
+        }
+
+        let mut out = Vec::with_capacity(64);
+        while let Some(item) = self.ringbuf.next() {
+            out.push(item.to_vec());
+        }
+
+        Ok(out)
     }
 }

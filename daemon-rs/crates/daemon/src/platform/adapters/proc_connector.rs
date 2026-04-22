@@ -28,6 +28,7 @@ pub(crate) const PROC_EVENT_EXEC: u32 = 0x0000_0002;
 pub(crate) const PROC_EVENT_EXIT: u32 = 0x8000_0000;
 
 pub struct ProcEventSocket {
+    #[allow(dead_code)]
     pub(crate) request_sock: NetlinkSocket,
     pub(crate) event_sock: MulticastSocketRaw,
 }

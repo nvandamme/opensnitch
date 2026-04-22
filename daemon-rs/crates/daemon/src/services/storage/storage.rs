@@ -21,6 +21,7 @@ pub(crate) struct StorageService {
     events: StorageEventBus,
 }
 
+#[allow(dead_code)]
 impl StorageService {
     fn option_if_not_found<T>(result: io::Result<T>) -> io::Result<Option<T>> {
         match result {

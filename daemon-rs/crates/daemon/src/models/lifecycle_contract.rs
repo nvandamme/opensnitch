@@ -1,11 +1,11 @@
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum ServiceState {
     #[default]
     Uninitialized,
     Running,
     Paused,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     Quiescing,
     Stopped,
     Degraded,
@@ -23,7 +23,7 @@ pub(crate) struct ServiceMonitorStats {
     pub event_subscribers: usize,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ServiceEvent {
     StateChanged {
@@ -31,8 +31,8 @@ pub(crate) enum ServiceEvent {
         to: ServiceState,
         last_error: Option<String>,
     },
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     HealthCheckFailed { error: String },
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     Message { text: String },
 }

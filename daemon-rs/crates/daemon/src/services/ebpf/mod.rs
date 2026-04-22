@@ -7,4 +7,5 @@ mod ringbuf;
 
 pub use crate::models::ebpf_availability::EbpfObjectAvailability;
 pub use ebpf::*;
+pub(crate) use paths::*;
 pub(crate) use ringbuf::*;

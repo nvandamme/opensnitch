@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::net::IpAddr;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::models::socket_state::SocketInfo;
 
@@ -61,6 +61,7 @@ impl SocketDiagAdapter {
         out
     }
 
+    #[allow(dead_code)]
     pub fn dump_sockets(family: u8, protocol: u8) -> Result<Vec<SocketInfo>> {
         #[cfg(feature = "netlink-bindings-socket-diag")]
         {

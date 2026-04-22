@@ -14,6 +14,8 @@ pub(crate) type DynError = Box<dyn std::error::Error>;
 
 const TABLE_HEADER: &str = "| Date | Backend | Profile | Rounds | Commit | p50 ms | p95 ms | p99 ms | max ms | drop_total | Baseline Check | Go Ref | vs Go p50 | vs Go p95 | vs Go p99 | vs Go max | vs Go drop | Prev Commit Ref | vs Prev p50 | vs Prev p95 | vs Prev p99 | vs Prev max | vs Prev drop | Notes |";
 const DELTA_TABLE_HEADER: &str = "| Date | Delta Target | Rounds | Commit | Hot Mixed Go verdict ms | Hot Mixed Rust verdict ms | Hot Mixed Δ ms (Rust-Go) | Hot Throughput Go time/op us | Hot Throughput Rust time/op us | Hot Throughput Go op/s | Hot Throughput Rust op/s | Hot Δ p50 ms | Hot Δ p95 ms | Hot Δ p99 ms | Hot Δ max ms | Hot Δ drop_total | Cold Go rule s | Cold Rust rule s | Cold Δ rule s | Cold Go ui s | Cold Rust ui s | Cold Δ ui s | Cold Go tasks s | Cold Rust tasks s | Cold Δ tasks s | Cold Go total s (with tasks) | Cold Rust total s (with tasks) | Cold Δ total s (Rust-Go, with tasks) | Result | Notes |";
+const DELTA_TABLE_HEADER_LEGACY: &str = "| Date | Delta Target | Rounds | Commit | Hot Mixed Go verdict ms | Hot Mixed Rust verdict ms | Hot Mixed Δ ms (Rust-Go) | Hot Throughput Go time/op us | Hot Throughput Rust time/op us | Hot Throughput Go op/s | Hot Throughput Rust op/s | Hot Δ p50 ms | Hot Δ p95 ms | Hot Δ p99 ms | Hot Δ max ms | Hot Δ drop_total | Cold Go rule s | Cold Rust rule s | Cold Δ rule s | Cold Go ui s | Cold Rust ui s | Cold Δ ui s | Cold Go tasks s | Cold Rust tasks s | Cold Δ tasks s | Cold Go total s | Cold Rust total s | Cold Δ total s (Rust-Go, with tasks) | Result | Notes |";
+const DELTA_TABLE_HEADER_LEGACY_ALT: &str = "| Date | Delta Target | Rounds | Commit | Hot Mixed Go verdict ms | Hot Mixed Rust verdict ms | Hot Mixed Δ ms (Rust-Go) | Hot Throughput Go time/op us | Hot Throughput Rust time/op us | Hot Throughput Go op/s | Hot Throughput Rust op/s | Hot Δ p50 ms | Hot Δ p95 ms | Hot Δ p99 ms | Hot Δ max ms | Hot Δ drop_total | Cold Go rule s | Cold Rust rule s | Cold Δ rule s | Cold Go ui s | Cold Rust ui s | Cold Δ ui s | Cold Go tasks s | Cold Rust tasks s | Cold Δ tasks s | Cold Go total s | Cold Rust total s | Cold Δ total s (Rust-Go) | Result | Notes |";
 const EMPTY_COMPARISON_COLUMNS: &str = "- | - | - | - | - | - | - | - | - | - | - | -";
 const TS_COMPACT: &[time::format_description::FormatItem<'static>] =
     format_description!("[year][month][day]-[hour][minute][second]");
@@ -32,6 +34,7 @@ fn main() {
 
 fn run() -> Result<(), DynError> {
     ensure_release_tools_mode()?;
+    apply_tools_env_defaults()?;
 
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
@@ -47,9 +50,34 @@ fn run() -> Result<(), DynError> {
         Some("stop-daemon-live-logs") => stop_daemon_live_logs(),
         Some(command) => Err(format!("unsupported tools command: {command}").into()),
         None => Err(
-            "usage: cargo run -p tools -- <update-run-perf|quick-pressure-sweep-tunables|auto-tune-kernel-pressure-tunables|microbench-connect-dispatch|parity-gate|parity-hot-path-harness-once|parity-cold-path-harness|parity-hot-cold-delta-once|launch-daemon-live-logs|stop-daemon-live-logs>".into(),
+            "usage: cargo run -p tools -- <update-run-perf|quick-pressure-sweep-tunables|auto-tune-kernel-pressure-tunables|microbench-connect-dispatch|parity-gate|parity-hot-path-harness-once|parity-cold-path-harness|parity-hot-cold-delta-once|launch-daemon-live-logs|stop-daemon-live-logs>\nshort alias from repo root: cargo unit <command>"
+                .into(),
         ),
     }
+}
+
+fn apply_tools_env_defaults() -> Result<(), DynError> {
+    let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let daemon_rs_dir = tools_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or("tools dir missing daemon-rs parent")?;
+
+    // Keep cargo-run behavior aligned with Makefile defaults.
+    let default_target = daemon_rs_dir.join("target-kernel");
+    if env::var_os("CARGO_TARGET_DIR").is_none() {
+        unsafe {
+            env::set_var("CARGO_TARGET_DIR", &default_target);
+        }
+    }
+    if env::var_os("OPENSNITCH_CARGO_TARGET_DIR").is_none() {
+        let resolved = env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| default_target.into_os_string());
+        unsafe {
+            env::set_var("OPENSNITCH_CARGO_TARGET_DIR", resolved);
+        }
+    }
+
+    Ok(())
 }
 
 fn ensure_release_tools_mode() -> Result<(), DynError> {
@@ -1195,7 +1223,15 @@ fn update_perf_md() -> Result<(), DynError> {
         hot_drop = hot_drop_total,
     );
 
-    prepend_rows(&perf_md, DELTA_TABLE_HEADER, &[delta_row])?;
+    prepend_rows_any_header(
+        &perf_md,
+        &[
+            DELTA_TABLE_HEADER,
+            DELTA_TABLE_HEADER_LEGACY,
+            DELTA_TABLE_HEADER_LEGACY_ALT,
+        ],
+        &[delta_row],
+    )?;
 
     println!("Updated {}", perf_md.display());
     println!("Current Rust (median): {current_rust_line}");
@@ -1477,10 +1513,15 @@ fn ensure_cached_worktree(
 }
 
 fn prepend_rows(perf_md: &Path, header: &str, rows: &[String]) -> Result<(), DynError> {
+    prepend_rows_any_header(perf_md, &[header], rows)
+}
+
+fn prepend_rows_any_header(perf_md: &Path, headers: &[&str], rows: &[String]) -> Result<(), DynError> {
     let text = fs::read_to_string(perf_md)?;
-    let header_idx = text
-        .find(header)
-        .ok_or_else(|| format!("table header not found in PERF.md: {header}"))?;
+    let header_idx = headers
+        .iter()
+        .find_map(|candidate| text.find(candidate))
+        .ok_or_else(|| format!("table header not found in PERF.md: {}", headers.join(" || ")))?;
     let first_newline = text[header_idx..]
         .find('\n')
         .ok_or("run history header line not terminated")?

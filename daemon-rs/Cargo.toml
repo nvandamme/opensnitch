@@ -1,6 +1,14 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/ebpf",
+    "crates/ebpf-common",
+    "crates/proto",
+    "crates/daemon",
+    "crates/tools"
+]
+default-members = [
+    "crates/ebpf-common",
     "crates/proto",
     "crates/daemon",
     "crates/tools"

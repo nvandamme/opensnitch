@@ -196,6 +196,7 @@ where
     metrics: Arc<DualLayerMetrics>,
 }
 
+#[allow(dead_code)]
 impl<K, V> DualLayerLruMap<K, V>
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,
@@ -590,6 +591,7 @@ where
     metrics: Arc<DualLayerMetrics>,
 }
 
+#[allow(dead_code)]
 impl<K, V> SyncDualLayerLruMap<K, V>
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,

@@ -157,11 +157,21 @@ impl KernelFlow {
                     let dns_service = dns_service.clone();
                     let dns_stats = dns_stats.clone();
                     async move {
-                        dns_stats.on_dns_resolved();
                         match update {
-                            DnsPayload::Answers(record) => dns_service.track_answers(record).await,
+                            DnsPayload::Answers(record) => {
+                                dns_stats.on_dns_resolved();
+                                dns_service.track_answers(record).await;
+                            }
                             DnsPayload::Alias { alias, host } => {
+                                dns_stats.on_dns_resolved();
                                 dns_service.track_alias(alias, host).await;
+                            }
+                            DnsPayload::NxDomain { host, error_code } => {
+                                tracing::debug!(
+                                    host = %host,
+                                    error_code = %error_code,
+                                    "[DNS] resolution failed"
+                                );
                             }
                         }
                     }

@@ -29,6 +29,22 @@ action_log() {
 #   "pkexec" — desktop session detected; polkit will show a graphical auth dialog
 #   "sudo"   — non-desktop or pkexec unavailable; fall back to sudo
 pick_priv_cmd() {
+  if [[ -n "${OPENSNITCH_TEST_GUARD_PRIV_CMD:-}" ]]; then
+    case "${OPENSNITCH_TEST_GUARD_PRIV_CMD,,}" in
+      direct|none)
+        echo ""
+        return
+        ;;
+      pkexec)
+        echo "pkexec"
+        return
+        ;;
+      sudo)
+        echo "sudo"
+        return
+        ;;
+    esac
+  fi
   if [[ "$(id -u 2>/dev/null)" == "0" ]]; then
     echo ""
     return
@@ -43,12 +59,33 @@ pick_priv_cmd() {
 }
 
 PRIV_CMD="$(pick_priv_cmd)"
+SUDO_KEEPALIVE_PID=""
+
+ensure_privileged_session() {
+  if [[ -z "${PRIV_CMD}" ]]; then
+    return
+  fi
+
+  if [[ "${PRIV_CMD}" == "sudo" ]]; then
+    # Prime sudo timestamp cache once so subsequent privileged commands reuse it.
+    sudo -v
+
+    # Keep sudo ticket alive during long test runs.
+    (
+      while true; do
+        sudo -n true >/dev/null 2>&1 || exit 0
+        sleep 30
+      done
+    ) &
+    SUDO_KEEPALIVE_PID="$!"
+  fi
+}
 
 # Run a command with the appropriate privilege escalation.
 # pkexec is tried first on desktop.  We only fall back to sudo when pkexec
 # *itself* failed to dispatch (exit 126 = auth not obtained, 127 = binary
 # not found); if the underlying command failed that is not our problem.
-# sudo is always run with -n (non-interactive) to avoid terminal prompts.
+# sudo is intentionally interactive to allow password prompts when needed.
 run_privileged() {
   if [[ -z "${PRIV_CMD}" ]]; then
     "$@" >/dev/null 2>&1 || true
@@ -58,11 +95,56 @@ run_privileged() {
     pkexec "$@" >/dev/null 2>&1
     local rc=$?
     if (( rc == 126 || rc == 127 )); then
-      sudo -n -- "$@" >/dev/null 2>&1 || true
+      sudo -- "$@" >/dev/null 2>&1 || true
     fi
     return
   fi
-  sudo -n -- "$@" >/dev/null 2>&1 || true
+  sudo -- "$@" >/dev/null 2>&1 || true
+}
+
+run_test_payload() {
+  local wants_privileged="${OPENSNITCH_RUN_PRIVILEGED_TESTS:-0}"
+
+  if [[ "$wants_privileged" == "1" && "$(id -u)" != "0" ]]; then
+    local -a forwarded_env=()
+    local key
+    local env_keys=(
+      OPENSNITCH_RUN_PRIVILEGED_TESTS
+      OPENSNITCH_RUN_PRIVILEDGED_TESTS
+      OPENSNITCH_CARGO_TARGET_DIR
+      CARGO_TARGET_DIR
+      RUST_LOG
+      CARGO_HOME
+      RUSTUP_HOME
+      HOME
+      PATH
+    )
+
+    for key in "${env_keys[@]}"; do
+      if [[ -v "$key" ]]; then
+        forwarded_env+=("${key}=${!key}")
+      fi
+    done
+
+    if [[ -z "${PRIV_CMD}" ]]; then
+      env "${forwarded_env[@]}" "$@"
+      return
+    fi
+
+    if [[ "${PRIV_CMD}" == "pkexec" ]]; then
+      pkexec env "${forwarded_env[@]}" "$@"
+      local rc=$?
+      if (( rc == 126 || rc == 127 )); then
+        sudo env "${forwarded_env[@]}" "$@"
+      fi
+      return
+    fi
+
+    sudo env "${forwarded_env[@]}" "$@"
+    return
+  fi
+
+  "$@"
 }
 
 # More reliable than is-active --quiet: returns exactly "active" or not.
@@ -137,6 +219,9 @@ restart_services() {
 }
 
 cleanup() {
+  if [[ -n "${SUDO_KEEPALIVE_PID}" ]]; then
+    kill "${SUDO_KEEPALIVE_PID}" >/dev/null 2>&1 || true
+  fi
   restart_services
   if [[ "$had_original_privileged_tests" == "1" ]]; then
     export OPENSNITCH_RUN_PRIVILEGED_TESTS="$original_privileged_tests"
@@ -171,6 +256,8 @@ kill_standalone_processes() {
 
 trap cleanup EXIT
 
+ensure_privileged_session
+
 for service in "${SERVICES[@]}"; do
   try_stop_service "system" "$service"
   try_stop_service "user" "$service"
@@ -185,4 +272,4 @@ if [[ "$(id -u)" == "0" ]]; then
 fi
 
 action_log "running: $*"
-"$@"
+run_test_payload "$@"

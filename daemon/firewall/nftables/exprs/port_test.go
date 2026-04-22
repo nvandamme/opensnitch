@@ -36,6 +36,12 @@ func TestExprPort(t *testing.T) {
 
 	for _, test := range portTests {
 		t.Run(fmt.Sprint("test-", test.port), func(t *testing.T) {
+			portDirExpr, err := exprs.NewExprPortDirection(exprs.NFT_DPORT)
+			if err != nil {
+				t.Errorf("Error creating port direction expression: %v", err)
+				return
+			}
+
 			portExpr, err := exprs.NewExprPort(test.port, &test.cmp)
 			if err != nil {
 				if !test.shouldFail {
@@ -43,13 +49,17 @@ func TestExprPort(t *testing.T) {
 				}
 				return
 			}
+
+			ruleExpr := []expr.Any{portDirExpr}
+			ruleExpr = append(ruleExpr, *portExpr...)
+
 			//fmt.Printf("%s, %+v\n", test.port, *portExpr)
-			r, _ := nftest.AddTestRule(t, conn, portExpr)
+			r, _ := nftest.AddTestRule(t, conn, &ruleExpr)
 			if r == nil {
 				t.Errorf("Error adding rule with port (%s) expression", test.port)
 				return
 			}
-			e := r.Exprs[0]
+			e := r.Exprs[1]
 			cmp, ok := e.(*expr.Cmp)
 			if !ok {
 				t.Errorf("%s - invalid port expr: %T", test.port, e)
@@ -87,6 +97,12 @@ func TestExprPortRange(t *testing.T) {
 
 	for _, test := range portTests {
 		t.Run(fmt.Sprint("test-", test.port), func(t *testing.T) {
+			portDirExpr, err := exprs.NewExprPortDirection(exprs.NFT_DPORT)
+			if err != nil {
+				t.Errorf("Error creating port direction expression: %v", err)
+				return
+			}
+
 			portExpr, err := exprs.NewExprPortRange(test.port, &test.cmp)
 			if err != nil {
 				if !test.shouldFail {
@@ -94,13 +110,17 @@ func TestExprPortRange(t *testing.T) {
 				}
 				return
 			}
+
+			ruleExpr := []expr.Any{portDirExpr}
+			ruleExpr = append(ruleExpr, *portExpr...)
+
 			//fmt.Printf("%s, %+v\n", test.port, *portExpr)
-			r, _ := nftest.AddTestRule(t, conn, portExpr)
+			r, _ := nftest.AddTestRule(t, conn, &ruleExpr)
 			if r == nil {
 				t.Errorf("Error adding rule with port range (%s) expression", test.port)
 				return
 			}
-			e := r.Exprs[0]
+			e := r.Exprs[1]
 			_, ok := e.(*expr.Range)
 			if !ok {
 				t.Errorf("%s - invalid port range expr: %T", test.port, e)

@@ -12,6 +12,7 @@ use std::{
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
+use opensnitch_ebpf_common::maps::EVENTS_MAP_NAME;
 
 use crate::{
     bus::Bus,
@@ -22,7 +23,7 @@ use crate::{
     services::{
         connection::ConnectionService,
         dns::{DnsEbpfEventDeduper, DnsService},
-        ebpf::{EbpfRingbufConsumer, EbpfService},
+        ebpf::{EbpfPinDomain, EbpfRingbufConsumer, EbpfService},
         process::ProcessService,
     },
     tunables::RuntimeTunables,
@@ -34,6 +35,65 @@ use crate::{
         WorkerCommandResult, impl_restartable_thread_worker_control,
     },
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DnsExplicitRuntimeKind {
+    #[cfg(feature = "aya-ebpf")]
+    Aya,
+    Libbpf,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DnsExplicitRuntime<'a> {
+    kind: DnsExplicitRuntimeKind,
+    obj: &'a Path,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DnsUprobeSpec {
+    program_name: &'static str,
+    section_name: &'static str,
+    symbol_name: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcExplicitRuntimeKind {
+    #[cfg(feature = "aya-ebpf")]
+    Aya,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProcExplicitRuntime<'a> {
+    kind: ProcExplicitRuntimeKind,
+    obj: &'a Path,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProcTracepointSpec {
+    program_name: &'static str,
+    section_name: &'static str,
+    category: &'static str,
+    name: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnExplicitRuntimeKind {
+    #[cfg(feature = "aya-ebpf")]
+    Aya,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ConnExplicitRuntime<'a> {
+    kind: ConnExplicitRuntimeKind,
+    obj: &'a Path,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ConnKprobeSpec {
+    program_name: &'static str,
+    section_name: &'static str,
+    symbol_name: &'static str,
+}
 
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const CONN_SUPERVISE_INTERVAL: Duration = Duration::from_secs(5);
@@ -52,7 +112,7 @@ pub(crate) struct EbpfWorkerMode {
 }
 
 impl EbpfWorkerMode {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) const ALL: Self = Self {
         enable_dns: true,
         enable_proc: true,
@@ -92,7 +152,7 @@ pub struct EbpfWorkerControl {
 }
 
 impl EbpfWorkerControl {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn new(bus: Bus, daemon_shutdown: CancellationToken, tunables: RuntimeTunables) -> Self {
         Self::new_with_mode(bus, daemon_shutdown, tunables, EbpfWorkerMode::ALL, "ebpf")
     }
@@ -182,13 +242,15 @@ impl EbpfWorkerControl {
                 "eBPF worker facilities requested"
             );
 
-            let runtime = match EbpfService::load_existing_objects() {
+            let mut runtime = match EbpfService::load_existing_objects() {
                 Ok(runtime) => {
                     debug!(
+                        pin_domain = ?runtime.pin_domain(),
                         conn_obj = ?runtime.conn_obj,
                         proc_obj = ?runtime.proc_obj,
                         process_obj = ?runtime.process_obj,
                         dns_obj = ?runtime.dns_obj,
+                        rust_dns_obj = ?runtime.rust_dns_obj,
                         "eBPF object discovery initialized"
                     );
                     let _ = crate::workers::dispatch_kernel_event_with_backoff(
@@ -211,26 +273,95 @@ impl EbpfWorkerControl {
                 && !mode.enable_proc
                 && !mode.enable_conn
                 && let Some(runtime) = runtime.as_ref()
-                && let Some(dns_obj) = runtime.dns_obj.as_ref()
+                && let Some(explicit_runtime) = Self::select_dns_explicit_runtime(runtime)
             {
-                match Self::run_dns_explicit_runtime(&bus, &shutdown, dns_obj) {
+                match Self::run_dns_explicit_runtime(&bus, &shutdown, explicit_runtime) {
                     Ok(()) => {
                         info!(worker = worker_name, "explicit DNS eBPF runtime active");
+                        return;
+                    }
+                    Err(err) => {
+                        let summary = Self::summarize_bpf_attach_error(&err);
+                        warn!(
+                            worker = worker_name,
+                            detail = %summary,
+                            "explicit DNS eBPF attach/runtime unavailable, continuing with generic eBPF flow"
+                        );
+                        debug!(
+                            worker = worker_name,
+                            detail = %err,
+                            "explicit DNS eBPF attach/runtime full verifier output"
+                        );
+                    }
+                }
+            }
+
+            if mode.enable_proc
+                && !mode.enable_dns
+                && !mode.enable_conn
+                && let Some(runtime) = runtime.as_ref()
+                && let Some(explicit_runtime) = Self::select_proc_explicit_runtime(runtime)
+            {
+                match Self::run_proc_explicit_runtime(&bus, &shutdown, explicit_runtime) {
+                    Ok(()) => {
+                        info!(worker = worker_name, "explicit process eBPF runtime active");
                         return;
                     }
                     Err(err) => {
                         warn!(
                             worker = worker_name,
                             detail = %err,
-                            "explicit DNS eBPF attach/runtime unavailable, continuing with generic eBPF flow"
+                            "explicit process eBPF attach/runtime unavailable, continuing with generic eBPF flow"
                         );
                     }
                 }
             }
 
+            if mode.enable_conn
+                && !mode.enable_dns
+                && !mode.enable_proc
+                && let Some(runtime) = runtime.as_ref()
+                && let Some(explicit_runtime) = Self::select_conn_explicit_runtime(runtime)
+            {
+                match Self::run_conn_explicit_runtime(&shutdown, explicit_runtime) {
+                    Ok(()) => {
+                        info!(worker = worker_name, "explicit connection eBPF runtime active");
+                        return;
+                    }
+                    Err(err) => {
+                        warn!(
+                            worker = worker_name,
+                            detail = %err,
+                            "explicit connection eBPF attach/runtime unavailable, continuing with generic eBPF flow"
+                        );
+                    }
+                }
+            }
+
+            if let Some(runtime) = runtime.as_mut() {
+                Self::ensure_ebpf_runtime_loaded(runtime, &bus, mode);
+                #[cfg(feature = "aya-ebpf")]
+                runtime.refresh_aya_managed_ringbufs();
+            }
+
             let mut state = SupervisorState::default();
             let mut native_ringbuf = if mode.native_ringbuf_requested() {
-                match NativeRingbuf::try_open(mode, worker_name) {
+                let pin_domain = runtime
+                    .as_ref()
+                    .map(|runtime| runtime.pin_domain())
+                    .unwrap_or_else(EbpfService::selected_pin_domain);
+                #[cfg(feature = "aya-ebpf")]
+                let managed_aya_ringbuf = runtime
+                    .as_mut()
+                    .and_then(|runtime| runtime.take_aya_managed_ringbuf(mode.enable_proc, mode.enable_dns));
+
+                match NativeRingbuf::try_open(
+                    mode,
+                    worker_name,
+                    pin_domain,
+                    #[cfg(feature = "aya-ebpf")]
+                    managed_aya_ringbuf,
+                ) {
                     Ok((consumer, diagnostics)) => {
                         for detail in diagnostics {
                             info!(worker = worker_name, detail = %detail, "native eBPF ringbuf backend fallback detail");
@@ -238,6 +369,7 @@ impl EbpfWorkerControl {
 
                         info!(
                             worker = worker_name,
+                            runtime_mode = ?consumer.runtime_mode(),
                             backend = ?consumer.backend_kind(),
                             "native eBPF ringbuf consumer enabled"
                         );
@@ -297,10 +429,6 @@ impl EbpfWorkerControl {
                 }
             }
 
-            if let Some(runtime) = runtime.as_ref() {
-                Self::ensure_ebpf_runtime_loaded(runtime, &bus, mode);
-            }
-
             let mut last_conn_supervise = Instant::now()
                 .checked_sub(CONN_SUPERVISE_INTERVAL)
                 .unwrap_or_else(Instant::now);
@@ -320,8 +448,10 @@ impl EbpfWorkerControl {
                 }
 
                 if last_reconcile.elapsed() >= Duration::from_secs(30) {
-                    if let Some(runtime) = runtime.as_ref() {
+                    if let Some(runtime) = runtime.as_mut() {
                         Self::ensure_ebpf_runtime_loaded(runtime, &bus, mode);
+                        #[cfg(feature = "aya-ebpf")]
+                        runtime.refresh_aya_managed_ringbufs();
                     }
                     last_reconcile = Instant::now();
                 }
@@ -357,6 +487,67 @@ impl EbpfWorkerControl {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn probe_find_numeric(node: &Value, wanted_keys: &[&str]) -> Option<u64> {
         ConnectionService::find_numeric(node, wanted_keys)
+    }
+
+    fn summarize_bpf_attach_error(err: &str) -> String {
+        let mut summary = err;
+        if let Some((head, _)) = err.split_once("Verifier output:") {
+            summary = head.trim();
+        }
+        if let Some((line, _)) = summary.split_once('\n') {
+            summary = line.trim();
+        }
+        summary.to_string()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn probe_select_dns_explicit_runtime(
+        pin_domain: EbpfPinDomain,
+        has_legacy_dns_obj: bool,
+        has_rust_dns_obj: bool,
+    ) -> Option<&'static str> {
+        #[cfg(feature = "aya-ebpf")]
+        let runtime = Self::select_dns_explicit_runtime_parts(
+            pin_domain,
+            has_legacy_dns_obj.then_some(Path::new("legacy-dns.o")),
+            has_rust_dns_obj.then_some(Path::new("opensnitch-ebpf")),
+        );
+
+        #[cfg(not(feature = "aya-ebpf"))]
+        let runtime = Self::select_dns_explicit_runtime_parts(
+            pin_domain,
+            has_legacy_dns_obj.then_some(Path::new("legacy-dns.o")),
+        );
+
+        runtime.map(|runtime| match runtime.kind {
+            #[cfg(feature = "aya-ebpf")]
+            DnsExplicitRuntimeKind::Aya => "aya",
+            DnsExplicitRuntimeKind::Libbpf => "libbpf",
+        })
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn probe_select_proc_explicit_runtime(
+        pin_domain: EbpfPinDomain,
+        has_rust_ebpf_obj: bool,
+    ) -> Option<&'static str> {
+        #[cfg(feature = "aya-ebpf")]
+        {
+            let runtime = Self::select_proc_explicit_runtime_parts(
+                pin_domain,
+                has_rust_ebpf_obj.then_some(Path::new("opensnitch-ebpf")),
+            );
+            return runtime.map(|runtime| match runtime.kind {
+                ProcExplicitRuntimeKind::Aya => "aya",
+            });
+        }
+
+        #[cfg(not(feature = "aya-ebpf"))]
+        {
+            let _ = pin_domain;
+            let _ = has_rust_ebpf_obj;
+            None
+        }
     }
 
     #[cfg(feature = "native-ebpf-ringbuf")]
@@ -403,10 +594,12 @@ impl EbpfWorkerControl {
 impl_restartable_thread_worker_control!(EbpfWorkerControl, "ebpf");
 
 impl EbpfWorkerControl {
-    fn ensure_ebpf_runtime_loaded(runtime: &EbpfService, bus: &Bus, mode: EbpfWorkerMode) {
+    fn ensure_ebpf_runtime_loaded(runtime: &mut EbpfService, bus: &Bus, mode: EbpfWorkerMode) {
         let Some(bpftool) = resolve_command_path("bpftool") else {
             return;
         };
+
+        let pin_domain = runtime.pin_domain();
 
         if (mode.enable_conn || mode.enable_proc) && !Self::ensure_tracefs_ready() {
             warn!(
@@ -416,9 +609,9 @@ impl EbpfWorkerControl {
 
         let mut loaded_any = false;
 
-        let has_conn_maps = Path::new("/sys/fs/bpf/opensnitch/tcpMap").exists();
-        let has_process_events = Path::new("/sys/fs/bpf/opensnitch_procs/events").exists();
-        let has_dns_events = Path::new("/sys/fs/bpf/opensnitch_dns/events").exists();
+        let has_conn_maps = Path::new(pin_domain.conn_tcp_map_path()).exists();
+        let has_process_events = Path::new(pin_domain.proc_events_path()).exists();
+        let has_dns_events = Path::new(pin_domain.dns_events_path()).exists();
 
         if mode.enable_conn
             && let Some(obj) = runtime.conn_obj.as_ref()
@@ -439,7 +632,7 @@ impl EbpfWorkerControl {
         if mode.enable_dns
             && let Some(obj) = runtime.dns_obj.as_ref()
             && !has_dns_events
-            && Self::try_load_object_with_bpftool(&bpftool, obj, "/sys/fs/bpf/opensnitch_dns")
+            && Self::try_load_object_with_bpftool(&bpftool, obj, runtime.dns_pin_root())
         {
             loaded_any = true;
         }
@@ -533,8 +726,294 @@ impl EbpfWorkerControl {
         None
     }
 
-    #[cfg(all(feature = "libbpf-ebpf", feature = "native-ebpf-ringbuf"))]
+    fn dns_uprobe_specs() -> &'static [DnsUprobeSpec] {
+        &[
+            DnsUprobeSpec {
+                program_name: "uprobe__gethostbyname",
+                section_name: "uprobe/gethostbyname",
+                symbol_name: "gethostbyname",
+            },
+            DnsUprobeSpec {
+                program_name: "uretprobe__gethostbyname",
+                section_name: "uretprobe/gethostbyname",
+                symbol_name: "gethostbyname",
+            },
+            DnsUprobeSpec {
+                program_name: "uprobe__gethostbyname2",
+                section_name: "uprobe/gethostbyname2",
+                symbol_name: "gethostbyname2",
+            },
+            DnsUprobeSpec {
+                program_name: "uretprobe__gethostbyname2",
+                section_name: "uretprobe/gethostbyname2",
+                symbol_name: "gethostbyname2",
+            },
+            DnsUprobeSpec {
+                program_name: "uprobe__getaddrinfo",
+                section_name: "uprobe/getaddrinfo",
+                symbol_name: "getaddrinfo",
+            },
+            DnsUprobeSpec {
+                program_name: "uretprobe__getaddrinfo",
+                section_name: "uretprobe/getaddrinfo",
+                symbol_name: "getaddrinfo",
+            },
+        ]
+    }
+
+    fn proc_tracepoint_specs() -> &'static [ProcTracepointSpec] {
+        &[
+            ProcTracepointSpec {
+                program_name: "tracepoint__syscalls_sys_enter_execve",
+                section_name: "tracepoint/syscalls/sys_enter_execve",
+                category: "syscalls",
+                name: "sys_enter_execve",
+            },
+            ProcTracepointSpec {
+                program_name: "tracepoint__syscalls_sys_enter_execveat",
+                section_name: "tracepoint/syscalls/sys_enter_execveat",
+                category: "syscalls",
+                name: "sys_enter_execveat",
+            },
+            ProcTracepointSpec {
+                program_name: "tracepoint__syscalls_sys_exit_execve",
+                section_name: "tracepoint/syscalls/sys_exit_execve",
+                category: "syscalls",
+                name: "sys_exit_execve",
+            },
+            ProcTracepointSpec {
+                program_name: "tracepoint__syscalls_sys_exit_execveat",
+                section_name: "tracepoint/syscalls/sys_exit_execveat",
+                category: "syscalls",
+                name: "sys_exit_execveat",
+            },
+            ProcTracepointSpec {
+                program_name: "tracepoint__sched_sched_process_exit",
+                section_name: "tracepoint/sched/sched_process_exit",
+                category: "sched",
+                name: "sched_process_exit",
+            },
+        ]
+    }
+
+    fn select_dns_explicit_runtime(runtime: &EbpfService) -> Option<DnsExplicitRuntime<'_>> {
+        #[cfg(feature = "aya-ebpf")]
+        {
+            return Self::select_dns_explicit_runtime_parts(
+                runtime.pin_domain(),
+                runtime.dns_obj.as_deref(),
+                runtime.rust_dns_obj.as_deref(),
+            );
+        }
+
+        #[cfg(not(feature = "aya-ebpf"))]
+        {
+            Self::select_dns_explicit_runtime_parts(runtime.pin_domain(), runtime.dns_obj.as_deref())
+        }
+    }
+
+    fn select_proc_explicit_runtime(runtime: &EbpfService) -> Option<ProcExplicitRuntime<'_>> {
+        #[cfg(feature = "aya-ebpf")]
+        {
+            return Self::select_proc_explicit_runtime_parts(
+                runtime.pin_domain(),
+                runtime.rust_dns_obj.as_deref(),
+            );
+        }
+
+        #[cfg(not(feature = "aya-ebpf"))]
+        {
+            let _ = runtime;
+            None
+        }
+    }
+
+    fn conn_kprobe_specs() -> &'static [ConnKprobeSpec] {
+        &[
+            ConnKprobeSpec {
+                program_name: "kprobe__tcp_v4_connect",
+                section_name: "kprobe/tcp_v4_connect",
+                symbol_name: "tcp_v4_connect",
+            },
+            ConnKprobeSpec {
+                program_name: "kretprobe__tcp_v4_connect",
+                section_name: "kretprobe/tcp_v4_connect",
+                symbol_name: "tcp_v4_connect",
+            },
+            ConnKprobeSpec {
+                program_name: "kprobe__tcp_v6_connect",
+                section_name: "kprobe/tcp_v6_connect",
+                symbol_name: "tcp_v6_connect",
+            },
+            ConnKprobeSpec {
+                program_name: "kretprobe__tcp_v6_connect",
+                section_name: "kretprobe/tcp_v6_connect",
+                symbol_name: "tcp_v6_connect",
+            },
+            ConnKprobeSpec {
+                program_name: "kprobe__udp_sendmsg",
+                section_name: "kprobe/udp_sendmsg",
+                symbol_name: "udp_sendmsg",
+            },
+            ConnKprobeSpec {
+                program_name: "kprobe__udpv6_sendmsg",
+                section_name: "kprobe/udpv6_sendmsg",
+                symbol_name: "udpv6_sendmsg",
+            },
+            ConnKprobeSpec {
+                program_name: "kprobe__inet_dgram_connect",
+                section_name: "kprobe/inet_dgram_connect",
+                symbol_name: "inet_dgram_connect",
+            },
+            ConnKprobeSpec {
+                program_name: "kretprobe__inet_dgram_connect",
+                section_name: "kretprobe/inet_dgram_connect",
+                symbol_name: "inet_dgram_connect",
+            },
+            ConnKprobeSpec {
+                program_name: "kprobe__udp_tunnel6_xmit_skb",
+                section_name: "kprobe/udp_tunnel6_xmit_skb",
+                symbol_name: "udp_tunnel6_xmit_skb",
+            },
+            ConnKprobeSpec {
+                program_name: "kprobe__iptunnel_xmit",
+                section_name: "kprobe/iptunnel_xmit",
+                symbol_name: "iptunnel_xmit",
+            },
+        ]
+    }
+
+    fn select_conn_explicit_runtime(runtime: &EbpfService) -> Option<ConnExplicitRuntime<'_>> {
+        #[cfg(feature = "aya-ebpf")]
+        {
+            return Self::select_conn_explicit_runtime_parts(
+                runtime.pin_domain(),
+                runtime.rust_dns_obj.as_deref(),
+            );
+        }
+
+        #[cfg(not(feature = "aya-ebpf"))]
+        {
+            let _ = runtime;
+            None
+        }
+    }
+
+    #[cfg(feature = "aya-ebpf")]
+    fn select_conn_explicit_runtime_parts<'a>(
+        pin_domain: EbpfPinDomain,
+        rust_ebpf_obj: Option<&'a Path>,
+    ) -> Option<ConnExplicitRuntime<'a>> {
+        if pin_domain == EbpfPinDomain::Aya && let Some(obj) = rust_ebpf_obj {
+            return Some(ConnExplicitRuntime {
+                kind: ConnExplicitRuntimeKind::Aya,
+                obj,
+            });
+        }
+
+        None
+    }
+
+    #[cfg(not(feature = "aya-ebpf"))]
+    fn select_conn_explicit_runtime_parts<'a>(
+        _pin_domain: EbpfPinDomain,
+        _rust_ebpf_obj: Option<&'a Path>,
+    ) -> Option<ConnExplicitRuntime<'a>> {
+        None
+    }
+
+    #[cfg(feature = "aya-ebpf")]
+    fn select_proc_explicit_runtime_parts<'a>(
+        pin_domain: EbpfPinDomain,
+        rust_ebpf_obj: Option<&'a Path>,
+    ) -> Option<ProcExplicitRuntime<'a>> {
+        if pin_domain == EbpfPinDomain::Aya && let Some(obj) = rust_ebpf_obj {
+            return Some(ProcExplicitRuntime {
+                kind: ProcExplicitRuntimeKind::Aya,
+                obj,
+            });
+        }
+
+        None
+    }
+
+    #[cfg(not(feature = "aya-ebpf"))]
+    fn select_proc_explicit_runtime_parts<'a>(
+        _pin_domain: EbpfPinDomain,
+        _rust_ebpf_obj: Option<&'a Path>,
+    ) -> Option<ProcExplicitRuntime<'a>> {
+        None
+    }
+
+    #[cfg(feature = "aya-ebpf")]
+    fn select_dns_explicit_runtime_parts<'a>(
+        pin_domain: EbpfPinDomain,
+        legacy_dns_obj: Option<&'a Path>,
+        rust_dns_obj: Option<&'a Path>,
+    ) -> Option<DnsExplicitRuntime<'a>> {
+        if pin_domain == EbpfPinDomain::Aya && let Some(obj) = rust_dns_obj {
+            return Some(DnsExplicitRuntime {
+                kind: DnsExplicitRuntimeKind::Aya,
+                obj,
+            });
+        }
+
+        legacy_dns_obj.map(|obj| DnsExplicitRuntime {
+            kind: DnsExplicitRuntimeKind::Libbpf,
+            obj,
+        })
+    }
+
+    #[cfg(not(feature = "aya-ebpf"))]
+    fn select_dns_explicit_runtime_parts<'a>(
+        _pin_domain: EbpfPinDomain,
+        legacy_dns_obj: Option<&'a Path>,
+    ) -> Option<DnsExplicitRuntime<'a>> {
+        legacy_dns_obj.map(|obj| DnsExplicitRuntime {
+            kind: DnsExplicitRuntimeKind::Libbpf,
+            obj,
+        })
+    }
+
     fn run_dns_explicit_runtime(
+        bus: &Bus,
+        shutdown: &CancellationToken,
+        runtime: DnsExplicitRuntime<'_>,
+    ) -> Result<(), String> {
+        match runtime.kind {
+            #[cfg(feature = "aya-ebpf")]
+            DnsExplicitRuntimeKind::Aya => Self::run_dns_explicit_aya_runtime(bus, shutdown, runtime.obj),
+            DnsExplicitRuntimeKind::Libbpf => Self::run_dns_explicit_libbpf_runtime(bus, shutdown, runtime.obj),
+        }
+    }
+
+    fn run_proc_explicit_runtime(
+        bus: &Bus,
+        shutdown: &CancellationToken,
+        runtime: ProcExplicitRuntime<'_>,
+    ) -> Result<(), String> {
+        match runtime.kind {
+            #[cfg(feature = "aya-ebpf")]
+            ProcExplicitRuntimeKind::Aya => {
+                Self::run_proc_explicit_aya_runtime(bus, shutdown, runtime.obj)
+            }
+        }
+    }
+
+    fn run_conn_explicit_runtime(
+        shutdown: &CancellationToken,
+        runtime: ConnExplicitRuntime<'_>,
+    ) -> Result<(), String> {
+        match runtime.kind {
+            #[cfg(feature = "aya-ebpf")]
+            ConnExplicitRuntimeKind::Aya => {
+                Self::run_conn_explicit_aya_runtime(shutdown, runtime.obj)
+            }
+        }
+    }
+
+    #[cfg(all(feature = "libbpf-ebpf", feature = "native-ebpf-ringbuf"))]
+    fn run_dns_explicit_libbpf_runtime(
         bus: &Bus,
         shutdown: &CancellationToken,
         dns_obj: &Path,
@@ -553,24 +1032,14 @@ impl EbpfWorkerControl {
         let mut links = Vec::new();
         for prog in obj.progs_mut() {
             let prog_name = lossy_os(prog.name());
-            let attach = match prog_name.as_str() {
-                "uretprobe__gethostbyname" => Some(UprobeOpts {
-                    retprobe: true,
-                    func_name: Some("gethostbyname".to_string()),
+            let attach = Self::dns_uprobe_specs()
+                .iter()
+                .find(|spec| spec.program_name == prog_name)
+                .map(|spec| UprobeOpts {
+                    retprobe: spec.program_name.starts_with("uretprobe__"),
+                    func_name: Some(spec.symbol_name.to_string()),
                     ..Default::default()
-                }),
-                "uprobe__getaddrinfo" => Some(UprobeOpts {
-                    retprobe: false,
-                    func_name: Some("getaddrinfo".to_string()),
-                    ..Default::default()
-                }),
-                "uretprobe__getaddrinfo" => Some(UprobeOpts {
-                    retprobe: true,
-                    func_name: Some("getaddrinfo".to_string()),
-                    ..Default::default()
-                }),
-                _ => None,
-            };
+                });
 
             let Some(opts) = attach else {
                 continue;
@@ -592,8 +1061,8 @@ impl EbpfWorkerControl {
 
         let map = obj
             .maps()
-            .find(|m| m.name() == "events")
-            .ok_or_else(|| "dns object map 'events' not found".to_string())?;
+            .find(|m| m.name() == EVENTS_MAP_NAME)
+            .ok_or_else(|| format!("dns object map '{}' not found", EVENTS_MAP_NAME))?;
 
         let queue = Arc::new(Mutex::new(Vec::<Vec<u8>>::with_capacity(128)));
         let queue_closure = Arc::clone(&queue);
@@ -644,12 +1113,520 @@ impl EbpfWorkerControl {
     }
 
     #[cfg(not(all(feature = "libbpf-ebpf", feature = "native-ebpf-ringbuf")))]
-    fn run_dns_explicit_runtime(
+    fn run_dns_explicit_libbpf_runtime(
         _bus: &Bus,
         _shutdown: &CancellationToken,
         _dns_obj: &Path,
     ) -> Result<(), String> {
         Err("explicit DNS eBPF runtime requires libbpf-ebpf + native-ebpf-ringbuf".to_string())
+    }
+
+    #[cfg(feature = "aya-ebpf")]
+    fn run_dns_explicit_aya_runtime(
+        bus: &Bus,
+        shutdown: &CancellationToken,
+        dns_obj: &Path,
+    ) -> Result<(), String> {
+        use std::convert::TryInto;
+
+        use aya::{EbpfLoader, maps::{Map, RingBuf}, programs::UProbe};
+
+        let libc =
+            Self::find_libc_path().ok_or_else(|| "failed to resolve libc path".to_string())?;
+        let mut bpf = EbpfLoader::new()
+            .load_file(dns_obj)
+            .map_err(|err| format!("load Rust DNS object failed ({:?}): {err}", dns_obj))?;
+
+        let mut attached = 0usize;
+        for spec in Self::dns_uprobe_specs() {
+            let lookup_key = if bpf.program(spec.section_name).is_some() {
+                spec.section_name
+            } else if bpf.program(spec.program_name).is_some() {
+                spec.program_name
+            } else {
+                let available = bpf
+                    .programs()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                warn!(
+                    program = spec.program_name,
+                    section = spec.section_name,
+                    available = %available,
+                    "explicit Rust DNS program not found in object; skipping"
+                );
+                continue;
+            };
+
+            let Some(program_handle) = bpf.program_mut(lookup_key) else {
+                warn!(
+                    program = spec.program_name,
+                    key = lookup_key,
+                    "explicit Rust DNS program handle disappeared; skipping"
+                );
+                continue;
+            };
+
+            let program: &mut UProbe = match program_handle.try_into() {
+                Ok(program) => program,
+                Err(err) => {
+                    warn!(
+                        program = spec.program_name,
+                        detail = %err,
+                        "explicit Rust DNS program type mismatch; skipping"
+                    );
+                    continue;
+                }
+            };
+
+            if let Err(err) = program.load() {
+                warn!(
+                    program = spec.program_name,
+                    section = spec.section_name,
+                    detail = %err,
+                    "explicit Rust DNS program load failed"
+                );
+                continue;
+            }
+
+            match program.attach(Some(spec.symbol_name), 0, &libc, None) {
+                Ok(_) => attached += 1,
+                Err(err) => {
+                    warn!(
+                        program = spec.program_name,
+                        symbol = spec.symbol_name,
+                        detail = %err,
+                        "explicit Rust DNS uprobe attach failed"
+                    );
+                }
+            }
+        }
+
+        if attached == 0 {
+            return Err("no Rust DNS uprobes attached".to_string());
+        }
+
+        if let Some(events_dir) = Path::new(EbpfPinDomain::Aya.dns_events_path()).parent() {
+            let _ = fs::create_dir_all(events_dir);
+        }
+        if !Path::new(EbpfPinDomain::Aya.dns_events_path()).exists() {
+            bpf.map_mut(EVENTS_MAP_NAME)
+                .ok_or_else(|| format!("Rust DNS object map '{}' not found", EVENTS_MAP_NAME))?
+                .pin(EbpfPinDomain::Aya.dns_events_path())
+                .map_err(|err| format!("pin Rust DNS events map failed: {err}"))?;
+        }
+
+        let map = bpf
+            .take_map(EVENTS_MAP_NAME)
+            .ok_or_else(|| format!("Rust DNS object map '{}' not found", EVENTS_MAP_NAME))?;
+        let map = match map {
+            Map::RingBuf(map) => Map::RingBuf(map),
+            _ => return Err(format!("Rust DNS object map '{}' is not a ringbuf", EVENTS_MAP_NAME)),
+        };
+        let mut ringbuf = RingBuf::try_from(map)
+            .map_err(|err| format!("Rust DNS ringbuf reader attach failed: {err}"))?;
+
+        let mut dns_deduper = DnsEbpfEventDeduper::default();
+        while !shutdown.is_cancelled() {
+            let samples = {
+                let mut out = Vec::with_capacity(64);
+                while let Some(item) = ringbuf.next() {
+                    out.push(item.to_vec());
+                }
+                out
+            };
+
+            if samples.is_empty() {
+                if crate::workers::sleep_with_shutdown(
+                    shutdown,
+                    Duration::from_millis(100),
+                    SHUTDOWN_POLL_INTERVAL,
+                ) {
+                    break;
+                }
+                continue;
+            }
+
+            for sample in samples {
+                let Some(payload) = DnsService::parse_ebpf_dns_sample(&sample) else {
+                    continue;
+                };
+                if !dns_deduper.should_emit(&payload) {
+                    continue;
+                }
+                let _ = crate::workers::dispatch_kernel_event_with_backoff(
+                    &bus.kernel_tx,
+                    KernelEvent::DnsUpdate(payload),
+                );
+            }
+        }
+
+        drop(ringbuf);
+        drop(bpf);
+        Ok(())
+    }
+
+    #[cfg(feature = "aya-ebpf")]
+    fn run_proc_explicit_aya_runtime(
+        bus: &Bus,
+        shutdown: &CancellationToken,
+        proc_obj: &Path,
+    ) -> Result<(), String> {
+        use std::convert::TryInto;
+
+        use aya::{
+            EbpfLoader,
+            maps::{Map, RingBuf},
+            programs::TracePoint,
+        };
+
+        let mut bpf = EbpfLoader::new()
+            .load_file(proc_obj)
+            .map_err(|err| format!("load Rust process object failed ({:?}): {err}", proc_obj))?;
+
+        let mut attached = 0usize;
+        for spec in Self::proc_tracepoint_specs() {
+            let lookup_key = if bpf.program(spec.section_name).is_some() {
+                spec.section_name
+            } else if bpf.program(spec.program_name).is_some() {
+                spec.program_name
+            } else {
+                let available = bpf
+                    .programs()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                warn!(
+                    program = spec.program_name,
+                    section = spec.section_name,
+                    available = %available,
+                    "explicit Rust process program not found in object; skipping"
+                );
+                continue;
+            };
+
+            let Some(program_handle) = bpf.program_mut(lookup_key) else {
+                warn!(
+                    program = spec.program_name,
+                    key = lookup_key,
+                    "explicit Rust process program handle disappeared; skipping"
+                );
+                continue;
+            };
+
+            let program: &mut TracePoint = match program_handle.try_into() {
+                Ok(program) => program,
+                Err(err) => {
+                    warn!(
+                        program = spec.program_name,
+                        detail = %err,
+                        "explicit Rust process program type mismatch; skipping"
+                    );
+                    continue;
+                }
+            };
+
+            program.load().map_err(|err| {
+                format!(
+                    "load Rust process program '{}' failed ({:?}): {err}",
+                    spec.program_name, proc_obj
+                )
+            })?;
+
+            match program.attach(spec.category, spec.name) {
+                Ok(_) => attached += 1,
+                Err(err) => {
+                    warn!(
+                        program = spec.program_name,
+                        category = spec.category,
+                        name = spec.name,
+                        detail = %err,
+                        "explicit Rust process tracepoint attach failed"
+                    );
+                }
+            }
+        }
+
+        if attached == 0 {
+            return Err("no Rust process tracepoints attached".to_string());
+        }
+
+        info!(
+            worker = "ebpf-proc",
+            attached,
+            "explicit process tracepoints attached"
+        );
+
+        let _ = crate::workers::dispatch_kernel_event_with_backoff(
+            &bus.kernel_tx,
+            KernelEvent::EbpfProcessMapHit {
+                pid: std::process::id(),
+                uid: 0,
+                note: format!("explicit process tracepoints attached count={attached}"),
+            },
+        );
+
+        if let Some(events_dir) = Path::new(EbpfPinDomain::Aya.proc_events_path()).parent() {
+            let _ = fs::create_dir_all(events_dir);
+        }
+        if !Path::new(EbpfPinDomain::Aya.proc_events_path()).exists() {
+            bpf.map_mut(EVENTS_MAP_NAME)
+                .ok_or_else(|| format!("Rust process object map '{}' not found", EVENTS_MAP_NAME))?
+                .pin(EbpfPinDomain::Aya.proc_events_path())
+                .map_err(|err| format!("pin Rust process events map failed: {err}"))?;
+        }
+
+        let map = bpf
+            .take_map(EVENTS_MAP_NAME)
+            .ok_or_else(|| format!("Rust process object map '{}' not found", EVENTS_MAP_NAME))?;
+        let map = match map {
+            Map::RingBuf(map) => Map::RingBuf(map),
+            _ => {
+                return Err(format!(
+                    "Rust process object map '{}' is not a ringbuf",
+                    EVENTS_MAP_NAME
+                ));
+            }
+        };
+        let mut ringbuf = RingBuf::try_from(map)
+            .map_err(|err| format!("Rust process ringbuf reader attach failed: {err}"))?;
+
+        let mut total_samples: usize = 0;
+        let mut parsed_samples: usize = 0;
+        let mut rejected_samples: usize = 0;
+        let mut first_payload_logged = false;
+        let mut last_stats_emit = Instant::now();
+
+        while !shutdown.is_cancelled() {
+            let mut samples = 0usize;
+            while let Some(item) = ringbuf.next() {
+                samples += 1;
+                total_samples = total_samples.saturating_add(1);
+                trace!(sample_len = item.len(), worker = "ebpf-proc", "explicit process ringbuf sample received");
+                if let Some(payload) = ProcessService::parse_ebpf_proc_state_payload(&item) {
+                    debug!(
+                        worker = "ebpf-proc",
+                        sample_len = item.len(),
+                        pid = payload.pid,
+                        uid = payload.uid,
+                        kind = ?payload.kind,
+                        "explicit process ringbuf sample parsed"
+                    );
+                    if !first_payload_logged {
+                        info!(
+                            worker = "ebpf-proc",
+                            pid = payload.pid,
+                            uid = payload.uid,
+                            ppid = payload.ppid,
+                            kind = ?payload.kind,
+                            comm = payload.comm,
+                            exe = payload.exe,
+                            args = ?payload.args,
+                            args_partial = payload.args_partial,
+                            ret_code = payload.ret_code,
+                            "native eBPF process state event received"
+                        );
+                        first_payload_logged = true;
+                    }
+                    let _ = crate::workers::dispatch_kernel_event_with_backoff(
+                        &bus.kernel_tx,
+                        KernelEvent::EbpfProcStateChanged(payload),
+                    );
+                    parsed_samples = parsed_samples.saturating_add(1);
+                } else {
+                    let ev_type = read_ne_value_at(&item, 0, u64::from_ne_bytes).unwrap_or_default();
+                    debug!(
+                        worker = "ebpf-proc",
+                        sample_len = item.len(),
+                        ev_type,
+                        expected_len = ProcessService::EBPF_EXEC_EVENT_LEN,
+                        "explicit process ringbuf sample rejected by parser"
+                    );
+                    rejected_samples = rejected_samples.saturating_add(1);
+                }
+            }
+
+            if last_stats_emit.elapsed() >= Duration::from_secs(2) {
+                info!(
+                    worker = "ebpf-proc",
+                    total_samples,
+                    parsed_samples,
+                    rejected_samples,
+                    "explicit process ringbuf sample stats"
+                );
+                let note = format!(
+                    "explicit process ringbuf parse stats parsed={} rejected={}",
+                    parsed_samples, rejected_samples
+                );
+                let _ = crate::workers::dispatch_kernel_event_with_backoff(
+                    &bus.kernel_tx,
+                    KernelEvent::EbpfProcessMapHit {
+                        pid: std::process::id(),
+                        uid: 0,
+                        note,
+                    },
+                );
+                last_stats_emit = Instant::now();
+            }
+
+            if samples == 0
+                && crate::workers::sleep_with_shutdown(
+                    shutdown,
+                    Duration::from_millis(100),
+                    SHUTDOWN_POLL_INTERVAL,
+                )
+            {
+                break;
+            }
+        }
+
+        drop(ringbuf);
+        drop(bpf);
+        Ok(())
+    }
+
+    #[cfg(not(feature = "aya-ebpf"))]
+    fn run_proc_explicit_aya_runtime(
+        _bus: &Bus,
+        _shutdown: &CancellationToken,
+        _proc_obj: &Path,
+    ) -> Result<(), String> {
+        Err("explicit Rust process eBPF runtime requires aya-ebpf".to_string())
+    }
+
+    #[cfg(not(feature = "aya-ebpf"))]
+    fn run_dns_explicit_aya_runtime(
+        _bus: &Bus,
+        _shutdown: &CancellationToken,
+        _dns_obj: &Path,
+    ) -> Result<(), String> {
+        Err("explicit Rust DNS eBPF runtime requires aya-ebpf".to_string())
+    }
+
+    #[cfg(feature = "aya-ebpf")]
+    fn run_conn_explicit_aya_runtime(
+        shutdown: &CancellationToken,
+        conn_obj: &Path,
+    ) -> Result<(), String> {
+        use std::convert::TryInto;
+
+        use aya::{EbpfLoader, programs::KProbe};
+
+        let mut bpf = EbpfLoader::new()
+            .load_file(conn_obj)
+            .map_err(|err| format!("load Rust connection object failed ({:?}): {err}", conn_obj))?;
+
+        let mut attached = 0usize;
+        let mut tunnel_expected = 0usize;
+        let mut tunnel_attached = 0usize;
+        for spec in Self::conn_kprobe_specs() {
+            let is_tunnel = matches!(spec.symbol_name, "udp_tunnel6_xmit_skb" | "iptunnel_xmit");
+            if is_tunnel {
+                tunnel_expected += 1;
+            }
+
+            let lookup_key = if bpf.program(spec.section_name).is_some() {
+                spec.section_name
+            } else if bpf.program(spec.program_name).is_some() {
+                spec.program_name
+            } else {
+                if is_tunnel {
+                    warn!(
+                        symbol = spec.symbol_name,
+                        section = spec.section_name,
+                        program = spec.program_name,
+                        "connection tunnel probe not found in Aya object"
+                    );
+                }
+                continue;
+            };
+
+            let Some(program_handle) = bpf.program_mut(lookup_key) else {
+                if is_tunnel {
+                    warn!(symbol = spec.symbol_name, "connection tunnel probe handle missing");
+                }
+                continue;
+            };
+
+            let program: &mut KProbe = match program_handle.try_into() {
+                Ok(program) => program,
+                Err(_) => {
+                    if is_tunnel {
+                        warn!(
+                            symbol = spec.symbol_name,
+                            "connection tunnel probe is not an Aya KProbe"
+                        );
+                    }
+                    continue;
+                }
+            };
+
+            if let Err(err) = program.load() {
+                if is_tunnel {
+                    warn!(symbol = spec.symbol_name, detail = %err, "connection tunnel probe load failed");
+                }
+                continue;
+            }
+
+            if program.attach(spec.symbol_name, 0).is_ok() {
+                attached += 1;
+                if is_tunnel {
+                    tunnel_attached += 1;
+                }
+            } else if is_tunnel {
+                warn!(
+                    symbol = spec.symbol_name,
+                    "connection tunnel probe attach failed"
+                );
+            }
+        }
+
+        info!(
+            attached,
+            total = Self::conn_kprobe_specs().len(),
+            tunnel_attached,
+            tunnel_expected,
+            "explicit Aya connection kprobe attach summary"
+        );
+
+        if tunnel_expected > 0 && tunnel_attached == 0 {
+            warn!(
+                "no connection tunnel probes were attached; tunnel parity checks may be incomplete on this host"
+            );
+        }
+
+        if attached == 0 {
+            return Err("no Rust connection kprobes attached".to_string());
+        }
+
+        let _ = fs::create_dir_all(EbpfPinDomain::Aya.conn_root());
+        if !Path::new(EbpfPinDomain::Aya.conn_tcp_map_path()).exists() {
+            bpf.map_mut("tcpMap")
+                .ok_or_else(|| "Rust connection object map 'tcpMap' not found".to_string())?
+                .pin(EbpfPinDomain::Aya.conn_tcp_map_path())
+                .map_err(|err| format!("pin Rust connection tcpMap failed: {err}"))?;
+        }
+
+        while !shutdown.is_cancelled() {
+            if crate::workers::sleep_with_shutdown(
+                shutdown,
+                Duration::from_millis(250),
+                SHUTDOWN_POLL_INTERVAL,
+            ) {
+                break;
+            }
+        }
+
+        drop(bpf);
+        Ok(())
+    }
+
+    #[cfg(not(feature = "aya-ebpf"))]
+    fn run_conn_explicit_aya_runtime(
+        _shutdown: &CancellationToken,
+        _conn_obj: &Path,
+    ) -> Result<(), String> {
+        Err("explicit Rust connection eBPF runtime requires aya-ebpf".to_string())
     }
 }
 
@@ -1051,28 +2028,30 @@ mod tests {
 
 #[cfg(feature = "native-ebpf-ringbuf")]
 impl NativeRingbuf {
-    fn try_open(mode: EbpfWorkerMode, worker_name: &'static str) -> Result<(Self, Vec<String>), String> {
-        let candidates: Vec<&str> = if mode.enable_proc && mode.enable_dns {
-            vec![
-                "/sys/fs/bpf/opensnitch_procs/events",
-                "/sys/fs/bpf/opensnitch_dns/events",
-            ]
-        } else if mode.enable_proc {
-            vec!["/sys/fs/bpf/opensnitch_procs/events"]
-        } else if mode.enable_dns {
-            vec!["/sys/fs/bpf/opensnitch_dns/events"]
-        } else {
-            Vec::new()
-        };
+    fn try_open(
+        mode: EbpfWorkerMode,
+        worker_name: &'static str,
+        pin_domain: EbpfPinDomain,
+        #[cfg(feature = "aya-ebpf")] managed_aya_ringbuf: Option<crate::services::ebpf::AyaManagedRingbufAsset>,
+    ) -> Result<(Self, Vec<String>), String> {
+        let managed_candidates = pin_domain.native_ringbuf_candidates(mode.enable_proc, mode.enable_dns);
+        let legacy_candidates = EbpfPinDomain::Legacy
+            .native_ringbuf_candidates(mode.enable_proc, mode.enable_dns);
 
-        if candidates.is_empty() {
+        if managed_candidates.is_empty() && legacy_candidates.is_empty() {
             return Err(format!(
                 "native ringbuf path disabled for worker={worker_name} (enable_proc={}, enable_dns={}, enable_conn={})",
                 mode.enable_proc, mode.enable_dns, mode.enable_conn
             ));
         }
 
-        let (consumer, diagnostics) = EbpfRingbufConsumer::try_open_with_diagnostics(&candidates)?;
+        let (consumer, diagnostics) = EbpfRingbufConsumer::try_open_with_diagnostics(
+            pin_domain,
+            #[cfg(feature = "aya-ebpf")]
+            managed_aya_ringbuf,
+            &managed_candidates,
+            &legacy_candidates,
+        )?;
 
         Ok((
             Self {
@@ -1132,6 +2111,10 @@ impl NativeRingbuf {
         self.consumer.backend_kind()
     }
 
+    fn runtime_mode(&self) -> crate::services::ebpf::EbpfRuntimeMode {
+        self.consumer.runtime_mode()
+    }
+
     fn should_emit_dns_event(&mut self, payload: &DnsPayload) -> bool {
         self.dns_deduper.should_emit(payload)
     }
@@ -1151,7 +2134,12 @@ struct NativeRingbuf;
 
 #[cfg(not(feature = "native-ebpf-ringbuf"))]
 impl NativeRingbuf {
-    fn try_open(_mode: EbpfWorkerMode, _worker_name: &'static str) -> Result<(Self, Vec<String>), String> {
+    fn try_open(
+        _mode: EbpfWorkerMode,
+        _worker_name: &'static str,
+        _pin_domain: EbpfPinDomain,
+        #[cfg(feature = "aya-ebpf")] _managed_aya_ringbuf: Option<crate::services::ebpf::AyaManagedRingbufAsset>,
+    ) -> Result<(Self, Vec<String>), String> {
         Err("native-ebpf-ringbuf feature disabled".to_string())
     }
 

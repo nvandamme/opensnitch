@@ -10,6 +10,10 @@ pub(crate) mod support;
 
 #[path = "services/client.rs"]
 mod client;
+#[path = "services/ebpf_paths.rs"]
+mod ebpf_paths;
+#[path = "services/ebpf_runtime_mode.rs"]
+mod ebpf_runtime_mode;
 #[path = "runtime_tasks/command_control.rs"]
 mod command_control;
 #[path = "flows/command_flow.rs"]
@@ -24,6 +28,14 @@ mod config_service;
 mod connect_flow;
 #[path = "smoke/daemon_runtime.rs"]
 mod daemon_runtime;
+#[path = "smoke/aya_dns_trace.rs"]
+mod aya_dns_trace;
+#[path = "smoke/aya_proc_trace.rs"]
+mod aya_proc_trace;
+#[path = "smoke/aya_conn_trace.rs"]
+mod aya_conn_trace;
+#[path = "smoke/aya_tunnel_trace.rs"]
+mod aya_tunnel_trace;
 #[path = "workers/dns_service.rs"]
 mod dns_service;
 #[path = "workers/ebpf_service.rs"]
@@ -54,6 +66,8 @@ mod notification_flow;
 mod pid_resolver;
 #[path = "parsing/proc_connector.rs"]
 mod proc_connector;
+#[path = "parsing/proc_ebpf.rs"]
+mod proc_ebpf;
 #[path = "parsing/proc_fs.rs"]
 mod proc_fs;
 #[path = "services/process_service.rs"]
@@ -113,6 +127,10 @@ mod workers_ebpf;
 mod atomic_write;
 #[path = "parsing/audit_netlink.rs"]
 mod audit_netlink;
+#[path = "parsing/dns_ebpf.rs"]
+mod dns_ebpf;
+#[path = "parsing/ebpf_ringbuf.rs"]
+mod ebpf_ringbuf;
 #[path = "parsing/lru_cache.rs"]
 mod lru_cache;
 #[path = "parsing/ring_buffer.rs"]

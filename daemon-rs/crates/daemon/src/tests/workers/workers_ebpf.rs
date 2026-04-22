@@ -143,3 +143,88 @@ fn native_dns_dedup_blocks_immediate_duplicates() {
 
     assert_eq!(verdicts, vec![true, false, true, false]);
 }
+
+#[test]
+fn explicit_dns_runtime_prefers_rust_object_in_aya_pin_domain() {
+    assert_eq!(
+        EbpfWorkerControl::probe_select_dns_explicit_runtime(
+            crate::services::ebpf::EbpfPinDomain::Aya,
+            true,
+            true,
+        ),
+        Some("aya")
+    );
+}
+
+#[test]
+fn explicit_dns_runtime_uses_rust_object_when_legacy_is_unavailable() {
+    assert_eq!(
+        EbpfWorkerControl::probe_select_dns_explicit_runtime(
+            crate::services::ebpf::EbpfPinDomain::Aya,
+            false,
+            true,
+        ),
+        Some("aya")
+    );
+}
+
+#[test]
+fn explicit_dns_runtime_falls_back_to_legacy_object_when_rust_object_missing() {
+    assert_eq!(
+        EbpfWorkerControl::probe_select_dns_explicit_runtime(
+            crate::services::ebpf::EbpfPinDomain::Aya,
+            true,
+            false,
+        ),
+        Some("libbpf")
+    );
+    assert_eq!(
+        EbpfWorkerControl::probe_select_dns_explicit_runtime(
+            crate::services::ebpf::EbpfPinDomain::Legacy,
+            true,
+            true,
+        ),
+        Some("libbpf")
+    );
+}
+
+#[test]
+fn explicit_dns_runtime_returns_none_when_no_dns_object_is_available() {
+    assert_eq!(
+        EbpfWorkerControl::probe_select_dns_explicit_runtime(
+            crate::services::ebpf::EbpfPinDomain::Aya,
+            false,
+            false,
+        ),
+        None
+    );
+}
+
+#[test]
+fn explicit_process_runtime_prefers_rust_object_in_aya_pin_domain() {
+    assert_eq!(
+        EbpfWorkerControl::probe_select_proc_explicit_runtime(
+            crate::services::ebpf::EbpfPinDomain::Aya,
+            true,
+        ),
+        Some("aya")
+    );
+}
+
+#[test]
+fn explicit_process_runtime_returns_none_without_rust_object() {
+    assert_eq!(
+        EbpfWorkerControl::probe_select_proc_explicit_runtime(
+            crate::services::ebpf::EbpfPinDomain::Aya,
+            false,
+        ),
+        None
+    );
+    assert_eq!(
+        EbpfWorkerControl::probe_select_proc_explicit_runtime(
+            crate::services::ebpf::EbpfPinDomain::Legacy,
+            true,
+        ),
+        None
+    );
+}

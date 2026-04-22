@@ -170,7 +170,8 @@ pub(crate) struct DnsEbpfEventDeduper {
 }
 
 impl DnsService {
-    pub(crate) const EBPF_DNS_EVENT_LEN: usize = 4 + 16 + 252;
+    #[allow(dead_code)]
+    pub(crate) const EBPF_DNS_EVENT_LEN: usize = opensnitch_ebpf_common::dns::DnsEvent::LEN;
 
     pub fn init_workers(
         &self,

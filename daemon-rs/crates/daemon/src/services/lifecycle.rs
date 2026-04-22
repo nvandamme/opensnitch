@@ -140,7 +140,7 @@ pub(crate) fn clear_error_and_transition_mut<T, ClearError, TransitionState>(
     transition_state(runtime, next_state);
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 #[tonic::async_trait]
 pub(crate) trait ServiceLifecycle {
     async fn init(&mut self) -> anyhow::Result<()> {
@@ -163,23 +163,23 @@ pub(crate) trait ServiceLifecycle {
         Ok(())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     async fn reload(&mut self) -> anyhow::Result<()> {
         self.stop().await?;
         self.start().await
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     async fn quiesce(&mut self) -> anyhow::Result<()> {
         self.pause().await
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     async fn drain(&mut self, _timeout: Duration) -> anyhow::Result<()> {
         Ok(())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     async fn health_check(&self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -188,7 +188,7 @@ pub(crate) trait ServiceLifecycle {
         ServiceStatus::default()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     async fn reset(&mut self) -> anyhow::Result<()> {
         Ok(())
     }

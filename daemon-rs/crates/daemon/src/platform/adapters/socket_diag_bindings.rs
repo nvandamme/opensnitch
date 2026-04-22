@@ -57,6 +57,7 @@ impl NetlinkRequest for KillSocketRequest {
 }
 
 impl SocketDiagBindingsAdapter {
+    #[allow(dead_code)]
     pub(crate) fn dump_sockets(family: u8, protocol: u8) -> Result<Vec<SocketInfo>> {
         super::netlink_rt::run_on_netlink_rt(Self::dump_sockets_async(family, protocol))
     }

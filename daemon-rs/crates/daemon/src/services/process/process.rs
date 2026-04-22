@@ -124,20 +124,17 @@ pub struct ProcessService {
 }
 
 impl ProcessService {
-    pub(crate) const EV_TYPE_EXEC: u64 = 1;
-    pub(crate) const EV_TYPE_EXECVEAT: u64 = 2;
-    pub(crate) const EV_TYPE_FORK: u64 = 3;
-    pub(crate) const EV_TYPE_SCHED_EXIT: u64 = 4;
+    pub(crate) const EV_TYPE_EXEC: u64 = opensnitch_ebpf_common::process::EV_TYPE_EXEC;
+    pub(crate) const EV_TYPE_EXECVEAT: u64 = opensnitch_ebpf_common::process::EV_TYPE_EXECVEAT;
+    pub(crate) const EV_TYPE_FORK: u64 = opensnitch_ebpf_common::process::EV_TYPE_FORK;
+    pub(crate) const EV_TYPE_SCHED_EXIT: u64 = opensnitch_ebpf_common::process::EV_TYPE_SCHED_EXIT;
 
-    pub(crate) const EXEC_HDR_LEN: usize = 26;
-    pub(crate) const MAX_PATH_LEN: usize = 4096;
-    pub(crate) const MAX_ARGS: usize = 20;
-    pub(crate) const MAX_ARG_LEN: usize = 256;
-    pub(crate) const TASK_COMM_LEN: usize = 16;
-    pub(crate) const EBPF_EXEC_EVENT_LEN: usize = Self::EXEC_HDR_LEN
-        + Self::MAX_PATH_LEN
-        + (Self::MAX_ARGS * Self::MAX_ARG_LEN)
-        + Self::TASK_COMM_LEN;
+    pub(crate) const EXEC_HDR_LEN: usize = opensnitch_ebpf_common::process::ExecEvent::HDR_LEN;
+    pub(crate) const MAX_PATH_LEN: usize = opensnitch_ebpf_common::process::MAX_PATH_LEN;
+    pub(crate) const MAX_ARGS: usize = opensnitch_ebpf_common::process::MAX_ARGS;
+    pub(crate) const MAX_ARG_LEN: usize = opensnitch_ebpf_common::process::MAX_ARG_LEN;
+    pub(crate) const TASK_COMM_LEN: usize = opensnitch_ebpf_common::process::TASK_COMM_LEN;
+    pub(crate) const EBPF_EXEC_EVENT_LEN: usize = opensnitch_ebpf_common::process::ExecEvent::LEN;
 
     pub fn preferred_monitor_method(
         &self,

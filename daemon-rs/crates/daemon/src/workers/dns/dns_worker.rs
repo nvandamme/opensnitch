@@ -362,6 +362,9 @@ impl DnsWorkerControl {
                 DnsPayload::Alias { alias, host } => {
                     trace!(alias = %alias, host = %host, "[DNS] systemd-resolved alias event");
                 }
+                DnsPayload::NxDomain { host, error_code } => {
+                    trace!(host = %host, error_code = %error_code, "[DNS] systemd-resolved resolution failed");
+                }
             }
             let _ = crate::workers::dispatch_kernel_event_with_backoff(
                 &bus.kernel_tx,

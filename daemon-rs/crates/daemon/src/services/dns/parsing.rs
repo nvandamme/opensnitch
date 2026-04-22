@@ -4,6 +4,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use opensnitch_ebpf_common::dns::{AF_INET, AF_INET6, AF_UNRESOLVED, DnsEvent};
+
 use crate::models::dns_payload::DnsPayload;
 use crate::utils::byte_read::read_ne_value_at;
 use crate::utils::name_parsing::normalized_name;
@@ -22,12 +24,23 @@ pub(crate) fn normalize_dns_host(raw: &str) -> Option<String> {
 
 impl DnsService {
     pub(crate) fn parse_ebpf_dns_sample(sample: &[u8]) -> Option<DnsPayload> {
-        if sample.len() != Self::EBPF_DNS_EVENT_LEN {
+        if sample.len() != DnsEvent::LEN {
             return None;
         }
 
         let addr_type = read_ne_value_at(sample, 0, u32::from_ne_bytes)?;
-        if addr_type != 2 && addr_type != 10 {
+
+        // Failure event: addr_type sentinel + EAI_* code in ip[0..4].
+        if addr_type == AF_UNRESOLVED {
+            let ip_bytes = sample.get(4..8)?;
+            let error_code = i32::from_ne_bytes([ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]]);
+            let host_bytes = sample.get(20..272)?;
+            let host = nul_terminated_utf8_lossy(host_bytes);
+            let host = normalize_dns_host(&host)?;
+            return Some(DnsPayload::nxdomain(host, error_code));
+        }
+
+        if addr_type != AF_INET && addr_type != AF_INET6 {
             return None;
         }
 
@@ -36,7 +49,7 @@ impl DnsService {
         let host = nul_terminated_utf8_lossy(host_bytes);
         let host = normalize_dns_host(&host)?;
 
-        let ip = if addr_type == 2 {
+        let ip = if addr_type == AF_INET {
             IpAddr::V4(Ipv4Addr::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]))
         } else {
             let mut octets = [0_u8; 16];
@@ -68,6 +81,9 @@ impl DnsEbpfEventDeduper {
                 host.as_ref(),
                 Instant::now(),
             ),
+            // Resolution failures are not deduplicated: each failure is
+            // independently observable and shouldn't suppress re-tries.
+            DnsPayload::NxDomain { .. } => true,
         }
     }
 

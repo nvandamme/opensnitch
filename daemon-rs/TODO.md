@@ -6,7 +6,7 @@ It supersedes:
 - `daemon-rs/FEATURE_PARITY.md`
 - `daemon-rs/SERVICE_ASYNC_AND_MODEL_SCAN_2026-03-15.md`
 
-Last update: 2026-03-22 (entry 438)
+Last update: 2026-03-23 (entry 439)
 
 ## Scope
 
@@ -182,6 +182,8 @@ Override at runtime when needed:
 1. Future enhancements
 - [~] Add optional `aya-ebpf` implementation path as a high-level replacement candidate for current `libbpf-rs` integration. (Scaffold landed: feature flag + backend abstraction wiring; polling implementation still pending)
 - [~] Provisional policy: prefer Aya backend by default, keep libbpf as automatic fallback until Aya path reaches runtime parity.
+- [x] Document resolved Aya eBPF probe relocation quirk: avoid `.text.unlikely` relocation targets in probe sections by using explicit section wrappers and panic-path-safe probe code patterns.
+  - Completed (entry 439): added eBPF quirk documentation in `crates/ebpf/QUIRKS.md`, including detection commands and coding patterns used for DNS/process probe stabilization.
 - [ ] Add optional `scope` field to gRPC/proto `Operator` in a dedicated compatibility PR (default dst semantics, backward-compatible wire evolution, Go/Rust/Python client alignment).
   - Note: deferred for now to stay aligned with base opensnitch implementation; revisit in a future dedicated compatibility PR.
 - [ ] Support AdBlock/AdGuard list format in rule list operators and subscriptions.

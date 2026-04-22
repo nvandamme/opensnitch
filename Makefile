@@ -5,9 +5,13 @@ PARITY_STRESS_ROUNDS ?= 1000
 PERF_REPEATS ?= 5
 GO_KERNEL_PRESSURE_SECS ?= 3
 GO_KERNEL_PRESSURE_SWEEP_SECS ?= 2
-DAEMON_RS_MANIFEST := daemon-rs/Cargo.toml
+DAEMON_RS_EBPF_SMOKE_TIMEOUT_SECS ?= 90
 DAEMON_RS_PACKAGE := opensnitchd-rs
-DAEMON_RS_TOOLS_RUN := cargo run --release --manifest-path $(DAEMON_RS_MANIFEST) -p tools --
+DAEMON_RS_EBPF_PACKAGE := opensnitch-ebpf
+DAEMON_RS_EBPF_TARGET ?= bpfel-unknown-none
+DAEMON_RS_EBPF_TOOLCHAIN ?= nightly
+DAEMON_RS_EBPF_SMOKE_TIMEOUT_KILL_AFTER_SECS ?= 3
+OPENSNITCH_TEST_GUARD_PRIV_CMD ?= sudo
 TEST_GUARD := daemon-rs/scripts/with_test_guard.sh
 GO_UI_TEST_FIXTURE := daemon/ui/testdata/default-config.json
 RUST_TEST_LOG_LEVEL ?= info,opensnitchd_rs=debug
@@ -17,8 +21,17 @@ PERF_RUST_LOG_LEVEL ?= error
 PERF_PREBUILD ?= 1
 DAEMON_RS_LIVE_RUST_LOG ?= info
 GO_PROTO_BOOTSTRAP := ./scripts/bootstrap_go_proto_tools.sh
+WORKSPACE_ROOT := $(abspath .)
+DAEMON_RS_DIR := $(WORKSPACE_ROOT)/daemon-rs
+DAEMON_RS_MANIFEST := $(DAEMON_RS_DIR)/Cargo.toml
+DAEMON_RS_KERNEL_TARGET_DIR ?= $(DAEMON_RS_DIR)/target-kernel
+DAEMON_RS_CARGO_TARGET_DIR ?= $(DAEMON_RS_KERNEL_TARGET_DIR)
+DAEMON_RS_RUNTIME_TARGET_DIR ?= $(DAEMON_RS_DIR)/target
+DAEMON_RS_TOOLS_RUN := CARGO_TARGET_DIR=$(DAEMON_RS_CARGO_TARGET_DIR) cargo run --release --manifest-path $(DAEMON_RS_MANIFEST) -p tools --
 
-.PHONY: protocol go-protocol go-proto-tools go-test-full go-stress-profile go-kernel-profile-harness rust-parity-tests rust-kernel-it go-rust-parity-full parity-hot-path-harness parity-hot-path-harness-once parity-cold-path-harness parity-hot-cold-matrix parity-hot-cold-delta parity-hot-cold-delta-once daemon-rs-kernel-profile-harness update-run-perf parity-gate quick-pressure-sweep-tunables auto-tune-kernel-pressure-tunables microbench-connect-dispatch daemon-rs-live-logs daemon-rs-live-stop daemon-rs-async-send-audit daemon-rs-snapshot-clone-audit daemon-rs-design-rule-audit daemon-rs-design-rule-helper-contract-audit daemon-rs-immutable-state-audit daemon-rs-policy-audit
+export OPENSNITCH_TEST_GUARD_PRIV_CMD
+
+.PHONY: protocol go-protocol go-proto-tools go-test-full go-stress-profile go-kernel-profile-harness rust-parity-tests rust-kernel-it go-rust-parity-full parity-hot-path-harness parity-hot-path-harness-once parity-cold-path-harness parity-hot-cold-matrix parity-hot-cold-delta parity-hot-cold-delta-once daemon-rs-kernel-profile-harness update-run-perf parity-gate quick-pressure-sweep-tunables auto-tune-kernel-pressure-tunables microbench-connect-dispatch daemon-rs-live-logs daemon-rs-live-stop daemon-rs-async-send-audit daemon-rs-snapshot-clone-audit daemon-rs-design-rule-audit daemon-rs-design-rule-helper-contract-audit daemon-rs-immutable-state-audit daemon-rs-policy-audit daemon-rs-ebpf-build daemon-rs-ebpf-build-runtime daemon-rs-aya-proc-smoke daemon-rs-aya-dns-smoke daemon-rs-aya-conn-smoke daemon-rs-aya-tunnel-smoke daemon-rs-tools daemon-rs-tool-%
 
 install:
 	@cd daemon && make install
@@ -71,25 +84,106 @@ adblocker:
 	./daemon/opensnitchd -rules-path /etc/opensnitchd/rules -ui-socket unix:///tmp/osui.sock
 
 daemon-rs-build:
-	@cargo build --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE)
+	@CARGO_TARGET_DIR=$(DAEMON_RS_CARGO_TARGET_DIR) cargo build --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE)
+
+daemon-rs-ebpf-build:
+	@CARGO_TARGET_DIR=$(DAEMON_RS_CARGO_TARGET_DIR) DAEMON_RS_EBPF_PACKAGE=$(DAEMON_RS_EBPF_PACKAGE) DAEMON_RS_EBPF_TARGET=$(DAEMON_RS_EBPF_TARGET) DAEMON_RS_EBPF_TOOLCHAIN=$(DAEMON_RS_EBPF_TOOLCHAIN) daemon-rs/scripts/build_ebpf.sh --release
+
+daemon-rs-ebpf-build-runtime:
+	@CARGO_TARGET_DIR=$(DAEMON_RS_RUNTIME_TARGET_DIR) DAEMON_RS_EBPF_PACKAGE=$(DAEMON_RS_EBPF_PACKAGE) DAEMON_RS_EBPF_TARGET=$(DAEMON_RS_EBPF_TARGET) DAEMON_RS_EBPF_TOOLCHAIN=$(DAEMON_RS_EBPF_TOOLCHAIN) daemon-rs/scripts/build_ebpf.sh --release
+
+daemon-rs-aya-proc-smoke: daemon-rs-build daemon-rs-ebpf-build
+	@bash -lc 'set -u; status=0; \
+	env OPENSNITCH_RUN_PRIVILEGED_TESTS=1 OPENSNITCH_CARGO_TARGET_DIR=$(DAEMON_RS_KERNEL_TARGET_DIR) CARGO_TARGET_DIR=$(DAEMON_RS_KERNEL_TARGET_DIR) $(TEST_GUARD) bash -lc '\''cd $(DAEMON_RS_DIR) && timeout --signal=TERM --kill-after=$(DAEMON_RS_EBPF_SMOKE_TIMEOUT_KILL_AFTER_SECS)s $(DAEMON_RS_EBPF_SMOKE_TIMEOUT_SECS)s cargo test -p opensnitchd-rs aya_proc_trace_smoke_reports_explicit_runtime_active -- --ignored --nocapture'\'' || status=$$?; \
+	log=$$(ls -1t /tmp/opensnitch-aya-proc-trace-test-*.log 2>/dev/null | head -n1 || true); \
+	if [ -n "$$log" ] && grep -q "Verifier output:" "$$log"; then \
+		echo "=== Extracted verifier output from $$log ==="; \
+		awk '\''/Verifier output:/ { print; in_block=1; next } in_block { if ($$0 ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2} /) { in_block=0; next } print }'\'' "$$log"; \
+	elif [ -n "$$log" ]; then \
+		echo "no verifier stack trace found in $$log"; \
+	else \
+		echo "no process smoke log found under /tmp/opensnitch-aya-proc-trace-test-*.log"; \
+	fi; \
+	if [ "$$status" -eq 143 ] || [ "$$status" -eq 124 ] || [ "$$status" -eq 137 ]; then \
+		echo "aya process smoke timed out after $(DAEMON_RS_EBPF_SMOKE_TIMEOUT_SECS)s"; \
+		$(TEST_GUARD) bash -lc '\''pkill -KILL -x opensnitchd-rs >/dev/null 2>&1 || true'\'' || true; \
+		status=124; \
+	fi; \
+	exit $$status'
+
+daemon-rs-aya-dns-smoke: daemon-rs-build daemon-rs-ebpf-build
+	@bash -lc 'set -u; status=0; log=/tmp/opensnitch-aya-dns-trace-test.log; \
+	env OPENSNITCH_RUN_PRIVILEGED_TESTS=1 OPENSNITCH_CARGO_TARGET_DIR=$(DAEMON_RS_KERNEL_TARGET_DIR) CARGO_TARGET_DIR=$(DAEMON_RS_KERNEL_TARGET_DIR) $(TEST_GUARD) bash -lc '\''cd $(DAEMON_RS_DIR) && timeout --signal=TERM --kill-after=$(DAEMON_RS_EBPF_SMOKE_TIMEOUT_KILL_AFTER_SECS)s $(DAEMON_RS_EBPF_SMOKE_TIMEOUT_SECS)s cargo test -p opensnitchd-rs aya_dns_trace_smoke_reports_explicit_runtime_active -- --ignored --nocapture'\'' || status=$$?; \
+	if [ -f "$$log" ] && grep -q "Verifier output:" "$$log"; then \
+		echo "=== Extracted verifier output from $$log ==="; \
+		awk '\''/Verifier output:/ { print; in_block=1; next } in_block { if ($$0 ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2} /) { in_block=0; next } print }'\'' "$$log"; \
+	elif [ -f "$$log" ]; then \
+		echo "no verifier stack trace found in $$log"; \
+	else \
+		echo "missing $$log"; \
+	fi; \
+	if [ "$$status" -eq 143 ] || [ "$$status" -eq 124 ] || [ "$$status" -eq 137 ]; then \
+		echo "aya dns smoke timed out after $(DAEMON_RS_EBPF_SMOKE_TIMEOUT_SECS)s"; \
+		$(TEST_GUARD) bash -lc '\''pkill -KILL -x opensnitchd-rs >/dev/null 2>&1 || true'\'' || true; \
+		status=124; \
+	fi; \
+	exit $$status'
+
+daemon-rs-aya-conn-smoke: daemon-rs-build daemon-rs-ebpf-build
+	@bash -lc 'set -u; status=0; \
+	env OPENSNITCH_RUN_PRIVILEGED_TESTS=1 OPENSNITCH_CARGO_TARGET_DIR=$(DAEMON_RS_KERNEL_TARGET_DIR) CARGO_TARGET_DIR=$(DAEMON_RS_KERNEL_TARGET_DIR) $(TEST_GUARD) bash -lc '\''cd $(DAEMON_RS_DIR) && timeout --signal=TERM --kill-after=$(DAEMON_RS_EBPF_SMOKE_TIMEOUT_KILL_AFTER_SECS)s $(DAEMON_RS_EBPF_SMOKE_TIMEOUT_SECS)s cargo test -p opensnitchd-rs aya_conn_trace_smoke_reports_explicit_runtime_active -- --ignored --nocapture'\'' || status=$$?; \
+	log=$$(ls -1t /tmp/opensnitch-aya-conn-trace-test-*.log 2>/dev/null | head -n1 || true); \
+	if [ -n "$$log" ] && grep -q "Verifier output:" "$$log"; then \
+		echo "=== Extracted verifier output from $$log ==="; \
+		awk '\''/Verifier output:/ { print; in_block=1; next } in_block { if ($$0 ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2} /) { in_block=0; next } print }'\'' "$$log"; \
+	elif [ -n "$$log" ]; then \
+		echo "no verifier stack trace found in $$log"; \
+	else \
+		echo "no connection smoke log found under /tmp/opensnitch-aya-conn-trace-test-*.log"; \
+	fi; \
+	if [ "$$status" -eq 143 ] || [ "$$status" -eq 124 ] || [ "$$status" -eq 137 ]; then \
+		echo "aya connection smoke timed out after $(DAEMON_RS_EBPF_SMOKE_TIMEOUT_SECS)s"; \
+		$(TEST_GUARD) bash -lc '\''pkill -KILL -x opensnitchd-rs >/dev/null 2>&1 || true'\'' || true; \
+		status=124; \
+	fi; \
+	exit $$status'
+
+daemon-rs-aya-tunnel-smoke: daemon-rs-build daemon-rs-ebpf-build
+	@bash -lc 'set -u; status=0; \
+	env OPENSNITCH_RUN_PRIVILEGED_TESTS=1 OPENSNITCH_CARGO_TARGET_DIR=$(DAEMON_RS_KERNEL_TARGET_DIR) CARGO_TARGET_DIR=$(DAEMON_RS_KERNEL_TARGET_DIR) $(TEST_GUARD) bash -lc '\''cd $(DAEMON_RS_DIR) && timeout --signal=TERM --kill-after=$(DAEMON_RS_EBPF_SMOKE_TIMEOUT_KILL_AFTER_SECS)s $(DAEMON_RS_EBPF_SMOKE_TIMEOUT_SECS)s cargo test -p opensnitchd-rs aya_tunnel_trace_smoke_reports_tunnel_probe_activity -- --ignored --nocapture'\'' || status=$$?; \
+	log=$$(ls -1t /tmp/opensnitch-aya-tunnel-trace-test-*.log 2>/dev/null | head -n1 || true); \
+	if [ -n "$$log" ] && grep -q "Verifier output:" "$$log"; then \
+		echo "=== Extracted verifier output from $$log ==="; \
+		awk '\''/Verifier output:/ { print; in_block=1; next } in_block { if ($$0 ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2} /) { in_block=0; next } print }'\'' "$$log"; \
+	elif [ -n "$$log" ]; then \
+		echo "no verifier stack trace found in $$log"; \
+	else \
+		echo "no tunnel smoke log found under /tmp/opensnitch-aya-tunnel-trace-test-*.log"; \
+	fi; \
+	if [ "$$status" -eq 143 ] || [ "$$status" -eq 124 ] || [ "$$status" -eq 137 ]; then \
+		echo "aya tunnel smoke timed out after $(DAEMON_RS_EBPF_SMOKE_TIMEOUT_SECS)s"; \
+		$(TEST_GUARD) bash -lc '\''pkill -KILL -x opensnitchd-rs >/dev/null 2>&1 || true'\'' || true; \
+		status=124; \
+	fi; \
+	exit $$status'
 
 daemon-rs-profile-test:
 	@set -e; \
 	for i in $$(seq 1 $(PERF_REPEATS)); do \
 		echo "daemon-rs-profile-test run $$i/$(PERF_REPEATS)"; \
-		$(TEST_GUARD) env RUST_LOG=$(HARNESS_RUST_LOG_LEVEL) OPENSNITCH_STRESS_ROUNDS=$(STRESS_ROUNDS) cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) stress_profile_reports_connect_latency_and_pipeline_drops -- --ignored --nocapture; \
+		$(TEST_GUARD) env CARGO_TARGET_DIR=$(DAEMON_RS_CARGO_TARGET_DIR) RUST_LOG=$(HARNESS_RUST_LOG_LEVEL) OPENSNITCH_STRESS_ROUNDS=$(STRESS_ROUNDS) cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) stress_profile_reports_connect_latency_and_pipeline_drops -- --ignored --nocapture; \
 	done
 
 daemon-rs-kernel-profile-harness:
 	@set -e; \
 	for i in $$(seq 1 $(PERF_REPEATS)); do \
 		echo "daemon-rs-kernel-profile-harness pressure run $$i/$(PERF_REPEATS)"; \
-		$(TEST_GUARD) env RUST_LOG=error OPENSNITCH_STRESS_SKIP_REGRESSION_CHECK=1 cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) stress_profile_reports_kernel_pipeline_pressure -- --ignored --nocapture; \
+		$(TEST_GUARD) env CARGO_TARGET_DIR=$(DAEMON_RS_CARGO_TARGET_DIR) RUST_LOG=error OPENSNITCH_STRESS_SKIP_REGRESSION_CHECK=1 cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) stress_profile_reports_kernel_pipeline_pressure -- --ignored --nocapture; \
 	done
 	@set -e; \
 	for i in $$(seq 1 $(PERF_REPEATS)); do \
 		echo "daemon-rs-kernel-profile-harness sweep run $$i/$(PERF_REPEATS)"; \
-		$(TEST_GUARD) env RUST_LOG=error OPENSNITCH_STRESS_SKIP_REGRESSION_CHECK=1 cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) stress_profile_reports_kernel_pipeline_timeout_sweep -- --ignored --nocapture; \
+		$(TEST_GUARD) env CARGO_TARGET_DIR=$(DAEMON_RS_CARGO_TARGET_DIR) RUST_LOG=error OPENSNITCH_STRESS_SKIP_REGRESSION_CHECK=1 cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) stress_profile_reports_kernel_pipeline_timeout_sweep -- --ignored --nocapture; \
 	done
 
 profile-backends: daemon-rs-build daemon-rs-profile-test go-protocol
@@ -102,18 +196,7 @@ go-test-full: go-protocol
 	fixture_backup=$$(mktemp); \
 	cp -f $(GO_UI_TEST_FIXTURE) "$$fixture_backup"; \
 	trap 'cp -f "$$fixture_backup" $(GO_UI_TEST_FIXTURE) >/dev/null 2>&1 || true; rm -f "$$fixture_backup"' EXIT; \
-	if [ "$$(id -u)" -ne 0 ]; then \
-		echo "go-test-full must run as root (kernel/netfilter test paths require elevated privileges)."; \
-		exit 1; \
-	fi; \
-	for m in nf_conntrack nfnetlink_queue xt_conntrack xt_mark xt_NFQUEUE; do \
-		modprobe "$$m" >/dev/null 2>&1 || { \
-			echo "missing kernel module '$$m' for kernel $$(uname -r)."; \
-			echo "If you recently upgraded kernel/modules, reboot and rerun: sudo make go-test-full"; \
-			exit 1; \
-		}; \
-	done; \
-	$(TEST_GUARD) sh -c 'cd daemon && go test ./... -count=1' || { \
+	OPENSNITCH_RUN_PRIVILEGED_TESTS=1 $(TEST_GUARD) sh -c 'for m in nf_conntrack nfnetlink_queue xt_conntrack xt_mark xt_NFQUEUE; do modprobe "$$m" >/dev/null 2>&1 || { echo "missing kernel module '\''$$m'\'' for kernel $$(uname -r)."; echo "If you recently upgraded kernel/modules, reboot and rerun: sudo make go-test-full"; exit 1; }; done; cd $(WORKSPACE_ROOT)/daemon && OPENSNITCH_HARNESS_GO_LOG_LEVEL=error go test ./... -count=1' || { \
 		echo "go-test-full failed."; \
 		echo "If netfilter tests report missing conntrack/NFQUEUE extensions, reboot into the updated kernel and rerun: sudo make go-test-full"; \
 		exit 1; \
@@ -167,18 +250,14 @@ parity-hot-cold-delta-once: go-protocol
 	@OPENSNITCH_PARITY_STRESS_ROUNDS=$(STRESS_ROUNDS) OPENSNITCH_PERF_RUST_LOG_LEVEL=$(PERF_RUST_LOG_LEVEL) OPENSNITCH_PERF_GO_LOG_LEVEL=$(HARNESS_GO_LOG_LEVEL) OPENSNITCH_PARITY_PREBUILD=$(PERF_PREBUILD) GO_KERNEL_PRESSURE_SECS=$(GO_KERNEL_PRESSURE_SECS) GO_KERNEL_PRESSURE_SWEEP_SECS=$(GO_KERNEL_PRESSURE_SWEEP_SECS) $(DAEMON_RS_TOOLS_RUN) parity-hot-cold-delta-once
 
 rust-parity-tests:
-	@$(TEST_GUARD) env RUST_LOG=$(RUST_TEST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) -p $(DAEMON_RS_PACKAGE) tests::config_service:: -- --nocapture
-	@$(TEST_GUARD) env RUST_LOG=$(RUST_TEST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) -p $(DAEMON_RS_PACKAGE) tests::firewall_service:: -- --nocapture
-	@$(TEST_GUARD) env RUST_LOG=$(RUST_TEST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) -p $(DAEMON_RS_PACKAGE) tests::client:: -- --nocapture
+	@$(TEST_GUARD) env CARGO_TARGET_DIR=$(DAEMON_RS_CARGO_TARGET_DIR) RUST_LOG=$(RUST_TEST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) -p $(DAEMON_RS_PACKAGE) tests::config_service:: -- --nocapture
+	@$(TEST_GUARD) env CARGO_TARGET_DIR=$(DAEMON_RS_CARGO_TARGET_DIR) RUST_LOG=$(RUST_TEST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) -p $(DAEMON_RS_PACKAGE) tests::firewall_service:: -- --nocapture
+	@$(TEST_GUARD) env CARGO_TARGET_DIR=$(DAEMON_RS_CARGO_TARGET_DIR) RUST_LOG=$(RUST_TEST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) -p $(DAEMON_RS_PACKAGE) tests::client:: -- --nocapture
 
 rust-kernel-it:
-	@$(TEST_GUARD) env RUST_LOG=$(RUST_TEST_LOG_LEVEL) OPENSNITCH_RUN_PRIVILEGED_TESTS=1 OPENSNITCH_KERNEL_IT_STRICT=1 cargo test --manifest-path $(DAEMON_RS_MANIFEST) -p $(DAEMON_RS_PACKAGE) integration_kernel_tests:: -- --nocapture
+	@$(TEST_GUARD) env CARGO_TARGET_DIR=$(DAEMON_RS_CARGO_TARGET_DIR) RUST_LOG=$(RUST_TEST_LOG_LEVEL) OPENSNITCH_RUN_PRIVILEGED_TESTS=1 OPENSNITCH_KERNEL_IT_STRICT=1 cargo test --manifest-path $(DAEMON_RS_MANIFEST) -p $(DAEMON_RS_PACKAGE) integration_kernel_tests:: -- --nocapture
 
 go-rust-parity-full:
-	@if [ "$$(id -u)" -ne 0 ]; then \
-		echo "go-rust-parity-full must run as root (includes go-test-full and strict rust kernel integration tests)."; \
-		exit 1; \
-	fi
 	@$(MAKE) go-test-full
 	@$(MAKE) rust-parity-tests
 	@$(MAKE) rust-kernel-it
@@ -199,11 +278,27 @@ auto-tune-kernel-pressure-tunables:
 microbench-connect-dispatch:
 	@OPENSNITCH_PERF_REPEATS=$(PERF_REPEATS) OPENSNITCH_PARITY_PREBUILD=$(PERF_PREBUILD) $(DAEMON_RS_TOOLS_RUN) microbench-connect-dispatch
 
-daemon-rs-live-logs:
-	@OPENSNITCH_DAEMON_RS_RUST_LOG=$(DAEMON_RS_LIVE_RUST_LOG) $(DAEMON_RS_TOOLS_RUN) launch-daemon-live-logs
+daemon-rs-live-logs: daemon-rs-ebpf-build-runtime
+	@OPENSNITCH_DAEMON_RS_RUST_LOG=$(DAEMON_RS_LIVE_RUST_LOG) OPENSNITCH_EBPF_PIN_DOMAIN=aya $(DAEMON_RS_TOOLS_RUN) launch-daemon-live-logs
 
 daemon-rs-live-stop:
 	@$(DAEMON_RS_TOOLS_RUN) stop-daemon-live-logs
+
+daemon-rs-tool-launch-daemon-live-logs: daemon-rs-ebpf-build-runtime
+	@OPENSNITCH_DAEMON_RS_RUST_LOG=$(DAEMON_RS_LIVE_RUST_LOG) OPENSNITCH_EBPF_PIN_DOMAIN=aya $(DAEMON_RS_TOOLS_RUN) launch-daemon-live-logs
+
+daemon-rs-tool-stop-daemon-live-logs:
+	@$(DAEMON_RS_TOOLS_RUN) stop-daemon-live-logs
+
+daemon-rs-tools:
+	@if [ -z "$(TOOL_CMD)" ]; then \
+		echo "usage: make daemon-rs-tools TOOL_CMD='<tools-command-and-args>'"; \
+		exit 2; \
+	fi
+	@$(DAEMON_RS_TOOLS_RUN) $(TOOL_CMD)
+
+daemon-rs-tool-%:
+	@$(DAEMON_RS_TOOLS_RUN) $*
 
 daemon-rs-async-send-audit:
 	@daemon-rs/scripts/check_async_send_policy.sh
