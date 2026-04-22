@@ -473,7 +473,7 @@ above and take precedence within their domain.
 - UI/client transport is an adapter choice, not a core domain assumption.
 - Current gRPC transport remains the default adapter while the daemon still uses the inverted UI connection model, but it must be isolated so future frontends can reuse the same session/control ports.
 - Keep proto/domain message models transport-neutral where practical; do not leak tonic/h2 client concerns into authorization, session registry, or command-classification logic.
-- Feature-gate transport implementations independently when that reduces binary/dependency footprint (`grpc-ui` for tonic-based UI transport, later `http-client`, `openwrt`, or similar), but do not feature-gate the core session/auth policy they consume.
+- Feature-gate transport implementations independently when that reduces binary/dependency footprint (`transport-wire-grpc-client` for tonic-based UI transport, later `http-client`, `openwrt`, or similar), but do not feature-gate the core session/auth policy they consume.
 - `services/client` should converge toward a transport-agnostic UI session port plus adapter implementations, rather than permanently binding daemon behavior to a single gRPC client stack.
 - Remote principal binding and capability authorization are transport-independent rules: the same mapped-principal policy must apply regardless of whether the session arrived over gRPC, WebSocket, ubus, or another frontend adapter.
 

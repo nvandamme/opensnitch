@@ -8,7 +8,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 #[cfg(feature = "client-transport")]
 use transport_wire_core::NotificationInboundPort;
-#[cfg(feature = "subscriptions")]
+#[cfg(all(feature = "subscriptions", feature = "client-transport"))]
 use transport_wire_core::SubscriptionCommandInboundPort;
 #[cfg(feature = "client-transport")]
 use transport_wire_core::{
@@ -16,7 +16,7 @@ use transport_wire_core::{
     WireSubscribeConfig as TransportWireSubscribeConfig,
 };
 use transport_wire_core::{WireRule, WireStatistics, WireSysFirewall};
-#[cfg(feature = "subscriptions")]
+#[cfg(all(feature = "subscriptions", feature = "client-transport"))]
 use transport_wire_core::{
     WireSubscriptionCommandAck, WireSubscriptionReply, WireSubscriptionRequest,
 };

@@ -411,13 +411,15 @@ eBPF library policy:
   - Goal: avoid daemon-side noisy transport warnings during intentional UI termination.
   - Note: future work only; separate PR branch once related Python-client PR is accepted upstream.
 
-- [ ] **`[ARCH]`** Isolate current gRPC UI transport behind a dedicated adapter feature.
+- [x] **`[ARCH]`** Isolate current gRPC UI transport behind a dedicated adapter feature.
   - **Current branch progress (2026-03-30)**:
     - **Done**: added explicit default-on Cargo feature gate for the gRPC wire adapter in `crates/daemon/Cargo.toml` (`transport-wire-grpc-client`).
     - **Done**: `ClientService` transport methods now have `transport-wire-grpc-client`/no-adapter behavior split; no-adapter builds return explicit transport-unavailable errors instead of panicking (`subscribe`, `ping`, `ask_rule`, `post_alert`, subscription RPCs, notification stream open).
     - **Done**: `connect*` helpers now degrade to `ClientService::default()` when `transport-wire-grpc-client` is disabled so policy/runtime paths can continue to apply fallback behavior instead of hard startup failure.
     - **Done**: tonic/rustls dependency wiring moved behind optional `transport-wire-grpc-client` feature deps (`hyper-rustls`, `rustls`, `rustls-pki-types`, `x509-cert`) and transport TLS helpers are now `#[cfg(feature = "transport-wire-grpc-client")]`-scoped.
     - **Done (2026-04-06)**: local validation now confirms `cargo check -p opensnitchd-rs --no-default-features --features storage-format-json` passes with gRPC adapter off; promote this into CI as a dedicated lane when CI matrix policy is updated.
+    - **Done (2026-04-22)**: daemon feature graph now keeps gRPC/TLS stacks adapter-owned: `client-transport` is transport-generic, `transport-wire-grpc-client` owns grpc/tls dependency wiring, and default features enable the adapter feature directly.
+    - **Done (2026-04-22)**: daemon runtime no longer has direct `tonic`/`opensnitch-proto` dependencies; gRPC test scaffolding dependencies moved to daemon `dev-dependencies`.
   - **Feature gate**: `transport-wire-grpc-client` default-on Cargo feature for the current tonic-based UI transport/client path.
   - **Intent**: treat gRPC as one transport adapter, not as the permanent shape of the daemon client.
   - **Scope**:
@@ -433,8 +435,9 @@ eBPF library policy:
     - do not hide remote-principal mapping or command authorization behind transport-specific code paths,
     - do not make wire adapters responsible for core command classification, owner-scope validation, or elevation policy,
     - do not gate proto definitions or shared UI message models that other adapters must reuse.
+  - **Closure note (2026-04-22)**: complete. gRPC UI transport is adapter-scoped behind `transport-wire-grpc-client`, daemon runtime no longer directly depends on `tonic`/`opensnitch-proto`, and non-gRPC compile paths pass (`cargo check -p opensnitchd-rs --no-default-features --features storage-format-json` and `... --features storage-format-json,subscriptions`). Transport policy/session logic remains transport-agnostic in daemon core.
 
-- [ ] **`[ARCH]`** Extract transport/session client port and make transport libraries truly pluggable.
+- [x] **`[ARCH]`** Extract transport/session client port and make transport libraries truly pluggable.
   - **Why**: current mapper-boundary progress is strong, but daemon runtime is still coupled to tonic client surfaces (`UiClient<Channel>`, `tonic::Streaming`, `NotificationStream` wire stream shape) and tonic remains a baseline dependency.
   - **Current branch progress (2026-03-31)**:
     - **Done**: introduced `platform/ports/client_transport_port.rs::NotificationInboundPort` as a transport-agnostic inbound notification stream contract.
@@ -456,6 +459,8 @@ eBPF library policy:
     - **Done**: moved remaining UI gRPC wire calls (`subscribe/ping/ask-rule/post-alert/notifications-open`) into `transport-wire-grpc-client` helper APIs; daemon `services/client/wire.rs` now holds orchestration + inbound adapter wrapping only.
     - **Done**: added dedicated transport adapter tests under `crates/transport-wire-grpc-client/src/tests/` and guarded daemon flow-consistency test modules (`notification_flow`, `stats_flow`, `verdict_flow`) behind `transport-wire-grpc-client`.
     - **Done**: centralized transport/storage adapter dependency versions in workspace-level `[workspace.dependencies]` and switched adapter/storage crates to `workspace = true` dependencies to reduce avoidable version drift for future libs.
+    - **Done (2026-04-22)**: `subscriptions` feature no longer implicitly enables gRPC adapter wiring; non-gRPC compile path now works with `--no-default-features --features storage-format-json,subscriptions`.
+    - **Done (2026-04-22)**: runtime dependency check confirms non-gRPC build graph excludes `tonic` (`cargo tree -p opensnitchd-rs --no-default-features --features storage-format-json --edges normal`).
   - **Target**:
     - introduce a transport-agnostic client/session port in `platform/ports` (connect, subscribe, ping, ask-rule, alert post, notification stream open/send/recv, subscription RPCs),
     - keep flow/service policy paths dependent on domain contracts and transport ports only,
@@ -469,6 +474,7 @@ eBPF library policy:
     - `rg -n "tonic::|UiClient<|SubscriptionsClient<|tonic::Streaming" crates/daemon/src/flows crates/daemon/src/services crates/daemon/src/commands` should return only adapter/bridge surfaces,
     - a no-gRPC transport build path must compile once alternate adapter stubs exist,
     - tests cover parity of notification command/reply flow across at least one non-gRPC adapter stub.
+  - **Closure note (2026-04-22)**: complete for current daemon-as-client architecture slice. Validation gate is green: transport type scan over core flows/services/commands returns no direct tonic client surfaces, no-gRPC builds compile, and runtime graph with non-gRPC feature set excludes `tonic` and `h2` (`cargo tree -p opensnitchd-rs --no-default-features --features storage-format-json --edges normal`). Remaining `hyper-rustls` in that graph is from daemon HTTPS client usage (`reqwest`) and is not UI transport coupling.
 
 - [x] **`[ARCH]`** Extract loadable-state backend/codec ports and make file formats truly pluggable.
   - **Why**: pluggability must be symmetric with transport. Runtime currently assumes JSON/file-centric load paths for config/rules/network aliases/firewall state in multiple domains. We need explicit multi-format compatibility so OpenWrt-style configuration and control surfaces can plug in cleanly (for example UCI-like config files and ubus JSON-compatible payload contracts) without policy-layer rewrites.
