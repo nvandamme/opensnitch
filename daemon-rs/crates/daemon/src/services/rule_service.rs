@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    ffi::CStr,
     io::ErrorKind,
     net::IpAddr,
     path::{Path, PathBuf},
@@ -7,7 +8,10 @@ use std::{
     time::Duration,
 };
 
+use aho_corasick::AhoCorasick;
 use anyhow::{Context, Result};
+use globset::{Glob, GlobMatcher};
+use nix::libc;
 use opensnitch_proto::pb;
 use regex::Regex;
 use tokio::sync::RwLock;
@@ -24,13 +28,15 @@ use crate::models::{
 pub struct RuleMatchDecision {
     pub allow: bool,
     pub reject: bool,
+    pub nolog: bool,
 }
 
 impl RuleMatchDecision {
-    fn from_action(action: RuleAction) -> Self {
+    fn from_rule(action: RuleAction, nolog: bool) -> Self {
         Self {
             allow: action.allows(),
             reject: action.rejects(),
+            nolog,
         }
     }
 }
@@ -65,12 +71,171 @@ impl ListRegexCacheKey {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
+struct DomainWildcardTrieNode {
+    children: HashMap<String, DomainWildcardTrieNode>,
+    min_host_labels_required: Option<usize>,
+}
+
+#[derive(Default)]
+struct DomainWildcardTrie {
+    root: DomainWildcardTrieNode,
+}
+
+impl DomainWildcardTrie {
+    fn insert_suffix(&mut self, suffix: &str) {
+        let labels = suffix
+            .split('.')
+            .filter(|label| !label.is_empty())
+            .collect::<Vec<_>>();
+        if labels.is_empty() {
+            return;
+        }
+
+        let mut node = &mut self.root;
+        for label in labels.iter().rev() {
+            node = node.children.entry((*label).to_string()).or_default();
+        }
+
+        let required = labels.len() + 1;
+        node.min_host_labels_required = Some(
+            node.min_host_labels_required
+                .map(|current| current.min(required))
+                .unwrap_or(required),
+        );
+    }
+
+    fn matches_host(&self, host: &str) -> bool {
+        let labels = host
+            .split('.')
+            .filter(|label| !label.is_empty())
+            .collect::<Vec<_>>();
+        if labels.is_empty() {
+            return false;
+        }
+
+        let mut node = &self.root;
+        for label in labels.iter().rev() {
+            let Some(next) = node.children.get(*label) else {
+                return false;
+            };
+            node = next;
+            if let Some(min_required) = node.min_host_labels_required
+                && labels.len() >= min_required
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+#[derive(Default)]
+struct CidrTrieNode {
+    terminal: bool,
+    zero: Option<Box<CidrTrieNode>>,
+    one: Option<Box<CidrTrieNode>>,
+}
+
+#[derive(Default)]
+struct CidrTrieIndex {
+    has_entries: bool,
+    v4: CidrTrieNode,
+    v6: CidrTrieNode,
+}
+
+impl CidrTrieIndex {
+    fn insert(&mut self, network: IpAddr, prefix_len: u8) {
+        self.has_entries = true;
+        match network {
+            IpAddr::V4(ip) => Self::insert_bits(&mut self.v4, &ip.octets(), prefix_len),
+            IpAddr::V6(ip) => Self::insert_bits(&mut self.v6, &ip.octets(), prefix_len),
+        }
+    }
+
+    fn has_entries(&self) -> bool {
+        self.has_entries
+    }
+
+    fn contains(&self, ip: IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(ip) => Self::contains_bits(&self.v4, &ip.octets(), 32),
+            IpAddr::V6(ip) => Self::contains_bits(&self.v6, &ip.octets(), 128),
+        }
+    }
+
+    fn insert_bits(root: &mut CidrTrieNode, octets: &[u8], prefix_len: u8) {
+        let mut node = root;
+        for bit_idx in 0..usize::from(prefix_len) {
+            let byte = octets[bit_idx / 8];
+            let bit = (byte >> (7 - (bit_idx % 8))) & 1;
+            let next = if bit == 0 {
+                &mut node.zero
+            } else {
+                &mut node.one
+            };
+            node = next.get_or_insert_with(|| Box::new(CidrTrieNode::default()));
+        }
+        node.terminal = true;
+    }
+
+    fn contains_bits(root: &CidrTrieNode, octets: &[u8], max_bits: u8) -> bool {
+        let mut node = root;
+        if node.terminal {
+            return true;
+        }
+
+        for bit_idx in 0..usize::from(max_bits) {
+            let byte = octets[bit_idx / 8];
+            let bit = (byte >> (7 - (bit_idx % 8))) & 1;
+            let next = if bit == 0 {
+                node.zero.as_deref()
+            } else {
+                node.one.as_deref()
+            };
+            let Some(next_node) = next else {
+                return false;
+            };
+            node = next_node;
+            if node.terminal {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+struct ListRegexCache {
+    aho_regexes: Vec<Regex>,
+    fallback_regexes: Vec<Regex>,
+    aho: Option<AhoCorasick>,
+    aho_pattern_to_regex_indices: Vec<Vec<usize>>,
+}
+
+const AHO_MIN_REGEXES: usize = 128;
+const AHO_MIN_LITERAL_COVERAGE: f64 = 0.6;
+const AHO_MIN_AVG_LITERAL_LEN: f64 = 6.0;
+
+#[derive(Default)]
 struct RuleMatchCaches {
-    list_entries: HashMap<PathBuf, Vec<String>>,
-    list_regexes: HashMap<ListRegexCacheKey, Vec<Regex>>,
+    list_domains: HashMap<PathBuf, HashSet<String>>,
+    list_domain_wildcards: HashMap<PathBuf, DomainWildcardTrie>,
+    list_domain_globs: HashMap<PathBuf, Vec<GlobMatcher>>,
+    list_trimmed_values: HashMap<PathBuf, HashSet<String>>,
+    list_networks: HashMap<PathBuf, CidrTrieIndex>,
+    list_regexes: HashMap<ListRegexCacheKey, ListRegexCache>,
     network_aliases: HashMap<String, Vec<String>>,
     regexes: HashMap<RegexCacheKey, Regex>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ListPathNeeds {
+    domains: bool,
+    trimmed_values: bool,
+    networks: bool,
+    regex_sensitivities: HashSet<bool>,
 }
 
 #[derive(Clone, Default)]
@@ -91,6 +256,19 @@ fn operator_matches_against(
         return true;
     }
 
+    if operator.type_name.eq_ignore_ascii_case("simple")
+        && matches!(
+            operator.operand.as_str(),
+            "process.hash.md5" | "process.hash.sha1"
+        )
+    {
+        let Some(hash) = operator_operand_value(operator, attempt, process, dst_host) else {
+            // Go hash operators return true when checksum data is unavailable.
+            return true;
+        };
+        return operator_matches_text(operator, &hash, caches);
+    }
+
     if operator.operand == "list" || operator.type_name.eq_ignore_ascii_case("list") {
         return operator
             .list
@@ -103,6 +281,17 @@ fn operator_matches_against(
             .parent_chain
             .iter()
             .any(|parent| operator_matches_text(operator, parent.path.as_str(), caches));
+    }
+
+    if operator.operand == "user.name" {
+        let Some(uid) = nix::unistd::User::from_name(operator.data.as_str())
+            .ok()
+            .flatten()
+            .map(|user| user.uid.as_raw().to_string())
+        else {
+            return false;
+        };
+        return attempt.uid.to_string().compare_with(&uid, true);
     }
 
     if let Some(env_key) = operator.operand.strip_prefix("process.env.") {
@@ -143,7 +332,8 @@ fn operator_operand_value(
         "process.command" => Some(process.args.join(" ")),
         "process.parent.path" => process.parent_chain.first().map(|node| node.path.clone()),
         "process.id" => Some(process.pid.to_string()),
-        "process.hash.sha1" => process.process_hash.clone(),
+        "process.hash.sha1" => process.process_hash_sha1.clone(),
+        "process.hash.md5" => process.process_hash_md5.clone(),
         "user.id" => Some(attempt.uid.to_string()),
         "dest.ip" => Some(attempt.dst_ip.clone()),
         "dest.network" => Some(attempt.dst_ip.clone()),
@@ -152,15 +342,37 @@ fn operator_operand_value(
         "source.ip" => Some(attempt.src_ip.clone()),
         "source.network" => Some(attempt.src_ip.clone()),
         "source.port" => Some(attempt.src_port.to_string()),
+        "iface.in" => interface_name_by_index(attempt.iface_in_idx),
+        "iface.out" => interface_name_by_index(attempt.iface_out_idx),
         "protocol" => Some(match attempt.protocol {
-            crate::models::connection_state::TransportProtocol::Tcp => "tcp".to_string(),
-            crate::models::connection_state::TransportProtocol::Udp => "udp".to_string(),
-            crate::models::connection_state::TransportProtocol::UdpLite => "udplite".to_string(),
-            crate::models::connection_state::TransportProtocol::Sctp => "sctp".to_string(),
-            crate::models::connection_state::TransportProtocol::Icmp => "icmp".to_string(),
+            crate::models::connection_state::TransportProtocol::Tcp => "TCP".to_string(),
+            crate::models::connection_state::TransportProtocol::Udp => "UDP".to_string(),
+            crate::models::connection_state::TransportProtocol::UdpLite => "UDPLITE".to_string(),
+            crate::models::connection_state::TransportProtocol::Sctp => "SCTP".to_string(),
+            crate::models::connection_state::TransportProtocol::Icmp => "ICMP".to_string(),
         }),
         _ => None,
     }
+}
+
+fn interface_name_by_index(index: u32) -> Option<String> {
+    if index == 0 {
+        return None;
+    }
+
+    let mut name = [0_i8; libc::IF_NAMESIZE];
+    // SAFETY: if_indextoname writes a NUL-terminated interface name into the provided fixed-size buffer.
+    let ptr = unsafe { libc::if_indextoname(index, name.as_mut_ptr()) };
+    if ptr.is_null() {
+        return None;
+    }
+
+    // SAFETY: libc guarantees returned pointer references a NUL-terminated string in `name`.
+    Some(
+        unsafe { CStr::from_ptr(name.as_ptr()) }
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 fn operator_matches_text(
@@ -169,10 +381,18 @@ fn operator_matches_text(
     caches: &RuleMatchCaches,
 ) -> bool {
     if operator.type_name.eq_ignore_ascii_case("regexp") {
+        let lowered;
+        let value = if operator.sensitive {
+            candidate
+        } else {
+            lowered = candidate.to_lowercase();
+            lowered.as_str()
+        };
+
         return caches
             .regexes
             .get(&RegexCacheKey::new(&operator.data, operator.sensitive))
-            .map(|regex| regex.is_match(candidate))
+            .map(|regex| regex.is_match(value))
             .unwrap_or(false);
     }
 
@@ -210,46 +430,129 @@ fn operator_matches_lists(
 ) -> bool {
     let operand = operator.operand.as_str();
     let list_path = PathBuf::from(operator.data.as_str());
-    let entries = match caches.list_entries.get(&list_path) {
-        Some(entries) => entries,
-        None => return false,
-    };
 
     match operand {
         "lists.domains" => {
-            let Some(host) = dst_host.map(str::trim).filter(|value| !value.is_empty()) else {
+            let Some(mut host) = dst_host.map(str::trim).filter(|value| !value.is_empty()) else {
                 return false;
             };
-            entries
-                .iter()
-                .map(|entry| normalize_domain_list_entry(entry))
-                .any(|entry| host.compare_with(&entry, operator.sensitive))
+
+            // Go lists.domains lowers only the candidate host when sensitive=false,
+            // then performs exact map-key lookup against loaded entries.
+            let lowered;
+            if !operator.sensitive {
+                lowered = host.to_ascii_lowercase();
+                host = lowered.as_str();
+            }
+
+            if caches
+                .list_domains
+                .get(&list_path)
+                .map(|set| set.contains(host))
+                .unwrap_or(false)
+            {
+                return true;
+            }
+
+            if caches
+                .list_domain_wildcards
+                .get(&list_path)
+                .map(|trie| trie.matches_host(host))
+                .unwrap_or(false)
+            {
+                return true;
+            }
+
+            caches
+                .list_domain_globs
+                .get(&list_path)
+                .map(|globs| globs.iter().any(|glob| glob.is_match(host)))
+                .unwrap_or(false)
         }
         "lists.domains_regexp" => {
-            let Some(host) = dst_host.map(str::trim).filter(|value| !value.is_empty()) else {
+            let Some(mut host) = dst_host.map(str::trim).filter(|value| !value.is_empty()) else {
                 return false;
             };
+
+            // Go lists.domains_regexp lowers only the candidate host when
+            // sensitive=false and uses regexes compiled from raw list lines.
+            let lowered;
+            if !operator.sensitive {
+                lowered = host.to_ascii_lowercase();
+                host = lowered.as_str();
+            }
+
             caches
                 .list_regexes
                 .get(&ListRegexCacheKey::new(&list_path, operator.sensitive))
-                .map(|patterns| patterns.iter().any(|regex| regex.is_match(host)))
+                .map(|cache| cache.matches(host))
                 .unwrap_or(false)
         }
-        "lists.ips" => entries
-            .iter()
-            .any(|entry| attempt.dst_ip.compare_with(entry, operator.sensitive)),
+        "lists.ips" => {
+            caches
+                .list_trimmed_values
+                .get(&list_path)
+                .map(|set| {
+                    if operator.sensitive {
+                        set.contains(attempt.dst_ip.as_str())
+                    } else {
+                        let lowered = attempt.dst_ip.to_ascii_lowercase();
+                        set.contains(lowered.as_str())
+                    }
+                })
+                .unwrap_or(false)
+                || attempt
+                    .dst_ip
+                    .parse::<IpAddr>()
+                    .ok()
+                    .and_then(|ip| {
+                        caches
+                            .list_networks
+                            .get(&list_path)
+                            .filter(|index| index.has_entries())
+                            .map(|index| index.contains(ip))
+                    })
+                    .unwrap_or(false)
+        }
         "lists.hash.md5" => {
-            let Some(hash) = process.process_hash.as_deref() else {
-                return true;
+            let Some(hash) = process.process_hash_md5.as_deref() else {
+                return false;
             };
-            entries.iter().any(|entry| hash.compare_with(entry, true))
+            caches
+                .list_trimmed_values
+                .get(&list_path)
+                .map(|set| set.contains(hash.trim()))
+                .unwrap_or(false)
         }
         "lists.nets" => {
-            let ip = match attempt.dst_ip.parse::<IpAddr>() {
-                Ok(ip) => ip,
-                Err(_) => return false,
-            };
-            entries.iter().any(|entry| ip.matches_network_spec(entry))
+            if caches
+                .list_trimmed_values
+                .get(&list_path)
+                .map(|set| {
+                    if operator.sensitive {
+                        set.contains(attempt.dst_ip.as_str())
+                    } else {
+                        let lowered = attempt.dst_ip.to_ascii_lowercase();
+                        set.contains(lowered.as_str())
+                    }
+                })
+                .unwrap_or(false)
+            {
+                return true;
+            }
+
+            attempt
+                .dst_ip
+                .parse::<IpAddr>()
+                .ok()
+                .and_then(|ip| {
+                    caches
+                        .list_networks
+                        .get(&list_path)
+                        .filter(|index| index.has_entries())
+                        .map(|index| index.contains(ip))
+                })
+                .unwrap_or(false)
         }
         _ => false,
     }
@@ -430,14 +733,27 @@ impl RuleService {
             .collect()
     }
 
+    #[cfg(test)]
     pub async fn match_attempt(
         &self,
         attempt: &ConnectionAttempt,
         process: &ProcessInfo,
         dst_host: Option<&str>,
     ) -> Result<Option<RuleMatchDecision>> {
-        let rules = self.rules.read().await.clone();
-        let caches = self.match_caches.read().await.clone();
+        Ok(self
+            .match_attempt_with_rule_name(attempt, process, dst_host)
+            .await?
+            .map(|(decision, _)| decision))
+    }
+
+    pub async fn match_attempt_with_rule_name(
+        &self,
+        attempt: &ConnectionAttempt,
+        process: &ProcessInfo,
+        dst_host: Option<&str>,
+    ) -> Result<Option<(RuleMatchDecision, String)>> {
+        let rules = self.rules.read().await;
+        let caches = self.match_caches.read().await;
         let mut decision = None;
 
         for rule in rules.iter().filter(|rule| rule.enabled) {
@@ -445,11 +761,11 @@ impl RuleService {
                 continue;
             }
 
-            let matched = RuleMatchDecision::from_action(rule.action);
-            if rule.precedence {
-                return Ok(Some(matched));
+            let matched = RuleMatchDecision::from_rule(rule.action, rule.nolog);
+            if rule.precedence || !matched.allow {
+                return Ok(Some((matched, rule.name.clone())));
             }
-            decision = Some(matched);
+            decision = Some((matched, rule.name.clone()));
         }
 
         Ok(decision)
@@ -463,7 +779,11 @@ impl RuleService {
         }
         record.updated_at = Some(now);
 
-        let decision = RuleMatchDecision::from_action(record.action);
+        if record.enabled {
+            validate_operator(&record.operator)?;
+        }
+
+        let decision = RuleMatchDecision::from_rule(record.action, record.nolog);
 
         if record.duration == RuleDuration::Once {
             return Ok(decision);
@@ -577,16 +897,14 @@ impl RuleService {
 }
 
 async fn build_match_caches(rules: &[RuleRecord]) -> Result<RuleMatchCaches> {
-    let mut list_paths = HashSet::new();
-    let mut list_regex_paths = HashSet::new();
+    let mut list_path_needs = HashMap::new();
     let mut regex_keys = HashSet::new();
     let mut needs_network_aliases = false;
 
     for rule in rules.iter().filter(|rule| rule.enabled) {
         collect_operator_dependencies(
             &rule.operator,
-            &mut list_paths,
-            &mut list_regex_paths,
+            &mut list_path_needs,
             &mut regex_keys,
             &mut needs_network_aliases,
         );
@@ -594,23 +912,88 @@ async fn build_match_caches(rules: &[RuleRecord]) -> Result<RuleMatchCaches> {
 
     let mut caches = RuleMatchCaches::default();
 
-    for path in list_paths {
-        caches
-            .list_entries
-            .insert(path.clone(), load_list_entries_async(&path).await?);
-    }
+    for (path, needs) in list_path_needs {
+        let needs_text_entries = needs.domains
+            || needs.trimmed_values
+            || needs.networks
+            || !needs.regex_sensitivities.is_empty();
+        let entries = if needs_text_entries {
+            Some(load_list_entries_async(&path).await?)
+        } else {
+            None
+        };
 
-    for key in list_regex_paths {
-        let entries = caches
-            .list_entries
-            .get(&key.path)
-            .cloned()
-            .unwrap_or_default();
-        let regexes = entries
-            .iter()
-            .filter_map(|entry| compile_regex(entry, key.sensitive))
-            .collect::<Vec<_>>();
-        caches.list_regexes.insert(key, regexes);
+        if needs.domains {
+            let mut wildcard_trie = DomainWildcardTrie::default();
+            let mut glob_matchers = Vec::new();
+            let domains = entries
+                .as_ref()
+                .expect("entries loaded when domains are required")
+                .iter()
+                .filter_map(|entry| {
+                    let host = normalize_domain_list_entry(entry)?;
+                    if let Some(suffix) = wildcard_suffix(&host) {
+                        wildcard_trie.insert_suffix(suffix);
+                        return None;
+                    }
+                    if is_domain_glob_pattern(&host) {
+                        if let Ok(glob) = Glob::new(&host) {
+                            glob_matchers.push(glob.compile_matcher());
+                        }
+                        return None;
+                    }
+                    Some(host)
+                })
+                .collect::<HashSet<_>>();
+            caches.list_domains.insert(path.clone(), domains);
+            caches
+                .list_domain_wildcards
+                .insert(path.clone(), wildcard_trie);
+            caches.list_domain_globs.insert(path.clone(), glob_matchers);
+        }
+
+        if needs.trimmed_values {
+            let trimmed_values = entries
+                .as_ref()
+                .expect("entries loaded when trimmed_values are required")
+                .iter()
+                .map(|entry| entry.trim())
+                .filter(|entry| !entry.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<HashSet<_>>();
+            caches
+                .list_trimmed_values
+                .insert(path.clone(), trimmed_values);
+        }
+
+        if needs.networks {
+            let mut index = CidrTrieIndex::default();
+            for (network, prefix) in entries
+                .as_ref()
+                .expect("entries loaded when networks are required")
+                .iter()
+                .map(|entry| entry.trim())
+                .filter(|entry| !entry.is_empty())
+                .filter(|entry| entry.contains('/'))
+                .filter_map(<IpAddr as IpAddrNetworkExt>::parse_network_spec)
+            {
+                index.insert(network, prefix);
+            }
+            caches.list_networks.insert(path.clone(), index);
+        }
+
+        for sensitive in needs.regex_sensitivities {
+            let cache = build_list_regex_cache(
+                entries
+                    .as_ref()
+                    .expect("entries loaded when regex cache is required")
+                    .iter(),
+                sensitive,
+            );
+            caches
+                .list_regexes
+                .insert(ListRegexCacheKey::new(&path, sensitive), cache);
+        }
     }
 
     for key in regex_keys {
@@ -628,8 +1011,7 @@ async fn build_match_caches(rules: &[RuleRecord]) -> Result<RuleMatchCaches> {
 
 fn collect_operator_dependencies(
     operator: &RuleOperator,
-    list_paths: &mut HashSet<PathBuf>,
-    list_regex_paths: &mut HashSet<ListRegexCacheKey>,
+    list_path_needs: &mut HashMap<PathBuf, ListPathNeeds>,
     regex_keys: &mut HashSet<RegexCacheKey>,
     needs_network_aliases: &mut bool,
 ) {
@@ -639,9 +1021,22 @@ fn collect_operator_dependencies(
 
     if operator.type_name.eq_ignore_ascii_case("lists") || operator.operand.starts_with("lists.") {
         let path = PathBuf::from(operator.data.as_str());
-        list_paths.insert(path.clone());
-        if operator.operand == "lists.domains_regexp" {
-            list_regex_paths.insert(ListRegexCacheKey::new(&path, operator.sensitive));
+        let needs = list_path_needs.entry(path).or_default();
+        match operator.operand.as_str() {
+            "lists.domains" => needs.domains = true,
+            "lists.ips" => {
+                needs.trimmed_values = true;
+                needs.networks = true;
+            }
+            "lists.hash.md5" => needs.trimmed_values = true,
+            "lists.nets" => {
+                needs.trimmed_values = true;
+                needs.networks = true;
+            }
+            "lists.domains_regexp" => {
+                needs.regex_sensitivities.insert(operator.sensitive);
+            }
+            _ => {}
         }
     }
 
@@ -650,14 +1045,209 @@ fn collect_operator_dependencies(
     }
 
     for item in &operator.list {
-        collect_operator_dependencies(
-            item,
-            list_paths,
-            list_regex_paths,
-            regex_keys,
-            needs_network_aliases,
-        );
+        collect_operator_dependencies(item, list_path_needs, regex_keys, needs_network_aliases);
     }
+}
+
+impl ListRegexCache {
+    fn matches(&self, candidate: &str) -> bool {
+        if self.aho_regexes.is_empty() && self.fallback_regexes.is_empty() {
+            return false;
+        }
+
+        if let Some(aho) = &self.aho {
+            let mut tested = vec![false; self.aho_regexes.len()];
+            for mat in aho.find_iter(candidate) {
+                let idx = mat.pattern().as_usize();
+                if let Some(indices) = self.aho_pattern_to_regex_indices.get(idx) {
+                    for regex_idx in indices {
+                        if tested[*regex_idx] {
+                            continue;
+                        }
+                        tested[*regex_idx] = true;
+                        if self.aho_regexes[*regex_idx].is_match(candidate) {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            return self
+                .fallback_regexes
+                .iter()
+                .any(|regex| regex.is_match(candidate));
+        }
+
+        self.aho_regexes
+            .iter()
+            .chain(self.fallback_regexes.iter())
+            .any(|regex| regex.is_match(candidate))
+    }
+}
+
+fn build_list_regex_cache<'a>(
+    entries: impl Iterator<Item = &'a String>,
+    sensitive: bool,
+) -> ListRegexCache {
+    let mut aho_regexes = Vec::new();
+    let mut fallback_regexes = Vec::new();
+    let mut literal_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut literal_hint_count = 0usize;
+    let mut literal_total_len = 0usize;
+    let mut total_regex_count = 0usize;
+
+    for entry in entries {
+        if let Some(regex) = compile_regex(entry, true) {
+            total_regex_count += 1;
+            if let Some(literal) = extract_regex_literal_hint(entry, sensitive)
+                && is_aho_friendly_regex_pattern(entry)
+            {
+                let regex_idx = aho_regexes.len();
+                literal_total_len += literal.len();
+                literal_to_indices
+                    .entry(literal)
+                    .or_default()
+                    .push(regex_idx);
+                literal_hint_count += 1;
+                aho_regexes.push(regex);
+            } else {
+                fallback_regexes.push(regex);
+            }
+        }
+    }
+
+    let should_enable_aho =
+        should_enable_aho(total_regex_count, literal_hint_count, literal_total_len);
+
+    let (aho, aho_pattern_to_regex_indices) = if !should_enable_aho || literal_to_indices.is_empty()
+    {
+        fallback_regexes.extend(aho_regexes);
+        aho_regexes = Vec::new();
+        (None, Vec::new())
+    } else {
+        let mut literals = literal_to_indices.keys().cloned().collect::<Vec<_>>();
+        literals.sort();
+
+        let mut mapping = Vec::with_capacity(literals.len());
+        for literal in &literals {
+            mapping.push(literal_to_indices.get(literal).cloned().unwrap_or_default());
+        }
+
+        let aho = AhoCorasick::new(literals).ok();
+        (aho, mapping)
+    };
+
+    ListRegexCache {
+        aho_regexes,
+        fallback_regexes,
+        aho,
+        aho_pattern_to_regex_indices,
+    }
+}
+
+fn should_enable_aho(
+    total_regex_count: usize,
+    literal_hint_count: usize,
+    literal_total_len: usize,
+) -> bool {
+    if total_regex_count < AHO_MIN_REGEXES || literal_hint_count == 0 {
+        return false;
+    }
+
+    let coverage = (literal_hint_count as f64) / (total_regex_count as f64);
+    if coverage < AHO_MIN_LITERAL_COVERAGE {
+        return false;
+    }
+
+    let avg_literal_len = (literal_total_len as f64) / (literal_hint_count as f64);
+    avg_literal_len >= AHO_MIN_AVG_LITERAL_LEN
+}
+
+fn is_aho_friendly_regex_pattern(pattern: &str) -> bool {
+    !pattern.contains("(?")
+}
+
+fn extract_regex_literal_hint(pattern: &str, sensitive: bool) -> Option<String> {
+    // Safe literal hint extraction for common anchored forms like ^example\.org$.
+    let body = pattern.strip_prefix('^')?.strip_suffix('$')?;
+    let mut literal = String::new();
+    let mut escaped = false;
+
+    for ch in body.chars() {
+        if escaped {
+            literal.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+
+        if matches!(
+            ch,
+            '.' | '[' | ']' | '(' | ')' | '{' | '}' | '*' | '+' | '?' | '|' | '^' | '$'
+        ) {
+            return None;
+        }
+
+        literal.push(ch);
+    }
+
+    if literal.is_empty() {
+        return None;
+    }
+
+    Some(if sensitive {
+        literal
+    } else {
+        literal.to_ascii_lowercase()
+    })
+}
+
+fn normalize_domain_list_entry(entry: &str) -> Option<String> {
+    let line = entry.strip_suffix('\r').unwrap_or(entry).trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+
+    let host = if let Some(value) = line.strip_prefix("0.0.0.0") {
+        value.trim()
+    } else if let Some(value) = line.strip_prefix("127.0.0.1") {
+        value.trim()
+    } else {
+        return None;
+    };
+
+    if matches!(
+        host,
+        "local" | "localhost" | "localhost.localdomain" | "broadcasthost"
+    ) {
+        return None;
+    }
+
+    Some(host.to_string())
+}
+
+fn wildcard_suffix(host: &str) -> Option<&str> {
+    if let Some(value) = host.strip_prefix("*.") {
+        let suffix = value.trim_matches('.');
+        return (!suffix.is_empty()).then_some(suffix);
+    }
+    if let Some(value) = host.strip_prefix('.') {
+        let suffix = value.trim_matches('.');
+        return (!suffix.is_empty()).then_some(suffix);
+    }
+    None
+}
+
+fn is_domain_glob_pattern(host: &str) -> bool {
+    if wildcard_suffix(host).is_some() {
+        return false;
+    }
+
+    host.contains('?') || host.contains('[') || host.contains(']') || host.contains('*')
 }
 
 fn compile_regex(pattern: &str, sensitive: bool) -> Option<Regex> {
@@ -668,17 +1258,7 @@ fn build_regex_pattern(pattern: &str, sensitive: bool) -> String {
     if sensitive {
         pattern.to_string()
     } else {
-        format!("(?i:{pattern})")
-    }
-}
-
-fn normalize_domain_list_entry(entry: &str) -> String {
-    if let Some(value) = entry.strip_prefix("0.0.0.0 ") {
-        value.trim().to_string()
-    } else if let Some(value) = entry.strip_prefix("127.0.0.1 ") {
-        value.trim().to_string()
-    } else {
-        entry.to_string()
+        pattern.to_lowercase()
     }
 }
 
@@ -690,7 +1270,6 @@ async fn load_rules_from_path(
 
     let mut entries = match tokio::fs::read_dir(path).await {
         Ok(entries) => entries,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok((loaded, temporary_rules)),
         Err(err) => {
             return Err(err)
                 .with_context(|| format!("failed to read rules directory {}", path.display()));
@@ -709,6 +1288,17 @@ async fn load_rules_from_path(
         let rule_file: RuleFile = serde_json::from_str(&raw_rule)
             .with_context(|| format!("failed to parse rule file {}", file_path.display()))?;
         let record = RuleRecord::from(rule_file);
+        if record.enabled
+            && let Err(err) = validate_operator(&record.operator)
+        {
+            warn!(
+                file = %file_path.display(),
+                rule = %record.name,
+                err = %err,
+                "skipping invalid enabled rule"
+            );
+            continue;
+        }
         if record.enabled && record.duration.temporary_spec().is_some() {
             temporary_rules.push((record.name.clone(), record.duration.clone()));
         }
@@ -718,6 +1308,96 @@ async fn load_rules_from_path(
     loaded.sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
 
     Ok((loaded, temporary_rules))
+}
+
+fn validate_operator(operator: &RuleOperator) -> Result<()> {
+    if operator.type_name.trim().is_empty()
+        && operator.operand.trim().is_empty()
+        && operator.data.trim().is_empty()
+        && operator.list.is_empty()
+    {
+        anyhow::bail!("invalid operator");
+    }
+
+    if !operator.type_name.eq_ignore_ascii_case("simple")
+        && !operator.type_name.eq_ignore_ascii_case("regexp")
+        && !operator.type_name.eq_ignore_ascii_case("list")
+        && operator.operand != "true"
+        && operator.data.trim().is_empty()
+    {
+        anyhow::bail!(
+            "operand {} cannot be empty for type {}",
+            operator.operand,
+            operator.type_name
+        );
+    }
+
+    if operator.type_name.eq_ignore_ascii_case("regexp")
+        && compile_regex(&operator.data, operator.sensitive).is_none()
+    {
+        anyhow::bail!("invalid regexp pattern: {}", operator.data);
+    }
+
+    if operator.type_name.eq_ignore_ascii_case("simple") && operator.operand == "user.name" {
+        let exists = nix::unistd::User::from_name(operator.data.as_str())
+            .ok()
+            .flatten()
+            .is_some();
+        if !exists {
+            anyhow::bail!("invalid user.name operand: {}", operator.data);
+        }
+    }
+
+    if operator.type_name.eq_ignore_ascii_case("network")
+        && operator.operand != "dest.network"
+        && operator.operand != "source.network"
+    {
+        anyhow::bail!(
+            "operand {} is only allowed with type network (dest.network or source.network)",
+            operator.operand
+        );
+    }
+
+    if operator.type_name.eq_ignore_ascii_case("range") {
+        let normalized = operator.data.replace(' ', "");
+        let (min_raw, max_raw) = normalized
+            .split_once('-')
+            .ok_or_else(|| anyhow::anyhow!("invalid range format: {}", operator.data))?;
+        let min = min_raw
+            .parse::<u64>()
+            .map_err(|_| anyhow::anyhow!("invalid range minimum: {}", operator.data))?;
+        let max = max_raw
+            .parse::<u64>()
+            .map_err(|_| anyhow::anyhow!("invalid range maximum: {}", operator.data))?;
+        if min > max {
+            anyhow::bail!("range minimum is greater than maximum: {}", operator.data);
+        }
+    }
+
+    if operator.type_name.eq_ignore_ascii_case("lists") {
+        match operator.operand.as_str() {
+            "lists.domains"
+            | "lists.domains_regexp"
+            | "lists.ips"
+            | "lists.nets"
+            | "lists.hash.md5" => {}
+            _ => anyhow::bail!("unknown lists operand: {}", operator.operand),
+        }
+    }
+
+    if operator.type_name.eq_ignore_ascii_case("list")
+        && operator.list.is_empty()
+        && !operator.data.trim().is_empty()
+        && serde_json::from_str::<Vec<RuleFileOperator>>(&operator.data).is_err()
+    {
+        anyhow::bail!("invalid legacy list payload in operator data");
+    }
+
+    for sub in &operator.list {
+        validate_operator(sub)?;
+    }
+
+    Ok(())
 }
 
 trait StrDurationSpecExt {
@@ -749,6 +1429,194 @@ impl StrDurationSpecExt for str {
 }
 
 async fn load_list_entries_async(path: &Path) -> Result<Vec<String>> {
+    load_list_entries_async_plain(path).await
+}
+
+#[cfg(test)]
+pub(crate) async fn load_list_entries_async_plain_for_test(path: &Path) -> Result<Vec<String>> {
+    load_list_entries_async_plain(path).await
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum ListsDomainsRegexpCacheModeForTest {
+    AhoAndCompiled,
+    CompiledOnly,
+}
+
+#[cfg(test)]
+pub(crate) fn measure_lists_indexing_latency_for_test(
+    operand: &str,
+    entries: &[String],
+    sensitive: bool,
+    regexp_mode: ListsDomainsRegexpCacheModeForTest,
+) -> Result<Duration> {
+    let start = std::time::Instant::now();
+    let _ = build_lists_match_caches_for_test(operand, entries, sensitive, regexp_mode)?;
+    Ok(start.elapsed())
+}
+
+#[cfg(test)]
+pub(crate) fn measure_lists_matching_latency_for_test(
+    operand: &str,
+    entries: &[String],
+    sensitive: bool,
+    candidate_ip: &str,
+    candidate_host: Option<&str>,
+    iterations: usize,
+    regexp_mode: ListsDomainsRegexpCacheModeForTest,
+) -> Result<(Duration, usize)> {
+    let list_path = PathBuf::from("/__lists_bench_path__");
+    let caches = build_lists_match_caches_for_test(operand, entries, sensitive, regexp_mode)?;
+
+    let operator = RuleOperator {
+        type_name: "lists".to_string(),
+        operand: operand.to_string(),
+        data: list_path.display().to_string(),
+        sensitive,
+        list: Vec::new(),
+    };
+
+    let attempt = ConnectionAttempt {
+        request_id: 1,
+        protocol: crate::models::connection_state::TransportProtocol::Tcp,
+        src_ip: "127.0.0.1".to_string(),
+        src_port: 10000,
+        dst_ip: candidate_ip.to_string(),
+        dst_port: 443,
+        iface_in_idx: 0,
+        iface_out_idx: 0,
+        dns_query: None,
+        pid: 1,
+        uid: 1000,
+    };
+    let process = ProcessInfo {
+        pid: 1,
+        path: "/usr/bin/curl".to_string(),
+        args: vec!["curl".to_string()],
+        cwd: None,
+        env_preview: Vec::new(),
+        process_hash: Some("hash-value".to_string()),
+        process_hash_md5: Some("hash-value".to_string()),
+        process_hash_sha1: Some("hash-value".to_string()),
+        parent_chain: vec![crate::models::process_state::ProcessNode {
+            pid: 0,
+            path: "/sbin/init".to_string(),
+        }],
+    };
+
+    let start = std::time::Instant::now();
+    let mut hits = 0usize;
+    for _ in 0..iterations {
+        if operator_matches_lists(&operator, &attempt, &process, candidate_host, &caches) {
+            hits += 1;
+        }
+    }
+
+    Ok((start.elapsed(), hits))
+}
+
+#[cfg(test)]
+fn build_lists_match_caches_for_test(
+    operand: &str,
+    entries: &[String],
+    sensitive: bool,
+    regexp_mode: ListsDomainsRegexpCacheModeForTest,
+) -> Result<RuleMatchCaches> {
+    let list_path = PathBuf::from("/__lists_bench_path__");
+    let mut caches = RuleMatchCaches::default();
+
+    let normalized_entries = entries
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    match operand {
+        "lists.domains" => {
+            let mut wildcard_trie = DomainWildcardTrie::default();
+            let mut glob_matchers = Vec::new();
+            let domains = normalized_entries
+                .iter()
+                .filter_map(|entry| {
+                    let host = normalize_domain_list_entry(entry)?;
+                    if let Some(suffix) = wildcard_suffix(&host) {
+                        wildcard_trie.insert_suffix(suffix);
+                        return None;
+                    }
+                    if is_domain_glob_pattern(&host) {
+                        if let Ok(glob) = Glob::new(&host) {
+                            glob_matchers.push(glob.compile_matcher());
+                        }
+                        return None;
+                    }
+                    Some(host)
+                })
+                .collect::<HashSet<_>>();
+            caches.list_domains.insert(list_path.clone(), domains);
+            caches
+                .list_domain_wildcards
+                .insert(list_path.clone(), wildcard_trie);
+            caches
+                .list_domain_globs
+                .insert(list_path.clone(), glob_matchers);
+        }
+        "lists.ips" | "lists.nets" => {
+            let trimmed_values = normalized_entries.iter().cloned().collect::<HashSet<_>>();
+            caches
+                .list_trimmed_values
+                .insert(list_path.clone(), trimmed_values);
+
+            let mut index = CidrTrieIndex::default();
+            for (network, prefix) in normalized_entries
+                .iter()
+                .filter(|entry| entry.contains('/'))
+                .filter_map(|entry| <IpAddr as IpAddrNetworkExt>::parse_network_spec(entry))
+            {
+                index.insert(network, prefix);
+            }
+            caches.list_networks.insert(list_path.clone(), index);
+        }
+        "lists.domains_regexp" => {
+            let cache = match regexp_mode {
+                ListsDomainsRegexpCacheModeForTest::AhoAndCompiled => {
+                    build_list_regex_cache(normalized_entries.iter(), sensitive)
+                }
+                ListsDomainsRegexpCacheModeForTest::CompiledOnly => {
+                    build_list_regex_cache_compiled_only(normalized_entries.iter())
+                }
+            };
+            caches
+                .list_regexes
+                .insert(ListRegexCacheKey::new(&list_path, sensitive), cache);
+        }
+        _ => anyhow::bail!("unsupported benchmark lists operand: {operand}"),
+    }
+
+    Ok(caches)
+}
+
+#[cfg(test)]
+fn build_list_regex_cache_compiled_only<'a>(
+    entries: impl Iterator<Item = &'a String>,
+) -> ListRegexCache {
+    let mut fallback_regexes = Vec::new();
+    for entry in entries {
+        if let Some(regex) = compile_regex(entry, true) {
+            fallback_regexes.push(regex);
+        }
+    }
+
+    ListRegexCache {
+        aho_regexes: Vec::new(),
+        fallback_regexes,
+        aho: None,
+        aho_pattern_to_regex_indices: Vec::new(),
+    }
+}
+
+async fn load_list_entries_async_plain(path: &Path) -> Result<Vec<String>> {
     let mut entries = Vec::new();
 
     let mut dir = match tokio::fs::read_dir(path).await {
@@ -771,16 +1639,24 @@ async fn load_list_entries_async(path: &Path) -> Result<Vec<String>> {
         }
 
         let raw = tokio::fs::read_to_string(&file_path).await?;
-        for line in raw.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            entries.push(trimmed.to_string());
-        }
+        let file_entries = parse_list_lines(raw.lines());
+
+        entries.extend(file_entries);
     }
 
     Ok(entries)
+}
+
+fn parse_list_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
+    lines
+        .filter_map(|line| {
+            let normalized = line.strip_suffix('\r').unwrap_or(line);
+            if normalized.is_empty() || normalized.starts_with('#') {
+                return None;
+            }
+            Some(normalized.to_string())
+        })
+        .collect()
 }
 
 async fn load_network_aliases_map() -> HashMap<String, Vec<String>> {
@@ -855,6 +1731,16 @@ impl From<&RuleRecord> for RuleFile {
 
 impl From<RuleFileOperator> for RuleOperator {
     fn from(operator: RuleFileOperator) -> Self {
+        let mut operator = operator;
+        if operator.r#type.eq_ignore_ascii_case("list")
+            && operator.list.is_empty()
+            && !operator.data.trim().is_empty()
+            && let Ok(decoded) = serde_json::from_str::<Vec<RuleFileOperator>>(&operator.data)
+        {
+            operator.list = decoded;
+            operator.data.clear();
+        }
+
         Self {
             type_name: operator.r#type,
             operand: operator.operand,
@@ -879,17 +1765,13 @@ impl From<&RuleOperator> for RuleFileOperator {
 
 #[cfg(test)]
 mod tests {
-    use anyhow::Result;
+    use nix::unistd::{Uid, User};
     use regex::Regex;
     use std::path::PathBuf;
 
-    use crate::{
-        models::{
-            connection_state::{ConnectionAttempt, TransportProtocol},
-            process_state::ProcessNode,
-            rule_storage::{RuleFile, RuleFileOperator},
-        },
-        utils::test_support::TestDir,
+    use crate::models::{
+        connection_state::{ConnectionAttempt, TransportProtocol},
+        process_state::ProcessNode,
     };
 
     use super::*;
@@ -902,6 +1784,8 @@ mod tests {
             cwd: None,
             env_preview: Vec::new(),
             process_hash: Some("hash-value".to_string()),
+            process_hash_md5: Some("hash-value".to_string()),
+            process_hash_sha1: Some("hash-value".to_string()),
             parent_chain: vec![ProcessNode {
                 pid: 1,
                 path: "/sbin/init".to_string(),
@@ -917,134 +1801,12 @@ mod tests {
             src_port: 12345,
             dst_ip: dst_ip.to_string(),
             dst_port: 443,
+            iface_in_idx: 0,
+            iface_out_idx: 0,
             dns_query: None,
             pid: 4242,
             uid: 1000,
         }
-    }
-
-    async fn write_rule_file(
-        rules_dir: &Path,
-        name: &str,
-        operator: RuleFileOperator,
-    ) -> Result<()> {
-        let rule = RuleFile {
-            created: String::new(),
-            updated: String::new(),
-            name: name.to_string(),
-            description: String::new(),
-            action: "deny".to_string(),
-            duration: "always".to_string(),
-            enabled: true,
-            precedence: false,
-            nolog: false,
-            operator,
-        };
-
-        tokio::fs::write(
-            rules_dir.join(format!("{name}.json")),
-            serde_json::to_string(&rule)?,
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn match_attempt_uses_cached_list_entries_after_source_removal() -> Result<()> {
-        let rules_dir = TestDir::new("rule-service-rules");
-        let list_dir = TestDir::new("rule-service-lists");
-        tokio::fs::write(list_dir.path.join("domains.txt"), "example.org\n").await?;
-
-        write_rule_file(
-            &rules_dir.path,
-            "cached-list",
-            RuleFileOperator {
-                r#type: "lists".to_string(),
-                operand: "lists.domains".to_string(),
-                data: list_dir.path.display().to_string(),
-                sensitive: false,
-                list: Vec::new(),
-            },
-        )
-        .await?;
-
-        let service = RuleService::default();
-        service.load_path(&rules_dir.path).await?;
-
-        tokio::fs::remove_dir_all(&list_dir.path).await?;
-
-        let decision = service
-            .match_attempt(
-                &test_attempt("10.0.0.2"),
-                &test_process(),
-                Some("example.org"),
-            )
-            .await?;
-
-        assert_eq!(
-            decision,
-            Some(RuleMatchDecision {
-                allow: false,
-                reject: false,
-            })
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn match_attempt_uses_cached_network_aliases_after_source_removal() -> Result<()> {
-        let previous_aliases = std::env::var_os("OPENSNITCH_NETWORK_ALIASES_FILE");
-        let rules_dir = TestDir::new("rule-service-rules");
-        let alias_dir = TestDir::new("rule-service-aliases");
-        let alias_file = alias_dir.path.join("network_aliases.json");
-        tokio::fs::write(&alias_file, r#"{"corp":["10.10.0.0/16"]}"#).await?;
-        unsafe {
-            std::env::set_var("OPENSNITCH_NETWORK_ALIASES_FILE", &alias_file);
-        }
-
-        write_rule_file(
-            &rules_dir.path,
-            "cached-alias",
-            RuleFileOperator {
-                r#type: "network".to_string(),
-                operand: "dest.network".to_string(),
-                data: "corp".to_string(),
-                sensitive: false,
-                list: Vec::new(),
-            },
-        )
-        .await?;
-
-        let service = RuleService::default();
-        service.load_path(&rules_dir.path).await?;
-
-        tokio::fs::remove_file(&alias_file).await?;
-
-        let decision = service
-            .match_attempt(&test_attempt("10.10.4.7"), &test_process(), None)
-            .await?;
-
-        assert_eq!(
-            decision,
-            Some(RuleMatchDecision {
-                allow: false,
-                reject: false,
-            })
-        );
-
-        if let Some(value) = previous_aliases {
-            unsafe {
-                std::env::set_var("OPENSNITCH_NETWORK_ALIASES_FILE", value);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("OPENSNITCH_NETWORK_ALIASES_FILE");
-            }
-        }
-
-        Ok(())
     }
 
     #[test]
@@ -1052,12 +1814,16 @@ mod tests {
         let mut caches = RuleMatchCaches::default();
         let ins_key = RegexCacheKey::new("^example\\.org$", false);
         let sen_key = RegexCacheKey::new("^example\\.org$", true);
-        caches
-            .regexes
-            .insert(ins_key.clone(), Regex::new(&build_regex_pattern(&ins_key.pattern, false)).expect("compile insensitive regex"));
-        caches
-            .regexes
-            .insert(sen_key.clone(), Regex::new(&build_regex_pattern(&sen_key.pattern, true)).expect("compile sensitive regex"));
+        caches.regexes.insert(
+            ins_key.clone(),
+            Regex::new(&build_regex_pattern(&ins_key.pattern, false))
+                .expect("compile insensitive regex"),
+        );
+        caches.regexes.insert(
+            sen_key.clone(),
+            Regex::new(&build_regex_pattern(&sen_key.pattern, true))
+                .expect("compile sensitive regex"),
+        );
 
         let insensitive = RuleOperator {
             type_name: "regexp".to_string(),
@@ -1091,19 +1857,134 @@ mod tests {
     }
 
     #[test]
+    fn regexp_insensitive_lowers_pattern_and_candidate_like_go() {
+        let mut caches = RuleMatchCaches::default();
+        let key = RegexCacheKey::new("^EXAMPLE\\.ORG$", false);
+        caches.regexes.insert(
+            key.clone(),
+            Regex::new(&build_regex_pattern(&key.pattern, key.sensitive))
+                .expect("compile go-style lowered regex"),
+        );
+
+        let op = RuleOperator {
+            type_name: "regexp".to_string(),
+            operand: "dest.host".to_string(),
+            data: "^EXAMPLE\\.ORG$".to_string(),
+            sensitive: false,
+            list: Vec::new(),
+        };
+
+        assert!(operator_matches_against(
+            &op,
+            &test_attempt("10.0.0.3"),
+            &test_process(),
+            Some("ExAmPlE.OrG"),
+            &caches,
+        ));
+    }
+
+    #[test]
+    fn iface_in_operand_matches_interface_name() {
+        let lo = std::ffi::CString::new("lo").expect("static lo cstring");
+        // SAFETY: `lo` is NUL-terminated and if_nametoindex does not retain the pointer.
+        let lo_idx = unsafe { libc::if_nametoindex(lo.as_ptr()) };
+        if lo_idx == 0 {
+            return;
+        }
+
+        let mut attempt = test_attempt("10.0.0.3");
+        attempt.iface_in_idx = lo_idx;
+
+        let op = RuleOperator {
+            type_name: "simple".to_string(),
+            operand: "iface.in".to_string(),
+            data: "lo".to_string(),
+            sensitive: false,
+            list: Vec::new(),
+        };
+
+        assert!(operator_matches_against(
+            &op,
+            &attempt,
+            &test_process(),
+            None,
+            &RuleMatchCaches::default(),
+        ));
+    }
+
+    #[test]
+    fn iface_out_operand_matches_interface_name() {
+        let lo = std::ffi::CString::new("lo").expect("static lo cstring");
+        // SAFETY: `lo` is NUL-terminated and if_nametoindex does not retain the pointer.
+        let lo_idx = unsafe { libc::if_nametoindex(lo.as_ptr()) };
+        if lo_idx == 0 {
+            return;
+        }
+
+        let mut attempt = test_attempt("10.0.0.3");
+        attempt.iface_out_idx = lo_idx;
+
+        let op = RuleOperator {
+            type_name: "simple".to_string(),
+            operand: "iface.out".to_string(),
+            data: "lo".to_string(),
+            sensitive: false,
+            list: Vec::new(),
+        };
+
+        assert!(operator_matches_against(
+            &op,
+            &attempt,
+            &test_process(),
+            None,
+            &RuleMatchCaches::default(),
+        ));
+    }
+
+    #[test]
+    fn user_name_operand_matches_current_uid() {
+        let Some(user) = User::from_uid(Uid::current()).ok().flatten() else {
+            return;
+        };
+
+        let mut attempt = test_attempt("10.0.0.3");
+        attempt.uid = user.uid.as_raw();
+
+        let op = RuleOperator {
+            type_name: "simple".to_string(),
+            operand: "user.name".to_string(),
+            data: user.name,
+            sensitive: false,
+            list: Vec::new(),
+        };
+
+        assert!(operator_matches_against(
+            &op,
+            &attempt,
+            &test_process(),
+            None,
+            &RuleMatchCaches::default(),
+        ));
+    }
+
+    #[test]
     fn lists_domain_and_domain_regexp_match_expected_host_values() {
         let list_path = PathBuf::from("/tmp/test-domains");
         let mut caches = RuleMatchCaches::default();
-        caches.list_entries.insert(
+        caches.list_domains.insert(
             list_path.clone(),
-            vec![
-                "0.0.0.0 example.org".to_string(),
-                ".internal.example.org".to_string(),
-            ],
+            ["example.org".to_string()].into_iter().collect(),
         );
         caches.list_regexes.insert(
             ListRegexCacheKey::new(&list_path, false),
-            vec![Regex::new("(?i:^api\\.example\\.org$)").expect("compile list regex")],
+            ListRegexCache {
+                aho_regexes: Vec::new(),
+                fallback_regexes: vec![
+                    Regex::new("(?i:^api\\.example\\.org$)").expect("compile list regex"),
+                ],
+                aho: None,
+                aho_pattern_to_regex_indices: Vec::new(),
+            },
         );
 
         let domain_op = RuleOperator {
@@ -1142,6 +2023,557 @@ mod tests {
             Some("other.example.org"),
             &caches
         ));
+    }
+
+    #[test]
+    fn lists_ips_and_nets_match_expected_destination() {
+        let ips_path = PathBuf::from("/tmp/test-ips");
+        let nets_path = PathBuf::from("/tmp/test-nets");
+
+        let mut caches = RuleMatchCaches::default();
+        caches.list_trimmed_values.insert(
+            ips_path.clone(),
+            ["10.0.0.4".to_string()].into_iter().collect(),
+        );
+        caches.list_networks.insert(nets_path.clone(), {
+            let mut index = CidrTrieIndex::default();
+            index.insert("10.0.0.0".parse().expect("parse test network ip"), 24);
+            index
+        });
+
+        let ips_op = RuleOperator {
+            type_name: "lists".to_string(),
+            operand: "lists.ips".to_string(),
+            data: ips_path.display().to_string(),
+            sensitive: false,
+            list: Vec::new(),
+        };
+        let nets_op = RuleOperator {
+            operand: "lists.nets".to_string(),
+            data: nets_path.display().to_string(),
+            ..ips_op.clone()
+        };
+
+        let attempt = test_attempt("10.0.0.4");
+        let process = test_process();
+
+        assert!(operator_matches_against(
+            &ips_op, &attempt, &process, None, &caches,
+        ));
+        assert!(operator_matches_against(
+            &nets_op, &attempt, &process, None, &caches,
+        ));
+    }
+
+    #[test]
+    fn lists_nets_matches_ipv6_prefixes() {
+        let nets_path = PathBuf::from("/tmp/test-nets-v6");
+        let mut caches = RuleMatchCaches::default();
+        caches.list_networks.insert(nets_path.clone(), {
+            let mut index = CidrTrieIndex::default();
+            index.insert("2001:db8::".parse().expect("parse v6 test network ip"), 32);
+            index
+        });
+
+        let nets_op = RuleOperator {
+            type_name: "lists".to_string(),
+            operand: "lists.nets".to_string(),
+            data: nets_path.display().to_string(),
+            sensitive: false,
+            list: Vec::new(),
+        };
+
+        assert!(operator_matches_against(
+            &nets_op,
+            &test_attempt("2001:db8::10"),
+            &test_process(),
+            None,
+            &caches,
+        ));
+        assert!(!operator_matches_against(
+            &nets_op,
+            &test_attempt("2001:dead::10"),
+            &test_process(),
+            None,
+            &caches,
+        ));
+    }
+
+    #[test]
+    fn lists_domains_wildcard_fallback_matches_subdomains_only() {
+        let list_path = PathBuf::from("/tmp/test-domains-wildcard");
+        let mut caches = RuleMatchCaches::default();
+        let mut trie = DomainWildcardTrie::default();
+        trie.insert_suffix("example.org");
+        caches.list_domain_wildcards.insert(list_path.clone(), trie);
+
+        let wildcard_op = RuleOperator {
+            type_name: "lists".to_string(),
+            operand: "lists.domains".to_string(),
+            data: list_path.display().to_string(),
+            sensitive: false,
+            list: Vec::new(),
+        };
+
+        assert!(operator_matches_against(
+            &wildcard_op,
+            &test_attempt("10.0.0.4"),
+            &test_process(),
+            Some("api.example.org"),
+            &caches,
+        ));
+        assert!(!operator_matches_against(
+            &wildcard_op,
+            &test_attempt("10.0.0.4"),
+            &test_process(),
+            Some("example.org"),
+            &caches,
+        ));
+    }
+
+    #[test]
+    fn lists_domains_glob_fallback_matches_extended_patterns() {
+        let list_path = PathBuf::from("/tmp/test-domains-glob");
+        let mut caches = RuleMatchCaches::default();
+        let glob = Glob::new("api-??.example.org")
+            .expect("compile domain glob")
+            .compile_matcher();
+        caches
+            .list_domain_globs
+            .insert(list_path.clone(), vec![glob]);
+
+        let glob_op = RuleOperator {
+            type_name: "lists".to_string(),
+            operand: "lists.domains".to_string(),
+            data: list_path.display().to_string(),
+            sensitive: false,
+            list: Vec::new(),
+        };
+
+        assert!(operator_matches_against(
+            &glob_op,
+            &test_attempt("10.0.0.4"),
+            &test_process(),
+            Some("api-12.example.org"),
+            &caches,
+        ));
+        assert!(!operator_matches_against(
+            &glob_op,
+            &test_attempt("10.0.0.4"),
+            &test_process(),
+            Some("api-123.example.org"),
+            &caches,
+        ));
+    }
+
+    #[test]
+    fn list_regex_cache_disables_aho_for_low_literal_coverage() {
+        let mut entries = vec!["^api\\.example\\.org$".to_string()];
+        for i in 0..256 {
+            entries.push(format!(
+                "^(?:node|edge)-[a-z0-9]{{4}}\\.zone{}\\.example\\.(?:org|net)$",
+                i % 31
+            ));
+        }
+
+        let cache = build_list_regex_cache(entries.iter(), false);
+        assert!(cache.aho.is_none());
+        assert!(cache.aho_regexes.is_empty());
+        assert!(!cache.fallback_regexes.is_empty());
+    }
+
+    #[test]
+    fn list_regex_cache_enables_aho_for_high_literal_coverage() {
+        let entries = (0..256)
+            .map(|i| format!("^host-{i}\\.example\\.org$"))
+            .collect::<Vec<_>>();
+
+        let cache = build_list_regex_cache(entries.iter(), false);
+        assert!(cache.aho.is_some());
+        assert!(!cache.aho_regexes.is_empty());
+    }
+
+    #[test]
+    fn list_regex_cache_keeps_complex_regex_fallback_when_aho_enabled() {
+        let mut entries = (0..256)
+            .map(|i| format!("^host-{i}\\.example\\.org$"))
+            .collect::<Vec<_>>();
+        entries.push("^(?:service|api)-[a-z0-9-]+\\.example\\.org$".to_string());
+
+        let cache = build_list_regex_cache(entries.iter(), false);
+        assert!(cache.aho.is_some());
+        assert!(!cache.fallback_regexes.is_empty());
+
+        assert!(cache.matches("host-42.example.org"));
+        assert!(cache.matches("service-foo.example.org"));
+    }
+
+    #[test]
+    fn process_hash_sha1_operand_matches_expected_hash() {
+        let op = RuleOperator {
+            type_name: "simple".to_string(),
+            operand: "process.hash.sha1".to_string(),
+            data: "hash-value".to_string(),
+            sensitive: false,
+            list: Vec::new(),
+        };
+
+        assert!(operator_matches_against(
+            &op,
+            &test_attempt("10.0.0.3"),
+            &test_process(),
+            None,
+            &RuleMatchCaches::default(),
+        ));
+    }
+
+    #[test]
+    fn process_hash_operands_match_when_checksums_missing() {
+        let mut process = test_process();
+        process.process_hash_md5 = None;
+        process.process_hash_sha1 = None;
+
+        let md5_op = RuleOperator {
+            type_name: "simple".to_string(),
+            operand: "process.hash.md5".to_string(),
+            data: "anything".to_string(),
+            sensitive: false,
+            list: Vec::new(),
+        };
+        let sha1_op = RuleOperator {
+            operand: "process.hash.sha1".to_string(),
+            ..md5_op.clone()
+        };
+
+        assert!(operator_matches_against(
+            &md5_op,
+            &test_attempt("10.0.0.3"),
+            &process,
+            None,
+            &RuleMatchCaches::default(),
+        ));
+        assert!(operator_matches_against(
+            &sha1_op,
+            &test_attempt("10.0.0.3"),
+            &process,
+            None,
+            &RuleMatchCaches::default(),
+        ));
+    }
+
+    #[test]
+    fn validate_operator_accepts_source_network_operand() {
+        let op = RuleOperator {
+            type_name: "network".to_string(),
+            operand: "source.network".to_string(),
+            data: "10.0.0.0/8".to_string(),
+            sensitive: false,
+            list: Vec::new(),
+        };
+
+        assert!(validate_operator(&op).is_ok());
+    }
+
+    #[test]
+    fn validate_operator_rejects_invalid_network_operand() {
+        let op = RuleOperator {
+            type_name: "network".to_string(),
+            operand: "dest.host".to_string(),
+            data: "10.0.0.0/8".to_string(),
+            sensitive: false,
+            list: Vec::new(),
+        };
+
+        assert!(validate_operator(&op).is_err());
+    }
+
+    #[test]
+    fn simple_operands_match_expected_fields() {
+        let attempt = test_attempt("185.53.178.14");
+        let process = test_process();
+
+        let process_id = RuleOperator {
+            type_name: "simple".to_string(),
+            operand: "process.id".to_string(),
+            data: process.pid.to_string(),
+            sensitive: false,
+            list: Vec::new(),
+        };
+        let process_path = RuleOperator {
+            operand: "process.path".to_string(),
+            data: "/usr/bin/curl".to_string(),
+            ..process_id.clone()
+        };
+        let process_cmd = RuleOperator {
+            operand: "process.command".to_string(),
+            data: "CURL".to_string(),
+            ..process_id.clone()
+        };
+        let dst_ip = RuleOperator {
+            operand: "dest.ip".to_string(),
+            data: "185.53.178.14".to_string(),
+            ..process_id.clone()
+        };
+        let user_id = RuleOperator {
+            operand: "user.id".to_string(),
+            data: attempt.uid.to_string(),
+            ..process_id.clone()
+        };
+
+        assert!(operator_matches_against(
+            &process_id,
+            &attempt,
+            &process,
+            Some("opensnitch.io"),
+            &RuleMatchCaches::default(),
+        ));
+        assert!(operator_matches_against(
+            &process_path,
+            &attempt,
+            &process,
+            Some("opensnitch.io"),
+            &RuleMatchCaches::default(),
+        ));
+        assert!(operator_matches_against(
+            &process_cmd,
+            &attempt,
+            &process,
+            Some("opensnitch.io"),
+            &RuleMatchCaches::default(),
+        ));
+        assert!(operator_matches_against(
+            &dst_ip,
+            &attempt,
+            &process,
+            Some("opensnitch.io"),
+            &RuleMatchCaches::default(),
+        ));
+        assert!(operator_matches_against(
+            &user_id,
+            &attempt,
+            &process,
+            Some("opensnitch.io"),
+            &RuleMatchCaches::default(),
+        ));
+    }
+
+    #[test]
+    fn source_operands_match_expected_fields() {
+        let attempt = test_attempt("10.0.0.3");
+        let process = test_process();
+
+        let src_ip = RuleOperator {
+            type_name: "simple".to_string(),
+            operand: "source.ip".to_string(),
+            data: attempt.src_ip.clone(),
+            sensitive: false,
+            list: Vec::new(),
+        };
+        let src_port = RuleOperator {
+            operand: "source.port".to_string(),
+            data: attempt.src_port.to_string(),
+            ..src_ip.clone()
+        };
+
+        assert!(operator_matches_against(
+            &src_ip,
+            &attempt,
+            &process,
+            Some("opensnitch.io"),
+            &RuleMatchCaches::default(),
+        ));
+        assert!(operator_matches_against(
+            &src_port,
+            &attempt,
+            &process,
+            Some("opensnitch.io"),
+            &RuleMatchCaches::default(),
+        ));
+    }
+
+    #[test]
+    fn simple_process_path_sensitive_mismatch_fails() {
+        let op = RuleOperator {
+            type_name: "simple".to_string(),
+            operand: "process.path".to_string(),
+            data: "/usr/bin/OpenSnitchd".to_string(),
+            sensitive: true,
+            list: Vec::new(),
+        };
+
+        assert!(!operator_matches_against(
+            &op,
+            &test_attempt("10.0.0.3"),
+            &test_process(),
+            Some("opensnitch.io"),
+            &RuleMatchCaches::default(),
+        ));
+    }
+
+    #[test]
+    fn bare_ip_no_host_matches_empty_host_operands() {
+        let mut caches = RuleMatchCaches::default();
+        let regex_key = RegexCacheKey::new("^$", true);
+        caches.regexes.insert(
+            regex_key.clone(),
+            Regex::new(&build_regex_pattern(&regex_key.pattern, true))
+                .expect("compile empty-host regex"),
+        );
+
+        let simple_empty = RuleOperator {
+            type_name: "simple".to_string(),
+            operand: "dest.host".to_string(),
+            data: String::new(),
+            sensitive: true,
+            list: Vec::new(),
+        };
+        let regexp_empty = RuleOperator {
+            type_name: "regexp".to_string(),
+            operand: "dest.host".to_string(),
+            data: "^$".to_string(),
+            sensitive: true,
+            list: Vec::new(),
+        };
+
+        let attempt = test_attempt("10.0.0.3");
+        let process = test_process();
+
+        assert!(operator_matches_against(
+            &simple_empty,
+            &attempt,
+            &process,
+            Some(""),
+            &caches,
+        ));
+        assert!(operator_matches_against(
+            &regexp_empty,
+            &attempt,
+            &process,
+            Some(""),
+            &caches,
+        ));
+    }
+
+    #[test]
+    fn network_operator_matches_and_mismatches_expected_cidr() {
+        let match_op = RuleOperator {
+            type_name: "network".to_string(),
+            operand: "dest.network".to_string(),
+            data: "185.53.178.14/24".to_string(),
+            sensitive: false,
+            list: Vec::new(),
+        };
+        let miss_op = RuleOperator {
+            data: "8.8.8.8/24".to_string(),
+            ..match_op.clone()
+        };
+
+        let attempt = test_attempt("185.53.178.14");
+        let process = test_process();
+
+        assert!(operator_matches_against(
+            &match_op,
+            &attempt,
+            &process,
+            None,
+            &RuleMatchCaches::default(),
+        ));
+        assert!(!operator_matches_against(
+            &miss_op,
+            &attempt,
+            &process,
+            None,
+            &RuleMatchCaches::default(),
+        ));
+    }
+
+    #[test]
+    fn list_operator_requires_all_children_to_match() {
+        let mut caches = RuleMatchCaches::default();
+        let regex_key = RegexCacheKey::new("^/usr/bin/.*", false);
+        caches.regexes.insert(
+            regex_key.clone(),
+            Regex::new(&build_regex_pattern(&regex_key.pattern, false))
+                .expect("compile list child regex"),
+        );
+
+        let list_op = RuleOperator {
+            type_name: "list".to_string(),
+            operand: "list".to_string(),
+            data: String::new(),
+            sensitive: false,
+            list: vec![
+                RuleOperator {
+                    type_name: "regexp".to_string(),
+                    operand: "process.path".to_string(),
+                    data: "^/usr/bin/.*".to_string(),
+                    sensitive: false,
+                    list: Vec::new(),
+                },
+                RuleOperator {
+                    type_name: "simple".to_string(),
+                    operand: "dest.ip".to_string(),
+                    data: "185.53.178.14".to_string(),
+                    sensitive: false,
+                    list: Vec::new(),
+                },
+                RuleOperator {
+                    type_name: "simple".to_string(),
+                    operand: "dest.port".to_string(),
+                    data: "443".to_string(),
+                    sensitive: false,
+                    list: Vec::new(),
+                },
+            ],
+        };
+
+        let attempt = test_attempt("185.53.178.14");
+        let process = test_process();
+
+        assert!(operator_matches_against(
+            &list_op,
+            &attempt,
+            &process,
+            Some("opensnitch.io"),
+            &caches,
+        ));
+    }
+
+    #[test]
+    fn range_validation_mirrors_go_edge_cases() {
+        let valid = RuleOperator {
+            type_name: "range".to_string(),
+            operand: "dest.port".to_string(),
+            data: "1 - 5000".to_string(),
+            sensitive: false,
+            list: Vec::new(),
+        };
+        let invalid_desc = RuleOperator {
+            data: "89-80".to_string(),
+            ..valid.clone()
+        };
+        let invalid_open_min = RuleOperator {
+            data: "-80".to_string(),
+            ..valid.clone()
+        };
+        let invalid_open_max = RuleOperator {
+            data: "53-".to_string(),
+            ..valid
+        };
+
+        assert!(validate_operator(&invalid_desc).is_err());
+        assert!(validate_operator(&invalid_open_min).is_err());
+        assert!(validate_operator(&invalid_open_max).is_err());
+        assert!(
+            validate_operator(&RuleOperator {
+                type_name: "range".to_string(),
+                operand: "dest.port".to_string(),
+                data: "1 - 5000".to_string(),
+                sensitive: false,
+                list: Vec::new(),
+            })
+            .is_ok()
+        );
     }
 
     #[test]

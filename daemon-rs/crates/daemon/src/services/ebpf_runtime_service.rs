@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 
-trait ExistingPathCandidatesExt {
+pub(crate) trait ExistingPathCandidatesExt {
     fn first_existing(&self) -> Option<PathBuf>;
 }
 
@@ -43,25 +43,5 @@ impl EbpfRuntimeService {
             process_obj,
             dns_obj,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use super::ExistingPathCandidatesExt;
-    use crate::utils::test_support::TestDir;
-
-    #[test]
-    fn find_first_existing_returns_first_match() {
-        let dir = TestDir::new("opensnitch-ebpf-runtime-test");
-        let first = dir.path.join("missing-1.o");
-        let second = dir.path.join("found.o");
-        let third = dir.path.join("missing-2.o");
-        fs::write(&second, "dummy").expect("write object file");
-
-        let found = [first, second.clone(), third].first_existing();
-        assert_eq!(found, Some(second));
     }
 }

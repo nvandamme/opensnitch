@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    env,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -12,30 +13,52 @@ use opensnitch_proto::pb;
 use crate::config::StatsConfig;
 use crate::models::connection_state::ConnectionAttempt;
 
+const GO_BACKEND_COMPAT_VERSION: &str = "1.9.0";
+static DAEMON_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn daemon_version_string() -> &'static str {
+    DAEMON_VERSION
+        .get_or_init(|| {
+            env::var("OPENSNITCH_DAEMON_VERSION")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| GO_BACKEND_COMPAT_VERSION.to_string())
+        })
+        .as_str()
+}
+
 #[derive(Clone)]
 pub struct StatsService {
     inner: Arc<Mutex<StatsInner>>,
-    daemon_owned_fast_allow: Arc<AtomicU64>,
+    counters: Arc<StatsCounters>,
+    fast_allow: Arc<AtomicU64>,
+    fast_deny: Arc<AtomicU64>,
+}
+
+#[derive(Default)]
+struct StatsCounters {
+    dns_responses: AtomicU64,
+    connections: AtomicU64,
+    ignored: AtomicU64,
+    accepted: AtomicU64,
+    dropped: AtomicU64,
+    rule_hits: AtomicU64,
+    rule_misses: AtomicU64,
 }
 
 impl Default for StatsService {
     fn default() -> Self {
         Self {
             inner: Arc::new(Mutex::new(StatsInner::default())),
-            daemon_owned_fast_allow: Arc::new(AtomicU64::new(0)),
+            counters: Arc::new(StatsCounters::default()),
+            fast_allow: Arc::new(AtomicU64::new(0)),
+            fast_deny: Arc::new(AtomicU64::new(0)),
         }
     }
 }
 
 struct StatsInner {
     started_at: Option<Instant>,
-    dns_responses: u64,
-    connections: u64,
-    ignored: u64,
-    accepted: u64,
-    dropped: u64,
-    rule_hits: u64,
-    rule_misses: u64,
     by_proto: HashMap<String, u64>,
     by_address: HashMap<String, u64>,
     by_host: HashMap<String, u64>,
@@ -48,7 +71,7 @@ struct StatsInner {
     workers: usize,
 }
 
-trait StatsCounterMapExt {
+pub(crate) trait StatsCounterMapExt {
     fn bump_limited_counter(&mut self, key: String, max_stats: usize);
     fn trim_to_limit(&mut self, max_stats: usize);
 }
@@ -129,14 +152,7 @@ impl ConnectionAttemptStatsExt for ConnectionAttempt {
 impl Default for StatsInner {
     fn default() -> Self {
         Self {
-            started_at: None,
-            dns_responses: 0,
-            connections: 0,
-            ignored: 0,
-            accepted: 0,
-            dropped: 0,
-            rule_hits: 0,
-            rule_misses: 0,
+            started_at: Some(Instant::now()),
             by_proto: HashMap::new(),
             by_address: HashMap::new(),
             by_host: HashMap::new(),
@@ -152,23 +168,23 @@ impl Default for StatsInner {
 }
 
 impl StatsService {
-    fn build_snapshot(inner: &mut StatsInner, rules_count: u64) -> pb::Statistics {
+    fn build_snapshot(&self, inner: &mut StatsInner, rules_count: u64) -> pb::Statistics {
         let events = std::mem::take(&mut inner.events);
 
         pb::Statistics {
-            daemon_version: env!("CARGO_PKG_VERSION").to_string(),
+            daemon_version: daemon_version_string().to_string(),
             rules: rules_count,
             uptime: inner
                 .started_at
                 .map(|started| started.elapsed().as_secs())
                 .unwrap_or(0),
-            dns_responses: inner.dns_responses,
-            connections: inner.connections,
-            ignored: inner.ignored,
-            accepted: inner.accepted,
-            dropped: inner.dropped,
-            rule_hits: inner.rule_hits,
-            rule_misses: inner.rule_misses,
+            dns_responses: self.counters.dns_responses.load(Ordering::Relaxed),
+            connections: self.counters.connections.load(Ordering::Relaxed),
+            ignored: self.counters.ignored.load(Ordering::Relaxed),
+            accepted: self.counters.accepted.load(Ordering::Relaxed),
+            dropped: self.counters.dropped.load(Ordering::Relaxed),
+            rule_hits: self.counters.rule_hits.load(Ordering::Relaxed),
+            rule_misses: self.counters.rule_misses.load(Ordering::Relaxed),
             by_proto: inner.by_proto.clone(),
             by_address: inner.by_address.clone(),
             by_host: inner.by_host.clone(),
@@ -181,9 +197,15 @@ impl StatsService {
 
     pub fn apply_config(&self, config: StatsConfig) {
         let mut inner = self.inner.lock().expect("stats mutex poisoned");
-        inner.max_events = config.max_events.max(1);
-        inner.max_stats = config.max_stats.max(1);
-        inner.workers = config.workers.max(1);
+        if config.max_events > 0 {
+            inner.max_events = config.max_events;
+        }
+        if config.max_stats > 0 {
+            inner.max_stats = config.max_stats;
+        }
+        if config.workers > 0 {
+            inner.workers = config.workers;
+        }
         let max_stats = inner.max_stats;
 
         while inner.events.len() > inner.max_events {
@@ -199,13 +221,10 @@ impl StatsService {
     }
 
     pub fn on_connect_attempt(&self, attempt: &ConnectionAttempt) {
+        self.counters.connections.fetch_add(1, Ordering::Relaxed);
         let mut inner = self.inner.lock().expect("stats mutex poisoned");
         let max_stats = inner.max_stats;
-        if inner.started_at.is_none() {
-            inner.started_at = Some(Instant::now());
-        }
 
-        inner.connections += 1;
         inner
             .by_proto
             .bump_limited_counter(attempt.protocol_name().to_string(), max_stats);
@@ -220,22 +239,28 @@ impl StatsService {
             .bump_limited_counter(attempt.uid.to_string(), max_stats);
     }
 
-    pub fn on_daemon_owned_fast_allow(&self) {
-        self.daemon_owned_fast_allow.fetch_add(1, Ordering::Relaxed);
+    pub fn on_fast_allow(&self) {
+        self.fast_allow.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn daemon_owned_fast_allow_count(&self) -> u64 {
-        self.daemon_owned_fast_allow.load(Ordering::Relaxed)
+    pub fn fast_allow_count(&self) -> u64 {
+        self.fast_allow.load(Ordering::Relaxed)
+    }
+
+    pub fn on_fast_deny(&self) {
+        self.fast_deny.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn fast_deny_count(&self) -> u64 {
+        self.fast_deny.load(Ordering::Relaxed)
     }
 
     pub fn on_connection_metadata(&self, executable: &str, dst_host: Option<&str>) {
         let mut inner = self.inner.lock().expect("stats mutex poisoned");
         let max_stats = inner.max_stats;
-        if !executable.is_empty() {
-            inner
-                .by_executable
-                .bump_limited_counter(executable.to_string(), max_stats);
-        }
+        inner
+            .by_executable
+            .bump_limited_counter(executable.to_string(), max_stats);
         if let Some(host) = dst_host
             && !host.is_empty()
         {
@@ -246,37 +271,32 @@ impl StatsService {
     }
 
     pub fn on_dns_resolved(&self) {
-        let mut inner = self.inner.lock().expect("stats mutex poisoned");
-        if inner.started_at.is_none() {
-            inner.started_at = Some(Instant::now());
-        }
-        inner.dns_responses += 1;
-        inner.accepted += 1;
+        self.counters.dns_responses.fetch_add(1, Ordering::Relaxed);
+        self.counters.accepted.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn on_verdict(&self, allow: bool) {
-        let mut inner = self.inner.lock().expect("stats mutex poisoned");
         if allow {
-            inner.accepted += 1;
+            self.counters.accepted.fetch_add(1, Ordering::Relaxed);
         } else {
-            inner.dropped += 1;
+            self.counters.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     pub fn on_rule_hit(&self) {
-        let mut inner = self.inner.lock().expect("stats mutex poisoned");
-        inner.rule_hits += 1;
+        self.counters.rule_hits.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn on_rule_miss(&self) {
-        let mut inner = self.inner.lock().expect("stats mutex poisoned");
-        inner.rule_misses += 1;
+    // Go parity: when no rule matches and default action is applied, statistics
+    // count it as a miss and a dropped connection, regardless of verdict action.
+    pub fn on_missed_default_action(&self) {
+        self.counters.rule_misses.fetch_add(1, Ordering::Relaxed);
+        self.counters.dropped.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn on_ignored(&self) {
-        let mut inner = self.inner.lock().expect("stats mutex poisoned");
-        inner.ignored += 1;
-        inner.accepted += 1;
+        self.counters.ignored.fetch_add(1, Ordering::Relaxed);
+        self.counters.accepted.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn on_event(&self, connection: pb::Connection, rule: Option<pb::Rule>) {
@@ -300,7 +320,7 @@ impl StatsService {
 
     pub fn snapshot(&self, rules_count: u64) -> pb::Statistics {
         let mut inner = self.inner.lock().expect("stats mutex poisoned");
-        Self::build_snapshot(&mut inner, rules_count)
+        self.build_snapshot(&mut inner, rules_count)
     }
 
     pub fn snapshot_if_pending(&self, rules_count: u64) -> Option<pb::Statistics> {
@@ -309,87 +329,6 @@ impl StatsService {
             return None;
         }
 
-        Some(Self::build_snapshot(&mut inner, rules_count))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{StatsCounterMapExt, StatsService};
-    use crate::config::StatsConfig;
-    use opensnitch_proto::pb;
-
-    #[test]
-    fn bump_limited_counter_evicts_lowest_entry_at_capacity() {
-        let mut map =
-            std::collections::HashMap::from([("alpha".to_string(), 3), ("beta".to_string(), 1)]);
-
-        map.bump_limited_counter("gamma".to_string(), 2);
-
-        assert_eq!(map.len(), 2);
-        assert!(map.contains_key("alpha"));
-        assert!(map.contains_key("gamma"));
-        assert!(!map.contains_key("beta"));
-    }
-
-    #[test]
-    fn apply_config_trims_existing_event_backlog() {
-        let stats = StatsService::default();
-        for index in 0..3 {
-            stats.on_event(
-                pb::Connection {
-                    protocol: "tcp".to_string(),
-                    dst_ip: format!("10.0.0.{index}"),
-                    ..Default::default()
-                },
-                None,
-            );
-        }
-
-        stats.apply_config(StatsConfig {
-            max_events: 2,
-            max_stats: 5,
-            workers: 1,
-        });
-
-        let snapshot = stats.snapshot(0);
-        assert_eq!(snapshot.events.len(), 2);
-    }
-
-    #[test]
-    fn dns_and_ignored_traffic_increment_accepted() {
-        let stats = StatsService::default();
-
-        stats.on_dns_resolved();
-        stats.on_ignored();
-
-        let snapshot = stats.snapshot(0);
-        assert_eq!(snapshot.dns_responses, 1);
-        assert_eq!(snapshot.ignored, 1);
-        assert_eq!(snapshot.accepted, 2);
-    }
-
-    #[test]
-    fn daemon_owned_fast_allow_counter_is_tracked_separately() {
-        let stats = StatsService::default();
-
-        stats.on_daemon_owned_fast_allow();
-        stats.on_daemon_owned_fast_allow();
-
-        assert_eq!(stats.daemon_owned_fast_allow_count(), 2);
-        let snapshot = stats.snapshot(0);
-        assert_eq!(snapshot.connections, 0);
-        assert_eq!(snapshot.accepted, 0);
-    }
-
-    #[test]
-    fn snapshot_if_pending_returns_none_without_events_and_drains_when_present() {
-        let stats = StatsService::default();
-        assert!(stats.snapshot_if_pending(0).is_none());
-
-        stats.on_event(pb::Connection::default(), None);
-        let snapshot = stats.snapshot_if_pending(0).expect("pending snapshot");
-        assert_eq!(snapshot.events.len(), 1);
-        assert!(stats.snapshot_if_pending(0).is_none());
+        Some(self.build_snapshot(&mut inner, rules_count))
     }
 }

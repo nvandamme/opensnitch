@@ -134,12 +134,38 @@ pub async fn disable(queue_num: u16, queue_bypass: bool) -> Result<()> {
     Ok(())
 }
 
+pub async fn interception_rules_valid(queue_num: u16, queue_bypass: bool) -> Result<bool> {
+    if !command_exists(IPTABLES_BIN) {
+        return Ok(false);
+    }
+
+    let queue_num = queue_num.to_string();
+    let queue_num = queue_num.as_str();
+    let (conn_rule, dns_rule) = queue_num.nfqueue_rules(queue_bypass);
+
+    let ipv4_conn = check_rule_exists(IPTABLES_BIN, &conn_rule).await?;
+    let ipv4_dns = check_rule_exists(IPTABLES_BIN, &dns_rule).await?;
+    let mut healthy = ipv4_conn && ipv4_dns;
+
+    if command_exists(IP6TABLES_BIN) {
+        let ipv6_conn = check_rule_exists(IP6TABLES_BIN, &conn_rule).await?;
+        let ipv6_dns = check_rule_exists(IP6TABLES_BIN, &dns_rule).await?;
+        healthy = healthy && ipv6_conn && ipv6_dns;
+    }
+
+    Ok(healthy)
+}
+
 pub async fn apply_system_firewall(sysfw: &pb::SysFirewall) -> Result<()> {
     if !sysfw.enabled {
         return Ok(());
     }
 
     for item in &sysfw.system_rules {
+        for chain in &item.chains {
+            ensure_chain_policy(chain).await?;
+        }
+
         if let Some(rule) = &item.rule {
             if !rule.enabled {
                 continue;
@@ -248,4 +274,98 @@ async fn delete_system_rule(rule: &pb::FwRule) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn chain_policy_args(chain: &pb::FwChain) -> Option<Vec<String>> {
+    if chain.hook.trim().is_empty() || chain.r#type.trim().is_empty() {
+        return None;
+    }
+
+    let table = chain.r#type.trim();
+    let hook = chain.hook.trim().to_uppercase();
+    let policy = if chain.policy.trim().is_empty() {
+        "ACCEPT".to_string()
+    } else {
+        chain.policy.trim().to_uppercase()
+    };
+
+    Some(vec![
+        "-w".to_string(),
+        "-t".to_string(),
+        table.to_string(),
+        "-P".to_string(),
+        hook,
+        policy,
+    ])
+}
+
+async fn ensure_chain_policy(chain: &pb::FwChain) -> Result<()> {
+    let Some(args) = chain_policy_args(chain) else {
+        return Ok(());
+    };
+
+    let args_ref = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let out = Command::new(IPTABLES_BIN)
+        .args(&args_ref)
+        .output()
+        .await
+        .context("run iptables chain policy update")?;
+
+    if !out.status.success() {
+        bail!(
+            "iptables chain policy update failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    if command_exists(IP6TABLES_BIN) {
+        let out6 = Command::new(IP6TABLES_BIN)
+            .args(&args_ref)
+            .output()
+            .await
+            .context("run ip6tables chain policy update")?;
+
+        if !out6.status.success() {
+            bail!(
+                "ip6tables chain policy update failed: {}",
+                String::from_utf8_lossy(&out6.stderr)
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chain_policy_args;
+    use opensnitch_proto::pb;
+
+    #[test]
+    fn chain_policy_args_builds_expected_iptables_policy_command() {
+        let chain = pb::FwChain {
+            r#type: "mangle".to_string(),
+            hook: "output".to_string(),
+            policy: "drop".to_string(),
+            ..Default::default()
+        };
+
+        let args = chain_policy_args(&chain).expect("policy args expected");
+        assert_eq!(args, vec!["-w", "-t", "mangle", "-P", "OUTPUT", "DROP"]);
+    }
+
+    #[test]
+    fn chain_policy_args_returns_none_when_hook_or_table_missing() {
+        let missing_hook = pb::FwChain {
+            r#type: "filter".to_string(),
+            ..Default::default()
+        };
+        assert!(chain_policy_args(&missing_hook).is_none());
+
+        let missing_type = pb::FwChain {
+            hook: "output".to_string(),
+            ..Default::default()
+        };
+        assert!(chain_policy_args(&missing_type).is_none());
+    }
 }

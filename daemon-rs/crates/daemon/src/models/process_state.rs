@@ -12,5 +12,7 @@ pub struct ProcessInfo {
     pub cwd: Option<String>,
     pub env_preview: Vec<String>,
     pub process_hash: Option<String>,
+    pub process_hash_md5: Option<String>,
+    pub process_hash_sha1: Option<String>,
     pub parent_chain: Vec<ProcessNode>,
 }

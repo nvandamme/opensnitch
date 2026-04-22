@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 default = ["native-ebpf-ringbuf"]
-native-ebpf-ringbuf = ["dep:libbpf-rs"]
+native-ebpf-ringbuf = []
 aya-ebpf = []
 integration-kernel-tests = []
 
@@ -13,7 +13,7 @@ integration-kernel-tests = []
 tokio = { version = "1.50.0", features = ["full"] }
 tokio-stream = "0.1.18"
 tokio-util = "0.7.18"
-tonic = "0.14.5"
+tonic = { version = "0.14.5", features = ["tls-webpki-roots", "gzip"] }
 anyhow = "1.0.102"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -21,17 +21,30 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 thiserror = "2.0.18"
 crossbeam-channel = "0.5.15"
-nix = "0.31.2"
+nix = { version = "0.31.2", features = ["user", "socket"] }
 regex = "1.12.2"
+aho-corasick = "1.1.3"
+globset = "0.4.15"
 sha2 = "0.10.9"
-time = { version = "0.3.47", features = ["formatting", "parsing"] }
+sha1 = "0.10.6"
+md-5 = "0.10.6"
+time = { version = "0.3.47", features = ["formatting", "parsing", "macros", "local-offset"] }
 
 opensnitch-proto = { path = "../proto" }
-libbpf-rs = { version = "0.26.1", optional = true }
+libbpf-rs = "0.26.1"
 rtnetlink = "0.20.0"
 audit = "0.7.3"
 netlink-packet-sock-diag = "0.4.2"
 netlink-packet-core = "0.7.0"
 netlink-sys = "0.8.8"
 rustix = { version = "1.1.2", features = ["net", "event", "thread", "system"] }
-reqwest = { version = "0.12.23", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.13.2", default-features = true, features = ["brotli", "deflate", "zstd", "gzip", "json", "cookies", "form", "multipart", "query", "stream"] }
+hyper-rustls = { version = "0.27.7", default-features = true, features = ["http2", "webpki-tokio", "ring"] }
+hyper-util = { version = "0.1.17", features = ["tokio"] }
+rustls = "0.23.37"
+rustls-pki-types = "1.13.0"
+rustls-pemfile = "2.2.0"
+tower = { version = "0.5.2", features = ["util"] }
+
+[dev-dependencies]
+ctor = "0.6.3"

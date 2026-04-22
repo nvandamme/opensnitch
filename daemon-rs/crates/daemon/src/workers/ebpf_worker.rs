@@ -21,6 +21,7 @@ use crate::{
     models::ebpf_runtime::{BpfMap, BpfProgram},
     models::kernel_event::KernelEvent,
     services::ebpf_runtime_service::EbpfRuntimeService,
+    tunables::RuntimeTunables,
     workers::{
         control::{
             WorkerCommand, WorkerCommandResult, WorkerControl, WorkerJoinStatus, WorkerState,
@@ -39,16 +40,19 @@ struct EbpfWorkerRuntime {
 pub struct EbpfWorkerControl {
     bus: Bus,
     daemon_shutdown: CancellationToken,
+    prune_policy: EbpfMapPrunePolicy,
     runtime: Mutex<EbpfWorkerRuntime>,
 }
 
 impl EbpfWorkerControl {
-    pub fn new(bus: Bus, daemon_shutdown: CancellationToken) -> Self {
+    pub fn new(bus: Bus, daemon_shutdown: CancellationToken, tunables: RuntimeTunables) -> Self {
         let worker_shutdown = daemon_shutdown.child_token();
-        let handle = Self::spawn_worker_thread(bus.clone(), worker_shutdown.clone());
+        let prune_policy = EbpfMapPrunePolicy::from_tunables(tunables);
+        let handle = Self::spawn_worker_thread(bus.clone(), worker_shutdown.clone(), prune_policy);
         Self {
             bus,
             daemon_shutdown,
+            prune_policy,
             runtime: Mutex::new(EbpfWorkerRuntime {
                 shutdown: worker_shutdown,
                 handle: Some(handle),
@@ -88,13 +92,18 @@ impl EbpfWorkerControl {
             runtime.handle = Some(Self::spawn_worker_thread(
                 self.bus.clone(),
                 runtime.shutdown.clone(),
+                self.prune_policy,
             ));
         }
 
         WorkerCommandResult::Applied
     }
 
-    fn spawn_worker_thread(bus: Bus, shutdown: CancellationToken) -> JoinHandle<()> {
+    fn spawn_worker_thread(
+        bus: Bus,
+        shutdown: CancellationToken,
+        prune_policy: EbpfMapPrunePolicy,
+    ) -> JoinHandle<()> {
         thread::spawn(move || {
             let runtime = match EbpfRuntimeService::load_existing_objects() {
                 Ok(runtime) => {
@@ -136,7 +145,7 @@ impl EbpfWorkerControl {
                 ensure_ebpf_runtime_loaded(runtime, &bus);
             }
 
-            supervise_runtime(&bus, &mut state);
+            supervise_runtime(&bus, &mut state, prune_policy);
 
             let mut last_reconcile = Instant::now();
 
@@ -155,7 +164,7 @@ impl EbpfWorkerControl {
                     last_reconcile = Instant::now();
                 }
 
-                supervise_runtime(&bus, &mut state);
+                supervise_runtime(&bus, &mut state, prune_policy);
                 if sleep_with_shutdown(&shutdown, Duration::from_secs(5)) {
                     break;
                 }
@@ -292,15 +301,22 @@ fn try_load_object_with_bpftool(bpftool: &str, obj: &std::path::Path, pin_root: 
     ];
 
     for args in attempts {
-        let status = Command::new(bpftool).args(*args).status();
-        if let Ok(status) = status
-            && status.success()
-        {
+        let output = Command::new(bpftool).args(*args).output();
+        let Ok(output) = output else {
+            continue;
+        };
+
+        if output.status.success() || is_already_pinned_error(&output.stderr) {
             return true;
         }
     }
 
     false
+}
+
+fn is_already_pinned_error(stderr: &[u8]) -> bool {
+    let stderr = String::from_utf8_lossy(stderr);
+    stderr.contains("failed to pin at") && stderr.contains("-EEXIST")
 }
 
 #[derive(Debug, Default)]
@@ -309,7 +325,24 @@ struct SupervisorState {
     pressure_maps: HashSet<u32>,
 }
 
-fn supervise_runtime(bus: &Bus, state: &mut SupervisorState) {
+#[derive(Debug, Clone, Copy)]
+struct EbpfMapPrunePolicy {
+    enabled: bool,
+    threshold_percent: usize,
+    target_percent: usize,
+}
+
+impl EbpfMapPrunePolicy {
+    fn from_tunables(t: RuntimeTunables) -> Self {
+        Self {
+            enabled: t.ebpf_map_prune_enabled,
+            threshold_percent: t.ebpf_map_prune_threshold_percent,
+            target_percent: t.ebpf_map_prune_target_percent,
+        }
+    }
+}
+
+fn supervise_runtime(bus: &Bus, state: &mut SupervisorState, prune_policy: EbpfMapPrunePolicy) {
     prune_seen_hits(state);
 
     let Some(bpftool) = command_path("bpftool") else {
@@ -354,6 +387,28 @@ fn supervise_runtime(bus: &Bus, state: &mut SupervisorState) {
         let entries = dump_map(&bpftool, map_id);
         let entry_count = entries.len() as u32;
         maybe_emit_pressure(bus, state, map_meta, entry_count);
+        let pruned = prune_map_entries(
+            &bpftool,
+            map_id,
+            map_meta,
+            &entries,
+            entry_count,
+            prune_policy,
+        );
+        if pruned > 0 {
+            let note = format!(
+                "eBPF map '{}' (id={map_id}) pruned {pruned} entries under pressure",
+                map_meta.name
+            );
+            let _ = dispatch_kernel_event_with_backoff(
+                &bus.kernel_tx,
+                KernelEvent::EbpfProcessMapHit {
+                    pid: std::process::id(),
+                    uid: 0,
+                    note,
+                },
+            );
+        }
 
         for entry in entries {
             if let Some((pid, uid)) = extract_pid_uid(&entry) {
@@ -390,6 +445,111 @@ fn supervise_runtime(bus: &Bus, state: &mut SupervisorState) {
             ),
         },
     );
+}
+
+fn prune_map_entries(
+    bpftool: &str,
+    map_id: u32,
+    map_meta: &BpfMap,
+    entries: &[Value],
+    entry_count: u32,
+    policy: EbpfMapPrunePolicy,
+) -> usize {
+    if !policy.enabled || map_meta.max_entries == 0 {
+        return 0;
+    }
+
+    let threshold_count = ((map_meta.max_entries as usize * policy.threshold_percent) + 99) / 100;
+    if entry_count as usize <= threshold_count {
+        return 0;
+    }
+
+    let target_count = (map_meta.max_entries as usize * policy.target_percent) / 100;
+    if entry_count as usize <= target_count {
+        return 0;
+    }
+
+    let delete_budget = (entry_count as usize).saturating_sub(target_count);
+    if delete_budget == 0 {
+        return 0;
+    }
+
+    let mut deleted = 0;
+    for entry in entries.iter().take(delete_budget) {
+        let Some(key_bytes) = extract_key_bytes(entry) else {
+            continue;
+        };
+        if delete_map_key(bpftool, map_id, &key_bytes) {
+            deleted += 1;
+        }
+    }
+
+    if deleted > 0 {
+        debug!(
+            map_id,
+            map = %map_meta.name,
+            deleted,
+            entry_count,
+            max_entries = map_meta.max_entries,
+            threshold_percent = policy.threshold_percent,
+            target_percent = policy.target_percent,
+            "eBPF map prune applied"
+        );
+    }
+
+    deleted
+}
+
+fn delete_map_key(bpftool: &str, map_id: u32, key_bytes: &[u8]) -> bool {
+    let mut args = vec![
+        "map".to_string(),
+        "delete".to_string(),
+        "id".to_string(),
+        map_id.to_string(),
+        "key".to_string(),
+        "hex".to_string(),
+    ];
+    for b in key_bytes {
+        args.push(format!("{b:02x}"));
+    }
+
+    let Ok(output) = Command::new(bpftool).args(&args).output() else {
+        return false;
+    };
+    output.status.success()
+}
+
+fn extract_key_bytes(entry: &Value) -> Option<Vec<u8>> {
+    let key = entry.get("key")?;
+    let mut out = Vec::new();
+    collect_u8_values(key, &mut out);
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn collect_u8_values(node: &Value, out: &mut Vec<u8>) {
+    match node {
+        Value::Number(n) => {
+            if let Some(v) = n.as_u64().and_then(|v| u8::try_from(v).ok()) {
+                out.push(v);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_u8_values(value, out);
+            }
+        }
+        Value::Object(map) => {
+            for value in map.values() {
+                collect_u8_values(value, out);
+            }
+        }
+        Value::String(s) => {
+            if let Ok(v) = u8::from_str_radix(s.trim_start_matches("0x"), 16) {
+                out.push(v);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn command_path(bin: &str) -> Option<String> {
@@ -463,7 +623,7 @@ fn maybe_emit_pressure(bus: &Bus, state: &mut SupervisorState, map: &BpfMap, ent
     }
 }
 
-fn extract_pid_uid(entry: &Value) -> Option<(u32, u32)> {
+pub(crate) fn extract_pid_uid(entry: &Value) -> Option<(u32, u32)> {
     let value = entry.get("value").unwrap_or(entry);
     let pid = find_numeric(value, &["pid", "tgid"])? as u32;
 
@@ -480,7 +640,7 @@ fn extract_pid_uid(entry: &Value) -> Option<(u32, u32)> {
     Some((pid, uid))
 }
 
-fn find_numeric(node: &Value, wanted_keys: &[&str]) -> Option<u64> {
+pub(crate) fn find_numeric(node: &Value, wanted_keys: &[&str]) -> Option<u64> {
     match node {
         Value::Number(_) => None,
         Value::Object(map) => {
@@ -525,63 +685,6 @@ fn prune_seen_hits(state: &mut SupervisorState) {
     let ttl = Duration::from_secs(5 * 60);
     state.seen_hits.retain(|_, seen_at| seen_at.elapsed() < ttl);
     trace!(seen_hits = state.seen_hits.len(), "pruned eBPF hit cache");
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::{extract_pid_uid, find_numeric};
-
-    #[test]
-    fn find_numeric_reads_nested_numeric_values() {
-        let payload = json!({
-            "value": {
-                "meta": {"uid": 1000},
-                "process": {"tgid": 4242}
-            }
-        });
-
-        assert_eq!(find_numeric(&payload, &["uid"]), Some(1000));
-        assert_eq!(find_numeric(&payload, &["tgid"]), Some(4242));
-    }
-
-    #[test]
-    fn extract_pid_uid_prefers_pid_and_uid_fields() {
-        let payload = json!({
-            "value": {
-                "pid": 31337,
-                "uid": 501
-            }
-        });
-
-        assert_eq!(extract_pid_uid(&payload), Some((31337, 501)));
-    }
-
-    #[test]
-    fn extract_pid_uid_accepts_tgid_and_uid_gid_low_bits() {
-        let payload = json!({
-            "value": {
-                "tgid": 9001,
-                "uid_gid": 0x0000_03E8_0000_00FFu64
-            }
-        });
-
-        // uid_gid lower 32 bits are interpreted as uid.
-        assert_eq!(extract_pid_uid(&payload), Some((9001, 255)));
-    }
-
-    #[test]
-    fn extract_pid_uid_returns_none_when_pid_like_key_missing() {
-        let payload = json!({
-            "value": {
-                "uid": 1000,
-                "comm": "curl"
-            }
-        });
-
-        assert_eq!(extract_pid_uid(&payload), None);
-    }
 }
 
 #[cfg(feature = "native-ebpf-ringbuf")]

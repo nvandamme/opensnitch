@@ -4,9 +4,9 @@ use serde_json::Value;
 
 #[derive(Debug, Deserialize)]
 pub struct IncomingTaskNotification {
-    #[serde(rename = "Name")]
+    #[serde(alias = "Name", alias = "NAME")]
     pub name: String,
-    #[serde(rename = "Data")]
+    #[serde(default, alias = "Data", alias = "DATA")]
     pub data: Value,
 }
 
@@ -53,6 +53,8 @@ pub enum ClientCommand {
         notification_id: u64,
         rule_names: Vec<String>,
     },
+    PauseRuntimeTasks,
+    ResumeRuntimeTasks,
     StopRuntimeTasks,
     SetLogLevel {
         notification_id: u64,

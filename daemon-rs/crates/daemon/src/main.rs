@@ -6,15 +6,24 @@ mod config;
 mod daemon;
 mod ffi;
 mod flows;
-#[cfg(all(test, feature = "integration-kernel-tests"))]
-mod integration_kernel_tests;
 mod logging;
 mod models;
 mod services;
+#[cfg(test)]
+mod tests;
+mod tunables;
 mod utils;
 mod workers;
 
 use anyhow::Result;
+
+#[cfg(test)]
+mod test_bootstrap {
+    #[ctor::ctor]
+    fn init_logging_for_all_tests() {
+        crate::logging::init_for_tests();
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {

@@ -8,13 +8,12 @@ use std::{
 };
 
 use anyhow::Result;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    bus::{Bus, BusRx, build_bus},
+    bus::{Bus, BusCaps, BusRx, build_bus_with_caps},
     client::client::Client,
     commands::{command_control, rule_command, task_runtime},
     config::ProcMonitorMethod,
@@ -25,13 +24,16 @@ use crate::{
     },
     services::{
         config_service::ConfigService,
+        connection_service::ConnectionService,
         dns_service::DnsService,
         firewall_service::FirewallService,
         process_service::ProcessService,
         rule_service::RuleService,
         stats_service::StatsService,
+        ui_session_service::UiSessionService,
         watch_service::{ProcWorkerReconfigure, WatchService, WatcherService},
     },
+    tunables::RuntimeTunables,
     workers::{
         self,
         control::{
@@ -41,12 +43,9 @@ use crate::{
     },
 };
 
-const MAX_CONCURRENT_CONNECT_ATTEMPTS: usize = 32;
-const KERNEL_DNS_QUEUE_CAPACITY: usize = 512;
-const KERNEL_PROCESS_QUEUE_CAPACITY: usize = 512;
-const KERNEL_FIREWALL_QUEUE_CAPACITY: usize = 128;
 const KERNEL_PIPELINE_SEND_RETRIES: usize = 8;
 const KERNEL_PIPELINE_SEND_BACKOFF: Duration = Duration::from_millis(10);
+const KERNEL_INGRESS_DISPATCH_BATCH: usize = 32;
 
 #[derive(Debug)]
 enum ProcessKernelEvent {
@@ -126,24 +125,99 @@ fn increment_kernel_pipeline_drop(pipeline: KernelPipeline) -> u64 {
     previous.saturating_add(1)
 }
 
+async fn dispatch_connect_attempt_to_worker(
+    worker_txs: &[tokio::sync::mpsc::Sender<ConnectionAttempt>],
+    next_worker: &mut usize,
+    shutdown: &CancellationToken,
+    attempt: ConnectionAttempt,
+) -> bool {
+    if worker_txs.is_empty() {
+        return false;
+    }
+
+    let worker_count = worker_txs.len();
+    if worker_count == 1 {
+        let tx = &worker_txs[0];
+        return match tx.try_send(attempt) {
+            Ok(()) => true,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(attempt)) => {
+                tokio::select! {
+                    _ = shutdown.cancelled() => false,
+                    result = tx.send(attempt) => result.is_ok(),
+                }
+            }
+        };
+    }
+
+    let start_idx = *next_worker % worker_count;
+    let mut pending = attempt;
+    let mut fallback_idx = None;
+    let mut idx = start_idx;
+
+    // Fast path: probe all workers with try_send first to avoid waiting on one full lane.
+    for _ in 0..worker_count {
+        match worker_txs[idx].try_send(pending) {
+            Ok(()) => {
+                *next_worker = (idx + 1) % worker_count;
+                return true;
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(attempt)) => {
+                pending = attempt;
+                if fallback_idx.is_none() {
+                    fallback_idx = Some(idx);
+                }
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(attempt)) => {
+                pending = attempt;
+            }
+        }
+
+        idx += 1;
+        if idx == worker_count {
+            idx = 0;
+        }
+    }
+
+    // Fallback: block on the first observed non-closed lane after probes fail.
+    let Some(blocking_idx) = fallback_idx else {
+        return false;
+    };
+
+    let tx = &worker_txs[blocking_idx];
+    tokio::select! {
+        _ = shutdown.cancelled() => false,
+        result = tx.send(pending) => {
+            if result.is_ok() {
+                *next_worker = (blocking_idx + 1) % worker_count;
+                true
+            } else {
+                false
+            }
+        },
+    }
+}
+
 async fn dispatch_kernel_pipeline_event<T>(
     tx: &tokio::sync::mpsc::Sender<T>,
     event: T,
     shutdown: &CancellationToken,
     pipeline: KernelPipeline,
 ) -> bool {
-    let mut pending = event;
+    let pending = event;
 
     for _ in 0..KERNEL_PIPELINE_SEND_RETRIES {
         if shutdown.is_cancelled() {
             return false;
         }
 
-        match tx.try_send(pending) {
-            Ok(()) => return true,
+        match tx.try_reserve() {
+            Ok(permit) => {
+                permit.send(pending);
+                return true;
+            }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return false,
-            Err(tokio::sync::mpsc::error::TrySendError::Full(event)) => {
-                pending = event;
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 tokio::select! {
                     _ = shutdown.cancelled() => return false,
                     _ = tokio::time::sleep(KERNEL_PIPELINE_SEND_BACKOFF) => {}
@@ -161,6 +235,26 @@ async fn dispatch_kernel_pipeline_event<T>(
     true
 }
 
+fn fanout_kernel_ingress_event(
+    event: KernelEvent,
+    dns_ingress_tx: &tokio::sync::mpsc::UnboundedSender<(String, String)>,
+    process_ingress_tx: &tokio::sync::mpsc::UnboundedSender<ProcessKernelEvent>,
+    firewall_ingress_tx: &tokio::sync::mpsc::UnboundedSender<
+        crate::models::firewall_state::FirewallState,
+    >,
+) -> bool {
+    match event {
+        KernelEvent::DnsResolved { ip, host } => dns_ingress_tx.send((ip, host)).is_ok(),
+        KernelEvent::ProcStateChanged { pid, kind } => process_ingress_tx
+            .send(ProcessKernelEvent::ProcStateChanged { pid, kind })
+            .is_ok(),
+        KernelEvent::EbpfProcessMapHit { pid, uid, note } => process_ingress_tx
+            .send(ProcessKernelEvent::EbpfProcessMapHit { pid, uid, note })
+            .is_ok(),
+        KernelEvent::FirewallState(state) => firewall_ingress_tx.send(state).is_ok(),
+    }
+}
+
 #[derive(Clone)]
 pub struct Daemon {
     inner: Arc<DaemonInner>,
@@ -168,16 +262,19 @@ pub struct Daemon {
 
 struct DaemonInner {
     config: ConfigService,
+    ui_session: UiSessionService,
     nfqueue_num: u16,
     default_action: crate::config::DefaultAction,
     audit_socket_path: std::path::PathBuf,
     proc_workers: Arc<std::sync::Mutex<ProcWorkersRuntime>>,
     bus: Bus,
     rules: RuleService,
+    connections: ConnectionService,
     process: ProcessService,
     dns: DnsService,
     stats: StatsService,
     firewall: FirewallService,
+    tunables: RuntimeTunables,
     shutdown: CancellationToken,
 }
 
@@ -253,23 +350,66 @@ impl Daemon {
     }
 
     pub async fn bootstrap(client_addr: Option<&str>) -> Result<(Self, BusRx)> {
-        let (bus, rx) = build_bus(512);
+        let (bus, rx) = build_bus_with_caps(BusCaps {
+            connect: 1024,
+            kernel: 512,
+            client_cmd: 256,
+            verdict: 1024,
+            task_reply: 256,
+            alert: 1024,
+        });
         let config = crate::config::Config::load_from_default_locations()?
             .with_client_addr_override(client_addr);
+        if let Some(status) = crate::tunables::maybe_autotune_on_startup() {
+            info!(status = %status, "daemon bootstrap: startup autotune");
+        }
+        let (tunables, tunables_source) = RuntimeTunables::load_effective();
+        info!(
+            addr = %config.client_addr,
+            ?config.default_action,
+            ?config.proc_monitor_method,
+            ?config.firewall_backend,
+            "daemon bootstrap: loaded config"
+        );
+        info!(
+            source = %tunables_source,
+            max_concurrent_connect_attempts = tunables.max_concurrent_connect_attempts,
+            connect_worker_queue_capacity = tunables.connect_worker_queue_capacity,
+            connect_dispatch_batch_size = tunables.connect_dispatch_batch_size,
+            kernel_dns_queue_capacity = tunables.kernel_dns_queue_capacity,
+            kernel_process_queue_capacity = tunables.kernel_process_queue_capacity,
+            kernel_firewall_queue_capacity = tunables.kernel_firewall_queue_capacity,
+            ebpf_map_prune_enabled = tunables.ebpf_map_prune_enabled,
+            ebpf_map_prune_threshold_percent = tunables.ebpf_map_prune_threshold_percent,
+            ebpf_map_prune_target_percent = tunables.ebpf_map_prune_target_percent,
+            "daemon bootstrap: effective runtime tunables"
+        );
         let config_service = ConfigService::new(config.clone());
+        let ui_session = UiSessionService::default();
         let rules = RuleService::default();
         rules.load_path(&config.rules_path).await?;
+        info!(path = %config.rules_path.display(), "daemon bootstrap: initial rules loaded");
         let firewall = FirewallService::new(&config)?;
         if let Err(err) = firewall.ensure_rules().await {
             warn!(
                 backend = config.firewall_backend.as_str(),
                 "firewall bootstrap skipped: {err}"
             );
+        } else {
+            info!(
+                backend = config.firewall_backend.as_str(),
+                "daemon bootstrap: firewall ensured"
+            );
         }
+
+        let process = ProcessService::default();
+        let dns = DnsService::default();
+        let connections = ConnectionService::new(process.clone(), dns.clone());
 
         let daemon = Self {
             inner: Arc::new(DaemonInner {
                 config: config_service,
+                ui_session,
                 nfqueue_num: config.firewall_queue_num,
                 default_action: config.default_action,
                 audit_socket_path: config.audit_socket_path.clone(),
@@ -280,10 +420,12 @@ impl Daemon {
                 })),
                 bus,
                 rules,
-                process: ProcessService::default(),
-                dns: DnsService::default(),
+                connections,
+                process,
+                dns,
                 stats: StatsService::default(),
                 firewall,
+                tunables,
                 shutdown: CancellationToken::new(),
             }),
         };
@@ -295,40 +437,54 @@ impl Daemon {
 
     pub async fn serve(&self, rx: BusRx) -> Result<()> {
         let config = self.inner.config.snapshot().await;
-        if let Err(err) = crate::logging::set_opensnitch_log_level(config.log_level as i32) {
-            warn!("failed to apply startup log level from config: {err}");
+        crate::utils::systemd_notify::status("Starting daemon runtime bootstrap...");
+        info!(addr = %config.client_addr, "daemon runtime: starting serve loop");
+        info!(queue = self.inner.nfqueue_num, "running on netfilter queue");
+        if let Err(err) = crate::logging::apply_config(&config) {
+            warn!("failed to apply startup logging config: {err}");
         }
-        let mut client = Client::connect(&config.client_addr).await?;
-        self.startup_handshake(&mut client).await?;
+        match Client::connect_with_config(&config).await {
+            Ok(mut client) => {
+                if let Err(err) = self.startup_handshake(&mut client).await {
+                    warn!(addr = %config.client_addr, "startup UI handshake failed, continuing without blocking runtime: {err}");
+                }
+            }
+            Err(err) => {
+                warn!(addr = %config.client_addr, "startup UI connect failed, continuing without blocking runtime: {err}");
+            }
+        }
 
         let verdict_flow = VerdictFlow::new(
             self.inner.bus.clone(),
             self.inner.config.clone(),
+            self.inner.ui_session.clone(),
             self.inner.rules.clone(),
-            self.inner.process.clone(),
-            self.inner.dns.clone(),
+            self.inner.connections.clone(),
             self.inner.stats.clone(),
         );
 
-        let notification_flow =
-            NotificationFlow::new(self.inner.bus.clone(), self.inner.config.clone());
+        let notification_flow = NotificationFlow::new(
+            self.inner.bus.clone(),
+            self.inner.config.clone(),
+            self.inner.ui_session.clone(),
+            self.inner.rules.clone(),
+            self.inner.firewall.clone(),
+        );
 
         let mut handles = RuntimeHandles::new();
         self.spawn_workers(&mut handles).await;
         self.spawn_tasks(&mut handles, rx, verdict_flow, notification_flow);
+        info!("daemon runtime: workers and tasks started");
+        crate::utils::systemd_notify::ready(Some("opensnitchd-rs runtime ready"));
 
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                info!("ctrl-c received");
-            }
-            _ = self.inner.shutdown.cancelled() => {
-                info!("shutdown requested");
-            }
-        }
+        self.run_signal_loop().await?;
 
+        crate::utils::systemd_notify::stopping(Some("Daemon stopping..."));
         self.shutdown().await;
         self.stop_proc_workers().await;
         handles.join_all().await;
+        info!("daemon runtime: shutdown complete");
+        crate::utils::systemd_notify::status("Daemon stopped");
 
         Ok(())
     }
@@ -341,6 +497,19 @@ impl Daemon {
         let subscribe_cfg =
             client.build_subscribe_config(&config, rules, firewall.enabled, system_firewall);
         let subscribe_reply = client.subscribe(subscribe_cfg).await?;
+
+        if let Some(connected_default_action) =
+            Self::parse_default_action_from_client_config(&subscribe_reply.config)
+        {
+            self.inner
+                .ui_session
+                .set_connected_default_action(connected_default_action)
+                .await;
+            info!(
+                ?connected_default_action,
+                "updated connected-mode default action from subscribe payload"
+            );
+        }
 
         info!(
             client_name = %subscribe_reply.name,
@@ -364,7 +533,132 @@ impl Daemon {
         Ok(())
     }
 
+    async fn run_signal_loop(&self) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+
+            let mut sig_int = signal(SignalKind::interrupt())?;
+            let mut sig_term = signal(SignalKind::terminate())?;
+            let mut sig_hup = signal(SignalKind::hangup())?;
+
+            loop {
+                tokio::select! {
+                    _ = self.inner.shutdown.cancelled() => {
+                        info!("shutdown requested");
+                        crate::utils::systemd_notify::status("Shutdown requested by runtime command");
+                        break;
+                    }
+                    signal = sig_int.recv() => {
+                        if signal.is_some() {
+                            info!("SIGINT received");
+                            crate::utils::systemd_notify::status("SIGINT received, stopping daemon");
+                        } else {
+                            warn!("SIGINT stream closed");
+                        }
+                        break;
+                    }
+                    signal = sig_term.recv() => {
+                        if signal.is_some() {
+                            info!("SIGTERM received");
+                            crate::utils::systemd_notify::status("SIGTERM received, stopping daemon");
+                        } else {
+                            warn!("SIGTERM stream closed");
+                        }
+                        break;
+                    }
+                    signal = sig_hup.recv() => {
+                        if signal.is_none() {
+                            warn!("SIGHUP stream closed");
+                            continue;
+                        }
+                        self.reload_runtime_after_sighup().await;
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("ctrl-c received");
+                }
+                _ = self.inner.shutdown.cancelled() => {
+                    info!("shutdown requested");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn reload_runtime_after_sighup(&self) {
+        crate::utils::systemd_notify::reloading(Some(
+            "SIGHUP received, reloading runtime config...",
+        ));
+        info!("SIGHUP received, reloading runtime config");
+
+        let updated = match self.inner.config.reload().await {
+            Ok(config) => config,
+            Err(err) => {
+                error!("failed to reload config from disk after SIGHUP: {err}");
+                crate::utils::systemd_notify::status("SIGHUP reload failed while reading config");
+                return;
+            }
+        };
+
+        crate::ffi::nfqueue::set_default_action(updated.default_action);
+        self.inner.stats.apply_config(updated.stats);
+
+        if let Err(err) = crate::logging::apply_config(&updated) {
+            error!("failed to apply logging config after SIGHUP reload: {err}");
+        }
+
+        if let Err(err) = self.inner.rules.load_path(&updated.rules_path).await {
+            error!("failed to reload rules after SIGHUP: {err}");
+            crate::utils::systemd_notify::status("SIGHUP reload failed while reloading rules");
+            return;
+        }
+
+        if let Err(err) = self.inner.firewall.reconcile_from_config(&updated).await {
+            error!("failed to reconcile firewall after SIGHUP: {err}");
+            crate::utils::systemd_notify::status("SIGHUP reload failed while reconciling firewall");
+            return;
+        }
+
+        if let Err(err) = self
+            .reconfigure_proc_workers(Some(updated.proc_monitor_method))
+            .await
+        {
+            error!("failed to reconfigure process monitor workers after SIGHUP: {err}");
+            crate::utils::systemd_notify::status(
+                "SIGHUP reload failed while reconfiguring process monitor",
+            );
+            return;
+        }
+
+        info!("SIGHUP reload completed");
+        crate::utils::systemd_notify::ready(Some("SIGHUP reload complete"));
+    }
+
+    fn parse_default_action_from_client_config(
+        raw_config_json: &str,
+    ) -> Option<crate::config::DefaultAction> {
+        let raw = serde_json::from_str::<serde_json::Value>(raw_config_json).ok()?;
+        let action = raw
+            .as_object()
+            .and_then(|obj| {
+                obj.iter().find_map(|(key, value)| {
+                    key.eq_ignore_ascii_case("DefaultAction").then_some(value)
+                })
+            })
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        Some(crate::config::DefaultAction::from_name(action))
+    }
     async fn spawn_workers(&self, handles: &mut RuntimeHandles) {
+        info!("starting worker set");
         handles.push_worker(
             "nfqueue",
             workers::nfqueue_worker::spawn(
@@ -374,14 +668,21 @@ impl Daemon {
                 self.inner.shutdown.clone(),
             ),
         );
+        debug!(queue = self.inner.nfqueue_num, "nfqueue worker started");
 
         let initial_method = self.inner.config.snapshot().await.proc_monitor_method;
-        self.reconfigure_proc_workers(Some(initial_method)).await;
+        if let Err(err) = self.reconfigure_proc_workers(Some(initial_method)).await {
+            warn!(method = ?initial_method, "failed to start requested process monitor method: {err}");
+            let _ = self
+                .reconfigure_proc_workers(Some(ProcMonitorMethod::Proc))
+                .await;
+        }
 
         handles.push_worker_control(Box::new(workers::dns_worker::DnsWorkerControl::new(
             self.inner.bus.clone(),
             self.inner.shutdown.clone(),
         )));
+        debug!("dns worker started");
 
         handles.push_worker(
             "firewall",
@@ -391,6 +692,13 @@ impl Daemon {
                 self.inner.shutdown.clone(),
             ),
         );
+        debug!("firewall worker started");
+
+        handles.push_worker(
+            "netlink-ifaces",
+            workers::netlink_addr_worker::spawn(self.inner.shutdown.clone()),
+        );
+        debug!("netlink local-address worker started");
     }
 
     fn spawn_proc_worker_handles(
@@ -403,16 +711,13 @@ impl Daemon {
                 "proc-netlink",
                 workers::netlink_proc_worker::spawn(self.inner.bus.clone(), shutdown),
             )],
-            ProcMonitorMethod::Ebpf => vec![
-                Box::new(workers::ebpf_worker::EbpfWorkerControl::new(
+            ProcMonitorMethod::Ebpf => {
+                vec![Box::new(workers::ebpf_worker::EbpfWorkerControl::new(
                     self.inner.bus.clone(),
-                    shutdown.clone(),
-                )),
-                workers::control::boxed_thread_worker(
-                    "proc-netlink",
-                    workers::netlink_proc_worker::spawn(self.inner.bus.clone(), shutdown),
-                ),
-            ],
+                    shutdown,
+                    self.inner.tunables,
+                ))]
+            }
             ProcMonitorMethod::Audit => vec![
                 workers::control::boxed_thread_worker(
                     "proc-audit",
@@ -498,7 +803,16 @@ impl Daemon {
         }
     }
 
-    async fn reconfigure_proc_workers(&self, method: Option<ProcMonitorMethod>) {
+    async fn reconfigure_proc_workers(&self, method: Option<ProcMonitorMethod>) -> Result<()> {
+        let previous_method = {
+            let runtime = self
+                .inner
+                .proc_workers
+                .lock()
+                .expect("proc workers mutex poisoned");
+            runtime.current_method
+        };
+
         let to_join = {
             let mut runtime = self
                 .inner
@@ -510,9 +824,10 @@ impl Daemon {
                 && runtime.current_method == method
                 && runtime.handles.iter().any(|handle| !handle.is_finished())
             {
-                return;
+                return Ok(());
             }
 
+            debug!("monitor.End()");
             let old_shutdown = std::mem::replace(&mut runtime.shutdown, CancellationToken::new());
             old_shutdown.cancel();
             let to_join = std::mem::take(&mut runtime.handles);
@@ -535,10 +850,73 @@ impl Daemon {
         }
 
         if let Some(method) = method {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let running = {
+                let runtime = self
+                    .inner
+                    .proc_workers
+                    .lock()
+                    .expect("proc workers mutex poisoned");
+                runtime.handles.iter().any(|handle| !handle.is_finished())
+            };
+
+            if !running {
+                warn!(requested = ?method, fallback = ?previous_method, "process monitor workers failed to start; rolling back");
+                crate::utils::systemd_notify::status(
+                    "Process monitor reconfigure failed; rolling back",
+                );
+                if previous_method != method {
+                    let failed_handles = {
+                        let mut runtime = self
+                            .inner
+                            .proc_workers
+                            .lock()
+                            .expect("proc workers mutex poisoned");
+                        runtime.shutdown.cancel();
+                        std::mem::take(&mut runtime.handles)
+                    };
+
+                    if !failed_handles.is_empty() {
+                        let _ = tokio::task::spawn_blocking(move || {
+                            for worker in failed_handles {
+                                let _ = worker.join();
+                            }
+                        })
+                        .await;
+                    }
+
+                    let mut runtime = self
+                        .inner
+                        .proc_workers
+                        .lock()
+                        .expect("proc workers mutex poisoned");
+                    runtime.current_method = previous_method;
+                    runtime.shutdown = CancellationToken::new();
+                    runtime.handles =
+                        self.spawn_proc_worker_handles(previous_method, runtime.shutdown.clone());
+                }
+                return Err(anyhow::anyhow!(
+                    "failed to start process monitor workers for {:?}",
+                    method
+                ));
+            }
+
+            let method_label = match method {
+                ProcMonitorMethod::Proc => "/proc",
+                ProcMonitorMethod::Audit => "audit",
+                ProcMonitorMethod::Ebpf => "ebpf",
+            };
+            info!("Process monitor method {method_label}");
             info!(method = ?method, "reconfigured process monitor workers");
+            crate::utils::systemd_notify::status(&format!(
+                "Process monitor reconfigured: {method_label}"
+            ));
         } else {
             info!("stopped process monitor workers");
+            crate::utils::systemd_notify::status("Process monitor workers stopped");
         }
+
+        Ok(())
     }
 
     async fn stop_proc_workers(&self) {
@@ -571,16 +949,21 @@ impl Daemon {
         verdict_flow: VerdictFlow,
         notification_flow: NotificationFlow,
     ) {
+        info!("starting runtime task set");
+        task_runtime::configure_alert_sender(self.inner.bus.alert_tx.clone());
         let task_reply_rx = rx.task_reply_rx;
+        let alert_rx = rx.alert_rx;
         handles.push_task(
             "notifications",
-            self.spawn_notification_task(notification_flow, task_reply_rx),
+            self.spawn_notification_task(notification_flow, task_reply_rx, alert_rx),
         );
+        debug!("notification task started");
 
         handles.push_task(
             "connect-attempts",
             self.spawn_connect_attempt_task(verdict_flow, self.inner.stats.clone(), rx.connect_rx),
         );
+        debug!("connect-attempt task started");
 
         handles.push_task(
             "kernel-events",
@@ -591,16 +974,27 @@ impl Daemon {
                 rx.kernel_rx,
             ),
         );
+        debug!("kernel-events task started");
+
+        handles.push_task(
+            "process-cache-cleanup",
+            self.inner
+                .process
+                .spawn_cleanup_task(self.inner.shutdown.clone()),
+        );
+        debug!("process-cache-cleanup task started");
 
         handles.push_task(
             "client-commands",
             self.spawn_client_command_task(rx.client_cmd_rx),
         );
+        debug!("client-command task started");
 
         handles.push_task(
             "verdict-replies",
             self.spawn_verdict_rpc_task(rx.verdict_rx, self.inner.stats.clone()),
         );
+        debug!("verdict-rpc task started");
 
         handles.push_task(
             "stats-ping",
@@ -610,24 +1004,28 @@ impl Daemon {
                 self.inner.stats.clone(),
             ),
         );
+        debug!("stats-ping task started");
 
         let watch_service = self.build_watch_service();
         handles.push_task("config-watch", watch_service.spawn_config_watch_task());
         handles.push_task("rules-watch", watch_service.spawn_rules_watch_task());
         handles.push_task("tasks-watch", watch_service.spawn_tasks_watch_task());
+        handles.push_task("firewall-watch", watch_service.spawn_firewall_watch_task());
+        debug!("watch tasks started");
     }
 
     fn spawn_notification_task(
         &self,
         flow: NotificationFlow,
         task_reply_rx: tokio::sync::mpsc::Receiver<opensnitch_proto::pb::NotificationReply>,
+        alert_rx: tokio::sync::mpsc::Receiver<crate::models::ui_alert::UiAlert>,
     ) -> JoinHandle<()> {
         let shutdown = self.inner.shutdown.clone();
 
         tokio::spawn(async move {
             tokio::select! {
                 _ = shutdown.cancelled() => {}
-                res = flow.run(task_reply_rx) => {
+                res = flow.run(task_reply_rx, alert_rx) => {
                     if let Err(err) = res {
                         error!("notification flow failed: {err}");
                     }
@@ -643,44 +1041,116 @@ impl Daemon {
         mut connect_rx: tokio::sync::mpsc::Receiver<ConnectionAttempt>,
     ) -> JoinHandle<()> {
         let shutdown = self.inner.shutdown.clone();
-        let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECT_ATTEMPTS));
         let daemon_pid = std::process::id();
+        let tunables = self.inner.tunables;
+
+        let mut worker_handles = Vec::with_capacity(tunables.max_concurrent_connect_attempts);
+        let mut worker_txs = Vec::with_capacity(tunables.max_concurrent_connect_attempts);
+        for _ in 0..tunables.max_concurrent_connect_attempts {
+            let worker_shutdown = shutdown.clone();
+            let worker_flow = flow.clone();
+            let (worker_tx, mut worker_rx) = tokio::sync::mpsc::channel::<ConnectionAttempt>(
+                tunables.connect_worker_queue_capacity,
+            );
+            worker_txs.push(worker_tx);
+
+            worker_handles.push(tokio::spawn(async move {
+                'worker: loop {
+                    let first = tokio::select! {
+                        _ = worker_shutdown.cancelled() => break 'worker,
+                        msg = worker_rx.recv() => {
+                            match msg {
+                                Some(attempt) => attempt,
+                                None => break 'worker,
+                            }
+                        }
+                    };
+
+                    worker_flow.handle_connect_attempt(first).await;
+
+                    // Drain a bounded burst from this lane to amortize wake-up/scheduling cost.
+                    for _ in 1..tunables.connect_dispatch_batch_size {
+                        if worker_shutdown.is_cancelled() {
+                            break 'worker;
+                        }
+
+                        let next = match worker_rx.try_recv() {
+                            Ok(attempt) => attempt,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                                break 'worker;
+                            }
+                        };
+
+                        worker_flow.handle_connect_attempt(next).await;
+                    }
+                }
+            }));
+        }
 
         tokio::spawn(async move {
+            let mut next_worker = 0usize;
+
             loop {
                 tokio::select! {
                     _ = shutdown.cancelled() => break,
                     msg = connect_rx.recv() => {
                         match msg {
                             Some(attempt) => {
-                                // Keep daemon-owned attempts on the hot path to avoid
-                                // semaphore acquisition and per-attempt task spawn overhead.
+                                // Process first message.
                                 if attempt.pid == daemon_pid {
-                                    flow.fast_allow_daemon_owned(attempt.request_id).await;
-                                    continue;
+                                    flow.fast_allow_with_stats(attempt.request_id, "daemon-self-dispatch")
+                                        .await;
+                                } else {
+                                    stats.on_connect_attempt(&attempt);
+                                    if !dispatch_connect_attempt_to_worker(
+                                        &worker_txs,
+                                        &mut next_worker,
+                                        &shutdown,
+                                        attempt,
+                                    )
+                                    .await
+                                    {
+                                        break;
+                                    }
                                 }
 
-                                stats.on_connect_attempt(&attempt);
+                                // Drain additional already-queued connect attempts without
+                                // allocating a temporary batch vector.
+                                for _ in 1..tunables.connect_dispatch_batch_size {
+                                    let next = match connect_rx.try_recv() {
+                                        Ok(next) => next,
+                                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                                    };
 
-                                let permit: Option<OwnedSemaphorePermit> = tokio::select! {
-                                    _ = shutdown.cancelled() => None,
-                                    permit = permits.clone().acquire_owned() => permit.ok(),
-                                };
-
-                                let Some(permit) = permit else {
-                                    break;
-                                };
-
-                                let flow = flow.clone();
-                                tokio::spawn(async move {
-                                    let _permit = permit;
-                                    flow.handle_connect_attempt(attempt).await;
-                                });
+                                    if next.pid == daemon_pid {
+                                        flow.fast_allow_with_stats(next.request_id, "daemon-self-dispatch")
+                                            .await;
+                                    } else {
+                                        stats.on_connect_attempt(&next);
+                                        if !dispatch_connect_attempt_to_worker(
+                                            &worker_txs,
+                                            &mut next_worker,
+                                            &shutdown,
+                                            next,
+                                        )
+                                        .await
+                                        {
+                                            break;
+                                        }
+                                    }
+                                }
                             }
                             None => break,
                         }
                     }
                 }
+            }
+
+            worker_txs.clear();
+            for handle in worker_handles {
+                let _ = handle.await;
             }
         })
     }
@@ -693,15 +1163,31 @@ impl Daemon {
         mut kernel_rx: tokio::sync::mpsc::Receiver<crate::models::kernel_event::KernelEvent>,
     ) -> JoinHandle<()> {
         let shutdown = self.inner.shutdown.clone();
+        let tunables = self.inner.tunables;
 
         tokio::spawn(async move {
+            let kernel_fanout_batch = tunables
+                .max_concurrent_connect_attempts
+                .saturating_mul(2)
+                .clamp(8, KERNEL_INGRESS_DISPATCH_BATCH);
+
             let (dns_tx, mut dns_rx) =
-                tokio::sync::mpsc::channel::<(String, String)>(KERNEL_DNS_QUEUE_CAPACITY);
-            let (process_tx, mut process_rx) =
-                tokio::sync::mpsc::channel::<ProcessKernelEvent>(KERNEL_PROCESS_QUEUE_CAPACITY);
-            let (firewall_tx, mut firewall_rx) = tokio::sync::mpsc::channel::<
-                crate::models::firewall_state::FirewallState,
-            >(KERNEL_FIREWALL_QUEUE_CAPACITY);
+                tokio::sync::mpsc::channel::<(String, String)>(tunables.kernel_dns_queue_capacity);
+            let (process_tx, mut process_rx) = tokio::sync::mpsc::channel::<ProcessKernelEvent>(
+                tunables.kernel_process_queue_capacity,
+            );
+            let (firewall_tx, mut firewall_rx) =
+                tokio::sync::mpsc::channel::<crate::models::firewall_state::FirewallState>(
+                    tunables.kernel_firewall_queue_capacity,
+                );
+
+            let (dns_ingress_tx, mut dns_ingress_rx) =
+                tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+            let (process_ingress_tx, mut process_ingress_rx) =
+                tokio::sync::mpsc::unbounded_channel::<ProcessKernelEvent>();
+            let (firewall_ingress_tx, mut firewall_ingress_rx) =
+                tokio::sync::mpsc::unbounded_channel::<crate::models::firewall_state::FirewallState>(
+                );
 
             let dns_shutdown = shutdown.clone();
             let dns_service = dns.clone();
@@ -770,61 +1256,199 @@ impl Daemon {
                 }
             });
 
+            let dns_dispatch_shutdown = shutdown.clone();
+            let dns_dispatch_tx = dns_tx.clone();
+            let dns_dispatch_handle = tokio::spawn(async move {
+                loop {
+                    let first = tokio::select! {
+                        _ = dns_dispatch_shutdown.cancelled() => break,
+                        msg = dns_ingress_rx.recv() => {
+                            match msg {
+                                Some(event) => event,
+                                None => break,
+                            }
+                        }
+                    };
+
+                    if !dispatch_kernel_pipeline_event(
+                        &dns_dispatch_tx,
+                        first,
+                        &dns_dispatch_shutdown,
+                        KernelPipeline::Dns,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+
+                    for _ in 1..KERNEL_INGRESS_DISPATCH_BATCH {
+                        if dns_dispatch_shutdown.is_cancelled() {
+                            break;
+                        }
+
+                        let next = match dns_ingress_rx.try_recv() {
+                            Ok(event) => event,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                        };
+
+                        if !dispatch_kernel_pipeline_event(
+                            &dns_dispatch_tx,
+                            next,
+                            &dns_dispatch_shutdown,
+                            KernelPipeline::Dns,
+                        )
+                        .await
+                        {
+                            break;
+                        }
+                    }
+                }
+            });
+
+            let process_dispatch_shutdown = shutdown.clone();
+            let process_dispatch_tx = process_tx.clone();
+            let process_dispatch_handle = tokio::spawn(async move {
+                loop {
+                    let first = tokio::select! {
+                        _ = process_dispatch_shutdown.cancelled() => break,
+                        msg = process_ingress_rx.recv() => {
+                            match msg {
+                                Some(event) => event,
+                                None => break,
+                            }
+                        }
+                    };
+
+                    if !dispatch_kernel_pipeline_event(
+                        &process_dispatch_tx,
+                        first,
+                        &process_dispatch_shutdown,
+                        KernelPipeline::Process,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+
+                    for _ in 1..KERNEL_INGRESS_DISPATCH_BATCH {
+                        if process_dispatch_shutdown.is_cancelled() {
+                            break;
+                        }
+
+                        let next = match process_ingress_rx.try_recv() {
+                            Ok(event) => event,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                        };
+
+                        if !dispatch_kernel_pipeline_event(
+                            &process_dispatch_tx,
+                            next,
+                            &process_dispatch_shutdown,
+                            KernelPipeline::Process,
+                        )
+                        .await
+                        {
+                            break;
+                        }
+                    }
+                }
+            });
+
+            let firewall_dispatch_shutdown = shutdown.clone();
+            let firewall_dispatch_tx = firewall_tx.clone();
+            let firewall_dispatch_handle = tokio::spawn(async move {
+                loop {
+                    let first = tokio::select! {
+                        _ = firewall_dispatch_shutdown.cancelled() => break,
+                        msg = firewall_ingress_rx.recv() => {
+                            match msg {
+                                Some(state) => state,
+                                None => break,
+                            }
+                        }
+                    };
+
+                    if !dispatch_kernel_pipeline_event(
+                        &firewall_dispatch_tx,
+                        first,
+                        &firewall_dispatch_shutdown,
+                        KernelPipeline::Firewall,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+
+                    for _ in 1..KERNEL_INGRESS_DISPATCH_BATCH {
+                        if firewall_dispatch_shutdown.is_cancelled() {
+                            break;
+                        }
+
+                        let next = match firewall_ingress_rx.try_recv() {
+                            Ok(state) => state,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                        };
+
+                        if !dispatch_kernel_pipeline_event(
+                            &firewall_dispatch_tx,
+                            next,
+                            &firewall_dispatch_shutdown,
+                            KernelPipeline::Firewall,
+                        )
+                        .await
+                        {
+                            break;
+                        }
+                    }
+                }
+            });
+
             loop {
                 tokio::select! {
                     _ = shutdown.cancelled() => break,
                     msg = kernel_rx.recv() => {
                         match msg {
                             Some(event) => {
-                                match event {
-                                    KernelEvent::DnsResolved { ip, host } => {
-                                        if !dispatch_kernel_pipeline_event(
-                                            &dns_tx,
-                                            (ip, host),
-                                            &shutdown,
-                                            KernelPipeline::Dns,
-                                        )
-                                        .await
-                                        {
-                                            break;
-                                        }
+                                if !fanout_kernel_ingress_event(
+                                    event,
+                                    &dns_ingress_tx,
+                                    &process_ingress_tx,
+                                    &firewall_ingress_tx,
+                                ) {
+                                    break;
+                                }
+
+                                let mut drained = 1usize;
+                                for _ in 1..kernel_fanout_batch {
+                                    if shutdown.is_cancelled() {
+                                        break;
                                     }
-                                    KernelEvent::ProcStateChanged { pid, kind } => {
-                                        if !dispatch_kernel_pipeline_event(
-                                            &process_tx,
-                                            ProcessKernelEvent::ProcStateChanged { pid, kind },
-                                            &shutdown,
-                                            KernelPipeline::Process,
-                                        )
-                                        .await
-                                        {
-                                            break;
-                                        }
+
+                                    let next = match kernel_rx.try_recv() {
+                                        Ok(next) => next,
+                                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                                    };
+
+                                    if !fanout_kernel_ingress_event(
+                                        next,
+                                        &dns_ingress_tx,
+                                        &process_ingress_tx,
+                                        &firewall_ingress_tx,
+                                    ) {
+                                        break;
                                     }
-                                    KernelEvent::EbpfProcessMapHit { pid, uid, note } => {
-                                        if !dispatch_kernel_pipeline_event(
-                                            &process_tx,
-                                            ProcessKernelEvent::EbpfProcessMapHit { pid, uid, note },
-                                            &shutdown,
-                                            KernelPipeline::Process,
-                                        )
-                                        .await
-                                        {
-                                            break;
-                                        }
-                                    }
-                                    KernelEvent::FirewallState(state) => {
-                                        if !dispatch_kernel_pipeline_event(
-                                            &firewall_tx,
-                                            state,
-                                            &shutdown,
-                                            KernelPipeline::Firewall,
-                                        )
-                                        .await
-                                        {
-                                            break;
-                                        }
-                                    }
+
+                                    drained += 1;
+                                }
+
+                                // Keep burst processing, but yield after full drains to avoid
+                                // starving connect-attempt handling under sustained kernel load.
+                                if drained >= kernel_fanout_batch {
+                                    tokio::task::yield_now().await;
                                 }
                             }
                             None => break,
@@ -832,6 +1456,16 @@ impl Daemon {
                     }
                 }
             }
+
+            drop(dns_ingress_tx);
+            drop(process_ingress_tx);
+            drop(firewall_ingress_tx);
+
+            let _ = tokio::join!(
+                dns_dispatch_handle,
+                process_dispatch_handle,
+                firewall_dispatch_handle
+            );
 
             drop(dns_tx);
             drop(process_tx);
@@ -856,9 +1490,7 @@ impl Daemon {
         let reconfigure_proc_workers: command_control::ProcWorkerReconfigure =
             Arc::new(move |method| {
                 let daemon = daemon.clone();
-                Box::pin(async move {
-                    daemon.reconfigure_proc_workers(method).await;
-                })
+                Box::pin(async move { daemon.reconfigure_proc_workers(method).await })
             });
         let proc_workers = self.proc_workers_control();
         let control_proc_workers: command_control::ProcWorkerControl = Arc::new(move |command| {
@@ -871,6 +1503,33 @@ impl Daemon {
                 String,
                 (tokio::task::JoinHandle<()>, CancellationToken),
             > = HashMap::new();
+            let (task_lifecycle_tx, mut task_lifecycle_rx) =
+                tokio::sync::mpsc::channel::<task_runtime::TaskLifecycleEvent>(128);
+            let shutdown_events = shutdown.clone();
+            let task_lifecycle_handle = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = shutdown_events.cancelled() => break,
+                        msg = task_lifecycle_rx.recv() => {
+                            match msg {
+                                Some(task_runtime::TaskLifecycleEvent::Added { task_name, task_key }) => {
+                                    tracing::debug!(task = %task_name, key = %task_key, "Task Added");
+                                }
+                                Some(task_runtime::TaskLifecycleEvent::Removed { task_name, task_key }) => {
+                                    tracing::debug!(task = %task_name, key = %task_key, "Task removed");
+                                }
+                                Some(task_runtime::TaskLifecycleEvent::PausedAll { task_count }) => {
+                                    tracing::debug!(task_count, "runtime task manager pause-all acknowledged");
+                                }
+                                Some(task_runtime::TaskLifecycleEvent::ResumedAll { task_count }) => {
+                                    tracing::debug!(task_count, "runtime task manager resume-all acknowledged");
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+            });
 
             loop {
                 tokio::select! {
@@ -962,17 +1621,7 @@ impl Daemon {
                                     }
                                     crate::models::command_rpc::ClientCommand::StartTask(task) => {
                                         if !task_runtime::is_runtime_task_name_supported(&task.name) {
-                                            task_runtime::send_task_reply(
-                                                &task_reply_tx,
-                                                task.notification_id,
-                                                opensnitch_proto::pb::NotificationReplyCode::Ok,
-                                                serde_json::json!({
-                                                    "status": "ignored",
-                                                    "task": task.name,
-                                                })
-                                                .to_string(),
-                                            )
-                                            .await;
+                                            tracing::debug!(task = %task.name, "TaskStart ignored for unsupported runtime task");
                                             continue;
                                         }
 
@@ -1008,32 +1657,19 @@ impl Daemon {
                                             process.clone(),
                                             task_reply_tx.clone(),
                                         );
+                                        let event_name = task.name.clone();
+                                        let event_key = task_key.clone();
                                         task_handles.insert(task_key, (handle, token));
-                                        task_runtime::send_task_reply(
-                                            &task_reply_tx,
-                                            task.notification_id,
-                                            opensnitch_proto::pb::NotificationReplyCode::Ok,
-                                            serde_json::json!({
-                                                "status": "started",
-                                                "task": task.name,
+                                        let _ = task_lifecycle_tx
+                                            .send(task_runtime::TaskLifecycleEvent::Added {
+                                                task_name: event_name,
+                                                task_key: event_key,
                                             })
-                                            .to_string(),
-                                        )
-                                        .await;
+                                            .await;
                                     }
                                     crate::models::command_rpc::ClientCommand::StopTask(task) => {
                                         if !task_runtime::is_runtime_task_name_supported(&task.name) {
-                                            task_runtime::send_task_reply(
-                                                &task_reply_tx,
-                                                task.notification_id,
-                                                opensnitch_proto::pb::NotificationReplyCode::Ok,
-                                                serde_json::json!({
-                                                    "status": "ignored",
-                                                    "task": task.name,
-                                                })
-                                                .to_string(),
-                                            )
-                                            .await;
+                                            tracing::debug!(task = %task.name, "TaskStop ignored for unsupported runtime task");
                                             continue;
                                         }
 
@@ -1041,29 +1677,14 @@ impl Daemon {
                                         if let Some((handle, token)) = task_handles.remove(&task_key) {
                                             token.cancel();
                                             handle.abort();
-                                            task_runtime::send_task_reply(
-                                                &task_reply_tx,
-                                                task.notification_id,
-                                                opensnitch_proto::pb::NotificationReplyCode::Ok,
-                                                serde_json::json!({
-                                                    "status": "stopped",
-                                                    "task": task.name,
+                                            let _ = task_lifecycle_tx
+                                                .send(task_runtime::TaskLifecycleEvent::Removed {
+                                                    task_name: task.name.clone(),
+                                                    task_key,
                                                 })
-                                                .to_string(),
-                                            )
-                                            .await;
+                                                .await;
                                         } else {
-                                            task_runtime::send_task_reply(
-                                                &task_reply_tx,
-                                                task.notification_id,
-                                                opensnitch_proto::pb::NotificationReplyCode::Ok,
-                                                serde_json::json!({
-                                                    "status": "not-running",
-                                                    "task": task.name,
-                                                })
-                                                .to_string(),
-                                            )
-                                            .await;
+                                            tracing::debug!(task = %task_key, "TaskStop requested for non-running task");
                                         }
                                     }
                                     crate::models::command_rpc::ClientCommand::UpsertRules {
@@ -1090,7 +1711,31 @@ impl Daemon {
                                         )
                                         .await;
                                     }
+                                    crate::models::command_rpc::ClientCommand::PauseRuntimeTasks => {
+                                        let paused = task_runtime::pause_runtime_tasks(&task_handles);
+                                        let _ = task_lifecycle_tx
+                                            .send(task_runtime::TaskLifecycleEvent::PausedAll {
+                                                task_count: paused,
+                                            })
+                                            .await;
+                                    }
+                                    crate::models::command_rpc::ClientCommand::ResumeRuntimeTasks => {
+                                        let resumed = task_runtime::resume_runtime_tasks(&task_handles);
+                                        let _ = task_lifecycle_tx
+                                            .send(task_runtime::TaskLifecycleEvent::ResumedAll {
+                                                task_count: resumed,
+                                            })
+                                            .await;
+                                    }
                                     crate::models::command_rpc::ClientCommand::StopRuntimeTasks => {
+                                        for task_key in task_handles.keys().cloned().collect::<Vec<_>>() {
+                                            let _ = task_lifecycle_tx
+                                                .send(task_runtime::TaskLifecycleEvent::Removed {
+                                                    task_name: task_key.clone(),
+                                                    task_key,
+                                                })
+                                                .await;
+                                        }
                                         let stopped = task_runtime::stop_runtime_tasks(&mut task_handles);
                                         tracing::info!(stopped, "stopped temporary runtime tasks after notification disconnect");
                                     }
@@ -1126,6 +1771,8 @@ impl Daemon {
             }
 
             task_runtime::stop_runtime_tasks(&mut task_handles);
+            drop(task_lifecycle_tx);
+            let _ = task_lifecycle_handle.await;
         })
     }
 
@@ -1143,17 +1790,37 @@ impl Daemon {
                     msg = verdict_rx.recv() => {
                         match msg {
                             Some(reply) => {
-                                stats.on_verdict(reply.allow);
+                                if reply.count_stats {
+                                    stats.on_verdict(reply.allow);
+                                }
                                 crate::ffi::nfqueue::submit_verdict(
                                     reply.request_id,
                                     reply.allow,
                                     reply.reject,
                                 );
+                                let decision = if reply.allow {
+                                    "allow"
+                                } else if reply.reject {
+                                    "reject"
+                                } else {
+                                    "deny"
+                                };
+                                let source = match (reply.source, reply.rule_name.as_deref()) {
+                                    (src, Some(rule_name)) if src.contains("rule") => {
+                                        format!("rule:[{rule_name}]")
+                                    }
+                                    (src, Some(rule_name)) => format!("{src}:[{rule_name}]"),
+                                    ("runtime-fast-allow", None) => "fast-allow".to_string(),
+                                    ("runtime-fast-deny", None) => "fast-deny".to_string(),
+                                    ("runtime-default", None) => "default".to_string(),
+                                    (src, None) => src.to_string(),
+                                };
                                 tracing::info!(
-                                    "verdict reply request_id={} allow={} reject={}",
-                                    reply.request_id,
-                                    reply.allow,
-                                    reply.reject
+                                    id = reply.request_id,
+                                    decision,
+                                    stats = reply.count_stats,
+                                    source = %source,
+                                    "verdict reply"
                                 );
                             }
                             None => break,
@@ -1176,7 +1843,8 @@ impl Daemon {
         tokio::spawn(async move {
             let mut ping_id = 2_u64;
             let mut last_drop_snapshot = kernel_pipeline_drop_stats_snapshot();
-            let mut last_daemon_owned_fast_allow = stats.daemon_owned_fast_allow_count();
+            let mut last_fast_allow = stats.fast_allow_count();
+            let mut last_fast_deny = stats.fast_deny_count();
             let mut last_drop_log_at = tokio::time::Instant::now();
 
             loop {
@@ -1196,14 +1864,25 @@ impl Daemon {
                                 );
                             }
 
-                            let daemon_owned_fast_allow_total = stats.daemon_owned_fast_allow_count();
-                            let daemon_owned_fast_allow_delta = daemon_owned_fast_allow_total
-                                .saturating_sub(last_daemon_owned_fast_allow);
-                            if daemon_owned_fast_allow_delta > 0 {
+                            let fast_allow_total = stats.fast_allow_count();
+                            let fast_allow_delta = fast_allow_total
+                                .saturating_sub(last_fast_allow);
+                            if fast_allow_delta > 0 {
                                 debug!(
-                                    delta = daemon_owned_fast_allow_delta,
-                                    total = daemon_owned_fast_allow_total,
-                                    "daemon-owned fast-allow attempts observed"
+                                    delta = fast_allow_delta,
+                                    total = fast_allow_total,
+                                    "fast-allow attempts observed"
+                                );
+                            }
+
+                            let fast_deny_total = stats.fast_deny_count();
+                            let fast_deny_delta = fast_deny_total
+                                .saturating_sub(last_fast_deny);
+                            if fast_deny_delta > 0 {
+                                debug!(
+                                    delta = fast_deny_delta,
+                                    total = fast_deny_total,
+                                    "fast-deny attempts observed"
                                 );
                             }
 
@@ -1212,6 +1891,7 @@ impl Daemon {
                                 worker = proc_workers.worker_name(),
                                 state = snapshot.state.as_str(),
                                 method = ?snapshot.method,
+                                dns_monitor_state = crate::workers::dns_worker::dns_monitor_state_label(),
                                 configured_handles = snapshot.configured_handles,
                                 running_handles = snapshot.running_handles,
                                 shutdown_requested = snapshot.shutdown_requested,
@@ -1219,7 +1899,8 @@ impl Daemon {
                             );
 
                             last_drop_snapshot = current;
-                            last_daemon_owned_fast_allow = daemon_owned_fast_allow_total;
+                            last_fast_allow = fast_allow_total;
+                            last_fast_deny = fast_deny_total;
                             last_drop_log_at = tokio::time::Instant::now();
                         }
 
@@ -1233,8 +1914,9 @@ impl Daemon {
                             stats: Some(snapshot),
                         };
 
-                        let client_addr = config.snapshot().await.client_addr;
-                        let mut client = match Client::connect(&client_addr).await {
+                        let config_snapshot = config.snapshot().await;
+                        let client_addr = config_snapshot.client_addr.clone();
+                        let mut client = match Client::connect_with_config(&config_snapshot).await {
                             Ok(client) => client,
                             Err(err) => {
                                 debug!(addr = %client_addr, "periodic ping connect failed: {err}");
@@ -1257,9 +1939,7 @@ impl Daemon {
         let daemon = self.clone();
         let reconfigure_proc_workers: ProcWorkerReconfigure = Arc::new(move |method| {
             let daemon = daemon.clone();
-            Box::pin(async move {
-                daemon.reconfigure_proc_workers(method).await;
-            })
+            Box::pin(async move { daemon.reconfigure_proc_workers(method).await })
         });
 
         WatchService::new(
@@ -1270,6 +1950,7 @@ impl Daemon {
             self.inner.stats.clone(),
             self.inner.process.clone(),
             self.inner.bus.task_reply_tx.clone(),
+            self.inner.bus.alert_tx.clone(),
             reconfigure_proc_workers,
         )
     }
@@ -1290,34 +1971,44 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::timeout;
     use tokio_util::sync::CancellationToken;
+    use tracing::{info, warn};
 
     use super::{
         Daemon, DaemonInner, KERNEL_PIPELINE_SEND_BACKOFF, KernelPipeline, ProcWorkersRuntime,
-        dispatch_kernel_pipeline_event, kernel_pipeline_drop_stats_snapshot,
+        ProcessKernelEvent, dispatch_connect_attempt_to_worker, dispatch_kernel_pipeline_event,
+        fanout_kernel_ingress_event, kernel_pipeline_drop_stats_snapshot,
     };
     use crate::{
         bus::{Bus, build_bus},
         config::Config,
         flows::verdict_flow::VerdictFlow,
         models::{
+            command_rpc::{ClientCommand, TaskNotification},
             connection_state::{ConnectionAttempt, TransportProtocol},
             firewall_state::{FirewallBackend, FirewallState},
             kernel_event::{KernelEvent, ProcEventKind},
         },
         services::{
-            config_service::ConfigService, dns_service::DnsService,
-            firewall_service::FirewallService, process_service::ProcessService,
-            rule_service::RuleService, stats_service::StatsService,
+            config_service::ConfigService, connection_service::ConnectionService,
+            dns_service::DnsService, firewall_service::FirewallService,
+            process_service::ProcessService, rule_service::RuleService,
+            stats_service::StatsService, ui_session_service::UiSessionService,
         },
+        tunables::RuntimeTunables,
     };
 
-    fn build_test_daemon(bus: Bus) -> Daemon {
+    fn build_test_daemon_with_tunables(bus: Bus, tunables: RuntimeTunables) -> Daemon {
         let config = Config::default();
         let firewall = FirewallService::new(&config).expect("firewall service");
+        let process = ProcessService::default();
+        let dns = DnsService::default();
+        let ui_session = UiSessionService::default();
+        let connections = ConnectionService::new(process.clone(), dns.clone());
 
         Daemon {
             inner: Arc::new(DaemonInner {
                 config: ConfigService::new(config.clone()),
+                ui_session,
                 nfqueue_num: config.firewall_queue_num,
                 default_action: config.default_action,
                 audit_socket_path: config.audit_socket_path.clone(),
@@ -1328,13 +2019,19 @@ mod tests {
                 })),
                 bus,
                 rules: RuleService::default(),
-                process: ProcessService::default(),
-                dns: DnsService::default(),
+                connections,
+                process,
+                dns,
                 stats: StatsService::default(),
                 firewall,
+                tunables,
                 shutdown: CancellationToken::new(),
             }),
         }
+    }
+
+    fn build_test_daemon(bus: Bus) -> Daemon {
+        build_test_daemon_with_tunables(bus, RuntimeTunables::default())
     }
 
     #[tokio::test]
@@ -1376,17 +2073,250 @@ mod tests {
         assert!(after.dns >= before.dns.saturating_add(1));
     }
 
+    #[test]
+    fn fanout_kernel_ingress_event_routes_dns_event() {
+        let (dns_tx, mut dns_rx) = mpsc::unbounded_channel::<(String, String)>();
+        let (process_tx, mut process_rx) = mpsc::unbounded_channel::<ProcessKernelEvent>();
+        let (firewall_tx, mut firewall_rx) = mpsc::unbounded_channel::<FirewallState>();
+
+        let routed = fanout_kernel_ingress_event(
+            KernelEvent::DnsResolved {
+                ip: "203.0.113.10".to_string(),
+                host: "dns.example.test".to_string(),
+            },
+            &dns_tx,
+            &process_tx,
+            &firewall_tx,
+        );
+
+        assert!(routed);
+        assert_eq!(
+            dns_rx.try_recv().ok(),
+            Some(("203.0.113.10".to_string(), "dns.example.test".to_string()))
+        );
+        assert!(process_rx.try_recv().is_err());
+        assert!(firewall_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn fanout_kernel_ingress_event_returns_false_when_target_receiver_is_closed() {
+        let (dns_tx, dns_rx) = mpsc::unbounded_channel::<(String, String)>();
+        let (process_tx, _process_rx) = mpsc::unbounded_channel::<ProcessKernelEvent>();
+        let (firewall_tx, _firewall_rx) = mpsc::unbounded_channel::<FirewallState>();
+        drop(dns_rx);
+
+        let routed = fanout_kernel_ingress_event(
+            KernelEvent::DnsResolved {
+                ip: "198.51.100.20".to_string(),
+                host: "closed.example.test".to_string(),
+            },
+            &dns_tx,
+            &process_tx,
+            &firewall_tx,
+        );
+
+        assert!(!routed);
+    }
+
+    fn build_connect_attempt(request_id: u64) -> ConnectionAttempt {
+        ConnectionAttempt {
+            request_id,
+            protocol: TransportProtocol::Tcp,
+            src_ip: "127.0.0.1".to_string(),
+            src_port: 46000,
+            dst_ip: "127.0.0.1".to_string(),
+            dst_port: 50051,
+            iface_in_idx: 0,
+            iface_out_idx: 0,
+            dns_query: None,
+            pid: std::process::id(),
+            uid: 1000,
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_connect_attempt_reroutes_when_primary_worker_queue_is_full() {
+        let (tx0, mut rx0) = mpsc::channel::<ConnectionAttempt>(1);
+        let (tx1, mut rx1) = mpsc::channel::<ConnectionAttempt>(1);
+
+        // Saturate worker 0 queue so dispatcher should probe and route to worker 1.
+        tx0.send(build_connect_attempt(10))
+            .await
+            .expect("prime worker 0 queue");
+
+        let shutdown = CancellationToken::new();
+        let mut next_worker = 0usize;
+        let routed = timeout(
+            Duration::from_millis(200),
+            dispatch_connect_attempt_to_worker(
+                &[tx0.clone(), tx1.clone()],
+                &mut next_worker,
+                &shutdown,
+                build_connect_attempt(11),
+            ),
+        )
+        .await
+        .expect("dispatch timeout");
+
+        assert!(routed);
+        assert_eq!(next_worker, 0);
+        assert_eq!(rx1.recv().await.expect("worker 1 recv").request_id, 11);
+        assert_eq!(rx0.recv().await.expect("worker 0 recv").request_id, 10);
+    }
+
+    #[tokio::test]
+    async fn dispatch_connect_attempt_returns_false_when_all_workers_are_closed() {
+        let (tx0, rx0) = mpsc::channel::<ConnectionAttempt>(1);
+        let (tx1, rx1) = mpsc::channel::<ConnectionAttempt>(1);
+        drop(rx0);
+        drop(rx1);
+
+        let shutdown = CancellationToken::new();
+        let mut next_worker = 0usize;
+        let routed = dispatch_connect_attempt_to_worker(
+            &[tx0, tx1],
+            &mut next_worker,
+            &shutdown,
+            build_connect_attempt(12),
+        )
+        .await;
+
+        assert!(!routed);
+    }
+
+    #[tokio::test]
+    async fn runtime_task_commands_ignore_unsupported_names_without_immediate_reply() {
+        let (bus, rx) = build_bus(16);
+        let daemon = build_test_daemon(bus.clone());
+
+        let crate::bus::BusRx {
+            connect_rx: _,
+            kernel_rx: _,
+            client_cmd_rx,
+            verdict_rx: _,
+            mut task_reply_rx,
+            alert_rx: _,
+        } = rx;
+
+        let cmd_handle = daemon.spawn_client_command_task(client_cmd_rx);
+
+        bus.client_cmd_tx
+            .send(ClientCommand::StartTask(TaskNotification {
+                notification_id: 1,
+                name: "unknown-task".to_string(),
+                data: serde_json::json!({}),
+            }))
+            .await
+            .expect("send start task");
+
+        assert!(
+            timeout(Duration::from_millis(80), task_reply_rx.recv())
+                .await
+                .is_err(),
+            "unsupported task start should not emit immediate reply"
+        );
+
+        bus.client_cmd_tx
+            .send(ClientCommand::StopTask(TaskNotification {
+                notification_id: 2,
+                name: "unknown-task".to_string(),
+                data: serde_json::json!({}),
+            }))
+            .await
+            .expect("send stop task");
+
+        assert!(
+            timeout(Duration::from_millis(80), task_reply_rx.recv())
+                .await
+                .is_err(),
+            "unsupported task stop should not emit immediate reply"
+        );
+
+        daemon.shutdown().await;
+        let _ = timeout(Duration::from_secs(1), cmd_handle).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_task_start_duplicate_returns_error_without_initial_started_reply() {
+        let (bus, rx) = build_bus(16);
+        let daemon = build_test_daemon(bus.clone());
+
+        let crate::bus::BusRx {
+            connect_rx: _,
+            kernel_rx: _,
+            client_cmd_rx,
+            verdict_rx: _,
+            mut task_reply_rx,
+            alert_rx: _,
+        } = rx;
+
+        let cmd_handle = daemon.spawn_client_command_task(client_cmd_rx);
+        let pid = std::process::id().to_string();
+
+        bus.client_cmd_tx
+            .send(ClientCommand::StartTask(TaskNotification {
+                notification_id: 7,
+                name: "pid-monitor".to_string(),
+                data: serde_json::json!({
+                    "pid": pid,
+                    "interval": "5s",
+                }),
+            }))
+            .await
+            .expect("send initial start task");
+
+        assert!(
+            timeout(Duration::from_millis(80), task_reply_rx.recv())
+                .await
+                .is_err(),
+            "successful start should not emit immediate started reply"
+        );
+
+        bus.client_cmd_tx
+            .send(ClientCommand::StartTask(TaskNotification {
+                notification_id: 8,
+                name: "pid-monitor".to_string(),
+                data: serde_json::json!({
+                    "pid": std::process::id().to_string(),
+                    "interval": "5s",
+                }),
+            }))
+            .await
+            .expect("send duplicate start task");
+
+        let duplicate_reply = timeout(Duration::from_secs(1), task_reply_rx.recv())
+            .await
+            .expect("duplicate start reply timeout")
+            .expect("duplicate start reply missing");
+
+        assert_eq!(duplicate_reply.id, 8);
+        assert_eq!(
+            duplicate_reply.code,
+            opensnitch_proto::pb::NotificationReplyCode::Error as i32
+        );
+        assert!(duplicate_reply.data.contains("already exists"));
+
+        bus.client_cmd_tx
+            .send(ClientCommand::StopRuntimeTasks)
+            .await
+            .expect("send stop runtime tasks");
+
+        daemon.shutdown().await;
+        let _ = timeout(Duration::from_secs(1), cmd_handle).await;
+    }
+
     #[tokio::test]
     async fn connect_attempt_progresses_under_mixed_non_connect_saturation() {
         let (bus, rx) = build_bus(64);
-        let daemon = build_test_daemon(bus.clone());
+        let (tunables, _) = RuntimeTunables::load_effective();
+        let daemon = build_test_daemon_with_tunables(bus.clone(), tunables);
 
         let verdict_flow = VerdictFlow::new(
             bus.clone(),
             daemon.inner.config.clone(),
+            daemon.inner.ui_session.clone(),
             daemon.inner.rules.clone(),
-            daemon.inner.process.clone(),
-            daemon.inner.dns.clone(),
+            daemon.inner.connections.clone(),
             daemon.inner.stats.clone(),
         );
 
@@ -1396,16 +2326,121 @@ mod tests {
             client_cmd_rx: _,
             mut verdict_rx,
             task_reply_rx: _,
+            alert_rx: _,
         } = rx;
 
         let connect_handle =
             daemon.spawn_connect_attempt_task(verdict_flow, daemon.inner.stats.clone(), connect_rx);
-        let kernel_handle = daemon.spawn_kernel_task(
-            daemon.inner.process.clone(),
-            daemon.inner.dns.clone(),
-            daemon.inner.stats.clone(),
-            kernel_rx,
-        );
+
+        // Mirror Go runtimeprofile harness shape: lightweight per-pipeline workers and
+        // bounded dispatch retries, instead of full daemon service handlers.
+        let (dns_tx, mut dns_rx) = tokio::sync::mpsc::channel::<()>(32);
+        let (process_tx, mut process_rx) = tokio::sync::mpsc::channel::<()>(32);
+        let (firewall_tx, mut firewall_rx) = tokio::sync::mpsc::channel::<()>(32);
+        let kernel_shutdown = daemon.inner.shutdown.clone();
+
+        let dns_shutdown = kernel_shutdown.clone();
+        let dns_worker = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = dns_shutdown.cancelled() => break,
+                    msg = dns_rx.recv() => {
+                        match msg {
+                            Some(()) => tokio::time::sleep(Duration::from_millis(2)).await,
+                            None => break,
+                        }
+                    }
+                }
+            }
+        });
+
+        let process_shutdown = kernel_shutdown.clone();
+        let process_worker = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = process_shutdown.cancelled() => break,
+                    msg = process_rx.recv() => {
+                        match msg {
+                            Some(()) => tokio::time::sleep(Duration::from_millis(2)).await,
+                            None => break,
+                        }
+                    }
+                }
+            }
+        });
+
+        let firewall_shutdown = kernel_shutdown.clone();
+        let firewall_worker = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = firewall_shutdown.cancelled() => break,
+                    msg = firewall_rx.recv() => {
+                        match msg {
+                            Some(()) => tokio::time::sleep(Duration::from_millis(2)).await,
+                            None => break,
+                        }
+                    }
+                }
+            }
+        });
+
+        let router_shutdown = kernel_shutdown.clone();
+        let kernel_handle = tokio::spawn(async move {
+            let mut kernel_rx = kernel_rx;
+
+            loop {
+                tokio::select! {
+                    _ = router_shutdown.cancelled() => break,
+                    msg = kernel_rx.recv() => {
+                        match msg {
+                            Some(KernelEvent::DnsResolved { .. }) => {
+                                if !dispatch_kernel_pipeline_event(
+                                    &dns_tx,
+                                    (),
+                                    &router_shutdown,
+                                    KernelPipeline::Dns,
+                                )
+                                .await
+                                {
+                                    break;
+                                }
+                            }
+                            Some(KernelEvent::ProcStateChanged { .. } | KernelEvent::EbpfProcessMapHit { .. }) => {
+                                if !dispatch_kernel_pipeline_event(
+                                    &process_tx,
+                                    (),
+                                    &router_shutdown,
+                                    KernelPipeline::Process,
+                                )
+                                .await
+                                {
+                                    break;
+                                }
+                            }
+                            Some(KernelEvent::FirewallState(_)) => {
+                                if !dispatch_kernel_pipeline_event(
+                                    &firewall_tx,
+                                    (),
+                                    &router_shutdown,
+                                    KernelPipeline::Firewall,
+                                )
+                                .await
+                                {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+
+            drop(dns_tx);
+            drop(process_tx);
+            drop(firewall_tx);
+
+            let _ = tokio::join!(dns_worker, process_worker, firewall_worker);
+        });
 
         let flood_bus = bus.clone();
         let flood = tokio::spawn(async move {
@@ -1442,6 +2477,8 @@ mod tests {
                 src_port: 45000,
                 dst_ip: "127.0.0.1".to_string(),
                 dst_port: 50051,
+                iface_in_idx: 0,
+                iface_out_idx: 0,
                 dns_query: None,
                 pid: std::process::id(),
                 uid: 1000,
@@ -1473,6 +2510,49 @@ mod tests {
         let max_idx = sorted.len().saturating_sub(1);
         let idx = ((max_idx as f64) * pct).round() as usize;
         sorted[idx.min(max_idx)]
+    }
+
+    fn enforce_low_noise_harness_log_level(harness_name: &str) {
+        crate::utils::test_support::init_test_logging();
+
+        let raw = std::env::var("RUST_LOG").unwrap_or_default();
+        let normalized = raw.to_ascii_lowercase();
+        let has_warn_or_error = normalized.contains("warn") || normalized.contains("error");
+        let has_debug_or_trace = normalized.contains("debug") || normalized.contains("trace");
+
+        let allow_verbose = std::env::var("OPENSNITCH_VERBOSE")
+            .ok()
+            .map(|value| {
+                let value = value.trim().to_ascii_lowercase();
+                value == "1" || value == "true" || value == "yes" || value == "on"
+            })
+            .unwrap_or(false);
+
+        if allow_verbose {
+            info!(
+                harness = harness_name,
+                rust_log = %raw,
+                "running with verbose logging for debug (OPENSNITCH_VERBOSE=1)"
+            );
+            return;
+        }
+
+        if !(has_warn_or_error && !has_debug_or_trace) {
+            warn!(
+                harness = harness_name,
+                previous_rust_log = %raw,
+                "requires low-noise logging; overriding RUST_LOG to 'error' for this test"
+            );
+            // SAFETY: Harness tests may run in dedicated test processes and need a predictable
+            // log level to avoid noisy output and parser breakage.
+            unsafe {
+                std::env::set_var("RUST_LOG", "error");
+            }
+        }
+    }
+
+    fn enforce_kernel_stress_log_level() {
+        enforce_low_noise_harness_log_level("kernel stress harness tests")
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -1533,12 +2613,35 @@ mod tests {
     }
 
     fn enforce_stress_regression_guard(
+        rounds: usize,
         p95: Duration,
         p99: Duration,
         max: Duration,
         drop_total: u64,
     ) {
+        crate::utils::test_support::init_test_logging();
+
         if std::env::var("OPENSNITCH_STRESS_SKIP_REGRESSION_CHECK").as_deref() == Ok("1") {
+            return;
+        }
+
+        if cfg!(debug_assertions) {
+            warn!(
+                "skipping stress regression guard in non-release profile (rerun with cargo test --release to enforce baselines)"
+            );
+            return;
+        }
+
+        let min_rounds = std::env::var("OPENSNITCH_STRESS_REGRESSION_MIN_ROUNDS")
+            .ok()
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .unwrap_or(1000);
+        if rounds < min_rounds {
+            warn!(
+                rounds,
+                min_rounds,
+                "skipping stress regression guard due to low sample count (set OPENSNITCH_STRESS_REGRESSION_MIN_ROUNDS to override)"
+            );
             return;
         }
 
@@ -1593,13 +2696,276 @@ mod tests {
         );
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct KernelPressureMetrics {
+        duration_secs: u64,
+        flood_tasks: usize,
+        enqueue_timeout_us: u64,
+        attempted_total: u64,
+        enqueued_total: u64,
+        enqueue_timeouts_total: u64,
+        enqueue_closed_total: u64,
+        forced_kernel_abort: bool,
+        attempted_pps: f64,
+        enqueued_pps: f64,
+        enqueue_drop_ratio: f64,
+        drop_delta: crate::daemon::KernelPipelineDropStats,
+    }
+
+    async fn run_kernel_pressure_profile(
+        duration_secs: u64,
+        flood_tasks: usize,
+        enqueue_mode: &str,
+        enqueue_timeout_us: u64,
+    ) -> KernelPressureMetrics {
+        let duration_secs = duration_secs.clamp(1, 30);
+        let flood_tasks = flood_tasks.clamp(1, 32);
+        let enqueue_timeout_us = enqueue_timeout_us.clamp(10, 20_000);
+
+        let (bus, rx) = build_bus(8192);
+        let daemon = build_test_daemon(bus.clone());
+
+        let crate::bus::BusRx {
+            connect_rx: _,
+            kernel_rx,
+            client_cmd_rx: _,
+            verdict_rx: _,
+            task_reply_rx: _,
+            alert_rx: _,
+        } = rx;
+
+        let kernel_handle = daemon.spawn_kernel_task(
+            daemon.inner.process.clone(),
+            daemon.inner.dns.clone(),
+            daemon.inner.stats.clone(),
+            kernel_rx,
+        );
+
+        let attempted = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let enqueued = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let enqueue_timeouts = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let enqueue_closed = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        let drop_before = kernel_pipeline_drop_stats_snapshot();
+        let flood_shutdown = CancellationToken::new();
+        let started = Instant::now();
+
+        let mut flood_handles = Vec::with_capacity(flood_tasks);
+        for worker_id in 0..flood_tasks {
+            let flood_token = flood_shutdown.clone();
+            let flood_bus = bus.clone();
+            let attempted_ctr = attempted.clone();
+            let enqueued_ctr = enqueued.clone();
+            let enqueue_timeouts_ctr = enqueue_timeouts.clone();
+            let enqueue_closed_ctr = enqueue_closed.clone();
+            let enqueue_mode = enqueue_mode.to_string();
+
+            flood_handles.push(tokio::spawn(async move {
+                let dns_ips = (0_u16..256)
+                    .map(|idx| format!("198.18.{}.{}", idx / 16, idx % 16))
+                    .collect::<Vec<_>>();
+                let dns_hosts = (0_u16..256)
+                    .map(|idx| format!("pressure-{}.example.test", idx))
+                    .collect::<Vec<_>>();
+                let mut i = worker_id as u64;
+                let mut burst_size = 32usize;
+                let mut consecutive_saturation = 0usize;
+                while !flood_token.is_cancelled() {
+                    let mut batch_saturation = 0usize;
+                    let mut saturation_dns_or_proc = 0usize;
+
+                    for _ in 0..burst_size {
+                        if flood_token.is_cancelled() {
+                            break;
+                        }
+
+                        let lane = i % 3;
+                        let event = match lane {
+                            0 => {
+                                let idx = (i as usize) & 0xFF;
+                                KernelEvent::DnsResolved {
+                                    ip: dns_ips[idx].clone(),
+                                    host: dns_hosts[idx].clone(),
+                                }
+                            }
+                            1 => KernelEvent::ProcStateChanged {
+                                pid: 50_000 + ((i as u32) % 8192),
+                                kind: ProcEventKind::Exec,
+                            },
+                            _ => KernelEvent::FirewallState(FirewallState {
+                                enabled: i % 2 == 0,
+                                backend: if i % 4 == 0 {
+                                    FirewallBackend::Iptables
+                                } else {
+                                    FirewallBackend::Nftables
+                                },
+                            }),
+                        };
+
+                        attempted_ctr.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let mut saturated = false;
+
+                        if enqueue_mode == "timeout" {
+                            match tokio::time::timeout(
+                                Duration::from_micros(enqueue_timeout_us),
+                                flood_bus.kernel_tx.send(event),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {
+                                    enqueued_ctr.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                Ok(Err(_)) => {
+                                    enqueue_closed_ctr
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    saturated = true;
+                                }
+                                Err(_) => {
+                                    enqueue_timeouts_ctr
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    saturated = true;
+                                }
+                            }
+                        } else if flood_bus.kernel_tx.try_send(event).is_ok() {
+                            enqueued_ctr.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        } else {
+                            saturated = true;
+                        }
+
+                        if saturated {
+                            batch_saturation = batch_saturation.saturating_add(1);
+                            if lane != 2 {
+                                saturation_dns_or_proc = saturation_dns_or_proc.saturating_add(1);
+                            }
+                        }
+
+                        i = i.wrapping_add(1);
+                    }
+
+                    if batch_saturation > 0 {
+                        consecutive_saturation = consecutive_saturation.saturating_add(1);
+                        burst_size = (burst_size / 2).max(4);
+
+                        // Under DNS/process lane saturation, add a short adaptive backoff so
+                        // producers do not keep overwhelming kernel pipeline queues.
+                        if consecutive_saturation >= 2 {
+                            let backoff_us = if saturation_dns_or_proc > (batch_saturation / 2) {
+                                250
+                            } else {
+                                100
+                            };
+                            tokio::time::sleep(Duration::from_micros(backoff_us)).await;
+                        }
+                    } else {
+                        consecutive_saturation = 0;
+                        burst_size = (burst_size + 4).min(128);
+                    }
+
+                    if (i & 0x3FF) == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }));
+        }
+
+        tokio::time::sleep(Duration::from_secs(duration_secs)).await;
+        flood_shutdown.cancel();
+        for mut handle in flood_handles {
+            if timeout(Duration::from_secs(3), &mut handle).await.is_err() {
+                handle.abort();
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        let elapsed = started.elapsed();
+        let attempted_total = attempted.load(std::sync::atomic::Ordering::Relaxed);
+        let enqueued_total = enqueued.load(std::sync::atomic::Ordering::Relaxed);
+        let enqueue_timeouts_total = enqueue_timeouts.load(std::sync::atomic::Ordering::Relaxed);
+        let enqueue_closed_total = enqueue_closed.load(std::sync::atomic::Ordering::Relaxed);
+
+        let drop_after = kernel_pipeline_drop_stats_snapshot();
+        let drop_delta = drop_after.saturating_delta(drop_before);
+
+        daemon.shutdown().await;
+        let mut kernel_handle = kernel_handle;
+        let forced_kernel_abort = if timeout(Duration::from_secs(10), &mut kernel_handle)
+            .await
+            .is_err()
+        {
+            kernel_handle.abort();
+            true
+        } else {
+            false
+        };
+
+        let attempted_pps = if elapsed.as_secs_f64() > 0.0 {
+            attempted_total as f64 / elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+        let enqueued_pps = if elapsed.as_secs_f64() > 0.0 {
+            enqueued_total as f64 / elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+        let enqueue_drop_ratio = if attempted_total > 0 {
+            (attempted_total.saturating_sub(enqueued_total)) as f64 / attempted_total as f64
+        } else {
+            0.0
+        };
+
+        KernelPressureMetrics {
+            duration_secs,
+            flood_tasks,
+            enqueue_timeout_us,
+            attempted_total,
+            enqueued_total,
+            enqueue_timeouts_total,
+            enqueue_closed_total,
+            forced_kernel_abort,
+            attempted_pps,
+            enqueued_pps,
+            enqueue_drop_ratio,
+            drop_delta,
+        }
+    }
+
     #[tokio::test]
     #[ignore = "profiling harness; run with --ignored --nocapture"]
     async fn stress_profile_reports_connect_latency_and_pipeline_drops() {
-        let rounds = std::env::var("OPENSNITCH_STRESS_ROUNDS")
+        enforce_low_noise_harness_log_level(
+            "stress_profile_reports_connect_latency_and_pipeline_drops",
+        );
+
+        // Default to enabled for harnesses when env is missing; allow explicit opt-out.
+        let stress_profile_enabled = std::env::var("OPENSNITCH_STRESS_PROFILE")
             .ok()
-            .and_then(|raw| raw.parse::<usize>().ok())
-            .unwrap_or(2_000);
+            .map(|value| {
+                let value = value.trim().to_ascii_lowercase();
+                !(value.is_empty() || value == "0" || value == "false")
+            })
+            .unwrap_or(true);
+
+        if !stress_profile_enabled {
+            info!(
+                stress_profile = %std::env::var("OPENSNITCH_STRESS_PROFILE").unwrap_or_default(),
+                "profiling harness disabled via OPENSNITCH_STRESS_PROFILE"
+            );
+            return;
+        }
+
+        let mut rounds = 2_000_usize;
+        if let Ok(raw) = std::env::var("OPENSNITCH_STRESS_ROUNDS") {
+            rounds = raw
+                .parse::<usize>()
+                .unwrap_or_else(|_| panic!("invalid OPENSNITCH_STRESS_ROUNDS value '{}'", raw));
+            assert!(
+                rounds > 0,
+                "invalid OPENSNITCH_STRESS_ROUNDS value '{}'",
+                raw
+            );
+        }
 
         let (bus, rx) = build_bus(256);
         let daemon = build_test_daemon(bus.clone());
@@ -1607,9 +2973,9 @@ mod tests {
         let verdict_flow = VerdictFlow::new(
             bus.clone(),
             daemon.inner.config.clone(),
+            daemon.inner.ui_session.clone(),
             daemon.inner.rules.clone(),
-            daemon.inner.process.clone(),
-            daemon.inner.dns.clone(),
+            daemon.inner.connections.clone(),
             daemon.inner.stats.clone(),
         );
 
@@ -1619,6 +2985,7 @@ mod tests {
             client_cmd_rx: _,
             mut verdict_rx,
             task_reply_rx: _,
+            alert_rx: _,
         } = rx;
 
         let connect_handle =
@@ -1667,20 +3034,23 @@ mod tests {
 
         for i in 0..rounds {
             let request_id = base_request_id + i as u64;
+            let attempt = ConnectionAttempt {
+                request_id,
+                protocol: TransportProtocol::Tcp,
+                src_ip: "127.0.0.1".to_string(),
+                src_port: 46000,
+                dst_ip: "127.0.0.1".to_string(),
+                dst_port: 50051,
+                iface_in_idx: 0,
+                iface_out_idx: 0,
+                dns_query: None,
+                pid: std::process::id(),
+                uid: 1000,
+            };
             let started = Instant::now();
 
             bus.connect_tx
-                .send(ConnectionAttempt {
-                    request_id,
-                    protocol: TransportProtocol::Tcp,
-                    src_ip: "127.0.0.1".to_string(),
-                    src_port: 46000,
-                    dst_ip: "127.0.0.1".to_string(),
-                    dst_port: 50051,
-                    dns_query: None,
-                    pid: std::process::id(),
-                    uid: 1000,
-                })
+                .send(attempt)
                 .await
                 .expect("connect attempt send");
 
@@ -1712,9 +3082,9 @@ mod tests {
         let p99 = duration_percentile(&latencies, 0.99);
         let max = latencies.last().copied().unwrap_or(Duration::ZERO);
 
-        enforce_stress_regression_guard(p95, p99, max, drop_delta.total());
+        enforce_stress_regression_guard(rounds, p95, p99, max, drop_delta.total());
 
-        println!(
+        info!(
             "stress-profile rounds={} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3} drop_dns={} drop_process={} drop_firewall={} drop_total={}",
             rounds,
             p50.as_secs_f64() * 1000.0,
@@ -1726,5 +3096,192 @@ mod tests {
             drop_delta.firewall,
             drop_delta.total(),
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "profiling harness; run with --ignored --nocapture"]
+    async fn stress_profile_reports_kernel_pipeline_pressure() {
+        enforce_kernel_stress_log_level();
+
+        let duration_secs = std::env::var("OPENSNITCH_KERNEL_PRESSURE_SECS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(3);
+        let flood_tasks = std::env::var("OPENSNITCH_KERNEL_PRESSURE_TASKS")
+            .ok()
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .unwrap_or(4);
+        let enqueue_mode = std::env::var("OPENSNITCH_KERNEL_PRESSURE_ENQUEUE_MODE")
+            .unwrap_or_else(|_| "try".to_string());
+        let enqueue_timeout_us = std::env::var("OPENSNITCH_KERNEL_PRESSURE_ENQUEUE_TIMEOUT_US")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(200);
+
+        let metrics = run_kernel_pressure_profile(
+            duration_secs,
+            flood_tasks,
+            &enqueue_mode,
+            enqueue_timeout_us,
+        )
+        .await;
+
+        info!(
+            "kernel-pressure mode={} enqueue_timeout_us={} secs={} flood_tasks={} attempted={} enqueued={} enqueue_timeouts={} enqueue_closed={} forced_kernel_abort={} attempted_pps={:.0} enqueued_pps={:.0} enqueue_drop_ratio={:.4} pipeline_drop_dns={} pipeline_drop_process={} pipeline_drop_firewall={} pipeline_drop_total={}",
+            enqueue_mode,
+            metrics.enqueue_timeout_us,
+            metrics.duration_secs,
+            metrics.flood_tasks,
+            metrics.attempted_total,
+            metrics.enqueued_total,
+            metrics.enqueue_timeouts_total,
+            metrics.enqueue_closed_total,
+            metrics.forced_kernel_abort,
+            metrics.attempted_pps,
+            metrics.enqueued_pps,
+            metrics.enqueue_drop_ratio,
+            metrics.drop_delta.dns,
+            metrics.drop_delta.process,
+            metrics.drop_delta.firewall,
+            metrics.drop_delta.total(),
+        );
+
+        assert!(
+            metrics.enqueued_total > 0,
+            "kernel pressure run did not enqueue events"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "profiling harness; run with --ignored --nocapture"]
+    async fn stress_profile_reports_kernel_pipeline_timeout_sweep() {
+        enforce_kernel_stress_log_level();
+
+        let duration_secs = std::env::var("OPENSNITCH_KERNEL_PRESSURE_SWEEP_SECS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(2);
+        let flood_tasks = std::env::var("OPENSNITCH_KERNEL_PRESSURE_SWEEP_TASKS")
+            .ok()
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .unwrap_or(4);
+        let sweep_raw = std::env::var("OPENSNITCH_KERNEL_PRESSURE_SWEEP_US")
+            .unwrap_or_else(|_| "50,100,200,500,1000".to_string());
+
+        let mut timeouts = Vec::new();
+        for token in sweep_raw.split(',') {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            if let Ok(value) = token.parse::<u64>() {
+                timeouts.push(value);
+            }
+        }
+        if timeouts.is_empty() {
+            timeouts.extend([50_u64, 100, 200, 500, 1000]);
+        }
+
+        info!(
+            "kernel-pressure-sweep-csv-header,timeout_us,secs,flood_tasks,attempted,enqueued,enqueue_timeouts,enqueue_closed,forced_kernel_abort,attempted_pps,enqueued_pps,enqueue_drop_ratio,pipeline_drop_dns,pipeline_drop_process,pipeline_drop_firewall,pipeline_drop_total"
+        );
+
+        let mut results = Vec::new();
+
+        for timeout_us in timeouts {
+            let metrics =
+                run_kernel_pressure_profile(duration_secs, flood_tasks, "timeout", timeout_us)
+                    .await;
+            info!(
+                "kernel-pressure-sweep timeout_us={} secs={} flood_tasks={} attempted={} enqueued={} enqueue_timeouts={} enqueue_closed={} forced_kernel_abort={} attempted_pps={:.0} enqueued_pps={:.0} enqueue_drop_ratio={:.4} pipeline_drop_total={}",
+                metrics.enqueue_timeout_us,
+                metrics.duration_secs,
+                metrics.flood_tasks,
+                metrics.attempted_total,
+                metrics.enqueued_total,
+                metrics.enqueue_timeouts_total,
+                metrics.enqueue_closed_total,
+                metrics.forced_kernel_abort,
+                metrics.attempted_pps,
+                metrics.enqueued_pps,
+                metrics.enqueue_drop_ratio,
+                metrics.drop_delta.total(),
+            );
+
+            info!(
+                "kernel-pressure-sweep-csv,{},{},{},{},{},{},{},{},{:.0},{:.0},{:.4},{},{},{},{}",
+                metrics.enqueue_timeout_us,
+                metrics.duration_secs,
+                metrics.flood_tasks,
+                metrics.attempted_total,
+                metrics.enqueued_total,
+                metrics.enqueue_timeouts_total,
+                metrics.enqueue_closed_total,
+                metrics.forced_kernel_abort,
+                metrics.attempted_pps,
+                metrics.enqueued_pps,
+                metrics.enqueue_drop_ratio,
+                metrics.drop_delta.dns,
+                metrics.drop_delta.process,
+                metrics.drop_delta.firewall,
+                metrics.drop_delta.total(),
+            );
+
+            assert!(
+                metrics.enqueued_total > 0,
+                "timeout_us={} did not enqueue events",
+                metrics.enqueue_timeout_us
+            );
+            results.push(metrics);
+        }
+
+        let mut best: Option<KernelPressureMetrics> = None;
+        let mut best_score = f64::NEG_INFINITY;
+        let has_non_abort = results.iter().any(|m| !m.forced_kernel_abort);
+        for metrics in results.iter().filter(|m| {
+            if has_non_abort {
+                !m.forced_kernel_abort
+            } else {
+                true
+            }
+        }) {
+            let score = metrics.enqueued_pps * (1.0 - metrics.enqueue_drop_ratio);
+            let replace = if score > best_score {
+                true
+            } else if (score - best_score).abs() < f64::EPSILON {
+                if let Some(current) = best {
+                    if metrics.enqueue_drop_ratio < current.enqueue_drop_ratio {
+                        true
+                    } else if (metrics.enqueue_drop_ratio - current.enqueue_drop_ratio).abs()
+                        < f64::EPSILON
+                    {
+                        metrics.enqueue_timeout_us < current.enqueue_timeout_us
+                    } else {
+                        false
+                    }
+                } else {
+                    true
+                }
+            } else {
+                false
+            };
+
+            if replace {
+                best_score = score;
+                best = Some(*metrics);
+            }
+        }
+
+        if let Some(best) = best {
+            info!(
+                "kernel-pressure-sweep-recommend timeout_us={} score={:.0} enqueued_pps={:.0} enqueue_drop_ratio={:.4} pipeline_drop_total={} forced_kernel_abort={}",
+                best.enqueue_timeout_us,
+                best_score,
+                best.enqueued_pps,
+                best.enqueue_drop_ratio,
+                best.drop_delta.total(),
+                best.forced_kernel_abort,
+            );
+        }
     }
 }

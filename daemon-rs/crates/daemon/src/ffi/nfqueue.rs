@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    env,
     ffi::c_void,
     io,
     net::{Ipv4Addr, Ipv6Addr},
@@ -35,9 +34,11 @@ const NF_DROP: u32 = 0;
 const NF_ACCEPT: u32 = 1;
 const NF_QUEUE: u32 = 3;
 const NFQNL_COPY_PACKET: u8 = 2;
+const NFQA_CFG_F_UID_GID: u32 = 1 << 3;
 
 const DEFAULT_PACKET_SIZE: u32 = 4096;
 const DEFAULT_QUEUE_SIZE: u32 = 4096;
+const DEFAULT_SOCKET_RCVBUF_BYTES: i32 = 8 * 1024 * 1024;
 const PRIMARY_DECISION_TIMEOUT: Duration = Duration::from_secs(1);
 const REPEAT_DECISION_TIMEOUT: Duration = Duration::from_secs(120);
 const REQUEUE_ALIAS_TTL: Duration = Duration::from_secs(5);
@@ -108,41 +109,6 @@ struct RequeueAlias {
 static RUNTIME: OnceLock<RuntimeState> = OnceLock::new();
 static QUEUE_HANDLE_MAP: OnceLock<Mutex<HashMap<usize, u16>>> = OnceLock::new();
 static QUEUE_METRICS: OnceLock<Mutex<HashMap<u16, QueueMetrics>>> = OnceLock::new();
-static OVERLOAD_FALLBACK_MODE: OnceLock<OverloadFallbackMode> = OnceLock::new();
-
-#[derive(Clone, Copy)]
-enum OverloadFallbackMode {
-    DefaultAction,
-    FailOpen,
-}
-
-impl OverloadFallbackMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::DefaultAction => "default-action",
-            Self::FailOpen => "fail-open",
-        }
-    }
-}
-
-fn overload_fallback_mode() -> OverloadFallbackMode {
-    *OVERLOAD_FALLBACK_MODE.get_or_init(|| {
-        let raw = env::var("OPENSNITCH_NFQUEUE_OVERLOAD_FALLBACK")
-            .unwrap_or_else(|_| "default-action".to_string())
-            .to_ascii_lowercase();
-        match raw.as_str() {
-            "default-action" | "default" => OverloadFallbackMode::DefaultAction,
-            "fail-open" | "open" => OverloadFallbackMode::FailOpen,
-            _ => {
-                warn!(
-                    mode = %raw,
-                    "unknown OPENSNITCH_NFQUEUE_OVERLOAD_FALLBACK value, falling back to default-action"
-                );
-                OverloadFallbackMode::DefaultAction
-            }
-        }
-    })
-}
 
 fn queue_handle_map() -> &'static Mutex<HashMap<usize, u16>> {
     QUEUE_HANDLE_MAP.get_or_init(|| Mutex::new(HashMap::new()))
@@ -179,7 +145,7 @@ pub fn debug_metrics_snapshot() -> Vec<QueueMetricsSnapshot> {
     out
 }
 
-fn record_packet_verdict(queue_num: u16, verdict: PacketVerdict) {
+fn record_packet_verdict(queue_num: u16, verdict: &PacketVerdict) {
     let Ok(mut metrics_map) = queue_metrics_map().lock() else {
         return;
     };
@@ -188,6 +154,9 @@ fn record_packet_verdict(queue_num: u16, verdict: PacketVerdict) {
 
     match verdict {
         PacketVerdict::Accept { .. } => {
+            entry.verdict_accept = entry.verdict_accept.saturating_add(1);
+        }
+        PacketVerdict::AcceptWithPacket { .. } => {
             entry.verdict_accept = entry.verdict_accept.saturating_add(1);
         }
         PacketVerdict::Drop => {
@@ -357,6 +326,14 @@ impl QueueRuntime {
                 bail!("nfq_create_queue failed for queue {queue_num}");
             }
 
+            let flags_rc = nfq_set_queue_flags(qh, NFQA_CFG_F_UID_GID, NFQA_CFG_F_UID_GID);
+            if flags_rc < 0 {
+                debug!(
+                    queue_num,
+                    "nfqueue uid/gid metadata flags unavailable; continuing without queue flags"
+                );
+            }
+
             if let Ok(mut m) = queue_handle_map().lock() {
                 m.insert(qh as usize, queue_num);
             }
@@ -379,6 +356,9 @@ impl QueueRuntime {
                 let _ = nfq_close(h);
                 bail!("nfq_fd failed");
             }
+
+            tune_netlink_no_enobufs(fd);
+            tune_socket_recv_buffer(fd, DEFAULT_SOCKET_RCVBUF_BYTES);
 
             Ok(Self {
                 h,
@@ -416,7 +396,11 @@ impl QueueRuntime {
                     if err != Errno::WOULDBLOCK && err != Errno::AGAIN {
                         let io_err = io::Error::from_raw_os_error(err.raw_os_error());
                         record_recv_error(self.queue_num);
-                        warn!("nfqueue recv failed: {io_err}");
+                        if err == Errno::NOBUFS {
+                            debug!("nfqueue recv overflow (ENOBUFS): {io_err}");
+                        } else {
+                            warn!("nfqueue recv failed: {io_err}");
+                        }
                     }
                     continue;
                 }
@@ -438,11 +422,56 @@ impl QueueRuntime {
                 nfq_handle_packet(self.h, buf.as_mut_ptr().cast::<c_char>(), recv_rc as c_int)
             };
             if handle_rc < 0 {
-                warn!("nfq_handle_packet failed rc={handle_rc}");
+                let io_err = io::Error::last_os_error();
+                let errno = io_err.raw_os_error().unwrap_or_default();
+                if errno == libc::ENOBUFS || errno == libc::EAGAIN || errno == libc::EINTR {
+                    debug!(rc = handle_rc, errno, "nfq_handle_packet transient failure");
+                } else {
+                    warn!(rc = handle_rc, errno, "nfq_handle_packet failed");
+                }
             }
         }
 
         Ok(())
+    }
+}
+
+fn tune_socket_recv_buffer(fd: c_int, size: i32) {
+    // SAFETY: setsockopt is called with a valid nfqueue fd and a properly sized integer buffer.
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            (&size as *const i32).cast::<c_void>(),
+            std::mem::size_of::<i32>() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        let err = io::Error::last_os_error();
+        warn!(
+            requested_bytes = size,
+            err = %err,
+            "nfqueue socket recv buffer tuning failed"
+        );
+    }
+}
+
+fn tune_netlink_no_enobufs(fd: c_int) {
+    let value: i32 = 1;
+    // SAFETY: setsockopt is called with a valid nfqueue netlink fd and integer option payload.
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_NETLINK,
+            libc::NETLINK_NO_ENOBUFS,
+            (&value as *const i32).cast::<c_void>(),
+            std::mem::size_of::<i32>() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        let err = io::Error::last_os_error();
+        debug!(err = %err, "nfqueue netlink no_enobufs tuning not applied");
     }
 }
 
@@ -465,11 +494,21 @@ impl Drop for QueueRuntime {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum PacketVerdict {
-    Accept { mark: u32 },
+    Accept {
+        mark: u32,
+    },
+    #[allow(dead_code)]
+    AcceptWithPacket {
+        mark: u32,
+        packet: Vec<u8>,
+    },
     Drop,
-    Requeue { queue_num: u16, mark: u32 },
+    Requeue {
+        queue_num: u16,
+        mark: u32,
+    },
 }
 
 fn default_action_verdict(action: DefaultAction, mark: u32) -> PacketVerdict {
@@ -500,34 +539,14 @@ fn timeout_fallback_verdict(
     mark: u32,
     attempt: Option<&ConnectionAttempt>,
 ) -> PacketVerdict {
-    timeout_fallback_verdict_with_mode(
-        queue_num,
-        repeat_queue_num,
-        default_action,
-        mark,
-        attempt,
-        OverloadFallbackMode::DefaultAction,
-        "timeout",
-    )
-}
-
-fn timeout_fallback_verdict_with_mode(
-    queue_num: u16,
-    repeat_queue_num: Option<u16>,
-    default_action: DefaultAction,
-    mark: u32,
-    attempt: Option<&ConnectionAttempt>,
-    mode: OverloadFallbackMode,
-    reason: &'static str,
-) -> PacketVerdict {
     if let Some(repeat_queue_num) = repeat_queue_num
         && queue_num != repeat_queue_num
     {
         warn!(
             queue_num,
             repeat_queue_num,
-            fallback_reason = reason,
-            fallback_mode = mode.as_str(),
+            fallback_reason = "timeout",
+            fallback_mode = "requeue",
             "nfqueue overload fallback requeue"
         );
         return PacketVerdict::Requeue {
@@ -536,23 +555,19 @@ fn timeout_fallback_verdict_with_mode(
         };
     }
 
-    let verdict = match mode {
-        OverloadFallbackMode::FailOpen => PacketVerdict::Accept { mark },
-        OverloadFallbackMode::DefaultAction => {
-            default_action_verdict_for_attempt(default_action, mark, attempt)
-        }
-    };
+    let verdict = default_action_verdict_for_attempt(default_action, mark, attempt);
 
     let verdict_name = match verdict {
         PacketVerdict::Accept { .. } => "accept",
+        PacketVerdict::AcceptWithPacket { .. } => "accept-with-packet",
         PacketVerdict::Drop => "drop",
         PacketVerdict::Requeue { .. } => "requeue",
     };
 
     warn!(
         queue_num,
-        fallback_reason = reason,
-        fallback_mode = mode.as_str(),
+        fallback_reason = "timeout",
+        fallback_mode = "default-action",
         default_action = ?default_action,
         verdict = verdict_name,
         "nfqueue overload fallback final verdict"
@@ -561,11 +576,21 @@ fn timeout_fallback_verdict_with_mode(
     verdict
 }
 
-fn packet_verdict_to_c(verdict: PacketVerdict) -> (u32, u32) {
+fn packet_verdict_to_c(verdict: &PacketVerdict) -> (u32, u32) {
     match verdict {
-        PacketVerdict::Accept { mark } => (NF_ACCEPT, mark),
+        PacketVerdict::Accept { mark } => (NF_ACCEPT, *mark),
+        PacketVerdict::AcceptWithPacket { mark, .. } => (NF_ACCEPT, *mark),
         PacketVerdict::Drop => (NF_DROP, 0),
-        PacketVerdict::Requeue { queue_num, mark } => (NF_QUEUE | ((queue_num as u32) << 16), mark),
+        PacketVerdict::Requeue { queue_num, mark } => {
+            (NF_QUEUE | ((*queue_num as u32) << 16), *mark)
+        }
+    }
+}
+
+fn packet_verdict_payload(verdict: &PacketVerdict) -> Option<&[u8]> {
+    match verdict {
+        PacketVerdict::AcceptWithPacket { packet, .. } if !packet.is_empty() => Some(packet),
+        _ => None,
     }
 }
 
@@ -575,6 +600,8 @@ fn compute_packet_verdict(
     payload: &[u8],
     uid: u32,
     mark: u32,
+    iface_in_idx: u32,
+    iface_out_idx: u32,
 ) -> PacketVerdict {
     let dns_answers = parse_dns_answer_mappings(payload);
     let is_dns_response = !dns_answers.is_empty();
@@ -595,9 +622,10 @@ fn compute_packet_verdict(
     let payload_signature = packet_signature(payload, uid, mark);
     let repeat_queue_num = RUNTIME.get().map(|runtime| runtime.repeat_queue_num);
     let request_id = resolve_request_id(queue_num, packet_id, payload_signature, repeat_queue_num);
-    let fallback_mode = overload_fallback_mode();
 
-    if let Some(mut attempt) = parse_connection_attempt(request_id, payload, uid) {
+    if let Some(mut attempt) =
+        parse_connection_attempt(request_id, payload, uid, iface_in_idx, iface_out_idx)
+    {
         if attempt.dst_port == 53 {
             attempt.dns_query = parse_dns_questions(payload).into_iter().last();
         }
@@ -614,14 +642,12 @@ fn compute_packet_verdict(
                     .ok()
                     .map(|g| *g)
                     .unwrap_or(DefaultAction::Allow);
-                return timeout_fallback_verdict_with_mode(
+                return timeout_fallback_verdict(
                     queue_num,
                     repeat_queue_num,
                     action,
                     mark,
                     Some(&attempt),
-                    fallback_mode,
-                    "queue-saturated",
                 );
             }
         }
@@ -642,14 +668,12 @@ fn compute_packet_verdict(
                         remember_requeue_alias(payload_signature, request_id);
                     }
 
-                    return timeout_fallback_verdict_with_mode(
+                    return timeout_fallback_verdict(
                         queue_num,
                         repeat_queue_num,
                         action,
                         mark,
                         Some(&attempt),
-                        fallback_mode,
-                        "decision-timeout",
                     );
                 }
             };
@@ -724,11 +748,28 @@ unsafe extern "C" fn nfqueue_callback(
     let (uid, _) = read_uid_gid(nfa);
     let mark = unsafe { nfq_get_nfmark(nfa) };
 
-    let packet_verdict = compute_packet_verdict(queue_num, packet_id, payload, uid, mark);
-    record_packet_verdict(queue_num, packet_verdict);
+    let iface_in_idx = unsafe { nfq_get_indev(nfa) };
+    let iface_out_idx = unsafe { nfq_get_outdev(nfa) };
 
-    let (verdict, verdict_mark) = packet_verdict_to_c(packet_verdict);
-    unsafe { nfq_set_verdict2(qh, packet_id, verdict, verdict_mark, 0, ptr::null()) }
+    let packet_verdict = compute_packet_verdict(
+        queue_num,
+        packet_id,
+        payload,
+        uid,
+        mark,
+        iface_in_idx,
+        iface_out_idx,
+    );
+    record_packet_verdict(queue_num, &packet_verdict);
+
+    let (verdict, verdict_mark) = packet_verdict_to_c(&packet_verdict);
+    let (data_len, data_ptr) = if let Some(packet) = packet_verdict_payload(&packet_verdict) {
+        (packet.len() as u32, packet.as_ptr())
+    } else {
+        (0_u32, ptr::null())
+    };
+
+    unsafe { nfq_set_verdict2(qh, packet_id, verdict, verdict_mark, data_len, data_ptr) }
 }
 
 fn read_uid_gid(nfa: *mut nfq_data) -> (u32, u32) {
@@ -1153,6 +1194,8 @@ fn parse_connection_attempt(
     request_id: u64,
     payload: &[u8],
     uid: u32,
+    iface_in_idx: u32,
+    iface_out_idx: u32,
 ) -> Option<ConnectionAttempt> {
     if payload.is_empty() {
         return None;
@@ -1160,13 +1203,19 @@ fn parse_connection_attempt(
 
     let version = payload[0] >> 4;
     match version {
-        4 => parse_ipv4_attempt(request_id, payload, uid),
-        6 => parse_ipv6_attempt(request_id, payload, uid),
+        4 => parse_ipv4_attempt(request_id, payload, uid, iface_in_idx, iface_out_idx),
+        6 => parse_ipv6_attempt(request_id, payload, uid, iface_in_idx, iface_out_idx),
         _ => None,
     }
 }
 
-fn parse_ipv4_attempt(request_id: u64, payload: &[u8], uid: u32) -> Option<ConnectionAttempt> {
+fn parse_ipv4_attempt(
+    request_id: u64,
+    payload: &[u8],
+    uid: u32,
+    iface_in_idx: u32,
+    iface_out_idx: u32,
+) -> Option<ConnectionAttempt> {
     if payload.len() < 20 {
         return None;
     }
@@ -1208,13 +1257,21 @@ fn parse_ipv4_attempt(request_id: u64, payload: &[u8], uid: u32) -> Option<Conne
         src_port,
         dst_ip,
         dst_port,
+        iface_in_idx,
+        iface_out_idx,
         dns_query: None,
         pid: 0,
         uid,
     })
 }
 
-fn parse_ipv6_attempt(request_id: u64, payload: &[u8], uid: u32) -> Option<ConnectionAttempt> {
+fn parse_ipv6_attempt(
+    request_id: u64,
+    payload: &[u8],
+    uid: u32,
+    iface_in_idx: u32,
+    iface_out_idx: u32,
+) -> Option<ConnectionAttempt> {
     if payload.len() < 44 {
         return None;
     }
@@ -1251,6 +1308,8 @@ fn parse_ipv6_attempt(request_id: u64, payload: &[u8], uid: u32) -> Option<Conne
         src_port,
         dst_ip,
         dst_port,
+        iface_in_idx,
+        iface_out_idx,
         dns_query: None,
         pid: 0,
         uid,
@@ -1304,6 +1363,7 @@ unsafe extern "C" {
 
     fn nfq_set_mode(qh: *mut nfq_q_handle, mode: u8, range: u32) -> c_int;
     fn nfq_set_queue_maxlen(qh: *mut nfq_q_handle, queuelen: u32) -> c_int;
+    fn nfq_set_queue_flags(qh: *mut nfq_q_handle, mask: u32, flags: u32) -> c_int;
     fn nfq_fd(h: *mut nfq_handle) -> c_int;
 
     fn nfq_handle_packet(h: *mut nfq_handle, buf: *mut c_char, len: c_int) -> c_int;
@@ -1311,6 +1371,8 @@ unsafe extern "C" {
     fn nfq_get_payload(tb: *mut nfq_data, data: *mut *mut u8) -> c_int;
     fn nfq_get_uid(tb: *mut nfq_data, uid: *mut u32) -> c_int;
     fn nfq_get_gid(tb: *mut nfq_data, gid: *mut u32) -> c_int;
+    fn nfq_get_indev(tb: *mut nfq_data) -> u32;
+    fn nfq_get_outdev(tb: *mut nfq_data) -> u32;
     fn nfq_get_nfmark(tb: *mut nfq_data) -> u32;
 
     fn nfq_set_verdict2(
@@ -1429,6 +1491,8 @@ mod tests {
             src_port: 12345,
             dst_ip: "127.0.0.1".to_string(),
             dst_port: 80,
+            iface_in_idx: 0,
+            iface_out_idx: 0,
             dns_query: None,
             pid: 1000,
             uid: 1000,
@@ -1451,6 +1515,8 @@ mod tests {
             src_port: 12345,
             dst_ip: "127.0.0.1".to_string(),
             dst_port: 80,
+            iface_in_idx: 0,
+            iface_out_idx: 0,
             dns_query: None,
             pid: 1000,
             uid: 1000,
@@ -1527,7 +1593,7 @@ mod tests {
         set_default_action(DefaultAction::Deny);
 
         let payload = build_ipv4_dns_response_payload();
-        let verdict = compute_packet_verdict(6000, 123, &payload, 1000, 0x5a);
+        let verdict = compute_packet_verdict(6000, 123, &payload, 1000, 0x5a, 0, 0);
 
         assert!(matches!(verdict, PacketVerdict::Accept { mark: 0x5a }));
 
@@ -1556,7 +1622,7 @@ mod tests {
                 mark,
                 None,
             ),
-            verdict => verdict,
+            _ => first.clone(),
         };
 
         (first, second)
@@ -1575,7 +1641,7 @@ mod tests {
     }
 
     #[test]
-    fn timeout_uses_default_action_on_repeat_queue() {
+    fn timeout_applies_default_action_on_repeat_queue() {
         let allow_verdict =
             timeout_fallback_verdict(11, Some(11), DefaultAction::Allow, 0x99, None);
         assert!(matches!(
@@ -1592,30 +1658,8 @@ mod tests {
     }
 
     #[test]
-    fn fail_open_mode_accepts_on_repeat_queue() {
-        let verdict = timeout_fallback_verdict_with_mode(
-            11,
-            Some(11),
-            DefaultAction::Deny,
-            0x33,
-            None,
-            OverloadFallbackMode::FailOpen,
-            "decision-timeout",
-        );
-        assert!(matches!(verdict, PacketVerdict::Accept { mark: 0x33 }));
-    }
-
-    #[test]
-    fn fail_open_mode_still_requeues_on_primary_queue() {
-        let verdict = timeout_fallback_verdict_with_mode(
-            10,
-            Some(11),
-            DefaultAction::Deny,
-            0x44,
-            None,
-            OverloadFallbackMode::FailOpen,
-            "queue-saturated",
-        );
+    fn timeout_still_requeues_on_primary_queue() {
+        let verdict = timeout_fallback_verdict(10, Some(11), DefaultAction::Deny, 0x44, None);
         assert!(matches!(
             verdict,
             PacketVerdict::Requeue {
@@ -1628,17 +1672,28 @@ mod tests {
     #[test]
     fn c_verdict_encoding_matches_expected_values() {
         assert_eq!(
-            packet_verdict_to_c(PacketVerdict::Accept { mark: 7 }),
+            packet_verdict_to_c(&PacketVerdict::Accept { mark: 7 }),
             (NF_ACCEPT, 7)
         );
-        assert_eq!(packet_verdict_to_c(PacketVerdict::Drop), (NF_DROP, 0));
+        assert_eq!(packet_verdict_to_c(&PacketVerdict::Drop), (NF_DROP, 0));
         assert_eq!(
-            packet_verdict_to_c(PacketVerdict::Requeue {
+            packet_verdict_to_c(&PacketVerdict::Requeue {
                 queue_num: 6,
                 mark: 77,
             }),
             (NF_QUEUE | ((6_u32) << 16), 77)
         );
+    }
+
+    #[test]
+    fn verdict_with_packet_exposes_payload_for_nfq_set_verdict2() {
+        let verdict = PacketVerdict::AcceptWithPacket {
+            mark: 7,
+            packet: vec![1, 2, 3],
+        };
+
+        assert_eq!(packet_verdict_to_c(&verdict), (NF_ACCEPT, 7));
+        assert_eq!(packet_verdict_payload(&verdict), Some(&[1, 2, 3][..]));
     }
 
     #[test]
@@ -1674,11 +1729,11 @@ mod tests {
         let _guard = queue_metrics_test_guard();
         reset_queue_metrics_for_test();
 
-        record_packet_verdict(7, PacketVerdict::Accept { mark: 1 });
-        record_packet_verdict(7, PacketVerdict::Drop);
+        record_packet_verdict(7, &PacketVerdict::Accept { mark: 1 });
+        record_packet_verdict(7, &PacketVerdict::Drop);
         record_packet_verdict(
             7,
-            PacketVerdict::Requeue {
+            &PacketVerdict::Requeue {
                 queue_num: 8,
                 mark: 2,
             },
@@ -1700,8 +1755,8 @@ mod tests {
         let _guard = queue_metrics_test_guard();
         reset_queue_metrics_for_test();
 
-        record_packet_verdict(9, PacketVerdict::Accept { mark: 10 });
-        record_packet_verdict(8, PacketVerdict::Drop);
+        record_packet_verdict(9, &PacketVerdict::Accept { mark: 10 });
+        record_packet_verdict(8, &PacketVerdict::Drop);
         record_recv_error(8);
 
         let snapshot = debug_metrics_snapshot();

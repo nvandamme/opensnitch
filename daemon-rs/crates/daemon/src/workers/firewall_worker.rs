@@ -29,8 +29,8 @@ pub fn spawn(bus: Bus, firewall: FirewallService, shutdown: CancellationToken) -
 
         while !shutdown.is_cancelled() {
             rt.block_on(async {
-                if let Err(err) = firewall.ensure_rules().await {
-                    warn!("firewall rule ensure failed: {err}");
+                if let Err(err) = firewall.heal_if_drifted().await {
+                    warn!("failed to heal firewall drift: {err}");
                 }
 
                 let state = firewall.snapshot().await;

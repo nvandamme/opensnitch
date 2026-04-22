@@ -19,10 +19,15 @@ use crate::models::{
 use crate::adapters::socket_diag;
 
 static INODE_TO_PID: OnceLock<Mutex<HashMap<u32, u32>>> = OnceLock::new();
+static INODE_KEY_TO_PID: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
 static BPF_MAP_IDS: OnceLock<Mutex<BpfMapIdCache>> = OnceLock::new();
 
 fn cache() -> &'static Mutex<HashMap<u32, u32>> {
     INODE_TO_PID.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn key_cache() -> &'static Mutex<HashMap<String, u32>> {
+    INODE_KEY_TO_PID.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[derive(Default)]
@@ -96,7 +101,8 @@ impl TransportProtocolResolverExt for TransportProtocol {
             TransportProtocol::Udp => &["/proc/net/udp", "/proc/net/udp6"],
             TransportProtocol::UdpLite => &["/proc/net/udplite", "/proc/net/udplite6"],
             TransportProtocol::Sctp => &["/proc/net/sctp/eps", "/proc/net/sctp/assocs"],
-            TransportProtocol::Icmp => &[],
+            // Keep Go netstat parity: ICMP paths are consulted in proc fallback flow.
+            TransportProtocol::Icmp => &["/proc/net/icmp", "/proc/net/icmp6"],
         }
     }
 
@@ -121,7 +127,7 @@ impl TransportProtocolResolverExt for TransportProtocol {
     }
 }
 
-trait ResolverTextExt {
+pub(crate) trait ResolverTextExt {
     fn parse_proc_addr_port(&self) -> Option<(String, u16)>;
     fn parse_proc_ip(&self) -> Option<String>;
     fn parse_socket_inode(&self) -> Option<u32>;
@@ -206,13 +212,69 @@ impl ResolverTextExt for str {
     }
 }
 
-pub fn resolve_pid_by_inode(inode: u32) -> Option<u32> {
+fn protocol_name(protocol: TransportProtocol) -> &'static str {
+    match protocol {
+        TransportProtocol::Tcp => "tcp",
+        TransportProtocol::Udp => "udp",
+        TransportProtocol::UdpLite => "udplite",
+        TransportProtocol::Sctp => "sctp",
+        TransportProtocol::Icmp => "icmp",
+    }
+}
+
+fn inode_lookup_key(
+    protocol: TransportProtocol,
+    src_ip: &str,
+    src_port: u16,
+    dst_ip: &str,
+    dst_port: u16,
+) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        protocol_name(protocol),
+        src_ip,
+        src_port,
+        dst_ip,
+        dst_port
+    )
+}
+
+fn pid_owns_inode(pid: u32, inode: u32) -> bool {
+    let fd_dir = format!("/proc/{pid}/fd");
+    let Ok(fds) = fs::read_dir(fd_dir) else {
+        return false;
+    };
+
+    for fd_entry in fds.flatten() {
+        let Ok(target) = fs::read_link(fd_entry.path()) else {
+            continue;
+        };
+        let target = target.to_string_lossy();
+        if let Some(found_inode) = target.parse_socket_inode() {
+            if found_inode == inode {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn resolve_pid_by_inode_with_key(inode: u32, inode_key: Option<&str>) -> Option<u32> {
     if inode == 0 {
         return None;
     }
 
+    if let Some(key) = inode_key {
+        if let Some(pid) = key_cache().lock().ok().and_then(|m| m.get(key).copied()) {
+            if Path::new(&format!("/proc/{pid}")).exists() && pid_owns_inode(pid, inode) {
+                return Some(pid);
+            }
+        }
+    }
+
     if let Some(pid) = cache().lock().ok().and_then(|m| m.get(&inode).copied()) {
-        if Path::new(&format!("/proc/{pid}")).exists() {
+        if Path::new(&format!("/proc/{pid}")).exists() && pid_owns_inode(pid, inode) {
             return Some(pid);
         }
     }
@@ -225,28 +287,24 @@ pub fn resolve_pid_by_inode(inode: u32) -> Option<u32> {
             continue;
         };
 
-        let fd_dir = format!("/proc/{pid}/fd");
-        let Ok(fds) = fs::read_dir(fd_dir) else {
-            continue;
-        };
-
-        for fd_entry in fds.flatten() {
-            let Ok(target) = fs::read_link(fd_entry.path()) else {
-                continue;
-            };
-            let target = target.to_string_lossy();
-            if let Some(found_inode) = target.parse_socket_inode() {
-                if found_inode == inode {
-                    if let Ok(mut m) = cache().lock() {
-                        m.insert(inode, pid);
-                    }
-                    return Some(pid);
+        if pid_owns_inode(pid, inode) {
+            if let Ok(mut m) = cache().lock() {
+                m.insert(inode, pid);
+            }
+            if let Some(key) = inode_key {
+                if let Ok(mut m) = key_cache().lock() {
+                    m.insert(key.to_string(), pid);
                 }
             }
+            return Some(pid);
         }
     }
 
     None
+}
+
+pub fn resolve_pid_by_inode(inode: u32) -> Option<u32> {
+    resolve_pid_by_inode_with_key(inode, None)
 }
 
 pub async fn resolve_pid_by_inode_async(inode: u32) -> Option<u32> {
@@ -287,7 +345,7 @@ pub fn enrich_connection_owner(attempt: &mut ConnectionAttempt) {
         return;
     };
 
-    if let Ok(Some(sock)) = socket_diag::find_socket(
+    if let Ok(candidates) = socket_diag::find_socket_candidates(
         family,
         ipproto,
         src,
@@ -295,11 +353,45 @@ pub fn enrich_connection_owner(attempt: &mut ConnectionAttempt) {
         dst,
         attempt.dst_port,
     ) {
-        attempt.uid = sock.uid;
-        if let Some(pid) = resolve_pid_by_inode(sock.inode) {
-            attempt.pid = pid;
+        let lookup_key = inode_lookup_key(
+            attempt.protocol,
+            &attempt.src_ip,
+            attempt.src_port,
+            &attempt.dst_ip,
+            attempt.dst_port,
+        );
+        for sock in candidates {
+            attempt.uid = sock.uid;
+            if let Some(pid) = resolve_pid_by_inode_with_key(sock.inode, Some(&lookup_key)) {
+                attempt.pid = pid;
+                return;
+            }
         }
-        return;
+    }
+
+    if let Ok(candidates) = socket_diag::find_socket_candidates(
+        family,
+        ipproto,
+        dst,
+        attempt.dst_port,
+        src,
+        attempt.src_port,
+    ) {
+        let reverse_lookup_key = inode_lookup_key(
+            attempt.protocol,
+            &attempt.dst_ip,
+            attempt.dst_port,
+            &attempt.src_ip,
+            attempt.src_port,
+        );
+        for sock in candidates {
+            attempt.uid = sock.uid;
+            if let Some(pid) = resolve_pid_by_inode_with_key(sock.inode, Some(&reverse_lookup_key))
+            {
+                attempt.pid = pid;
+                return;
+            }
+        }
     }
 
     if let Some(owner) = resolve_owner_by_connection(
@@ -366,21 +458,18 @@ pub fn resolve_owner_by_connection(
                 continue;
             }
 
+            // Keep Go netstat parity: proc row matching is exact 5-tuple only.
             let exact_match = local_ip == src_ip
                 && local_port == src_port
                 && remote_ip == dst_ip
                 && remote_port == dst_port;
 
-            let wildcard_remote = local_ip == src_ip
-                && local_port == src_port
-                && remote_port == 0
-                && (remote_ip == "0.0.0.0" || remote_ip == "::");
-
-            if !(exact_match || wildcard_remote) {
+            if !exact_match {
                 continue;
             }
 
-            let Some(pid) = resolve_pid_by_inode(inode) else {
+            let lookup_key = inode_lookup_key(protocol, src_ip, src_port, dst_ip, dst_port);
+            let Some(pid) = resolve_pid_by_inode_with_key(inode, Some(&lookup_key)) else {
                 continue;
             };
 
@@ -446,8 +535,14 @@ fn protocol_to_ipproto(protocol: TransportProtocol) -> Option<u8> {
         TransportProtocol::Udp => Some(libc::IPPROTO_UDP as u8),
         TransportProtocol::UdpLite => Some(136_u8),
         TransportProtocol::Sctp => Some(132_u8),
-        TransportProtocol::Icmp => None,
+        // Keep Go netlink parity: ICMP ownership queries use RAW socket diag lookup.
+        TransportProtocol::Icmp => Some(libc::IPPROTO_RAW as u8),
     }
+}
+
+#[cfg(test)]
+pub(crate) fn ipproto_for_transport(protocol: TransportProtocol) -> Option<u8> {
+    protocol_to_ipproto(protocol)
 }
 
 fn parse_proc_net_packet() -> std::io::Result<Vec<ProcNetPacketRow>> {
@@ -460,16 +555,10 @@ fn parse_proc_net_packet() -> std::io::Result<Vec<ProcNetPacketRow>> {
             continue;
         }
 
-        let proto = u16::from_str_radix(cols[3], 16).unwrap_or(0);
         let iface = cols[4].parse::<u32>().unwrap_or(0);
         let uid = cols[7].parse::<u32>().unwrap_or(0);
         let inode = cols[8].parse::<u32>().unwrap_or(0);
-        out.push(ProcNetPacketRow {
-            proto,
-            iface,
-            uid,
-            inode,
-        });
+        out.push(ProcNetPacketRow { iface, uid, inode });
     }
 
     Ok(out)
@@ -498,6 +587,26 @@ pub fn resolve_owner_by_ebpf_map(
         key[20..36].copy_from_slice(&[0; 16]);
     }
     if let Some((pid, uid)) = lookup_bpf_owner(map_id, &key) {
+        return Some(ConnectionOwner { uid, pid });
+    }
+
+    // Keep Go parity: retry by swapping source/destination IP bytes in the key.
+    // This can recover ownership for some reverse-flow packet observations.
+    let mut swapped = build_bpf_key(protocol, src_ip, src_port, dst_ip, dst_port)?;
+    if swapped.len() == 12 {
+        let daddr = [swapped[2], swapped[3], swapped[4], swapped[5]];
+        let saddr = [swapped[8], swapped[9], swapped[10], swapped[11]];
+        swapped[2..6].copy_from_slice(&saddr);
+        swapped[8..12].copy_from_slice(&daddr);
+    } else if swapped.len() == 36 {
+        let mut daddr = [0_u8; 16];
+        daddr.copy_from_slice(&swapped[2..18]);
+        let mut saddr = [0_u8; 16];
+        saddr.copy_from_slice(&swapped[20..36]);
+        swapped[2..18].copy_from_slice(&saddr);
+        swapped[20..36].copy_from_slice(&daddr);
+    }
+    if let Some((pid, uid)) = lookup_bpf_owner(map_id, &swapped) {
         return Some(ConnectionOwner { uid, pid });
     }
 
@@ -567,27 +676,4 @@ fn lookup_bpf_owner(map_id: u32, key: &[u8]) -> Option<(u32, u32)> {
     let pid = u64::from_ne_bytes(value_bytes[0..8].try_into().ok()?) as u32;
     let uid = u64::from_ne_bytes(value_bytes[8..16].try_into().ok()?) as u32;
     Some((pid, uid))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ResolverTextExt;
-
-    #[test]
-    fn parse_socket_inode_accepts_socket_link() {
-        assert_eq!("socket:[12345]".parse_socket_inode(), Some(12345));
-        assert_eq!("pipe:[12345]".parse_socket_inode(), None);
-    }
-
-    #[test]
-    fn parse_proc_ip_supports_ipv4_and_ipv6() {
-        assert_eq!("0100007F".parse_proc_ip(), Some("127.0.0.1".to_string()));
-        assert!("00000000000000000000000000000001".parse_proc_ip().is_some());
-    }
-
-    #[test]
-    fn parse_value_hex_bytes_extracts_value_section() {
-        let text = "key:\n  00 00\nvalue:\n  01 02 0a ff\n";
-        assert_eq!(text.parse_value_hex_bytes(), Some(vec![1, 2, 10, 255]));
-    }
 }

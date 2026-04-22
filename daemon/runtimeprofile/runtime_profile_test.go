@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	oslog "github.com/evilsocket/opensnitch/daemon/log"
 )
 
 const (
@@ -364,6 +366,8 @@ func enforceGoStressRegressionGuard(t *testing.T, p95, p99, max time.Duration, d
 }
 
 func TestConnectAttemptProgressesUnderMixedNonConnectSaturation(t *testing.T) {
+	enforceHarnessGoLogLevel(t)
+
 	h := newStressHarness()
 	defer h.stop()
 
@@ -397,6 +401,8 @@ func TestConnectAttemptProgressesUnderMixedNonConnectSaturation(t *testing.T) {
 }
 
 func TestStressProfileReportsConnectLatencyAndPipelineDrops(t *testing.T) {
+	enforceHarnessGoLogLevel(t)
+
 	if os.Getenv("OPENSNITCH_STRESS_PROFILE") == "" {
 		t.Skip("profiling harness; set OPENSNITCH_STRESS_PROFILE=1 to run")
 	}
@@ -494,4 +500,20 @@ func TestStressProfileReportsConnectLatencyAndPipelineDrops(t *testing.T) {
 		dropDelta.firewall,
 		dropDelta.total(),
 	)
+}
+
+func enforceHarnessGoLogLevel(t *testing.T) {
+	t.Helper()
+
+	raw := strings.TrimSpace(os.Getenv("OPENSNITCH_HARNESS_GO_LOG_LEVEL"))
+	normalized := strings.ToLower(raw)
+	if normalized != "err" && normalized != "error" {
+		t.Fatalf(
+			"go harness tests require OPENSNITCH_HARNESS_GO_LOG_LEVEL=err|error (current=%q)",
+			raw,
+		)
+	}
+
+	// Keep Go harness logging noise aligned with Rust perf/harness policy.
+	oslog.SetLogLevel(oslog.ERROR)
 }

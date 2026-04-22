@@ -2,7 +2,7 @@ use std::{fs, path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
 use opensnitch_proto::pb;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 
 use crate::{
     config::Config,
@@ -19,6 +19,7 @@ use crate::{
 #[derive(Clone)]
 pub struct FirewallService {
     state: Arc<RwLock<FirewallRuntime>>,
+    error_tx: broadcast::Sender<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +33,14 @@ struct FirewallRuntime {
 
 impl FirewallService {
     pub fn new(config: &Config) -> Result<Self> {
+        let (error_tx, _) = broadcast::channel(256);
+        tracing::info!(
+            backend = ?config.firewall_backend,
+            queue = config.firewall_queue_num,
+            bypass = config.firewall_queue_bypass,
+            path = %config.firewall_config_path.display(),
+            "initializing firewall service"
+        );
         Ok(Self {
             state: Arc::new(RwLock::new(FirewallRuntime {
                 state: FirewallState {
@@ -43,7 +52,16 @@ impl FirewallService {
                 interception_enabled: true,
                 system_firewall: load_system_firewall(&config.firewall_config_path)?,
             })),
+            error_tx,
         })
+    }
+
+    pub fn subscribe_errors(&self) -> broadcast::Receiver<String> {
+        self.error_tx.subscribe()
+    }
+
+    fn emit_error(&self, message: String) {
+        let _ = self.error_tx.send(message);
     }
 
     pub async fn ensure_rules(&self) -> Result<()> {
@@ -56,50 +74,110 @@ impl FirewallService {
         drop(state);
 
         if !interception_enabled {
+            tracing::info!("firewall interception disabled; ensuring backend rules are removed");
             self.disable_rules().await?;
             return Ok(());
         }
 
+        tracing::info!(backend = ?backend, queue = queue_num, bypass = queue_bypass, "ensuring firewall backend rules");
+
         match backend {
             FirewallBackend::Nftables => {
-                crate::adapters::firewall_nft::ensure(queue_num, queue_bypass).await?
+                if let Err(err) =
+                    crate::adapters::firewall_nft::ensure(queue_num, queue_bypass).await
+                {
+                    tracing::error!("Error while adding interception tables: {err}");
+                    self.emit_error(format!("Error while adding interception tables: {err}"));
+                    tracing::info!("Using nftables firewall");
+                    return Err(err);
+                }
+                tracing::info!("Using nftables firewall");
             }
             FirewallBackend::Iptables => {
-                crate::adapters::firewall_iptables::ensure(queue_num, queue_bypass).await?
+                if let Err(err) =
+                    crate::adapters::firewall_iptables::ensure(queue_num, queue_bypass).await
+                {
+                    self.emit_error(format!(
+                        "failed to ensure iptables interception rules: {err}"
+                    ));
+                    return Err(err);
+                }
             }
         }
 
         if let Some(sysfw) = system_firewall.as_ref() {
             match backend {
                 FirewallBackend::Nftables => {
-                    crate::adapters::firewall_nft::apply_system_firewall(sysfw, queue_num).await?
+                    if let Err(err) =
+                        crate::adapters::firewall_nft::apply_system_firewall(sysfw, queue_num).await
+                    {
+                        self.emit_error(format!("failed to apply nftables system firewall: {err}"));
+                        return Err(err);
+                    }
                 }
                 FirewallBackend::Iptables => {
-                    crate::adapters::firewall_iptables::apply_system_firewall(sysfw).await?
+                    if let Err(err) =
+                        crate::adapters::firewall_iptables::apply_system_firewall(sysfw).await
+                    {
+                        self.emit_error(format!("failed to apply iptables system firewall: {err}"));
+                        return Err(err);
+                    }
                 }
             }
         }
 
         self.state.write().await.state.enabled = true;
+        tracing::info!(backend = ?backend, "firewall backend enabled");
         Ok(())
     }
 
     pub async fn reload_from_config(&self, config: &Config) -> Result<()> {
+        tracing::info!(
+            backend = ?config.firewall_backend,
+            queue = config.firewall_queue_num,
+            bypass = config.firewall_queue_bypass,
+            path = %config.firewall_config_path.display(),
+            "reloading firewall service from config"
+        );
         let path = config.firewall_config_path.clone();
         let system_firewall =
-            tokio::task::spawn_blocking(move || load_system_firewall(&path)).await??;
+            match tokio::task::spawn_blocking(move || load_system_firewall(&path)).await {
+                Ok(Ok(system_firewall)) => system_firewall,
+                Ok(Err(err)) => {
+                    self.emit_error(format!("failed to reload firewall config from disk: {err}"));
+                    return Err(err);
+                }
+                Err(err) => {
+                    self.emit_error(format!("failed to join firewall reload task: {err}"));
+                    return Err(err.into());
+                }
+            };
         let mut state = self.state.write().await;
         state.state.backend = config.firewall_backend;
         state.queue_num = config.firewall_queue_num;
         state.queue_bypass = config.firewall_queue_bypass;
         state.system_firewall = system_firewall;
+        tracing::info!(backend = ?state.state.backend, "firewall runtime config reloaded");
         Ok(())
     }
 
     pub async fn reconcile_from_config(&self, config: &Config) -> Result<()> {
+        tracing::info!(backend = ?config.firewall_backend, path = %config.firewall_config_path.display(), "reconciling firewall runtime from config");
         let path = config.firewall_config_path.clone();
         let system_firewall =
-            tokio::task::spawn_blocking(move || load_system_firewall(&path)).await??;
+            match tokio::task::spawn_blocking(move || load_system_firewall(&path)).await {
+                Ok(Ok(system_firewall)) => system_firewall,
+                Ok(Err(err)) => {
+                    self.emit_error(format!(
+                        "failed to read firewall config during reconcile: {err}"
+                    ));
+                    return Err(err);
+                }
+                Err(err) => {
+                    self.emit_error(format!("failed to join firewall reconcile task: {err}"));
+                    return Err(err.into());
+                }
+            };
 
         let state = self.state.read().await;
         let was_enabled = state.state.enabled;
@@ -112,7 +190,14 @@ impl FirewallService {
         if was_enabled {
             Self::clear_system_firewall_for_backend(old_backend, old_system_firewall.as_ref())
                 .await;
-            Self::disable_backend_rules(old_backend, old_queue_num, old_queue_bypass).await?;
+            if let Err(err) =
+                Self::disable_backend_rules(old_backend, old_queue_num, old_queue_bypass).await
+            {
+                self.emit_error(format!(
+                    "failed to disable previous firewall backend rules: {err}"
+                ));
+                return Err(err);
+            }
         }
 
         {
@@ -121,11 +206,22 @@ impl FirewallService {
             state.queue_num = config.firewall_queue_num;
             state.queue_bypass = config.firewall_queue_bypass;
             state.system_firewall = system_firewall;
+
+            if matches!(state.state.backend, FirewallBackend::Nftables) {
+                if let Some(sysfw) = state.system_firewall.as_ref()
+                    && !sysfw.enabled
+                {
+                    tracing::info!("[nftables] AddSystemRules() fw disabled");
+                }
+                tracing::info!("Using nftables firewall");
+            }
         }
 
         if was_enabled {
             self.ensure_rules().await?;
         }
+
+        tracing::info!(backend = ?config.firewall_backend, enabled = was_enabled, "firewall reconcile completed");
 
         Ok(())
     }
@@ -138,7 +234,17 @@ impl FirewallService {
         if let Some(sysfw) = system_firewall.as_ref() {
             let path = config.firewall_config_path.clone();
             let sysfw = sysfw.clone();
-            tokio::task::spawn_blocking(move || save_system_firewall(&path, &sysfw)).await??;
+            match tokio::task::spawn_blocking(move || save_system_firewall(&path, &sysfw)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    self.emit_error(format!("failed to persist firewall config: {err}"));
+                    return Err(err);
+                }
+                Err(err) => {
+                    self.emit_error(format!("failed to join firewall persistence task: {err}"));
+                    return Err(err.into());
+                }
+            }
         }
 
         {
@@ -146,24 +252,51 @@ impl FirewallService {
             state.system_firewall = system_firewall;
         }
 
-        self.reconcile_from_config(config).await
+        if let Err(err) = self.reconcile_from_config(config).await {
+            self.emit_error(format!("failed to reconcile firewall after replace: {err}"));
+            return Err(err);
+        }
+
+        Ok(())
     }
 
     pub async fn set_enabled(&self, enabled: bool) -> Result<()> {
+        tracing::info!(enabled, "updating firewall enabled state");
         if enabled {
-            self.ensure_rules().await?;
+            if let Err(err) = self.ensure_rules().await {
+                self.emit_error(format!("failed to enable firewall rules: {err}"));
+                return Err(err);
+            }
             return Ok(());
         }
 
-        self.disable_rules().await
+        if let Err(err) = self.disable_rules().await {
+            self.emit_error(format!("failed to disable firewall rules: {err}"));
+            return Err(err);
+        }
+
+        Ok(())
     }
 
     pub async fn set_interception(&self, enabled: bool) -> Result<()> {
+        tracing::info!(enabled, "updating firewall interception state");
         self.state.write().await.interception_enabled = enabled;
         if enabled {
-            self.ensure_rules().await
+            if let Err(err) = self.ensure_rules().await {
+                self.emit_error(format!(
+                    "failed to enable firewall interception rules: {err}"
+                ));
+                return Err(err);
+            }
+            Ok(())
         } else {
-            self.disable_rules().await
+            if let Err(err) = self.disable_rules().await {
+                self.emit_error(format!(
+                    "failed to disable firewall interception rules: {err}"
+                ));
+                return Err(err);
+            }
+            Ok(())
         }
     }
 
@@ -175,6 +308,41 @@ impl FirewallService {
         self.state.read().await.system_firewall.clone()
     }
 
+    pub async fn heal_if_drifted(&self) -> Result<()> {
+        let state = self.state.read().await;
+        let backend = state.state.backend;
+        let queue_num = state.queue_num;
+        let queue_bypass = state.queue_bypass;
+        let enabled = state.state.enabled;
+        let interception_enabled = state.interception_enabled;
+        drop(state);
+
+        if !enabled || !interception_enabled {
+            return Ok(());
+        }
+
+        let healthy = match backend {
+            FirewallBackend::Nftables => {
+                crate::adapters::firewall_nft::interception_rules_valid().await?
+            }
+            FirewallBackend::Iptables => {
+                crate::adapters::firewall_iptables::interception_rules_valid(
+                    queue_num,
+                    queue_bypass,
+                )
+                .await?
+            }
+        };
+
+        if healthy {
+            return Ok(());
+        }
+
+        tracing::warn!(backend = ?backend, queue = queue_num, bypass = queue_bypass, "firewall rule drift detected; reloading interception rules");
+        self.disable_rules().await?;
+        self.ensure_rules().await
+    }
+
     async fn disable_rules(&self) -> Result<()> {
         let state = self.state.read().await;
         let backend = state.state.backend;
@@ -184,9 +352,13 @@ impl FirewallService {
         drop(state);
 
         Self::clear_system_firewall_for_backend(backend, system_firewall.as_ref()).await;
-        Self::disable_backend_rules(backend, queue_num, queue_bypass).await?;
+        if let Err(err) = Self::disable_backend_rules(backend, queue_num, queue_bypass).await {
+            self.emit_error(format!("failed to disable firewall backend rules: {err}"));
+            return Err(err);
+        }
 
         self.state.write().await.state.enabled = false;
+        tracing::info!(backend = ?backend, "firewall backend disabled");
         Ok(())
     }
 
@@ -224,6 +396,11 @@ impl FirewallService {
 
 fn load_system_firewall(path: &Path) -> Result<Option<pb::SysFirewall>> {
     if !path.exists() {
+        tracing::error!(
+            "Error reading firewall configuration from disk {}: open {}: no such file or directory",
+            path.display(),
+            path.display()
+        );
         return Ok(None);
     }
 
@@ -265,6 +442,7 @@ fn save_system_firewall(path: &Path, sysfw: &pb::SysFirewall) -> Result<()> {
         .context("failed to serialize system firewall config")?;
     fs::write(path, raw)
         .with_context(|| format!("failed to write firewall config {}", path.display()))?;
+    tracing::info!(path = %path.display(), version = sysfw.version, "persisted firewall config to disk");
     Ok(())
 }
 
@@ -426,16 +604,12 @@ impl From<pb::StatementValues> for PersistedStatementValue {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::fs;
 
     use opensnitch_proto::pb;
 
     use super::{load_system_firewall, save_system_firewall};
-    use crate::{
-        config::Config,
-        models::firewall_state::FirewallBackend,
-        utils::test_support::TestDir,
-    };
+    use crate::utils::test_support::TestDir;
 
     #[test]
     fn save_and_load_system_firewall_round_trip() {
@@ -479,98 +653,186 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn reload_from_config_updates_runtime_backend_and_system_firewall() {
-        let dir = TestDir::new("opensnitch-firewall-reload");
-        let nft_path = dir.path.join("system-fw-nft.json");
-        let ipt_path = dir.path.join("system-fw-ipt.json");
+    #[test]
+    fn load_system_firewall_missing_file_returns_none() {
+        let dir = TestDir::new("opensnitch-firewall-service-missing-load");
+        let path = dir.path.join("missing-system-fw.json");
 
-        let nft_sysfw = pb::SysFirewall {
+        let loaded = load_system_firewall(&path).expect("missing path should not fail");
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn load_system_firewall_invalid_json_returns_error() {
+        let dir = TestDir::new("opensnitch-firewall-service-invalid-json");
+        let path = dir.path.join("invalid-system-fw.json");
+        fs::write(&path, "{not-json").expect("write invalid json");
+
+        let err = load_system_firewall(&path).expect_err("invalid json must error");
+        assert!(format!("{err:#}").contains("failed to parse firewall config"));
+    }
+
+    #[test]
+    fn save_and_load_preserves_nested_chain_expressions() {
+        let dir = TestDir::new("opensnitch-firewall-service-nested-roundtrip");
+        let path = dir.path.join("nested-system-fw.json");
+
+        let sysfw = pb::SysFirewall {
             enabled: true,
-            version: 1,
+            version: 7,
             system_rules: vec![pb::FwChains {
-                rule: Some(pb::FwRule {
-                    table: "filter".to_string(),
-                    chain: "OUTPUT".to_string(),
-                    uuid: "nft-uuid".to_string(),
-                    enabled: true,
-                    position: 1,
-                    description: "nft rule".to_string(),
-                    parameters: "".to_string(),
-                    expressions: Vec::new(),
-                    target: "ACCEPT".to_string(),
-                    target_parameters: "".to_string(),
-                }),
-                chains: Vec::new(),
+                rule: None,
+                chains: vec![pb::FwChain {
+                    name: "mangle_output".to_string(),
+                    table: "opensnitch".to_string(),
+                    family: "inet".to_string(),
+                    priority: "mangle".to_string(),
+                    r#type: "filter".to_string(),
+                    hook: "output".to_string(),
+                    policy: "accept".to_string(),
+                    rules: vec![pb::FwRule {
+                        table: "opensnitch".to_string(),
+                        chain: "mangle_output".to_string(),
+                        uuid: "uuid-nested-1".to_string(),
+                        enabled: true,
+                        position: 11,
+                        description: "nested expression".to_string(),
+                        parameters: "".to_string(),
+                        expressions: vec![pb::Expressions {
+                            statement: Some(pb::Statement {
+                                op: "==".to_string(),
+                                name: "meta".to_string(),
+                                values: vec![pb::StatementValues {
+                                    key: "l4proto".to_string(),
+                                    value: "tcp".to_string(),
+                                }],
+                            }),
+                        }],
+                        target: "queue".to_string(),
+                        target_parameters: "num 0 bypass".to_string(),
+                    }],
+                }],
             }],
         };
 
-        let ipt_sysfw = pb::SysFirewall {
-            enabled: true,
-            version: 2,
-            system_rules: vec![pb::FwChains {
-                rule: Some(pb::FwRule {
-                    table: "mangle".to_string(),
-                    chain: "OUTPUT".to_string(),
-                    uuid: "ipt-uuid".to_string(),
-                    enabled: true,
-                    position: 1,
-                    description: "ipt rule".to_string(),
-                    parameters: "".to_string(),
-                    expressions: Vec::new(),
-                    target: "NFQUEUE".to_string(),
-                    target_parameters: "".to_string(),
-                }),
-                chains: Vec::new(),
-            }],
-        };
+        save_system_firewall(&path, &sysfw).expect("save nested sysfw");
+        let loaded = load_system_firewall(&path)
+            .expect("load nested sysfw")
+            .expect("nested sysfw should exist");
 
-        save_system_firewall(&nft_path, &nft_sysfw).expect("save nft sysfw");
-        save_system_firewall(&ipt_path, &ipt_sysfw).expect("save iptables sysfw");
+        assert_eq!(loaded.version, 7);
+        let chain = &loaded.system_rules[0].chains[0];
+        assert_eq!(chain.name, "mangle_output");
+        assert_eq!(chain.rules.len(), 1);
+        let expr = &chain.rules[0].expressions[0];
+        let statement = expr.statement.as_ref().expect("statement present");
+        assert_eq!(statement.name, "meta");
+        assert_eq!(statement.values[0].key, "l4proto");
+        assert_eq!(statement.values[0].value, "tcp");
+    }
 
-        let mut initial_cfg = Config::default();
-        initial_cfg.firewall_backend = FirewallBackend::Nftables;
-        initial_cfg.firewall_queue_num = 0;
-        initial_cfg.firewall_queue_bypass = true;
-        initial_cfg.firewall_config_path = nft_path.clone();
-        initial_cfg.rules_path = PathBuf::from(&dir.path);
-        initial_cfg.tasks_config_path = dir.path.join("tasks.json");
+    #[test]
+    fn load_system_firewall_minimal_json_uses_defaults() {
+        let dir = TestDir::new("opensnitch-firewall-service-minimal-json");
+        let path = dir.path.join("minimal-system-fw.json");
+        fs::write(&path, "{}").expect("write minimal json");
 
-        let service = super::FirewallService::new(&initial_cfg).expect("firewall service");
-        let initial_state = service.snapshot().await;
-        assert!(matches!(initial_state.backend, FirewallBackend::Nftables));
+        let loaded = load_system_firewall(&path)
+            .expect("load minimal sysfw")
+            .expect("minimal sysfw should deserialize");
 
-        let initial_sysfw = service
-            .system_firewall()
-            .await
-            .expect("initial system firewall must exist");
-        assert_eq!(initial_sysfw.version, 1);
+        assert!(!loaded.enabled);
+        assert_eq!(loaded.version, 0);
+        assert!(loaded.system_rules.is_empty());
+    }
 
-        let mut reloaded_cfg = initial_cfg.clone();
-        reloaded_cfg.firewall_backend = FirewallBackend::Iptables;
-        reloaded_cfg.firewall_queue_num = 23;
-        reloaded_cfg.firewall_queue_bypass = false;
-        reloaded_cfg.firewall_config_path = ipt_path;
+    #[test]
+    fn load_system_firewall_supports_top_level_rule_only() {
+        let dir = TestDir::new("opensnitch-firewall-service-top-rule");
+        let path = dir.path.join("top-rule-system-fw.json");
+        fs::write(
+            &path,
+            r#"{
+    "Enabled": true,
+    "Version": 2,
+    "SystemRules": [
+        {
+            "Rule": {
+                "Table": "filter",
+                "Chain": "OUTPUT",
+                "UUID": "rule-only-uuid",
+                "Enabled": true,
+                "Position": 9,
+                "Description": "top-level-rule",
+                "Parameters": "-p udp --dport 53",
+                "Expressions": [],
+                "Target": "ACCEPT",
+                "TargetParameters": ""
+            },
+            "Chains": []
+        }
+    ]
+}"#,
+        )
+        .expect("write top-level rule json");
 
-        service
-            .reload_from_config(&reloaded_cfg)
-            .await
-            .expect("reload from config");
+        let loaded = load_system_firewall(&path)
+            .expect("load top-level rule sysfw")
+            .expect("top-level rule sysfw should deserialize");
 
-        let reloaded_state = service.snapshot().await;
-        assert!(matches!(reloaded_state.backend, FirewallBackend::Iptables));
+        assert!(loaded.enabled);
+        assert_eq!(loaded.version, 2);
+        assert_eq!(loaded.system_rules.len(), 1);
+        let rule = loaded.system_rules[0]
+            .rule
+            .as_ref()
+            .expect("rule entry should be present");
+        assert_eq!(rule.uuid, "rule-only-uuid");
+        assert_eq!(rule.position, 9);
+        assert_eq!(rule.target, "ACCEPT");
+    }
 
-        let reloaded_sysfw = service
-            .system_firewall()
-            .await
-            .expect("reloaded system firewall must exist");
-        assert_eq!(reloaded_sysfw.version, 2);
-        assert_eq!(
-            reloaded_sysfw.system_rules[0]
-                .rule
-                .as_ref()
-                .map(|r| r.uuid.as_str()),
-            Some("ipt-uuid")
-        );
+    #[test]
+    fn load_system_firewall_parses_position_from_string_or_invalid_to_zero() {
+        let dir = TestDir::new("opensnitch-firewall-service-position-string");
+        let path = dir.path.join("position-system-fw.json");
+        fs::write(
+            &path,
+            r#"{
+    "Enabled": true,
+    "Version": 3,
+    "SystemRules": [
+        {
+            "Rule": {
+                "UUID": "pos-string",
+                "Enabled": true,
+                "Position": "13",
+                "Target": "ACCEPT"
+            },
+            "Chains": []
+        },
+        {
+            "Rule": {
+                "UUID": "pos-invalid",
+                "Enabled": true,
+                "Position": "not-a-number",
+                "Target": "DROP"
+            },
+            "Chains": []
+        }
+    ]
+}"#,
+        )
+        .expect("write position parsing json");
+
+        let loaded = load_system_firewall(&path)
+            .expect("load position parsing sysfw")
+            .expect("position parsing sysfw should deserialize");
+
+        let first = loaded.system_rules[0].rule.as_ref().expect("first rule");
+        let second = loaded.system_rules[1].rule.as_ref().expect("second rule");
+
+        assert_eq!(first.position, 13);
+        assert_eq!(second.position, 0);
     }
 }

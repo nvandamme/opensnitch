@@ -6,7 +6,7 @@ use crate::utils::command_path::command_exists;
 
 const SYSFW_TAG_PREFIX: &str = "opensnitch-sysfw:";
 
-trait FwChainExt {
+pub(crate) trait FwChainExt {
     fn family_or_default(&self) -> &str;
     fn table_or_default(&self) -> &str;
     fn chain_name_or_default(&self) -> &str;
@@ -54,14 +54,14 @@ impl FwChainExt for pb::FwChain {
     }
 }
 
-trait FwRuleNftExt {
+pub(crate) trait FwRuleNftExt {
     fn nft_expression(&self, queue_num: u16) -> String;
 }
 
 impl FwRuleNftExt for pb::FwRule {
     fn nft_expression(&self, queue_num: u16) -> String {
         if !self.parameters.is_empty() {
-            let mut out = self.parameters.clone();
+            let mut out = normalize_nft_parameters(&self.parameters);
             if !self.target.is_empty() {
                 out.push(' ');
                 out.push_str(&self.target);
@@ -70,7 +70,7 @@ impl FwRuleNftExt for pb::FwRule {
                 out.push(' ');
                 out.push_str(&self.target_parameters);
             }
-            return out;
+            return normalize_nft_parameters(&out);
         }
 
         let mut parts: Vec<String> = Vec::new();
@@ -114,11 +114,52 @@ impl FwRuleNftExt for pb::FwRule {
             parts.push(target_params);
         }
 
-        parts.join(" ")
+        normalize_nft_parameters(&parts.join(" "))
     }
 }
 
-trait StrNftExt {
+fn normalize_nft_parameters(parameters: &str) -> String {
+    let out = normalize_nft_type_list(parameters, "icmp type");
+    normalize_nft_type_list(&out, "icmpv6 type")
+}
+
+fn normalize_nft_type_list(parameters: &str, marker: &str) -> String {
+    let Some(marker_start) = parameters.find(marker) else {
+        return parameters.to_string();
+    };
+
+    let values_start = marker_start + marker.len();
+    let after_marker = &parameters[values_start..];
+    let trimmed = after_marker.trim_start();
+    let leading_ws = after_marker.len().saturating_sub(trimmed.len());
+    let token_end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+    let token = &trimmed[..token_end];
+
+    if !token.contains(',') || token.starts_with('{') {
+        return parameters.to_string();
+    }
+
+    let values: Vec<&str> = token
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect();
+
+    if values.len() < 2 {
+        return parameters.to_string();
+    }
+
+    let prefix = &parameters[..marker_start];
+    let marker_with_space = &parameters[marker_start..values_start + leading_ws];
+    let suffix = &trimmed[token_end..];
+
+    format!(
+        "{prefix}{marker_with_space}{{ {} }}{suffix}",
+        values.join(", ")
+    )
+}
+
+pub(crate) trait StrNftExt {
     fn nft_rule_lines(&self) -> Vec<&str>;
     fn parse_nft_handle(&self) -> Option<String>;
     fn nft_rule_tag(&self) -> &str;
@@ -162,50 +203,28 @@ pub async fn ensure(queue_num: u16, queue_bypass: bool) -> Result<()> {
     let bypass = if queue_bypass { " bypass" } else { "" };
 
     run_nft(&["add", "table", "inet", "opensnitch"]).await.ok();
-    run_nft(&[
-        "add",
-        "chain",
+    ensure_chain_with_fallback(
         "inet",
         "opensnitch",
         "filter_input",
-        "{",
-        "type",
-        "filter",
-        "hook",
         "input",
-        "priority",
         "0",
-        ";",
-        "policy",
         "accept",
-        ";",
-        "}",
-    ])
-    .await
-    .ok();
-    run_nft(&[
-        "add",
-        "chain",
+        &["filter"],
+    )
+    .await?;
+    ensure_chain_with_fallback(
         "inet",
         "opensnitch",
         "mangle_output",
-        "{",
-        "type",
-        "route",
-        "hook",
         "output",
-        "priority",
         "0",
-        ";",
-        "policy",
         "accept",
-        ";",
-        "}",
-    ])
-    .await
-    .ok();
+        &["route", "filter"],
+    )
+    .await?;
 
-    if !interception_rules_valid().await? {
+    if !interception_rules_valid_impl().await? {
         delete_interception_rules().await.ok();
     }
 
@@ -248,8 +267,17 @@ pub async fn disable() -> Result<()> {
     Ok(())
 }
 
+pub async fn interception_rules_valid() -> Result<bool> {
+    if !command_exists("nft") {
+        return Ok(false);
+    }
+
+    interception_rules_valid_impl().await
+}
+
 pub async fn apply_system_firewall(sysfw: &pb::SysFirewall, queue_num: u16) -> Result<()> {
     if !sysfw.enabled {
+        tracing::info!("[nftables] AddSystemRules() fw disabled");
         return Ok(());
     }
 
@@ -326,61 +354,29 @@ async fn ensure_rule(chain: &str, rule_expr: &str) -> Result<()> {
     run_nft(&args).await
 }
 
-async fn interception_rules_valid() -> Result<bool> {
+async fn interception_rules_valid_impl() -> Result<bool> {
     let input = list_chain("inet", "opensnitch", "filter_input").await?;
     let output = list_chain("inet", "opensnitch", "mangle_output").await?;
 
     let input_rules = input.nft_rule_lines();
     let output_rules = output.nft_rule_lines();
 
-    let mut total_tagged = 0_usize;
-
-    let dns_idx: Vec<usize> = input_rules
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, line)| line.contains("opensnitch-queue-dns").then_some(idx))
-        .collect();
-    total_tagged += dns_idx.len();
-
-    if dns_idx.len() != 1 || dns_idx[0] != 0 {
+    if count_rules_with_tag(&input_rules, "opensnitch-queue-dns") != 1 {
         return Ok(false);
     }
 
-    let non_tcp_idx: Vec<usize> = output_rules
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, line)| {
-            line.contains("opensnitch-queue-connections-non-tcp")
-                .then_some(idx)
-        })
-        .collect();
-    total_tagged += non_tcp_idx.len();
+    let non_tcp_count = count_rules_with_tag(&output_rules, "opensnitch-queue-connections-non-tcp");
+    let tcp_syn_count = count_rules_with_tag(&output_rules, "opensnitch-queue-connections-tcp-syn");
 
-    let tcp_syn_idx: Vec<usize> = output_rules
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, line)| {
-            line.contains("opensnitch-queue-connections-tcp-syn")
-                .then_some(idx)
-        })
-        .collect();
-    total_tagged += tcp_syn_idx.len();
-
-    if non_tcp_idx.len() != 1 || tcp_syn_idx.len() != 1 {
+    if non_tcp_count != 1 || tcp_syn_count != 1 {
         return Ok(false);
     }
 
-    let output_len = output_rules.len();
-    if output_len < 2 {
-        return Ok(false);
-    }
+    Ok(true)
+}
 
-    let near_tail = |idx: usize| idx >= output_len.saturating_sub(2);
-    if !near_tail(non_tcp_idx[0]) || !near_tail(tcp_syn_idx[0]) {
-        return Ok(false);
-    }
-
-    Ok(total_tagged == 3)
+fn count_rules_with_tag(lines: &[&str], tag: &str) -> usize {
+    lines.iter().filter(|line| line.contains(tag)).count()
 }
 
 async fn delete_interception_rules() -> Result<()> {
@@ -388,7 +384,13 @@ async fn delete_interception_rules() -> Result<()> {
         ("inet", "opensnitch", "filter_input"),
         ("inet", "opensnitch", "mangle_output"),
     ] {
-        let listing = list_chain(family, table, chain).await?;
+        let listing = match list_chain(family, table, chain).await {
+            Ok(listing) => listing,
+            Err(err) => {
+                tracing::warn!("error deleting interception rules: {err}");
+                continue;
+            }
+        };
         for line in listing.lines() {
             if !(line.contains("opensnitch-queue-dns")
                 || line.contains("opensnitch-queue-connections-non-tcp")
@@ -418,7 +420,11 @@ async fn list_chain(family: &str, table: &str, chain: &str) -> Result<String> {
         .with_context(|| format!("list nft chain {family} {table} {chain}"))?;
 
     if !out.status.success() {
-        return Ok(String::new());
+        bail!(
+            "error listing nftables chains ({}): {}",
+            chain,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
 
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
@@ -432,6 +438,10 @@ async fn run_nft(args: &[&str]) -> Result<()> {
         .with_context(|| format!("run nft with args: {}", args.join(" ")))?;
 
     if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if !stderr.is_empty() {
+            tracing::warn!("nftables: error applying changes: {stderr}");
+        }
         bail!(
             "nft command failed: {}",
             String::from_utf8_lossy(&out.stderr)
@@ -464,23 +474,63 @@ async fn ensure_system_chain(chain: &pb::FwChain) -> Result<()> {
     } else {
         chain.priority.as_str()
     };
-    let chain_type = match chain.r#type.as_str() {
-        "mangle" => "route",
-        "natdest" | "natsource" | "nat" => "nat",
-        "filter" => "filter",
-        _ => "filter",
+    let chain_types: &[&str] = match chain.r#type.as_str() {
+        "mangle" if hook.eq_ignore_ascii_case("output") => &["route", "filter"],
+        "mangle" => &["filter"],
+        "natdest" | "natsource" | "nat" => &["nat"],
+        "filter" => &["filter"],
+        _ => &["filter"],
     };
 
     run_nft(&["add", "table", family, table]).await.ok();
 
-    run_nft(&[
-        "add", "chain", family, table, name, "{", "type", chain_type, "hook", hook, "priority",
-        prio, ";", "policy", policy, ";", "}",
-    ])
-    .await
-    .ok();
+    ensure_chain_with_fallback(family, table, name, hook, prio, policy, chain_types).await?;
 
     Ok(())
+}
+
+async fn ensure_chain_with_fallback(
+    family: &str,
+    table: &str,
+    chain: &str,
+    hook: &str,
+    prio: &str,
+    policy: &str,
+    chain_types: &[&str],
+) -> Result<()> {
+    if chain_exists(family, table, chain).await {
+        return Ok(());
+    }
+
+    for chain_type in chain_types {
+        if run_nft(&[
+            "add", "chain", family, table, chain, "{", "type", chain_type, "hook", hook,
+            "priority", prio, ";", "policy", policy, ";", "}",
+        ])
+        .await
+        .is_ok()
+        {
+            return Ok(());
+        }
+
+        if chain_exists(family, table, chain).await {
+            return Ok(());
+        }
+    }
+
+    bail!(
+        "unable to ensure nft chain {family} {table} {chain} with chain types: {}",
+        chain_types.join(",")
+    )
+}
+
+async fn chain_exists(family: &str, table: &str, chain: &str) -> bool {
+    Command::new("nft")
+        .args(["list", "chain", family, table, chain])
+        .output()
+        .await
+        .map(|out| out.status.success())
+        .unwrap_or(false)
 }
 
 async fn chain_has_tag(chain: &pb::FwChain, tag: &str) -> Result<bool> {
@@ -539,93 +589,4 @@ async fn delete_tagged_rules(chain: &pb::FwChain) -> Result<()> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{FwChainExt, FwRuleNftExt, StrNftExt};
-    use opensnitch_proto::pb;
-
-    #[test]
-    fn chain_defaults_and_rule_tag_match_expected_values() {
-        let chain = pb::FwChain::default();
-        assert_eq!(chain.family_or_default(), "inet");
-        assert_eq!(chain.table_or_default(), "opensnitch");
-        assert_eq!(chain.chain_name_or_default(), "mangle_output");
-
-        let fallback_tag = chain.rule_tag(&pb::FwRule {
-            position: 7,
-            description: "allow dns".to_string(),
-            ..Default::default()
-        });
-        assert_eq!(
-            fallback_tag,
-            "opensnitch-sysfw:opensnitch:mangle_output:7:allow dns"
-        );
-
-        let uuid_tag = chain.rule_tag(&pb::FwRule {
-            uuid: "uuid-1".to_string(),
-            ..Default::default()
-        });
-        assert_eq!(uuid_tag, "opensnitch-sysfw:uuid-1");
-    }
-
-    #[test]
-    fn nft_expression_prefers_parameters_and_appends_target_parts() {
-        let rule = pb::FwRule {
-            parameters: "tcp dport 443".to_string(),
-            target: "accept".to_string(),
-            target_parameters: "comment \"https\"".to_string(),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            rule.nft_expression(0),
-            "tcp dport 443 accept comment \"https\""
-        );
-    }
-
-    #[test]
-    fn nft_expression_builds_from_statements_and_rewrites_queue_num() {
-        let rule = pb::FwRule {
-            expressions: vec![pb::Expressions {
-                statement: Some(pb::Statement {
-                    op: "==".to_string(),
-                    name: "meta".to_string(),
-                    values: vec![pb::StatementValues {
-                        key: "l4proto".to_string(),
-                        value: "tcp".to_string(),
-                    }],
-                }),
-            }],
-            target: "queue".to_string(),
-            target_parameters: "num 0 bypass".to_string(),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            rule.nft_expression(42),
-            "meta l4proto == tcp queue num 42 bypass"
-        );
-    }
-
-    #[test]
-    fn nft_rule_line_helpers_extract_handles_and_tags() {
-        let listing = r#"
-chain mangle_output {
-    udp sport 53 queue num 0 comment "opensnitch-queue-dns" # handle 5
-    tcp flags & (fin|syn|rst|ack) == syn queue num 0 comment "opensnitch-queue-connections-tcp-syn" # handle 7
-}
-"#;
-
-        let lines = listing.nft_rule_lines();
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].parse_nft_handle().as_deref(), Some("5"));
-        assert_eq!(lines[1].parse_nft_handle().as_deref(), Some("7"));
-        assert_eq!(lines[0].nft_rule_tag(), "opensnitch-queue-dns");
-        assert_eq!(
-            lines[1].nft_rule_tag(),
-            "opensnitch-queue-connections-tcp-syn"
-        );
-    }
 }

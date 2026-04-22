@@ -21,6 +21,20 @@ pub fn to_proto_connection(
 
     let mut process_checksums = HashMap::new();
     if let Some(hash) = proc_info
+        .process_hash_md5
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
+        process_checksums.insert("md5".to_string(), hash.clone());
+    }
+    if let Some(hash) = proc_info
+        .process_hash_sha1
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
+        process_checksums.insert("sha1".to_string(), hash.clone());
+    }
+    if let Some(hash) = proc_info
         .process_hash
         .as_ref()
         .filter(|value| !value.is_empty())

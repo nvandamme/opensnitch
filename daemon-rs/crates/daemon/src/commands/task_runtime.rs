@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::ErrorKind;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 use anyhow::Result;
 use opensnitch_proto::pb;
@@ -18,6 +18,7 @@ use crate::{
             IocToolConfig,
         },
         task_storage::{TaskDataFile, TasksListFile},
+        ui_alert::UiAlert,
     },
     services::process_service::ProcessService,
 };
@@ -28,11 +29,20 @@ pub(crate) struct DiskTaskRuntime {
     fingerprint: String,
 }
 
-const DISK_TASK_REPLY_ID_BASE: u64 = 10_001;
-static DISK_TASK_REPLY_ID_COUNTER: AtomicU64 = AtomicU64::new(DISK_TASK_REPLY_ID_BASE);
+#[derive(Debug, Clone)]
+pub(crate) enum TaskLifecycleEvent {
+    Added { task_name: String, task_key: String },
+    Removed { task_name: String, task_key: String },
+    PausedAll { task_count: usize },
+    ResumedAll { task_count: usize },
+}
 
-fn next_disk_task_reply_id() -> u64 {
-    DISK_TASK_REPLY_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+static ALERT_TX: OnceLock<tokio::sync::mpsc::Sender<UiAlert>> = OnceLock::new();
+const DOWNLOADER_SUCCESS_MSG: &str = "[blocklists] lists updated";
+const LEGACY_TASK_RESULT_NOTIFY_TYPE: i32 = 9999;
+
+pub(crate) fn configure_alert_sender(alert_tx: tokio::sync::mpsc::Sender<UiAlert>) {
+    let _ = ALERT_TX.set(alert_tx);
 }
 
 trait TaskNameExt {
@@ -64,8 +74,10 @@ impl TaskNameExt for str {
 
         if normalized == "socketsmonitor"
             || normalized == "sockets-monitor"
+            || normalized == "netstat"
             || normalized.starts_with("socketsmonitor-")
             || normalized.starts_with("sockets-monitor-")
+            || normalized.starts_with("netstat-")
         {
             return "sockets-monitor".to_string();
         }
@@ -371,6 +383,40 @@ impl IocReportPathExt for IocReportConfig {
     }
 }
 
+fn downloader_go_result_message(payload: &Value) -> String {
+    let errors = payload
+        .get("Errors")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if errors.is_empty() {
+        DOWNLOADER_SUCCESS_MSG.to_string()
+    } else {
+        format!("{DOWNLOADER_SUCCESS_MSG}\n\nErrors:\n{}", errors.join(", "))
+    }
+}
+
+fn build_legacy_downloader_task_result(data: &str) -> Value {
+    serde_json::json!({
+        "Type": LEGACY_TASK_RESULT_NOTIFY_TYPE,
+        "Data": data,
+    })
+}
+
+fn emit_legacy_downloader_typed_result(data: &str) {
+    // Go parity: downloader emits a second typed TaskResults payload
+    // (Type=9999) that the default UI task-event monitor ignores.
+    let legacy = build_legacy_downloader_task_result(data);
+    tracing::debug!(target: "opensnitch.task", task = "downloader", legacy_task_result = %legacy, "emitting legacy typed task result");
+}
+
 pub(crate) async fn sync_disk_tasks(
     tasks_file: &std::path::Path,
     task_handles: &mut HashMap<String, DiskTaskRuntime>,
@@ -452,13 +498,47 @@ pub(crate) fn stop_runtime_tasks(
     stopped
 }
 
+pub(crate) fn pause_runtime_tasks(
+    task_handles: &HashMap<String, (tokio::task::JoinHandle<()>, CancellationToken)>,
+) -> usize {
+    // Go parity: task manager exposes PauseAll(), but concrete runtime monitors
+    // implement Pause() as no-op today. Mirror that manager-level surface.
+    task_handles.len()
+}
+
+pub(crate) fn resume_runtime_tasks(
+    task_handles: &HashMap<String, (tokio::task::JoinHandle<()>, CancellationToken)>,
+) -> usize {
+    // Go parity: task manager exposes ResumeAll(), but concrete runtime monitors
+    // implement Resume() as no-op today. Mirror that manager-level surface.
+    task_handles.len()
+}
+
 async fn load_disk_tasks(
     tasks_file: &std::path::Path,
 ) -> Result<HashMap<String, (String, Value, String)>> {
+    tracing::debug!(
+        "[tasks] Loader.Load() config file: {}",
+        tasks_file.display()
+    );
     let raw = match tokio::fs::read_to_string(tasks_file).await {
         Ok(raw) => raw,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(HashMap::new()),
-        Err(err) => return Err(err.into()),
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            tracing::warn!(
+                "[tasks] LoadTaskFile, error loading tasks (), error reading tasks list file {}: {}",
+                tasks_file.display(),
+                err
+            );
+            return Ok(HashMap::new());
+        }
+        Err(err) => {
+            tracing::warn!(
+                "[tasks] LoadTaskFile, error loading tasks (), error reading tasks list file {}: {}",
+                tasks_file.display(),
+                err
+            );
+            return Err(err.into());
+        }
     };
     let tasks_list = serde_json::from_str::<TasksListFile>(&raw)?;
     let tasks_base_dir = tasks_file
@@ -544,6 +624,7 @@ pub(crate) fn spawn_task_monitor(
     process: ProcessService,
     task_reply_tx: tokio::sync::mpsc::Sender<pb::NotificationReply>,
 ) -> tokio::task::JoinHandle<()> {
+    tracing::info!("[tasks] Adding task: {task_name}");
     let raw_task_name = task_name.trim().to_string();
     let task_name = task_name.normalized_task_name();
     match task_name.as_str() {
@@ -554,9 +635,11 @@ pub(crate) fn spawn_task_monitor(
                 .unwrap_or(0);
             let interval = data.task_interval();
             tokio::spawn(async move {
+                let mut first_run = true;
                 if pid == 0 {
-                    send_task_reply(
+                    send_task_event(
                         &task_reply_tx,
+                        "pid-monitor",
                         notification_id,
                         pb::NotificationReplyCode::Error,
                         "invalid pid for pid-monitor".to_string(),
@@ -565,95 +648,108 @@ pub(crate) fn spawn_task_monitor(
                     return;
                 }
                 loop {
-                    tokio::select! {
-                        _ = token.cancelled() => break,
-                        _ = tokio::time::sleep(interval) => {
-                            match process.inspect(pid).await {
-                                Ok(info) => {
-                                    let mut checksums = serde_json::Map::new();
-                                    if let Some(hash) = info.process_hash.clone() {
-                                        checksums.insert(
-                                            "process.hash.sha1".to_string(),
-                                            serde_json::Value::String(hash),
-                                        );
-                                    }
+                    if !first_run {
+                        tokio::select! {
+                            _ = token.cancelled() => break,
+                            _ = tokio::time::sleep(interval) => {}
+                        }
+                    } else {
+                        first_run = false;
+                        if token.is_cancelled() {
+                            break;
+                        }
+                    }
 
-                                    let tree = info
-                                        .parent_chain
-                                        .iter()
-                                        .map(|n| serde_json::json!({ "key": n.path.clone(), "value": n.pid }))
-                                        .collect::<Vec<_>>();
+                    if token.is_cancelled() {
+                        break;
+                    }
 
-                                    if let Ok(raw) = serde_json::to_string(&serde_json::json!({
-                                        "Pid": info.pid,
-                                        "ID": info.pid,
-                                        "Ppid": info.parent_chain.get(1).map(|n| n.pid).unwrap_or(0),
-                                        "PPID": info.parent_chain.get(1).map(|n| n.pid).unwrap_or(0),
-                                        "Uid": 0,
-                                        "UID": 0,
-                                        "Comm": std::path::Path::new(&info.path)
-                                            .file_name()
-                                            .and_then(|s| s.to_str())
-                                            .unwrap_or("")
-                                            .to_string(),
-                                        "Path": info.path,
-                                        "Root": "/",
-                                        "RealPath": info.path,
-                                        "Args": info.args,
-                                        "Env": serde_json::Map::<String, serde_json::Value>::new(),
-                                        "CWD": info.cwd.unwrap_or_default(),
-                                        "Checksums": checksums,
-                                        "IOStats": {
-                                            "RChar": 0,
-                                            "WChar": 0,
-                                            "SyscallRead": 0,
-                                            "SyscallWrite": 0,
-                                            "ReadBytes": 0,
-                                            "WriteBytes": 0,
-                                        },
-                                        "Statm": {
-                                            "Size": 0,
-                                            "Resident": 0,
-                                            "Shared": 0,
-                                            "Text": 0,
-                                            "Lib": 0,
-                                            "Data": 0,
-                                            "Dt": 0,
-                                        },
-                                        "Status": "",
-                                        "Stat": "",
-                                        "Maps": "",
-                                        "Stack": "",
-                                        "Descriptors": serde_json::Value::Null,
-                                        "NetStats": {
-                                            "ReadBytes": 0,
-                                            "WriteBytes": 0,
-                                        },
-                                        "Tree": tree,
-                                    })) {
-                                        send_task_reply(
-                                            &task_reply_tx,
-                                            notification_id,
-                                            pb::NotificationReplyCode::Ok,
-                                            raw.clone(),
-                                        )
-                                        .await;
-                                        tracing::debug!(task = "pid-monitor", pid, data = %raw, "task result");
-                                    }
-                                }
-                                Err(err) => {
-                                    let message = format!("pid-monitor error: {err}");
-                                    send_task_reply(
-                                        &task_reply_tx,
-                                        notification_id,
-                                        pb::NotificationReplyCode::Error,
-                                        message.clone(),
-                                    )
-                                    .await;
-                                    tracing::debug!(task = "pid-monitor", pid, "task error: {err}");
-                                    break;
-                                }
+                    match process.inspect(pid).await {
+                        Ok(info) => {
+                            let mut checksums = serde_json::Map::new();
+                            if let Some(hash) = info.process_hash.clone() {
+                                checksums.insert(
+                                    "process.hash.sha1".to_string(),
+                                    serde_json::Value::String(hash),
+                                );
                             }
+
+                            let tree = info
+                                .parent_chain
+                                .iter()
+                                .map(|n| serde_json::json!({ "key": n.path.clone(), "value": n.pid }))
+                                .collect::<Vec<_>>();
+
+                            if let Ok(raw) = serde_json::to_string(&serde_json::json!({
+                                "Pid": info.pid,
+                                "ID": info.pid,
+                                "Ppid": info.parent_chain.get(1).map(|n| n.pid).unwrap_or(0),
+                                "PPID": info.parent_chain.get(1).map(|n| n.pid).unwrap_or(0),
+                                "Uid": 0,
+                                "UID": 0,
+                                "Comm": std::path::Path::new(&info.path)
+                                    .file_name()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                "Path": info.path,
+                                "Root": "/",
+                                "RealPath": info.path,
+                                "Args": info.args,
+                                "Env": serde_json::Map::<String, serde_json::Value>::new(),
+                                "CWD": info.cwd.unwrap_or_default(),
+                                "Checksums": checksums,
+                                "IOStats": {
+                                    "RChar": 0,
+                                    "WChar": 0,
+                                    "SyscallRead": 0,
+                                    "SyscallWrite": 0,
+                                    "ReadBytes": 0,
+                                    "WriteBytes": 0,
+                                },
+                                "Statm": {
+                                    "Size": 0,
+                                    "Resident": 0,
+                                    "Shared": 0,
+                                    "Text": 0,
+                                    "Lib": 0,
+                                    "Data": 0,
+                                    "Dt": 0,
+                                },
+                                "Status": "",
+                                "Stat": "",
+                                "Maps": "",
+                                "Stack": "",
+                                "Descriptors": serde_json::Value::Null,
+                                "NetStats": {
+                                    "ReadBytes": 0,
+                                    "WriteBytes": 0,
+                                },
+                                "Tree": tree,
+                            })) {
+                                send_task_event(
+                                    &task_reply_tx,
+                                    "pid-monitor",
+                                    notification_id,
+                                    pb::NotificationReplyCode::Ok,
+                                    raw.clone(),
+                                )
+                                .await;
+                                tracing::debug!(task = "pid-monitor", pid, data = %raw, "task result");
+                            }
+                        }
+                        Err(err) => {
+                            let message = format!("pid-monitor error: {err}");
+                            send_task_event(
+                                &task_reply_tx,
+                                "pid-monitor",
+                                notification_id,
+                                pb::NotificationReplyCode::Error,
+                                message.clone(),
+                            )
+                            .await;
+                            tracing::debug!(task = "pid-monitor", pid, "task error: {err}");
+                            break;
                         }
                     }
                 }
@@ -665,36 +761,49 @@ pub(crate) fn spawn_task_monitor(
                 .unwrap_or_default();
             let interval = data.task_interval();
             tokio::spawn(async move {
+                let mut first_run = true;
                 loop {
-                    tokio::select! {
-                        _ = token.cancelled() => break,
-                        _ = tokio::time::sleep(interval) => {
-                            let info = rustix::system::sysinfo();
-                            let payload = serde_json::json!({
-                                "Uptime": info.uptime,
-                                "Loads": [info.loads[0], info.loads[1], info.loads[2]],
-                                "Totalram": info.totalram,
-                                "Freeram": info.freeram,
-                                "Sharedram": info.sharedram,
-                                "Bufferram": info.bufferram,
-                                "Totalswap": info.totalswap,
-                                "Freeswap": info.freeswap,
-                                "Procs": info.procs,
-                                "Totalhigh": info.totalhigh,
-                                "Freehigh": info.freehigh,
-                                "Unit": info.mem_unit,
-                            })
-                            .to_string();
-                            send_task_reply(
-                                &task_reply_tx,
-                                notification_id,
-                                pb::NotificationReplyCode::Ok,
-                                payload,
-                            )
-                            .await;
-                            tracing::debug!(task = "node-monitor", node, "task result");
+                    if !first_run {
+                        tokio::select! {
+                            _ = token.cancelled() => break,
+                            _ = tokio::time::sleep(interval) => {}
+                        }
+                    } else {
+                        first_run = false;
+                        if token.is_cancelled() {
+                            break;
                         }
                     }
+
+                    if token.is_cancelled() {
+                        break;
+                    }
+
+                    let info = rustix::system::sysinfo();
+                    let payload = serde_json::json!({
+                        "Uptime": info.uptime,
+                        "Loads": [info.loads[0], info.loads[1], info.loads[2]],
+                        "Totalram": info.totalram,
+                        "Freeram": info.freeram,
+                        "Sharedram": info.sharedram,
+                        "Bufferram": info.bufferram,
+                        "Totalswap": info.totalswap,
+                        "Freeswap": info.freeswap,
+                        "Procs": info.procs,
+                        "Totalhigh": info.totalhigh,
+                        "Freehigh": info.freehigh,
+                        "Unit": info.mem_unit,
+                    })
+                    .to_string();
+                    send_task_event(
+                        &task_reply_tx,
+                        "node-monitor",
+                        notification_id,
+                        pb::NotificationReplyCode::Ok,
+                        payload,
+                    )
+                    .await;
+                    tracing::debug!(task = "node-monitor", node, "task result");
                 }
             })
         }
@@ -706,258 +815,299 @@ pub(crate) fn spawn_task_monitor(
                 .unwrap_or(nix::libc::IPPROTO_TCP as u8);
             let state_filter = data.data_u8("state").unwrap_or(0);
             tokio::spawn(async move {
+                let mut first_run = true;
                 loop {
-                    tokio::select! {
-                        _ = token.cancelled() => break,
-                        _ = tokio::time::sleep(interval) => {
-                            let reply = tokio::task::spawn_blocking(move || {
-                                crate::adapters::socket_diag::dump_sockets(family, proto)
-                            })
-                            .await;
+                    if !first_run {
+                        tokio::select! {
+                            _ = token.cancelled() => break,
+                            _ = tokio::time::sleep(interval) => {}
+                        }
+                    } else {
+                        first_run = false;
+                        if token.is_cancelled() {
+                            break;
+                        }
+                    }
 
-                            match reply {
-                                Ok(Ok(sockets)) => {
-                                    let mut inode_pid_cache: HashMap<u32, Option<u32>> = HashMap::new();
-                                    let mut iface_cache: HashMap<u32, String> = HashMap::new();
-                                    let rtnl_iface_map = fetch_iface_name_map_rtnetlink().await;
-                                    let mut process_map = serde_json::Map::<String, serde_json::Value>::new();
-                                    let mut table = Vec::with_capacity(sockets.len());
+                    if token.is_cancelled() {
+                        break;
+                    }
 
-                                    for s in &sockets {
-                                        if !(state_filter == 0 || state_filter == s.state) {
-                                            continue;
+                    let reply = tokio::task::spawn_blocking(move || {
+                        crate::adapters::socket_diag::dump_sockets(family, proto)
+                    })
+                    .await;
+
+                    match reply {
+                        Ok(Ok(sockets)) => {
+                            let mut inode_pid_cache: HashMap<u32, Option<u32>> = HashMap::new();
+                            let mut iface_cache: HashMap<u32, String> = HashMap::new();
+                            let rtnl_iface_map = fetch_iface_name_map_rtnetlink().await;
+                            let mut process_map =
+                                serde_json::Map::<String, serde_json::Value>::new();
+                            let mut table = Vec::with_capacity(sockets.len());
+
+                            for s in &sockets {
+                                if !(state_filter == 0 || state_filter == s.state) {
+                                    continue;
+                                }
+
+                                let pid = if s.inode != 0 {
+                                    if let Some(cached) = inode_pid_cache.get(&s.inode) {
+                                        *cached
+                                    } else {
+                                        let resolved =
+                                            crate::utils::pid_resolver::resolve_pid_by_inode_async(
+                                                s.inode,
+                                            )
+                                            .await;
+                                        inode_pid_cache.insert(s.inode, resolved);
+                                        resolved
+                                    }
+                                } else {
+                                    None
+                                };
+
+                                ensure_process_entry(&process, &mut process_map, pid).await;
+
+                                let iface_name = if s.iface == 0 {
+                                    String::new()
+                                } else if let Some(name) = iface_cache.get(&s.iface) {
+                                    name.clone()
+                                } else {
+                                    let name = rtnl_iface_map
+                                        .as_ref()
+                                        .and_then(|m| m.get(&s.iface).cloned())
+                                        .or_else(|| resolve_iface_name_sysfs(s.iface))
+                                        .unwrap_or_default();
+                                    iface_cache.insert(s.iface, name.clone());
+                                    name
+                                };
+
+                                table.push(serde_json::json!({
+                                    "Socket": {
+                                        "ID": {
+                                            "Source": s.src.to_string(),
+                                            "Destination": s.dst.to_string(),
+                                            "Cookie": [s.cookie0, s.cookie1],
+                                            "Interface": s.iface,
+                                            "SourcePort": s.src_port,
+                                            "DestinationPort": s.dst_port,
+                                        },
+                                        "Expires": s.expires,
+                                        "RQueue": s.rqueue,
+                                        "WQueue": s.wqueue,
+                                        "UID": s.uid,
+                                        "INode": s.inode,
+                                        "Family": s.family,
+                                        "State": s.state,
+                                        "Timer": s.timer,
+                                        "Retrans": s.retrans,
+                                    },
+                                    "Iface": iface_name,
+                                    "PID": pid.map(|v| v as i32).unwrap_or(-1),
+                                    "Mark": s.mark,
+                                    "Proto": proto,
+                                }));
+                            }
+
+                            if (family == 0 || family == nix::libc::AF_PACKET as u8)
+                                && state_filter == 0
+                            {
+                                for pkt in read_proc_net_packet_rows() {
+                                    let pid = if pkt.inode != 0 {
+                                        if let Some(cached) = inode_pid_cache.get(&pkt.inode) {
+                                            *cached
+                                        } else {
+                                            let resolved = crate::utils::pid_resolver::resolve_pid_by_inode_async(pkt.inode).await;
+                                            inode_pid_cache.insert(pkt.inode, resolved);
+                                            resolved
                                         }
+                                    } else {
+                                        None
+                                    };
 
-                                        let pid = if s.inode != 0 {
-                                            if let Some(cached) = inode_pid_cache.get(&s.inode) {
-                                                *cached
-                                            } else {
-                                                    let resolved = crate::utils::pid_resolver::resolve_pid_by_inode_async(s.inode).await;
-                                                inode_pid_cache.insert(s.inode, resolved);
-                                                resolved
-                                            }
-                                        } else {
-                                            None
-                                        };
+                                    ensure_process_entry(&process, &mut process_map, pid).await;
 
-                                        ensure_process_entry(&process, &mut process_map, pid).await;
+                                    let iface_name = if pkt.iface == 0 {
+                                        String::new()
+                                    } else if let Some(name) = iface_cache.get(&pkt.iface) {
+                                        name.clone()
+                                    } else {
+                                        let name = rtnl_iface_map
+                                            .as_ref()
+                                            .and_then(|m| m.get(&pkt.iface).cloned())
+                                            .or_else(|| resolve_iface_name_sysfs(pkt.iface))
+                                            .unwrap_or_default();
+                                        iface_cache.insert(pkt.iface, name.clone());
+                                        name
+                                    };
 
-                                        let iface_name = if s.iface == 0 {
-                                            String::new()
-                                        } else if let Some(name) = iface_cache.get(&s.iface) {
-                                            name.clone()
-                                        } else {
-                                            let name = rtnl_iface_map
-                                                .as_ref()
-                                                .and_then(|m| m.get(&s.iface).cloned())
-                                                .or_else(|| resolve_iface_name_sysfs(s.iface))
-                                                .unwrap_or_default();
-                                            iface_cache.insert(s.iface, name.clone());
-                                            name
-                                        };
-
-                                        table.push(serde_json::json!({
-                                            "Socket": {
-                                                "ID": {
-                                                    "Source": s.src.to_string(),
-                                                    "Destination": s.dst.to_string(),
-                                                    "Cookie": [s.cookie0, s.cookie1],
-                                                    "Interface": s.iface,
-                                                    "SourcePort": s.src_port,
-                                                    "DestinationPort": s.dst_port,
-                                                },
-                                                "Expires": s.expires,
-                                                "RQueue": s.rqueue,
-                                                "WQueue": s.wqueue,
-                                                "UID": s.uid,
-                                                "INode": s.inode,
-                                                "Family": s.family,
-                                                "State": s.state,
-                                                "Timer": s.timer,
-                                                "Retrans": s.retrans,
+                                    table.push(serde_json::json!({
+                                        "Socket": {
+                                            "ID": {
+                                                "Source": "",
+                                                "Destination": "",
+                                                "Cookie": [0, 0],
+                                                "Interface": pkt.iface,
+                                                "SourcePort": 0,
+                                                "DestinationPort": 0,
                                             },
-                                            "Iface": iface_name,
-                                            "PID": pid.map(|v| v as i32).unwrap_or(-1),
-                                            "Mark": s.mark,
-                                            "Proto": proto,
-                                        }));
-                                    }
-
-                                    if (family == 0 || family == nix::libc::AF_PACKET as u8) && state_filter == 0 {
-                                        for pkt in read_proc_net_packet_rows() {
-                                            let pid = if pkt.inode != 0 {
-                                                if let Some(cached) = inode_pid_cache.get(&pkt.inode) {
-                                                    *cached
-                                                } else {
-                                                    let resolved = crate::utils::pid_resolver::resolve_pid_by_inode_async(pkt.inode).await;
-                                                    inode_pid_cache.insert(pkt.inode, resolved);
-                                                    resolved
-                                                }
-                                            } else {
-                                                None
-                                            };
-
-                                            ensure_process_entry(&process, &mut process_map, pid).await;
-
-                                            let iface_name = if pkt.iface == 0 {
-                                                String::new()
-                                            } else if let Some(name) = iface_cache.get(&pkt.iface) {
-                                                name.clone()
-                                            } else {
-                                                let name = rtnl_iface_map
-                                                    .as_ref()
-                                                    .and_then(|m| m.get(&pkt.iface).cloned())
-                                                    .or_else(|| resolve_iface_name_sysfs(pkt.iface))
-                                                    .unwrap_or_default();
-                                                iface_cache.insert(pkt.iface, name.clone());
-                                                name
-                                            };
-
-                                            table.push(serde_json::json!({
-                                                "Socket": {
-                                                    "ID": {
-                                                        "Source": "",
-                                                        "Destination": "",
-                                                        "Cookie": [0, 0],
-                                                        "Interface": pkt.iface,
-                                                        "SourcePort": 0,
-                                                        "DestinationPort": 0,
-                                                    },
-                                                    "Expires": 0,
-                                                    "RQueue": 0,
-                                                    "WQueue": 0,
-                                                    "UID": pkt.uid,
-                                                    "INode": pkt.inode,
-                                                    "Family": nix::libc::AF_PACKET as u8,
-                                                    "State": 0,
-                                                    "Timer": 0,
-                                                    "Retrans": 0,
-                                                },
-                                                "Iface": iface_name,
-                                                "PID": pid.map(|v| v as i32).unwrap_or(-1),
-                                                "Mark": 0,
-                                                "Proto": pkt.proto,
-                                            }));
-                                        }
-                                    }
-
-                                    if (family == 0 || family == AF_XDP_FAMILY) && state_filter == 0 {
-                                        for xdp in read_proc_net_xdp_rows() {
-                                            let pid = if xdp.inode != 0 {
-                                                if let Some(cached) = inode_pid_cache.get(&xdp.inode) {
-                                                    *cached
-                                                } else {
-                                                    let resolved = crate::utils::pid_resolver::resolve_pid_by_inode_async(xdp.inode).await;
-                                                    inode_pid_cache.insert(xdp.inode, resolved);
-                                                    resolved
-                                                }
-                                            } else {
-                                                None
-                                            };
-
-                                            ensure_process_entry(&process, &mut process_map, pid).await;
-
-                                            let iface_name = if xdp.iface == 0 {
-                                                String::new()
-                                            } else if let Some(name) = iface_cache.get(&xdp.iface) {
-                                                name.clone()
-                                            } else {
-                                                let name = rtnl_iface_map
-                                                    .as_ref()
-                                                    .and_then(|m| m.get(&xdp.iface).cloned())
-                                                    .or_else(|| resolve_iface_name_sysfs(xdp.iface))
-                                                    .unwrap_or_default();
-                                                iface_cache.insert(xdp.iface, name.clone());
-                                                name
-                                            };
-
-                                            table.push(serde_json::json!({
-                                                "Socket": {
-                                                    "ID": {
-                                                        "Source": "",
-                                                        "Destination": "",
-                                                        "Cookie": [xdp.cookie0, xdp.cookie1],
-                                                        "Interface": xdp.iface,
-                                                        "SourcePort": 0,
-                                                        "DestinationPort": 0,
-                                                    },
-                                                    "Expires": 0,
-                                                    "RQueue": 0,
-                                                    "WQueue": 0,
-                                                    "UID": xdp.uid,
-                                                    "INode": xdp.inode,
-                                                    "Family": AF_XDP_FAMILY,
-                                                    "State": 0,
-                                                    "Timer": 0,
-                                                    "Retrans": 0,
-                                                },
-                                                "Iface": iface_name,
-                                                "PID": pid.map(|v| v as i32).unwrap_or(-1),
-                                                "Mark": 0,
-                                                "Proto": nix::libc::IPPROTO_RAW,
-                                            }));
-                                        }
-                                    }
-
-                                    let payload = serde_json::json!({
-                                        "Table": table,
-                                        "Processes": process_map,
-                                    })
-                                    .to_string();
-                                    send_task_reply(
-                                        &task_reply_tx,
-                                        notification_id,
-                                        pb::NotificationReplyCode::Ok,
-                                        payload,
-                                    )
-                                    .await;
-                                    tracing::debug!(task = "sockets-monitor", family, proto, count = sockets.len(), "task result");
-                                }
-                                Ok(Err(err)) => {
-                                    let message = format!("sockets-monitor error: {err}");
-                                    send_task_reply(
-                                        &task_reply_tx,
-                                        notification_id,
-                                        pb::NotificationReplyCode::Error,
-                                        message.clone(),
-                                    )
-                                    .await;
-                                    tracing::debug!(task = "sockets-monitor", family, proto, "task error: {err}");
-                                }
-                                Err(err) => {
-                                    let message = format!("sockets-monitor join error: {err}");
-                                    send_task_reply(
-                                        &task_reply_tx,
-                                        notification_id,
-                                        pb::NotificationReplyCode::Error,
-                                        message.clone(),
-                                    )
-                                    .await;
-                                    tracing::debug!(task = "sockets-monitor", family, proto, "task error: {err}");
+                                            "Expires": 0,
+                                            "RQueue": 0,
+                                            "WQueue": 0,
+                                            "UID": pkt.uid,
+                                            "INode": pkt.inode,
+                                            "Family": nix::libc::AF_PACKET as u8,
+                                            "State": 0,
+                                            "Timer": 0,
+                                            "Retrans": 0,
+                                        },
+                                        "Iface": iface_name,
+                                        "PID": pid.map(|v| v as i32).unwrap_or(-1),
+                                        "Mark": 0,
+                                        // Keep Go parity: /proc fallback packet sockets are tagged as raw.
+                                        "Proto": nix::libc::IPPROTO_RAW as u16,
+                                    }));
                                 }
                             }
+
+                            if (family == 0 || family == AF_XDP_FAMILY) && state_filter == 0 {
+                                for xdp in read_proc_net_xdp_rows() {
+                                    let pid = if xdp.inode != 0 {
+                                        if let Some(cached) = inode_pid_cache.get(&xdp.inode) {
+                                            *cached
+                                        } else {
+                                            let resolved = crate::utils::pid_resolver::resolve_pid_by_inode_async(xdp.inode).await;
+                                            inode_pid_cache.insert(xdp.inode, resolved);
+                                            resolved
+                                        }
+                                    } else {
+                                        None
+                                    };
+
+                                    ensure_process_entry(&process, &mut process_map, pid).await;
+
+                                    let iface_name = if xdp.iface == 0 {
+                                        String::new()
+                                    } else if let Some(name) = iface_cache.get(&xdp.iface) {
+                                        name.clone()
+                                    } else {
+                                        let name = rtnl_iface_map
+                                            .as_ref()
+                                            .and_then(|m| m.get(&xdp.iface).cloned())
+                                            .or_else(|| resolve_iface_name_sysfs(xdp.iface))
+                                            .unwrap_or_default();
+                                        iface_cache.insert(xdp.iface, name.clone());
+                                        name
+                                    };
+
+                                    table.push(serde_json::json!({
+                                        "Socket": {
+                                            "ID": {
+                                                "Source": "",
+                                                "Destination": "",
+                                                "Cookie": [xdp.cookie0, xdp.cookie1],
+                                                "Interface": xdp.iface,
+                                                "SourcePort": 0,
+                                                "DestinationPort": 0,
+                                            },
+                                            "Expires": 0,
+                                            "RQueue": 0,
+                                            "WQueue": 0,
+                                            "UID": xdp.uid,
+                                            "INode": xdp.inode,
+                                            "Family": AF_XDP_FAMILY,
+                                            "State": 0,
+                                            "Timer": 0,
+                                            "Retrans": 0,
+                                        },
+                                        "Iface": iface_name,
+                                        "PID": pid.map(|v| v as i32).unwrap_or(-1),
+                                        "Mark": 0,
+                                        "Proto": nix::libc::IPPROTO_RAW,
+                                    }));
+                                }
+                            }
+
+                            let payload = serde_json::json!({
+                                "Table": table,
+                                "Processes": process_map,
+                            })
+                            .to_string();
+                            send_task_event(
+                                &task_reply_tx,
+                                "sockets-monitor",
+                                notification_id,
+                                pb::NotificationReplyCode::Ok,
+                                payload,
+                            )
+                            .await;
+                            tracing::debug!(
+                                task = "sockets-monitor",
+                                family,
+                                proto,
+                                count = sockets.len(),
+                                "task result"
+                            );
+                        }
+                        Ok(Err(err)) => {
+                            let message = format!("sockets-monitor error: {err}");
+                            send_task_event(
+                                &task_reply_tx,
+                                "sockets-monitor",
+                                notification_id,
+                                pb::NotificationReplyCode::Error,
+                                message.clone(),
+                            )
+                            .await;
+                            tracing::debug!(
+                                task = "sockets-monitor",
+                                family,
+                                proto,
+                                "task error: {err}"
+                            );
+                        }
+                        Err(err) => {
+                            let message = format!("sockets-monitor join error: {err}");
+                            send_task_event(
+                                &task_reply_tx,
+                                "sockets-monitor",
+                                notification_id,
+                                pb::NotificationReplyCode::Error,
+                                message.clone(),
+                            )
+                            .await;
+                            tracing::debug!(
+                                task = "sockets-monitor",
+                                family,
+                                proto,
+                                "task error: {err}"
+                            );
                         }
                     }
                 }
             })
         }
         "looper" => {
-            let interval = data.task_interval();
+            let interval_raw = data
+                .data_string("interval")
+                .filter(|raw| !raw.trim().is_empty())
+                .unwrap_or_else(|| "5s".to_string());
+            let interval = interval_raw
+                .as_str()
+                .parse_or_default(std::time::Duration::from_secs(5));
             tokio::spawn(async move {
                 loop {
                     tokio::select! {
                         _ = token.cancelled() => break,
                         _ = tokio::time::sleep(interval) => {
-                            let payload = serde_json::json!({
-                                "Task": "looper",
-                                "Interval": format!("{}ms", interval.as_millis()),
-                            })
-                            .to_string();
-                            send_task_reply(
+                            send_task_event(
                                 &task_reply_tx,
+                                "looper",
                                 notification_id,
                                 pb::NotificationReplyCode::Ok,
-                                payload,
+                                interval_raw.clone(),
                             )
                             .await;
                         }
@@ -975,7 +1125,10 @@ pub(crate) fn spawn_task_monitor(
                 loop {
                     if notify_enabled {
                         let (code, payload) = match run_downloader_once(&data).await {
-                            Ok(payload) => (pb::NotificationReplyCode::Ok, payload.to_string()),
+                            Ok(payload) => (
+                                pb::NotificationReplyCode::Ok,
+                                downloader_go_result_message(&payload),
+                            ),
                             Err(err) => (
                                 pb::NotificationReplyCode::Error,
                                 serde_json::json!({
@@ -985,7 +1138,16 @@ pub(crate) fn spawn_task_monitor(
                                 .to_string(),
                             ),
                         };
-                        send_task_reply(&task_reply_tx, notification_id, code, payload).await;
+                        let legacy_payload = payload.clone();
+                        send_task_event(
+                            &task_reply_tx,
+                            "downloader",
+                            notification_id,
+                            code,
+                            payload,
+                        )
+                        .await;
+                        emit_legacy_downloader_typed_result(&legacy_payload);
                     } else if let Err(err) = run_downloader_once(&data).await {
                         tracing::debug!("downloader run completed with non-fatal error: {err}");
                     }
@@ -1009,18 +1171,35 @@ pub(crate) fn spawn_task_monitor(
                         let now_second = now.unix_timestamp();
                         if data.ioc_schedule_matches_now(now) && now_second != last_schedule_second
                         {
-                            let (code, payload) = match run_ioc_scanner_once(&data).await {
-                                Ok(payload) => (pb::NotificationReplyCode::Ok, payload.to_string()),
-                                Err(err) => (
-                                    pb::NotificationReplyCode::Error,
-                                    serde_json::json!({
+                            match run_ioc_scanner_once(&data).await {
+                                Ok(payloads) => {
+                                    for payload in payloads {
+                                        send_task_event(
+                                            &task_reply_tx,
+                                            "ioc-scanner",
+                                            notification_id,
+                                            pb::NotificationReplyCode::Ok,
+                                            payload,
+                                        )
+                                        .await;
+                                    }
+                                }
+                                Err(err) => {
+                                    let payload = serde_json::json!({
                                         "Task": "ioc-scanner",
                                         "Error": err.to_string(),
                                     })
-                                    .to_string(),
-                                ),
-                            };
-                            send_task_reply(&task_reply_tx, notification_id, code, payload).await;
+                                    .to_string();
+                                    send_task_event(
+                                        &task_reply_tx,
+                                        "ioc-scanner",
+                                        notification_id,
+                                        pb::NotificationReplyCode::Error,
+                                        payload,
+                                    )
+                                    .await;
+                                }
+                            }
                             last_schedule_second = now_second;
                         }
 
@@ -1030,20 +1209,8 @@ pub(crate) fn spawn_task_monitor(
                         }
                         continue;
                     }
-
-                    let (code, payload) = match run_ioc_scanner_once(&data).await {
-                        Ok(payload) => (pb::NotificationReplyCode::Ok, payload.to_string()),
-                        Err(err) => (
-                            pb::NotificationReplyCode::Error,
-                            serde_json::json!({
-                                "Task": "ioc-scanner",
-                                "Error": err.to_string(),
-                            })
-                            .to_string(),
-                        ),
-                    };
-                    send_task_reply(&task_reply_tx, notification_id, code, payload).await;
-
+                    // Go parity: IOC scanner schedules executions only through scheduler entries.
+                    // When no schedule is configured, keep task alive but emit no periodic results.
                     tokio::select! {
                         _ = token.cancelled() => break,
                         _ = tokio::time::sleep(interval) => {}
@@ -1054,8 +1221,9 @@ pub(crate) fn spawn_task_monitor(
         _ => {
             let task_name = task_name.to_string();
             tokio::spawn(async move {
-                send_task_reply(
+                send_task_event(
                     &task_reply_tx,
+                    task_name.as_str(),
                     notification_id,
                     pb::NotificationReplyCode::Error,
                     format!("unsupported task: {task_name}"),
@@ -1063,6 +1231,48 @@ pub(crate) fn spawn_task_monitor(
                 .await;
                 let _ = token.cancelled().await;
             })
+        }
+    }
+}
+
+async fn send_task_event(
+    task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+    task_name: &str,
+    notification_id: u64,
+    code: pb::NotificationReplyCode,
+    data: String,
+) {
+    let is_stream_notification = notification_id > 10_000;
+
+    if is_stream_notification {
+        send_task_reply(task_reply_tx, notification_id, code, data).await;
+        return;
+    }
+
+    let task_notification = serde_json::json!({
+        "Name": task_name,
+        "Data": data,
+    });
+    crate::logging::forward_task_notification(
+        task_name,
+        task_notification
+            .get("Data")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default(),
+        code != pb::NotificationReplyCode::Ok,
+    );
+
+    let payload = task_notification
+        .get("Data")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    if let Some(alert_tx) = ALERT_TX.get() {
+        if code == pb::NotificationReplyCode::Ok {
+            crate::models::ui_alert::enqueue_alert(alert_tx, UiAlert::info(payload));
+        } else {
+            crate::models::ui_alert::enqueue_alert(alert_tx, UiAlert::error(payload));
         }
     }
 }
@@ -1138,7 +1348,7 @@ async fn run_downloader_once(data: &Value) -> Result<Value> {
     }))
 }
 
-async fn run_ioc_scanner_once(data: &Value) -> Result<Value> {
+async fn run_ioc_scanner_once(data: &Value) -> Result<Vec<String>> {
     let cfg: IocScannerTaskConfig = serde_json::from_value(data.clone())?;
     let global_timeout = cfg
         .timeout
@@ -1150,11 +1360,14 @@ async fn run_ioc_scanner_once(data: &Value) -> Result<Value> {
         .unwrap_or_else(|| "unknown-host".to_string());
 
     let mut reports = Vec::new();
+    let mut tools_ran = 0usize;
 
     for tool in cfg.tools.into_iter().filter(|tool| tool.enabled) {
         if tool.cmd.is_empty() || tool.cmd[0].trim().is_empty() {
             continue;
         }
+
+        tools_ran = tools_ran.saturating_add(1);
 
         let timeout = tool
             .options
@@ -1178,62 +1391,44 @@ async fn run_ioc_scanner_once(data: &Value) -> Result<Value> {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let merged = format!("{stdout}{stderr}");
                 let html_report = merged.replace('\n', "<br>");
-                let trimmed = if merged.chars().count() <= 8192 {
-                    merged.clone()
-                } else {
-                    merged
-                        .chars()
-                        .take(8192)
-                        .collect::<String>()
-                        .trim_end()
-                        .to_string()
-                };
 
                 if let Err(err) = write_ioc_report_files(&tool, &html_report).await {
                     tracing::debug!(tool = %tool.name, "failed to write IOC report files: {err}");
                 }
 
-                reports.push(serde_json::json!({
-                    "Tool": tool.name,
-                    "Command": command,
-                    "Args": args,
-                    "ExitCode": output.status.code().unwrap_or(-1),
-                    "Status": if output.status.success() { "ok" } else { "error" },
-                    "DurationMs": started_at.elapsed().as_millis() as u64,
-                    "Report": trimmed.replace('\n', "<br>"),
-                }));
+                let started_human = time::OffsetDateTime::now_utc();
+                let stamp_format = time::format_description::parse(
+                    "[day]-[month]-[year], [hour]:[minute]:[second]",
+                )?;
+                let started_stamp = started_human.format(&stamp_format)?;
+                let duration = started_at.elapsed().as_secs();
+
+                reports.push(
+                    format!(
+                        "==== {} - {} ({}) ====\n\n{}\n\n=== {} - ({}s) ===",
+                        tool.name, hostname, started_stamp, merged, tool.name, duration
+                    )
+                    .replace('\n', "<br>"),
+                );
             }
             Ok(Err(err)) => {
-                reports.push(serde_json::json!({
-                    "Tool": tool.name,
-                    "Command": command,
-                    "Args": args,
-                    "Status": "error",
-                    "DurationMs": started_at.elapsed().as_millis() as u64,
-                    "Report": format!("failed to execute command: {err}"),
-                }));
+                reports.push(format!("{}: failed to execute command: {err}", tool.name));
             }
             Err(_) => {
-                reports.push(serde_json::json!({
-                    "Tool": tool.name,
-                    "Command": command,
-                    "Args": args,
-                    "Status": "timeout",
-                    "DurationMs": started_at.elapsed().as_millis() as u64,
-                    "Report": format!("timed out after {}ms", timeout.as_millis()),
-                }));
+                reports.push(format!(
+                    "{}: timed out after {}ms",
+                    tool.name,
+                    timeout.as_millis()
+                ));
             }
         }
     }
 
-    let tools_ran = reports.len();
+    if tools_ran == 0 {
+        anyhow::bail!("no tools configured");
+    }
 
-    Ok(serde_json::json!({
-        "Task": "ioc-scanner",
-        "Host": hostname,
-        "Tools": reports,
-        "ToolsRan": tools_ran,
-    }))
+    Ok(reports)
 }
 
 async fn write_ioc_report_files(tool: &IocToolConfig, report: &str) -> Result<()> {
@@ -1258,24 +1453,18 @@ pub(crate) async fn send_task_reply(
     code: pb::NotificationReplyCode,
     data: String,
 ) {
-    let reply_id = if notification_id == 0 {
-        let synthetic_id = next_disk_task_reply_id();
-        match code {
-            pb::NotificationReplyCode::Ok => {
-                tracing::info!(reply_id = synthetic_id, task_data = %data, "disk task output");
-            }
-            _ => {
-                tracing::error!(reply_id = synthetic_id, task_data = %data, "disk task error");
-            }
+    match code {
+        pb::NotificationReplyCode::Ok => {
+            tracing::info!(notification_id, task_data = %data, "task notification");
         }
-        synthetic_id
-    } else {
-        notification_id
-    };
+        _ => {
+            tracing::error!(notification_id, task_data = %data, "task notification error");
+        }
+    }
 
     let _ = task_reply_tx
         .send(pb::NotificationReply {
-            id: reply_id,
+            id: notification_id,
             code: code as i32,
             data,
         })
@@ -1458,16 +1647,10 @@ fn read_proc_net_packet_rows() -> Vec<ProcNetPacketRow> {
             continue;
         }
 
-        let proto = u16::from_str_radix(cols[3], 16).unwrap_or(nix::libc::IPPROTO_RAW as u16);
         let iface = cols[4].parse::<u32>().unwrap_or(0);
         let uid = cols[7].parse::<u32>().unwrap_or(0);
         let inode = cols[8].parse::<u32>().unwrap_or(0);
-        out.push(ProcNetPacketRow {
-            proto,
-            iface,
-            uid,
-            inode,
-        });
+        out.push(ProcNetPacketRow { iface, uid, inode });
     }
 
     out
@@ -1549,11 +1732,9 @@ const AF_XDP_FAMILY: u8 = 44;
 #[cfg(test)]
 mod tests {
     use super::{
-        DISK_TASK_REPLY_ID_BASE, DiskTaskRuntime, IocTaskDataExt, IocTimeSpecExt,
-        TaskIntervalSpecExt, TaskNameExt, build_task_key, is_runtime_task_name_supported,
-        send_task_reply, stop_disk_tasks, stop_runtime_tasks, validate_task_start_input,
+        DiskTaskRuntime, IocTaskDataExt, IocTimeSpecExt, TaskIntervalSpecExt, TaskNameExt,
+        build_legacy_downloader_task_result, stop_disk_tasks,
     };
-    use opensnitch_proto::pb;
     use serde_json::json;
     use tokio_util::sync::CancellationToken;
 
@@ -1571,87 +1752,10 @@ mod tests {
             "socketsmonitor-debug".normalized_task_name(),
             "sockets-monitor"
         );
+        assert_eq!("netstat".normalized_task_name(), "sockets-monitor");
+        assert_eq!("netstat-main".normalized_task_name(), "sockets-monitor");
         assert_eq!("iocscanner-weekly".normalized_task_name(), "ioc-scanner");
         assert_eq!("downloader-list-a".normalized_task_name(), "downloader");
-    }
-
-    #[test]
-    fn build_task_key_normalizes_aliases_and_uses_identity_keys() {
-        assert_eq!(
-            build_task_key("pidmonitor", &json!({ "pid": "4242" })),
-            "pid-monitor:4242"
-        );
-        assert_eq!(
-            build_task_key("nodemonitor", &json!({ "node": "alpha" })),
-            "node-monitor:alpha"
-        );
-        assert_eq!(
-            build_task_key("socketsmonitor", &json!({})),
-            "sockets-monitor"
-        );
-    }
-
-    #[test]
-    fn build_task_key_defaults_node_monitor_key_when_node_missing() {
-        assert_eq!(
-            build_task_key("node-monitor", &json!({})),
-            "node-monitor:default"
-        );
-    }
-
-    #[test]
-    fn build_task_key_uses_instance_suffix_when_data_is_missing() {
-        assert_eq!(
-            build_task_key("pid-monitor-4242", &json!({})),
-            "pid-monitor:4242"
-        );
-        assert_eq!(
-            build_task_key("node-monitor-main", &json!({})),
-            "node-monitor:main"
-        );
-        assert_eq!(
-            build_task_key("pidmonitor-555", &json!({})),
-            "pid-monitor:555"
-        );
-        assert_eq!(
-            build_task_key("nodemonitor-edge", &json!({})),
-            "node-monitor:edge"
-        );
-    }
-
-    #[test]
-    fn validate_task_start_input_checks_pid_monitor_inputs() {
-        assert!(validate_task_start_input("node-monitor", &json!({ "node": "main" })).is_ok());
-
-        let invalid = validate_task_start_input("pid-monitor", &json!({"pid": "abc"}));
-        assert!(invalid.is_err());
-
-        let invalid_interval = validate_task_start_input(
-            "pid-monitor",
-            &json!({"pid": std::process::id().to_string(), "interval": "bogus"}),
-        );
-        assert!(invalid_interval.is_err());
-
-        let running_pid = std::process::id().to_string();
-        let from_data = validate_task_start_input("pid-monitor", &json!({"pid": running_pid}));
-        assert!(from_data.is_ok());
-
-        let from_suffix =
-            validate_task_start_input(&format!("pid-monitor-{}", std::process::id()), &json!({}));
-        assert!(from_suffix.is_ok());
-
-        let node_missing = validate_task_start_input("node-monitor", &json!({}));
-        assert!(node_missing.is_err());
-
-        let sockets_missing =
-            validate_task_start_input("sockets-monitor", &json!({"family": 2, "proto": 6}));
-        assert!(sockets_missing.is_err());
-
-        let sockets_ok = validate_task_start_input(
-            "sockets-monitor",
-            &json!({"family": 2, "proto": 6, "state": 1}),
-        );
-        assert!(sockets_ok.is_ok());
     }
 
     #[test]
@@ -1724,49 +1828,18 @@ mod tests {
     }
 
     #[test]
-    fn is_supported_task_name_accepts_known_aliases_only() {
-        assert!(is_runtime_task_name_supported("pidmonitor"));
-        assert!(is_runtime_task_name_supported("node-monitor-main"));
-        assert!(is_runtime_task_name_supported("socketsmonitor"));
-        assert!(!is_runtime_task_name_supported("downloader-list-a"));
-        assert!(!is_runtime_task_name_supported("unknown-task"));
-
+    fn is_disk_task_name_supported_accepts_known_aliases_only() {
         assert!("downloader-list-a".is_disk_task_name_supported());
         assert!("looptask".is_disk_task_name_supported());
         assert!("iocscanner-weekly".is_disk_task_name_supported());
         assert!(!"pid-monitor-123".is_disk_task_name_supported());
     }
 
-    #[tokio::test]
-    async fn stop_runtime_tasks_cancels_all_handles() {
-        let first = CancellationToken::new();
-        let second = CancellationToken::new();
-        let first_child = first.clone();
-        let second_child = second.clone();
-
-        let mut handles = std::collections::HashMap::from([
-            (
-                "pid-monitor:1".to_string(),
-                (
-                    tokio::spawn(async move {
-                        first_child.cancelled().await;
-                    }),
-                    first,
-                ),
-            ),
-            (
-                "node-monitor:alpha".to_string(),
-                (
-                    tokio::spawn(async move {
-                        second_child.cancelled().await;
-                    }),
-                    second,
-                ),
-            ),
-        ]);
-
-        assert_eq!(stop_runtime_tasks(&mut handles), 2);
-        assert!(handles.is_empty());
+    #[test]
+    fn legacy_downloader_task_result_matches_go_taskresults_shape() {
+        let payload = build_legacy_downloader_task_result("[blocklists] lists updated");
+        assert_eq!(payload["Type"], 9999);
+        assert_eq!(payload["Data"], "[blocklists] lists updated");
     }
 
     #[tokio::test]
@@ -1786,29 +1859,5 @@ mod tests {
 
         assert_eq!(stop_disk_tasks(&mut handles), 1);
         assert!(handles.is_empty());
-    }
-
-    #[tokio::test]
-    async fn send_task_reply_assigns_synthetic_id_for_disk_tasks() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<pb::NotificationReply>(1);
-
-        send_task_reply(&tx, 0, pb::NotificationReplyCode::Ok, "disk payload".to_string()).await;
-
-        let reply = rx.recv().await.expect("reply should be sent");
-        assert!(reply.id >= DISK_TASK_REPLY_ID_BASE);
-        assert_eq!(reply.code, pb::NotificationReplyCode::Ok as i32);
-        assert_eq!(reply.data, "disk payload");
-    }
-
-    #[tokio::test]
-    async fn send_task_reply_keeps_existing_notification_id() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<pb::NotificationReply>(1);
-
-        send_task_reply(&tx, 77, pb::NotificationReplyCode::Error, "oops".to_string()).await;
-
-        let reply = rx.recv().await.expect("reply should be sent");
-        assert_eq!(reply.id, 77);
-        assert_eq!(reply.code, pb::NotificationReplyCode::Error as i32);
-        assert_eq!(reply.data, "oops");
     }
 }

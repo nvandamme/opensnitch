@@ -14,4 +14,5 @@ pub mod rule_storage;
 pub mod socket_state;
 pub mod task_config;
 pub mod task_storage;
+pub mod ui_alert;
 pub mod verdict_rpc;

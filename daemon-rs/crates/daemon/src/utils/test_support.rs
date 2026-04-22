@@ -1,5 +1,5 @@
 #[cfg(test)]
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, sync::Once};
 
 #[cfg(test)]
 use crate::utils::time_nonce::unique_name;
@@ -23,4 +23,13 @@ impl Drop for TestDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+#[cfg(test)]
+pub(crate) fn init_test_logging() {
+    static INIT: Once = Once::new();
+
+    INIT.call_once(|| {
+        crate::logging::init_for_tests();
+    });
 }

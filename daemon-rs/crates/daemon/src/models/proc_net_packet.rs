@@ -1,6 +1,5 @@
 #[derive(Debug, Clone, Copy)]
 pub struct ProcNetPacketRow {
-    pub proto: u16,
     pub iface: u32,
     pub uid: u32,
     pub inode: u32,

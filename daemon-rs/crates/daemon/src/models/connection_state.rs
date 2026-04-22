@@ -15,6 +15,8 @@ pub struct ConnectionAttempt {
     pub src_port: u16,
     pub dst_ip: String,
     pub dst_port: u16,
+    pub iface_in_idx: u32,
+    pub iface_out_idx: u32,
     pub dns_query: Option<String>,
     pub pid: u32,
     pub uid: u32,

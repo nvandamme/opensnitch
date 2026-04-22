@@ -1,0 +1,9 @@
+{
+  "profile": "high-throughput",
+  "max_concurrent_connect_attempts": 64,
+  "connect_worker_queue_capacity": 128,
+  "connect_dispatch_batch_size": 16,
+  "kernel_dns_queue_capacity": 2048,
+  "kernel_process_queue_capacity": 2048,
+  "kernel_firewall_queue_capacity": 512
+}

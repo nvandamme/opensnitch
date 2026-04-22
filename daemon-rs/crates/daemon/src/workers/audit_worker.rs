@@ -21,6 +21,8 @@ impl AuditLineExt for str {
         self.contains("key=\"opensnitch\"")
             || self.contains("syscall=42")
             || self.contains("syscall=41")
+            || self.contains("syscall=53")
+            || self.contains("syscall=59")
             || self.contains("syscall=102")
     }
 
