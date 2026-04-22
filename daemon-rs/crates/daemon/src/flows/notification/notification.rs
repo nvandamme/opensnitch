@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
-use std::net::IpAddr;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -11,194 +10,107 @@ use tokio::time::Duration;
 use crate::{
     bus::Bus,
     commands::{NotificationCommandDecision, command_from_action_or_reply},
-    config::Config,
+    config::{AuthMode, Config, LocalPrincipal},
     models::{
+        audit::{
+            AuditEvent, AuditEventKind,
+            ClientAuthorizationAction as ClientAuthorizationSignalPayload,
+        },
         command_rpc::ClientCommand,
-        ui_alert::{UiAlert, UiAlertData},
+        firewall_config::FirewallConfig,
+        rule_record::RuleRecord,
+        ui_alert::UiAlert,
     },
+    services::rule::rule_record_from_proto,
     services::{
+        audit::AuditService,
         client::{
-            AlertBuffer, ClientPrincipal, ClientService, ClientSession, NotificationStream,
-            drain_overflow_alerts,
+            AlertBuffer, ClientService, NotificationStream, build_wire_alert,
+            command_action_from_notification_wire, drain_overflow_alerts,
+            is_stream_close_notification_wire, notification_error_reply_wire,
+            notification_hello_reply_wire,
         },
         config::ConfigService,
         firewall::FirewallService,
         rule::RuleService,
     },
-    utils::{
-        channel_send::send_with_backpressure,
-        notification_reply::build_notification_reply,
-        time_nonce::unix_epoch_nanos,
-    },
+    utils::channel_send::send_with_backpressure,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct UnixPeerCredentials {
+    pub(super) uid: u32,
+    pub(super) gid: u32,
+    pub(super) pid: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NotificationAuthorizationClass {
+    AlwaysAllowed,
+    UserScopedAllowed,
+    ElevatedRequired,
+    AlwaysDenied,
+}
 
 #[derive(Clone)]
 pub struct NotificationFlow {
-    bus: Bus,
+    pub(super) bus: Bus,
     alert_buffer: AlertBuffer,
     config: ConfigService,
-    client_service: ClientService,
+    pub(super) client_service: ClientService,
     rules: RuleService,
     firewall: FirewallService,
+    audit: AuditService,
 }
 
 impl NotificationFlow {
-    const RECONNECT_DELAY: Duration = Duration::from_secs(1);
-    const RECONNECT_WARN_THROTTLE: Duration = Duration::from_secs(30);
+    pub(super) const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+    pub(super) const RECONNECT_WARN_THROTTLE: Duration = Duration::from_secs(30);
 
-    #[cfg(unix)]
-    fn try_unix_peer_uid(client_addr: &str) -> Option<u32> {
-        use std::os::fd::AsRawFd;
-
-        let fd = nix::sys::socket::socket(
-            nix::sys::socket::AddressFamily::Unix,
-            nix::sys::socket::SockType::Stream,
-            nix::sys::socket::SockFlag::SOCK_CLOEXEC,
-            None,
-        )
-        .ok()?;
-
-        let addr = if let Some(path) = client_addr.strip_prefix("unix:") {
-            nix::sys::socket::UnixAddr::new(path).ok()?
-        } else if let Some(name) = client_addr.strip_prefix("unix-abstract:") {
-            nix::sys::socket::UnixAddr::new_abstract(name.as_bytes()).ok()?
-        } else {
-            return None;
-        };
-
-        nix::sys::socket::connect(fd.as_raw_fd(), &addr).ok()?;
-        let creds = nix::sys::socket::getsockopt(&fd, nix::sys::socket::sockopt::PeerCredentials)
-            .ok()?;
-        Some(creds.uid())
-    }
-
-    #[cfg(not(unix))]
-    fn try_unix_peer_uid(_client_addr: &str) -> Option<u32> {
-        None
-    }
-
-    pub(crate) fn session_binding_from_client_addr(client_addr: &str) -> ClientSession {
-        if let Some(uid) = Self::try_unix_peer_uid(client_addr) {
-            return ClientSession::for_local_uid(uid, crate::config::DefaultAction::Deny);
-        }
-
-        if let Some(path) = client_addr.strip_prefix("unix:") {
-            return ClientSession::for_network_identity(
-                format!("unix:{path}"),
-                crate::config::DefaultAction::Deny,
-            );
-        }
-
-        if let Some(name) = client_addr.strip_prefix("unix-abstract:") {
-            return ClientSession::for_unix_abstract_name(name, crate::config::DefaultAction::Deny);
-        }
-
-        let endpoint = client_addr
-            .strip_prefix("http://")
-            .or_else(|| client_addr.strip_prefix("https://"))
-            .unwrap_or(client_addr)
-            .split('/')
-            .next()
-            .unwrap_or(client_addr);
-
-        let host = if let Some(stripped) = endpoint.strip_prefix('[') {
-            stripped.split(']').next().unwrap_or(endpoint)
-        } else {
-            endpoint.rsplit_once(':').map(|(h, _)| h).unwrap_or(endpoint)
-        };
-
-        if let Ok(ip) = host.parse::<IpAddr>() {
-            return ClientSession::for_ip_fallback(ip, crate::config::DefaultAction::Deny);
-        }
-
-        ClientSession::for_network_identity(
-            host.to_string(),
-            crate::config::DefaultAction::Deny,
+    pub(super) fn verdict_fallback_log_context(config: &Config) -> (&'static str, &'static str) {
+        let tunables = crate::tunables::RuntimeTunables::global();
+        (
+            tunables.nfqueue_overload_policy.as_str(),
+            config.ask_timeout_policy.as_name(),
         )
     }
 
-    fn client_origin(owner: &ClientPrincipal) -> String {
-        match owner {
-            ClientPrincipal::LocalUid(uid) => format!("local-uid:{uid}"),
-            ClientPrincipal::UnixAbstractName(name) => {
-                format!("unix-abstract:{name}")
-            }
-            ClientPrincipal::NetworkIdentity(identity) => {
-                format!("network:{identity}")
-            }
-            ClientPrincipal::IpFallback(ip) => format!("ip:{ip}"),
-        }
-    }
-
-    fn connect_owner_bound_session(&self, session_template: &ClientSession) {
-        let default_action = self.client_service.connected_default_action();
-        let owner = session_template.owner.clone();
-        match owner {
-            ClientPrincipal::LocalUid(uid) => {
-                self.client_service
-                    .upsert_session(ClientSession::for_local_uid(uid, default_action));
-            }
-            ClientPrincipal::UnixAbstractName(name) => {
-                self.client_service
-                    .upsert_session(ClientSession::for_unix_abstract_name(name, default_action));
-            }
-            ClientPrincipal::NetworkIdentity(identity) => {
-                self.client_service
-                    .upsert_session(ClientSession::for_network_identity(identity, default_action));
-            }
-            ClientPrincipal::IpFallback(ip) => {
-                self.client_service
-                    .upsert_session(ClientSession::for_ip_fallback(ip, default_action));
-            }
-        }
-    }
-
-    async fn do_reconnect(
-        &self,
-        task_reply_rx: &mpsc::Receiver<pb::NotificationReply>,
-        reconnect_state: &mut ReconnectState,
-        active_session_id: &mut Option<String>,
-        client_id: &str,
-        client_origin: &str,
-        warning: Option<&str>,
+    pub(crate) fn local_principal_allowlist_matches(
+        allowlist: &[LocalPrincipal],
+        uid: u32,
+        peer_gids: &[u32],
     ) -> bool {
-        if let Some(session_id) = active_session_id.take() {
-            self.client_service.disconnect_session(&session_id);
-        }
-        if let Some(msg) = warning {
-            reconnect_state.failures = reconnect_state.failures.saturating_add(1);
-            let now = Instant::now();
-            let should_warn = reconnect_state
-                .last_warn_at
-                .map(|last| now.duration_since(last) >= Self::RECONNECT_WARN_THROTTLE)
-                .unwrap_or(true);
-            if should_warn {
-                tracing::warn!(
-                    client_id,
-                    client_origin,
-                    attempt = reconnect_state.failures,
-                    suppressed = reconnect_state.suppressed_warns,
-                    elapsed_secs = reconnect_state.started_at.elapsed().as_secs(),
-                    "{msg}; retrying"
-                );
-                reconnect_state.last_warn_at = Some(now);
-                reconnect_state.suppressed_warns = 0;
-            } else {
-                reconnect_state.suppressed_warns = reconnect_state.suppressed_warns.saturating_add(1);
-            }
-        }
-        if task_reply_rx.is_closed() {
+        allowlist
+            .iter()
+            .any(|principal| principal.uid == uid && peer_gids.contains(&principal.gid))
+    }
+
+    pub(crate) fn allowed_group_selector_matches(allowed_gids: &[u32], peer_gids: &[u32]) -> bool {
+        !allowed_gids.is_empty()
+            && peer_gids
+                .iter()
+                .any(|peer_gid| allowed_gids.contains(peer_gid))
+    }
+
+    pub(crate) fn local_peer_principal_allowed(config: &Config) -> bool {
+        if matches!(config.auth_mode, AuthMode::Legacy) {
             return true;
         }
-        tokio::time::sleep(Self::RECONNECT_DELAY).await;
-        false
-    }
 
-    async fn request_runtime_task_teardown(&self, client_id: &str, client_origin: &str) {
-        tracing::info!(client_id, client_origin, "notification flow: requesting temporary runtime task teardown");
-        if !send_with_backpressure(&self.bus.client_cmd_tx, ClientCommand::StopRuntimeTasks).await {
-            tracing::warn!(client_id, client_origin, "failed to queue temporary task teardown after notification disconnect");
+        let client_addr = config.client_addr.as_str();
+        if client_addr.starts_with("unix:") || client_addr.starts_with("unix-abstract:") {
+            let Some(peer) = Self::try_unix_peer_credentials(client_addr) else {
+                return false;
+            };
+            return Self::unix_principal_allowed(config, peer);
         }
+        if client_addr.starts_with("http://") || client_addr.starts_with("https://") {
+            return match Self::try_loopback_tcp_listen_socket(client_addr) {
+                Some(_) => Self::loopback_tcp_principal_allowed(config, client_addr),
+                None => true,
+            };
+        }
+        true
     }
 
     pub fn new(
@@ -208,6 +120,7 @@ impl NotificationFlow {
         client_service: ClientService,
         rules: RuleService,
         firewall: FirewallService,
+        audit: AuditService,
     ) -> Self {
         Self {
             bus,
@@ -216,6 +129,7 @@ impl NotificationFlow {
             client_service,
             rules,
             firewall,
+            audit,
         }
     }
 
@@ -240,7 +154,7 @@ impl NotificationFlow {
 
         let drain_alert_overflow = |queue: &mut VecDeque<pb::Alert>| {
             for alert in drain_overflow_alerts(&self.alert_buffer) {
-                queue_alert(queue, Self::build_alert(alert));
+                queue_alert(queue, build_wire_alert(alert));
             }
         };
 
@@ -248,23 +162,43 @@ impl NotificationFlow {
             drain_alert_overflow(&mut queued_alerts);
             let config_snapshot = self.config.get_snapshot();
             let client_addr = config_snapshot.client_addr.as_str();
+            let (nfqueue_overload_policy, ask_timeout_policy) =
+                Self::verdict_fallback_log_context(&config_snapshot);
+            if !Self::local_peer_principal_allowed(&config_snapshot) {
+                if self
+                    .do_reconnect(
+                        &task_reply_rx,
+                        &mut reconnect_state,
+                        &mut active_session_id,
+                        "client",
+                        "local-peer-principal-check",
+                        Some("notification flow connect denied: peer principal not allowed by config"),
+                    )
+                    .await
+                {
+                    break;
+                }
+                continue;
+            }
             let auth_mode = config_snapshot.client_auth.auth_type.as_name();
-            let session_binding = Self::session_binding_from_client_addr(client_addr);
-            let client_id = session_binding.id.clone();
-            let client_origin = Self::client_origin(&session_binding.owner);
-            let current_auth_fingerprint = Self::auth_fingerprint(&config_snapshot);
-            tracing::debug!(client_id, client_origin, addr = %client_addr, "notification flow: connecting to UI endpoint");
+            let preconnect_session_binding =
+                Self::session_binding_from_client_addr(client_addr, &config_snapshot);
+            let preconnect_client_id = preconnect_session_binding.id.clone();
+            let preconnect_client_origin = Self::client_origin(&preconnect_session_binding.owner);
 
-            let mut client = match ClientService::connect_with_config(&config_snapshot).await {
-                Ok(client) => client,
+            let current_auth_fingerprint = Self::auth_fingerprint(&config_snapshot);
+            tracing::debug!(client_id = preconnect_client_id, client_origin = preconnect_client_origin, addr = %client_addr, "notification flow: connecting to UI endpoint");
+
+            let (mut client, server_identity) = match ClientService::connect_with_config_and_server_identity(&config_snapshot).await {
+                Ok(result) => result,
                 Err(err) => {
                     if self
                         .do_reconnect(
                             &task_reply_rx,
                             &mut reconnect_state,
                             &mut active_session_id,
-                            client_id.as_str(),
-                            client_origin.as_str(),
+                            preconnect_client_id.as_str(),
+                            preconnect_client_origin.as_str(),
                             Some(&format!("notification flow connect failed: {err}")),
                         )
                         .await
@@ -274,6 +208,31 @@ impl NotificationFlow {
                     continue;
                 }
             };
+
+            let session_binding = Self::session_binding_from_client_addr_and_server_identity(
+                client_addr,
+                &config_snapshot,
+                server_identity.as_deref(),
+            );
+            let client_id = session_binding.id.clone();
+            let client_origin = Self::client_origin(&session_binding.owner);
+
+            if matches!(
+                session_binding.owner,
+                crate::services::client::ClientPrincipal::RemoteCert { .. }
+            ) {
+                tracing::info!(
+                    client_id,
+                    client_origin,
+                    "remote principal binding resolved from live TLS handshake certificate"
+                );
+                self.audit
+                    .emit(AuditEvent::cold(AuditEventKind::ClientAuthorizationAction(
+                        ClientAuthorizationSignalPayload::RemotePrincipalResolved {
+                            reason: "resolved-from-tls-handshake",
+                        },
+                    )));
+            }
 
             let rules = self.rules.get_proto_snapshot();
             let firewall_state = self.firewall.get_snapshot();
@@ -314,7 +273,11 @@ impl NotificationFlow {
                 .strip_prefix("unix:")
                 .or_else(|| client_addr.strip_prefix("unix-abstract:"))
                 .unwrap_or(client_addr);
-            tracing::debug!(client_id, client_origin, "UI service poller started for socket {poller_addr}");
+            tracing::debug!(
+                client_id,
+                client_origin,
+                "UI service poller started for socket {poller_addr}"
+            );
 
             let stream = match NotificationStream::open(&mut client).await {
                 Ok(stream) => stream,
@@ -339,7 +302,7 @@ impl NotificationFlow {
             let mut inbound = stream.inbound;
             let reply_tx = stream.reply_tx;
             tracing::debug!(client_id, client_origin, "UI auth: {auth_mode}");
-            if !send_with_backpressure(&reply_tx, Self::notification_hello_reply()).await {
+            if !send_with_backpressure(&reply_tx, notification_hello_reply_wire()).await {
                 if self
                     .do_reconnect(
                         &task_reply_rx,
@@ -365,13 +328,21 @@ impl NotificationFlow {
             if !send_with_backpressure(&self.bus.client_cmd_tx, ClientCommand::ResumeRuntimeTasks)
                 .await
             {
-                tracing::warn!(client_id, client_origin, "failed to queue runtime task resume command after UI handshake");
+                tracing::warn!(
+                    client_id,
+                    client_origin,
+                    "failed to queue runtime task resume command after UI handshake"
+                );
             }
 
             while let Some(alert) = queued_alerts.pop_front() {
                 if let Err(err) = client.post_alert(alert.clone()).await {
                     queue_alert(&mut queued_alerts, alert);
-                    tracing::warn!(client_id, client_origin, "failed to flush queued alert to UI endpoint: {err}");
+                    tracing::warn!(
+                        client_id,
+                        client_origin,
+                        "failed to flush queued alert to UI endpoint: {err}"
+                    );
                     break;
                 }
             }
@@ -413,7 +384,7 @@ impl NotificationFlow {
                     maybe_alert = alert_rx.recv() => {
                         match maybe_alert {
                             Some(alert) => {
-                                let pb_alert = Self::build_alert(alert);
+                                let pb_alert = build_wire_alert(alert);
                                 if let Err(err) = client.post_alert(pb_alert.clone()).await {
                                     queue_alert(&mut queued_alerts, pb_alert);
                                     tracing::warn!(client_id, client_origin, "failed to post alert to UI endpoint: {err}");
@@ -433,7 +404,7 @@ impl NotificationFlow {
                                     r#type: action,
                                     data,
                                     rules,
-                                    sys_firewall,
+                                    sys_firewall: firewall,
                                     ..
                                 } = notification;
                                 tracing::info!(
@@ -443,7 +414,7 @@ impl NotificationFlow {
                                     action,
                                     "notification received"
                                 );
-                                if Self::is_stream_close_notification(action) {
+                                if is_stream_close_notification_wire(action) {
                                     tracing::info!(
                                         client_id,
                                         client_origin,
@@ -453,15 +424,228 @@ impl NotificationFlow {
                                     break true;
                                 }
 
-                                let parsed_action = pb::Action::try_from(action)
-                                    .unwrap_or(pb::Action::None);
+                                let parsed_action = command_action_from_notification_wire(action);
+
+                                // Map wire rules to domain models at the adapter boundary.
+                                let mut rules: Vec<RuleRecord> = rules
+                                    .into_iter()
+                                    .map(|r| rule_record_from_proto(&r))
+                                    .collect();
+
+                                // Map wire firewall to domain model at the adapter boundary.
+                                let mut firewall: Option<FirewallConfig> =
+                                    firewall.map(FirewallConfig::from);
+
+                                match Self::normalize_owner_scoped_rule_mutation_rules(
+                                    &config_snapshot,
+                                    &session_binding,
+                                    parsed_action,
+                                    &mut rules,
+                                ) {
+                                    Ok(injected) if injected > 0 => {
+                                        tracing::info!(
+                                            client_id,
+                                            client_origin,
+                                            notification_id = id,
+                                            action,
+                                            auth_mode = config_snapshot.auth_mode.as_name(),
+                                            nfqueue_overload_policy,
+                                            ask_timeout_policy,
+                                            injected,
+                                            "owner-scope constraints injected into rule payload"
+                                        );
+                                        self.audit.emit(AuditEvent::cold(
+                                            AuditEventKind::ClientAuthorizationAction(
+                                                ClientAuthorizationSignalPayload::AllowedOwnerScopeRules {
+                                                    notification_id: id,
+                                                    action: parsed_action,
+                                                    reason: "owner-scope-injected",
+                                                },
+                                            ),
+                                        ));
+                                    }
+                                    Ok(_) => {}
+                                    Err(reason) => {
+                                        tracing::warn!(
+                                            client_id,
+                                            client_origin,
+                                            notification_id = id,
+                                            action,
+                                            auth_mode = config_snapshot.auth_mode.as_name(),
+                                            nfqueue_overload_policy,
+                                            ask_timeout_policy,
+                                            reason,
+                                            "notification command denied during owner-scope normalization"
+                                        );
+                                        self.audit.emit(AuditEvent::cold(
+                                            AuditEventKind::ClientAuthorizationAction(
+                                                ClientAuthorizationSignalPayload::DeniedOwnerScopeRules {
+                                                    notification_id: id,
+                                                    action: parsed_action,
+                                                    reason,
+                                                },
+                                            ),
+                                        ));
+                                        let _ = send_with_backpressure(
+                                            &reply_tx,
+                                            notification_error_reply_wire(id, reason),
+                                        )
+                                        .await;
+                                        continue;
+                                    }
+                                }
+
+                                match Self::normalize_owner_scoped_firewall_reload(
+                                    &config_snapshot,
+                                    &session_binding,
+                                    parsed_action,
+                                    firewall.as_mut(),
+                                ) {
+                                    Ok(injected) if injected > 0 => {
+                                        tracing::info!(
+                                            client_id,
+                                            client_origin,
+                                            notification_id = id,
+                                            action,
+                                            auth_mode = config_snapshot.auth_mode.as_name(),
+                                            nfqueue_overload_policy,
+                                            ask_timeout_policy,
+                                            injected,
+                                            "owner-scope constraints injected into firewall payload"
+                                        );
+                                        self.audit.emit(AuditEvent::cold(
+                                            AuditEventKind::ClientAuthorizationAction(
+                                                ClientAuthorizationSignalPayload::AllowedOwnerScopeFirewall {
+                                                    notification_id: id,
+                                                    action: parsed_action,
+                                                    reason: "owner-scope-injected",
+                                                },
+                                            ),
+                                        ));
+                                    }
+                                    Ok(_) => {}
+                                    Err(reason) => {
+                                        tracing::warn!(
+                                            client_id,
+                                            client_origin,
+                                            notification_id = id,
+                                            action,
+                                            auth_mode = config_snapshot.auth_mode.as_name(),
+                                            nfqueue_overload_policy,
+                                            ask_timeout_policy,
+                                            reason,
+                                            "notification command denied during firewall owner-scope normalization"
+                                        );
+                                        self.audit.emit(AuditEvent::cold(
+                                            AuditEventKind::ClientAuthorizationAction(
+                                                ClientAuthorizationSignalPayload::DeniedOwnerScopeFirewall {
+                                                    notification_id: id,
+                                                    action: parsed_action,
+                                                    reason,
+                                                },
+                                            ),
+                                        ));
+                                        let _ = send_with_backpressure(
+                                            &reply_tx,
+                                            notification_error_reply_wire(id, reason),
+                                        )
+                                        .await;
+                                        continue;
+                                    }
+                                }
+
+                                if let Err(reason) = Self::notification_command_allowed(
+                                    &config_snapshot,
+                                    &session_binding,
+                                    parsed_action,
+                                    &Self::authorization_rule_candidates(
+                                        parsed_action,
+                                        &rules,
+                                        self.rules.get_rule_record_snapshot().as_ref(),
+                                    ),
+                                    firewall.as_ref(),
+                                ) {
+                                    tracing::warn!(
+                                        client_id,
+                                        client_origin,
+                                        notification_id = id,
+                                        action,
+                                        auth_mode = config_snapshot.auth_mode.as_name(),
+                                        nfqueue_overload_policy,
+                                        ask_timeout_policy,
+                                        reason,
+                                        "notification command denied by authorization policy"
+                                    );
+                                    let is_remote_cap_session =
+                                        matches!(session_binding.owner, crate::services::client::ClientPrincipal::RemoteCert { .. });
+                                    self.audit.emit(AuditEvent::cold(
+                                        AuditEventKind::ClientAuthorizationAction(
+                                            if is_remote_cap_session {
+                                                ClientAuthorizationSignalPayload::DeniedRemoteCapability {
+                                                    notification_id: id,
+                                                    action: parsed_action,
+                                                    reason,
+                                                }
+                                            } else {
+                                                ClientAuthorizationSignalPayload::DeniedAuthorizationPolicy {
+                                                    notification_id: id,
+                                                    action: parsed_action,
+                                                    reason,
+                                                }
+                                            },
+                                        ),
+                                    ));
+                                    let _ = send_with_backpressure(
+                                        &reply_tx,
+                                        notification_error_reply_wire(id, reason),
+                                    )
+                                    .await;
+                                    continue;
+                                }
+
+                                Self::log_privileged_authorization_allow(
+                                    &config_snapshot,
+                                    &session_binding,
+                                    id,
+                                    parsed_action,
+                                );
+                                if Self::is_privileged_notification_action(parsed_action) {
+                                    let is_remote_cap_session =
+                                        matches!(session_binding.owner, crate::services::client::ClientPrincipal::RemoteCert { .. });
+                                    self.audit.emit(AuditEvent::cold(
+                                        AuditEventKind::ClientAuthorizationAction(
+                                            if is_remote_cap_session {
+                                                ClientAuthorizationSignalPayload::AllowedRemoteCapability {
+                                                    notification_id: id,
+                                                    action: parsed_action,
+                                                    reason: "remote-capability-authorized",
+                                                }
+                                            } else if matches!(
+                                                config_snapshot.auth_mode,
+                                                crate::config::AuthMode::Legacy
+                                            ) {
+                                                ClientAuthorizationSignalPayload::AllowedAuthorizationPolicy {
+                                                    notification_id: id,
+                                                    action: parsed_action,
+                                                    reason: "legacy-compatibility-mode",
+                                                }
+                                            } else {
+                                                ClientAuthorizationSignalPayload::AllowedAuthorizationPolicy {
+                                                    notification_id: id,
+                                                    action: parsed_action,
+                                                    reason: "local-hardened-policy",
+                                                }
+                                            },
+                                        ),
+                                    ));
+                                }
 
                                 let cmd = match command_from_action_or_reply(
                                             id,
                                             parsed_action,
                                             &data,
                                             rules,
-                                            sys_firewall,
+                                            firewall,
                                             &reply_tx,
                                         )
                                         .await
@@ -471,9 +655,8 @@ impl NotificationFlow {
                                                 tracing::warn!(client_id, client_origin, notification_id = id, "invalid log-level payload in notification");
                                                 let _ = send_with_backpressure(
                                                     &reply_tx,
-                                                    build_notification_reply(
+                                                    notification_error_reply_wire(
                                                         id,
-                                                        pb::NotificationReplyCode::Error,
                                                         "invalid log level payload",
                                                     ),
                                                 )
@@ -488,9 +671,8 @@ impl NotificationFlow {
                                     if !send_with_backpressure(&self.bus.client_cmd_tx, cmd).await {
                                         let _ = send_with_backpressure(
                                             &reply_tx,
-                                            build_notification_reply(
+                                            notification_error_reply_wire(
                                                 id,
-                                                pb::NotificationReplyCode::Error,
                                                 "failed to queue command",
                                             ),
                                         )
@@ -516,7 +698,8 @@ impl NotificationFlow {
                 if let Some(session_id) = active_session_id.take() {
                     self.client_service.disconnect_session(&session_id);
                 }
-                self.request_runtime_task_teardown(client_id.as_str(), client_origin.as_str()).await;
+                self.request_runtime_task_teardown(client_id.as_str(), client_origin.as_str())
+                    .await;
             }
 
             tracing::debug!(client_id, client_origin, "client.disconnect()");
@@ -528,7 +711,8 @@ impl NotificationFlow {
             self.client_service.disconnect_session(&session_id);
         }
         let final_cfg = self.config.get_snapshot();
-        let final_session = Self::session_binding_from_client_addr(final_cfg.client_addr.as_str());
+        let final_session =
+            Self::session_binding_from_client_addr(final_cfg.client_addr.as_str(), &final_cfg);
         let final_client_origin = Self::client_origin(&final_session.owner);
         tracing::info!(client_id = %final_session.id, client_origin = %final_client_origin, "uiClient exit");
         Ok(())
@@ -538,6 +722,7 @@ impl NotificationFlow {
         let tls = &config.client_auth.tls_options;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         config.client_auth.auth_type.as_name().hash(&mut hasher);
+        config.auth_mode.as_name().hash(&mut hasher);
         tls.ca_cert.hash(&mut hasher);
         tls.server_cert.hash(&mut hasher);
         tls.server_key.hash(&mut hasher);
@@ -545,6 +730,9 @@ impl NotificationFlow {
         tls.client_key.hash(&mut hasher);
         tls.client_auth_type.hash(&mut hasher);
         tls.skip_verify.hash(&mut hasher);
+        config.local_control_allowed_principals.hash(&mut hasher);
+        config.local_control_allowed_group_gids.hash(&mut hasher);
+        config.remote_principal_bindings.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -554,55 +742,15 @@ impl NotificationFlow {
         crate::config::DefaultAction::from_raw_config_json(raw_config_json)
     }
 
-    fn build_alert(alert: UiAlert) -> pb::Alert {
-        let UiAlert {
-            alert_type,
-            action,
-            priority,
-            what,
-            data,
-        } = alert;
-
-        let data = match data {
-            UiAlertData::Text(text) => pb::alert::Data::Text(text),
-            UiAlertData::Connection(conn) => pb::alert::Data::Conn(conn),
-            UiAlertData::Process(proc_info) => pb::alert::Data::Proc(proc_info),
-        };
-
-        pb::Alert {
-            id: u64::try_from(unix_epoch_nanos()).unwrap_or(u64::MAX),
-            r#type: alert_type,
-            action,
-            priority,
-            what,
-            data: Some(data),
-        }
-    }
-
-    pub(crate) fn notification_hello_reply() -> pb::NotificationReply {
-        build_notification_reply(0, pb::NotificationReplyCode::Ok, String::new())
-    }
-
+    #[cfg(test)]
     pub(crate) fn is_stream_close_notification(action: i32) -> bool {
-        action <= pb::Action::None as i32
+        is_stream_close_notification_wire(action)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn notification_hello_reply() -> pb::NotificationReply {
+        notification_hello_reply_wire()
     }
 }
 
-#[derive(Debug)]
-struct ReconnectState {
-    started_at: Instant,
-    failures: u64,
-    last_warn_at: Option<Instant>,
-    suppressed_warns: u64,
-}
-
-impl Default for ReconnectState {
-    fn default() -> Self {
-        Self {
-            started_at: Instant::now(),
-            failures: 0,
-            last_warn_at: None,
-            suppressed_warns: 0,
-        }
-    }
-}
+use super::session::ReconnectState;

@@ -18,8 +18,8 @@ use crate::workers::{
     runtime::control::{ThreadWorkerControl, WorkerControl},
 };
 
-use super::runtime_lifecycle::ProcessLifecycle;
 use super::cache::ProcessCache;
+use super::runtime_lifecycle::ProcessLifecycle;
 
 pub struct ProcessRuntime {
     pub(super) state: Mutex<ProcessWorkerState>,

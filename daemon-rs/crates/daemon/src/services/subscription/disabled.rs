@@ -1,11 +1,13 @@
 use opensnitch_proto::pb;
 use tokio_util::sync::CancellationToken;
 
+use crate::services::audit::AuditService;
 use crate::services::stats::StatsService;
 
 #[derive(Clone, Default)]
 pub struct SubscriptionService;
 
+#[allow(dead_code)]
 impl SubscriptionService {
     #[allow(dead_code)]
     pub fn new<T, U>(_storage: T, _root_dir: U) -> Self {
@@ -51,6 +53,7 @@ impl SubscriptionService {
         shutdown: CancellationToken,
         _stats: StatsService,
         _rules: crate::services::rule::RuleService,
+        _audit: AuditService,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             shutdown.cancelled().await;

@@ -1,10 +1,10 @@
-use anyhow::Result;
 use crate::services::lifecycle::{ServiceFactory, ServiceRuntimeControl};
+use anyhow::Result;
 
-#[cfg(feature = "subscriptions")]
-use super::subscription::SubscriptionService;
 #[cfg(not(feature = "subscriptions"))]
 use super::disabled::SubscriptionService;
+#[cfg(feature = "subscriptions")]
+use super::subscription::SubscriptionService;
 
 #[cfg(feature = "subscriptions")]
 impl SubscriptionService {

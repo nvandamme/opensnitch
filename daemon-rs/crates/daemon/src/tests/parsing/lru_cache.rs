@@ -6,7 +6,7 @@
 use quick_cache::Weighter;
 
 use crate::utils::lru_cache::{
-    global_dual_layer_metrics_snapshot, ConcurrentLruCache, DualLayerLruMap, SyncDualLayerLruMap,
+    ConcurrentLruCache, DualLayerLruMap, SyncDualLayerLruMap, global_dual_layer_metrics_snapshot,
 };
 
 #[test]
@@ -93,7 +93,7 @@ fn global_metrics_count_hits_and_misses() {
     let before = global_dual_layer_metrics_snapshot();
     let cache: ConcurrentLruCache<String, u32> = ConcurrentLruCache::new(8);
     cache.insert("x".to_string(), 42);
-    let _ = cache.get("x");     // hit
+    let _ = cache.get("x"); // hit
     let _ = cache.get("absent"); // miss
     let after = global_dual_layer_metrics_snapshot();
     let delta = after.saturating_delta(before);

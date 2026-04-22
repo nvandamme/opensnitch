@@ -3,8 +3,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     flows::verdict::VerdictFlow,
-    models::connection_state::ConnectionAttempt,
-    services::stats::StatsService,
+    models::{
+        audit::{AuditEvent, AuditEventKind, ConnectFlowAction},
+        connection_state::ConnectionAttempt,
+    },
+    services::{audit::AuditService, stats::StatsService},
     tunables::RuntimeTunables,
     workers::runtime::{
         connect::dispatch as connect_dispatch, support, verdict::dispatch as verdict_dispatch,
@@ -16,6 +19,7 @@ pub struct ConnectFlow {
     shutdown: CancellationToken,
     tunables: RuntimeTunables,
     verdict_tx: tokio::sync::mpsc::Sender<crate::models::verdict_rpc::VerdictReply>,
+    verbose_hot_path_audit: bool,
 }
 
 impl ConnectFlow {
@@ -23,11 +27,13 @@ impl ConnectFlow {
         shutdown: CancellationToken,
         tunables: RuntimeTunables,
         verdict_tx: tokio::sync::mpsc::Sender<crate::models::verdict_rpc::VerdictReply>,
+        verbose_hot_path_audit: bool,
     ) -> Self {
         Self {
             shutdown,
             tunables,
             verdict_tx,
+            verbose_hot_path_audit,
         }
     }
 
@@ -35,12 +41,14 @@ impl ConnectFlow {
         self,
         flow: VerdictFlow,
         stats: StatsService,
+        audit: AuditService,
         mut connect_rx: tokio::sync::mpsc::Receiver<ConnectionAttempt>,
     ) -> JoinHandle<()> {
         let shutdown = self.shutdown.clone();
         let daemon_pid = std::process::id();
         let tunables = self.tunables;
         let verdict_tx = self.verdict_tx.clone();
+        let verbose_hot_path_audit = self.verbose_hot_path_audit;
 
         let mut worker_handles = Vec::with_capacity(tunables.max_concurrent_connect_attempts);
         let mut worker_txs = Vec::with_capacity(tunables.max_concurrent_connect_attempts);
@@ -105,6 +113,11 @@ impl ConnectFlow {
                                     .await;
                                 } else {
                                     stats.on_connect_attempt(&attempt);
+                                    if verbose_hot_path_audit {
+                                        audit.emit(AuditEvent::hot(AuditEventKind::ConnectFlowAction(
+                                            ConnectFlowAction::ConnectionTracked,
+                                        )));
+                                    }
                                     if !connect_dispatch::dispatch_connect_attempt_to_worker(
                                         &worker_txs,
                                         &mut next_worker,
@@ -113,6 +126,11 @@ impl ConnectFlow {
                                     )
                                     .await
                                     {
+                                        audit.emit(AuditEvent::hot(
+                                            AuditEventKind::ConnectFlowAction(
+                                                ConnectFlowAction::ConnectionDropped,
+                                            ),
+                                        ));
                                         break;
                                     }
                                 }
@@ -135,6 +153,11 @@ impl ConnectFlow {
                                         .await;
                                     } else {
                                         stats.on_connect_attempt(&next);
+                                        if verbose_hot_path_audit {
+                                            audit.emit(AuditEvent::hot(AuditEventKind::ConnectFlowAction(
+                                                ConnectFlowAction::ConnectionTracked,
+                                            )));
+                                        }
                                         if !connect_dispatch::dispatch_connect_attempt_to_worker(
                                             &worker_txs,
                                             &mut next_worker,
@@ -143,6 +166,11 @@ impl ConnectFlow {
                                         )
                                         .await
                                         {
+                                            audit.emit(AuditEvent::hot(
+                                                AuditEventKind::ConnectFlowAction(
+                                                    ConnectFlowAction::ConnectionDropped,
+                                                ),
+                                            ));
                                             break;
                                         }
                                     }

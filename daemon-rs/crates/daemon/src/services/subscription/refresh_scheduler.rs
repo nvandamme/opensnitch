@@ -1,9 +1,11 @@
-use opensnitch_proto::pb;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use super::SubscriptionService;
 use super::refresh_timing::scheduler_wake_duration;
+use crate::models::audit::{AuditEvent, AuditEventKind, SubscriptionAction};
+use crate::models::subscription_rpc::{SubscriptionCommand, SubscriptionOperation};
+use crate::services::audit::AuditService;
 use crate::services::rule::RuleService;
 use crate::services::stats::StatsService;
 
@@ -23,6 +25,7 @@ impl SubscriptionService {
         shutdown: CancellationToken,
         stats: StatsService,
         rules: RuleService,
+        audit: AuditService,
     ) -> tokio::task::JoinHandle<()> {
         let service = self.clone();
         tokio::spawn(async move {
@@ -37,12 +40,28 @@ impl SubscriptionService {
                     break;
                 }
 
-                let req = pb::SubscriptionRequest {
-                    operation: pb::SubscriptionAction::Refresh as i32,
-                    force: false,
-                    ..Default::default()
-                };
-                let reply = service.handle_request(req).await;
+                let reply = service
+                    .handle_command(SubscriptionCommand {
+                        operation: SubscriptionOperation::Refresh,
+                        subscriptions: Vec::new(),
+                        targets: Vec::new(),
+                        force: false,
+                    })
+                    .await;
+                for sub in &reply.subscriptions {
+                    audit.emit(AuditEvent::cold(AuditEventKind::SubscriptionAction(
+                        SubscriptionAction::RefreshCompleted {
+                            name: sub.name.as_str().into(),
+                        },
+                    )));
+                }
+                for err in &reply.errors {
+                    audit.emit(AuditEvent::cold(AuditEventKind::SubscriptionAction(
+                        SubscriptionAction::RefreshFailed {
+                            reason: err.as_str().into(),
+                        },
+                    )));
+                }
                 if !(reply.subscriptions.is_empty() && !reply.accepted) {
                     debug!(
                         message = %reply.message,

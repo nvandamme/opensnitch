@@ -1,7 +1,7 @@
 use netlink_socket2::MulticastSocketRaw;
 use tokio_util::sync::CancellationToken;
 
-use crate::services::firewall::FirewallService;
+use crate::services::{firewall::FirewallService, rule::RuleService};
 
 /// NFNLGRP_NFTABLES (group 7) — emitted by the kernel on any nftables ruleset
 /// change: table/chain/rule add, delete, or flush.  Subscribing to this group
@@ -16,7 +16,8 @@ const NFNLGRP_NFTABLES: u32 = 7;
 /// Spawn a background tokio task that subscribes to the NFNLGRP_NFTABLES
 /// multicast group on the `NETLINK_NETFILTER` (12) socket family and calls
 /// [`FirewallService::heal_if_drifted`] whenever the kernel emits a nftables
-/// ruleset-change notification.
+/// ruleset-change notification, then refreshes rule caches so firewall-native
+/// alias/zone changes can flow into the rule engine.
 ///
 /// The task exits silently when `shutdown` is cancelled or when the underlying
 /// netlink socket errors (e.g. socket closed, receive error).
@@ -26,6 +27,7 @@ const NFNLGRP_NFTABLES: u32 = 7;
 /// `workers/firewall/firewall_worker.rs` remains the safety-net fallback.
 pub(crate) fn spawn_nft_drift_listener(
     firewall: FirewallService,
+    rules: RuleService,
     shutdown: CancellationToken,
 ) {
     // NETLINK_NETFILTER = 12 (libc::NETLINK_NETFILTER as u16)
@@ -66,6 +68,10 @@ pub(crate) fn spawn_nft_drift_listener(
                             tracing::debug!("nftables rule-change event received; checking firewall drift");
                             if let Err(err) = firewall.heal_if_drifted().await {
                                 tracing::warn!("firewall drift heal after nft event failed: {err}");
+                                continue;
+                            }
+                            if let Err(err) = rules.rebuild_caches_from_snapshot().await {
+                                tracing::warn!("failed to rebuild rule caches after nftables event: {err}");
                             }
                         }
                         Err(err) => {

@@ -3,11 +3,13 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::{
-    models::command_rpc::{ClientCommand, IncomingTaskNotification, TaskNotification},
-    utils::{
-        json_value::object_get_case_insensitive,
-        notification_reply::send_notification_reply,
+    models::{
+        command_action::CommandAction,
+        command_rpc::{ClientCommand, IncomingTaskNotification, TaskNotification},
+        firewall_config::FirewallConfig,
+        rule_record::RuleRecord,
     },
+    utils::{json_value::object_get_case_insensitive, notification_reply::send_notification_reply},
 };
 
 const CLIENT_COMMAND_NOTIFICATION_LABEL: &str = "client command notification";
@@ -20,58 +22,72 @@ pub(crate) enum NotificationCommandDecision {
 
 pub(crate) async fn command_from_action_or_reply(
     notification_id: u64,
-    action: pb::Action,
+    action: CommandAction,
     data: &str,
-    rules: Vec<pb::Rule>,
-    sys_firewall: Option<pb::SysFirewall>,
+    rules: Vec<RuleRecord>,
+    firewall: Option<FirewallConfig>,
     reply_tx: &mpsc::Sender<pb::NotificationReply>,
 ) -> NotificationCommandDecision {
-    if let Some(toggle_cmd) = parse_toggle_command(notification_id, &action) {
+    if let Some(toggle_cmd) = parse_toggle_command(notification_id, action) {
         return NotificationCommandDecision::Command(toggle_cmd);
     }
 
     match action {
-        pb::Action::ReloadFwRules => NotificationCommandDecision::Command(
-            ClientCommand::ReloadFirewall {
+        CommandAction::ReloadFwRules => {
+            NotificationCommandDecision::Command(ClientCommand::ReloadFirewall {
                 notification_id,
-                sys_firewall,
-            },
-        ),
-        pb::Action::ChangeConfig => NotificationCommandDecision::Command(ClientCommand::ApplyConfig {
-            notification_id,
-            raw_json: data.to_string(),
-        }),
-        pb::Action::EnableRule => NotificationCommandDecision::Command(ClientCommand::EnableRules {
-            notification_id,
-            rules,
-        }),
-        pb::Action::DisableRule => NotificationCommandDecision::Command(ClientCommand::DisableRules {
-            notification_id,
-            rules,
-        }),
-        pb::Action::DeleteRule => NotificationCommandDecision::Command(ClientCommand::DeleteRules {
-            notification_id,
-            rule_names: rules.into_iter().map(|rule| rule.name).collect(),
-        }),
-        pb::Action::ChangeRule => NotificationCommandDecision::Command(ClientCommand::UpsertRules {
-            notification_id,
-            rules,
-        }),
-        pb::Action::TaskStart => {
-            if let Some(cmd) = parse_task_command_or_reply(notification_id, data, reply_tx, true).await {
+                firewall,
+            })
+        }
+        CommandAction::ChangeConfig => {
+            NotificationCommandDecision::Command(ClientCommand::ApplyConfig {
+                notification_id,
+                raw_json: data.to_string(),
+            })
+        }
+        CommandAction::EnableRule => {
+            NotificationCommandDecision::Command(ClientCommand::EnableRules {
+                notification_id,
+                rules,
+            })
+        }
+        CommandAction::DisableRule => {
+            NotificationCommandDecision::Command(ClientCommand::DisableRules {
+                notification_id,
+                rules,
+            })
+        }
+        CommandAction::DeleteRule => {
+            NotificationCommandDecision::Command(ClientCommand::DeleteRules {
+                notification_id,
+                rule_names: rules.into_iter().map(|rule| rule.name).collect(),
+            })
+        }
+        CommandAction::ChangeRule => {
+            NotificationCommandDecision::Command(ClientCommand::UpsertRules {
+                notification_id,
+                rules,
+            })
+        }
+        CommandAction::TaskStart => {
+            if let Some(cmd) =
+                parse_task_command_or_reply(notification_id, data, reply_tx, true).await
+            {
                 NotificationCommandDecision::Command(cmd)
             } else {
                 NotificationCommandDecision::None
             }
         }
-        pb::Action::TaskStop => {
-            if let Some(cmd) = parse_task_command_or_reply(notification_id, data, reply_tx, false).await {
+        CommandAction::TaskStop => {
+            if let Some(cmd) =
+                parse_task_command_or_reply(notification_id, data, reply_tx, false).await
+            {
                 NotificationCommandDecision::Command(cmd)
             } else {
                 NotificationCommandDecision::None
             }
         }
-        pb::Action::LogLevel => parse_log_level_data(data)
+        CommandAction::LogLevel => parse_log_level_data(data)
             .map(|level| {
                 NotificationCommandDecision::Command(ClientCommand::SetLogLevel {
                     notification_id,
@@ -79,10 +95,14 @@ pub(crate) async fn command_from_action_or_reply(
                 })
             })
             .unwrap_or(NotificationCommandDecision::InvalidLogLevel),
-        pb::Action::Stop => NotificationCommandDecision::Command(ClientCommand::Shutdown {
-            notification_id,
-        }),
-        _ => NotificationCommandDecision::None,
+        CommandAction::Stop => {
+            NotificationCommandDecision::Command(ClientCommand::Shutdown { notification_id })
+        }
+        CommandAction::EnableInterception
+        | CommandAction::DisableInterception
+        | CommandAction::EnableFirewall
+        | CommandAction::DisableFirewall => NotificationCommandDecision::None,
+        CommandAction::None => NotificationCommandDecision::None,
     }
 }
 
@@ -104,7 +124,10 @@ async fn parse_task_command_or_reply(
             if start {
                 tracing::warn!(notification_id = id, "invalid task-start payload: {err}");
             } else {
-                tracing::warn!(notification_id = id, "invalid task-stop payload in notification");
+                tracing::warn!(
+                    notification_id = id,
+                    "invalid task-stop payload in notification"
+                );
             }
 
             let data = if start {
@@ -125,21 +148,21 @@ async fn parse_task_command_or_reply(
     }
 }
 
-fn parse_toggle_command(notification_id: u64, action: &pb::Action) -> Option<ClientCommand> {
-    match *action {
-        pb::Action::EnableInterception => Some(ClientCommand::SetInterception {
+fn parse_toggle_command(notification_id: u64, action: CommandAction) -> Option<ClientCommand> {
+    match action {
+        CommandAction::EnableInterception => Some(ClientCommand::SetInterception {
             notification_id,
             enabled: true,
         }),
-        pb::Action::DisableInterception => Some(ClientCommand::SetInterception {
+        CommandAction::DisableInterception => Some(ClientCommand::SetInterception {
             notification_id,
             enabled: false,
         }),
-        pb::Action::EnableFirewall => Some(ClientCommand::SetFirewall {
+        CommandAction::EnableFirewall => Some(ClientCommand::SetFirewall {
             notification_id,
             enabled: true,
         }),
-        pb::Action::DisableFirewall => Some(ClientCommand::SetFirewall {
+        CommandAction::DisableFirewall => Some(ClientCommand::SetFirewall {
             notification_id,
             enabled: false,
         }),
@@ -184,4 +207,3 @@ pub(crate) fn parse_log_level_data(raw_data: &str) -> Option<i32> {
         _ => None,
     }
 }
-

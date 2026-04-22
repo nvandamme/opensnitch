@@ -9,9 +9,7 @@ mod resolution;
 mod runtime_lifecycle;
 
 #[allow(unused_imports)]
-pub use crate::models::connection_worker_state::{
-	ConnectionWorkerState, ConnectionWorkerKind,
-};
-#[allow(unused_imports)]
 pub use crate::models::connection_context::ConnectionContext;
+#[allow(unused_imports)]
+pub use crate::models::connection_worker_state::{ConnectionWorkerKind, ConnectionWorkerState};
 pub use connection::*;

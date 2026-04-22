@@ -73,10 +73,18 @@ impl SubscriptionStorage {
         out
     }
 
+    #[allow(dead_code)] // used by tests
     pub fn apply(&self, items: Vec<pb::Subscription>) -> Vec<pb::Subscription> {
+        let records = items.iter().map(proto_to_record).collect();
+        self.apply_records(records)
+            .into_iter()
+            .map(|record| record_to_proto(&record))
+            .collect()
+    }
+
+    pub(crate) fn apply_records(&self, items: Vec<SubscriptionRecord>) -> Vec<SubscriptionRecord> {
         let mut inner = self.inner.lock().expect("subscription storage poisoned");
-        for item in &items {
-            let mut record = proto_to_record(item);
+        for mut record in items {
             if let Some(existing) = inner.items.get(&record.id)
                 && existing.url == record.url
             {
@@ -88,7 +96,7 @@ impl SubscriptionStorage {
             inner.items.insert(record.id.clone(), record);
         }
         inner.dirty = true;
-        let mut out: Vec<_> = inner.items.values().map(record_to_proto).collect();
+        let mut out: Vec<_> = inner.items.values().cloned().collect();
         sort_by_string_key(&mut out, |item| item.id.as_str());
         out
     }
@@ -100,12 +108,12 @@ impl SubscriptionStorage {
         out
     }
 
-    pub(crate) fn put_record(&self, record: SubscriptionRecord) -> pb::Subscription {
+    pub(crate) fn put_record(&self, record: SubscriptionRecord) -> SubscriptionRecord {
         let mut inner = self.inner.lock().expect("subscription storage poisoned");
-        let proto = record_to_proto(&record);
+        let out = record.clone();
         inner.items.insert(record.id.clone(), record);
         inner.dirty = true;
-        proto
+        out
     }
 
     pub fn delete(&self, ids: &[String]) {
@@ -182,9 +190,10 @@ impl SubscriptionStorage {
         let mut total = 0u64;
         let mut ready = 0u64;
         let mut error = 0u64;
-        let mut by_status: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-        let mut by_group:  std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-        let mut by_node:   std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        let mut by_status: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        let mut by_group: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        let mut by_node: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
         for record in inner.items.values() {
             total += 1;
             match record.status.as_str() {

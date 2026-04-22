@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    services::{config::ConfigService, firewall::FirewallService},
+    platform::ports::nft_monitor_port::NftMonitorPort,
+    services::{config::ConfigService, firewall::FirewallService, rule::RuleService},
     utils::duration_parse::{DurationParseOptions, parse_human_duration},
     workers::{
         runtime::control::WorkerControl,
@@ -37,6 +38,7 @@ pub(crate) fn parse_firewall_monitor_interval(raw: &str) -> std::time::Duration 
 struct FirewallWatchControl {
     firewall: FirewallService,
     config: ConfigService,
+    rules: RuleService,
 }
 
 impl WatchWorkerControl for FirewallWatchControl {
@@ -68,6 +70,7 @@ impl WatchWorkerControl for FirewallWatchControl {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         let firewall = self.firewall.clone();
         let config = self.config.clone();
+        let rules = self.rules.clone();
         Box::pin(async move {
             let snapshot = config.get_snapshot();
             let interval =
@@ -75,8 +78,18 @@ impl WatchWorkerControl for FirewallWatchControl {
             if interval.is_zero() {
                 return;
             }
-            if let Err(err) = firewall.heal_if_drifted().await {
-                tracing::warn!("failed to heal firewall drift: {err}");
+            match firewall.heal_if_drifted().await {
+                Ok(true) => {
+                    if let Err(err) = rules.rebuild_caches_from_snapshot().await {
+                        tracing::warn!(
+                            "failed to rebuild rule caches after firewall drift heal: {err}"
+                        );
+                    }
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!("failed to heal firewall drift: {err}");
+                }
             }
         })
     }
@@ -85,11 +98,14 @@ impl WatchWorkerControl for FirewallWatchControl {
 pub(crate) fn start(
     firewall: FirewallService,
     config: ConfigService,
+    rules: RuleService,
     shutdown: CancellationToken,
 ) -> Box<dyn WorkerControl> {
-    crate::platform::adapters::nft_monitor::spawn_nft_drift_listener(
-        firewall.clone(),
-        shutdown.clone(),
-    );
-    FirewallWatchControl { firewall, config }.build(shutdown)
+    NftMonitorPort::spawn_nft_drift_listener(firewall.clone(), rules.clone(), shutdown.clone());
+    FirewallWatchControl {
+        firewall,
+        config,
+        rules,
+    }
+    .build(shutdown)
 }

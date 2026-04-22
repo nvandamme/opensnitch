@@ -11,12 +11,7 @@ pub(crate) fn status_payload(status: &str) -> String {
     serde_json::json!({"status": status}).to_string()
 }
 
-fn log_notification_reply(
-    id: u64,
-    code: pb::NotificationReplyCode,
-    data: &str,
-    log_label: &str,
-) {
+fn log_notification_reply(id: u64, code: pb::NotificationReplyCode, data: &str, log_label: &str) {
     if is_ok_reply_code(code) {
         tracing::info!(notification_id = id, reply_data = %data, "{log_label}");
     } else {

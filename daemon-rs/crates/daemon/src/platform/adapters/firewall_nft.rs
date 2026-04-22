@@ -357,8 +357,8 @@ impl FirewallNftAdapter {
         Self::interception_rules_valid_impl().await
     }
 
-    pub async fn interception_rules_health_report(
-    ) -> Result<crate::platform::ports::firewall_port::InterceptionHealth> {
+    pub async fn interception_rules_health_report()
+    -> Result<crate::platform::ports::firewall_port::InterceptionHealth> {
         if resolve_command_path("nft").is_none() {
             return Ok(crate::platform::ports::firewall_port::InterceptionHealth {
                 valid: false,
@@ -560,7 +560,10 @@ impl FirewallNftAdapter {
             if !stderr.is_empty() {
                 tracing::warn!("nftables: error applying changes: {stderr}");
             }
-            bail!("nft command failed: {}", String::from_utf8_lossy(&out.stderr));
+            bail!(
+                "nft command failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
 
         Ok(())

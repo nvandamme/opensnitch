@@ -53,6 +53,7 @@ async fn connect_flow_self_connect_emits_allow_verdict() {
         RuleService::default(),
         ConnectionService::new(process, dns),
         StatsService::default(),
+        crate::services::audit::AuditService::new(32),
     );
 
     let shutdown = CancellationToken::new();
@@ -60,9 +61,15 @@ async fn connect_flow_self_connect_emits_allow_verdict() {
         shutdown.clone(),
         RuntimeTunables::default(),
         bus.verdict_tx.clone(),
+        false,
     );
 
-    let join = flow.spawn(verdict_flow, StatsService::default(), connect_rx);
+    let join = flow.spawn(
+        verdict_flow,
+        StatsService::default(),
+        crate::services::audit::AuditService::new(32),
+        connect_rx,
+    );
 
     bus.connect_tx
         .send(self_connect_attempt(42))

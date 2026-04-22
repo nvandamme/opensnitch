@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use opensnitch_proto::pb;
 
 use crate::{
     config::Config,
-    models::firewall_state::{FirewallBackend, FirewallState},
+    models::{
+        firewall_config::FirewallConfig,
+        firewall_state::{FirewallBackend, FirewallState},
+    },
 };
 
 use super::{firewall::FirewallService, runtime_store::FirewallRuntime};
@@ -125,7 +127,7 @@ impl FirewallService {
 
     pub async fn replace_system_firewall(
         &self,
-        system_firewall: Option<pb::SysFirewall>,
+        system_firewall: Option<FirewallConfig>,
         config: &Config,
     ) -> Result<()> {
         if let Some(sysfw) = system_firewall.as_ref() {

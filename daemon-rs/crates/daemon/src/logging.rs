@@ -200,8 +200,7 @@ impl LoggingState {
             if logger.name.trim().is_empty() {
                 continue;
             }
-            let supported =
-                case_folded(&logger.protocol) == "udp" && !logger.server.is_empty();
+            let supported = case_folded(&logger.protocol) == "udp" && !logger.server.is_empty();
             warn!(
                 logger_name = %logger.name,
                 logger_format = %logger.format,

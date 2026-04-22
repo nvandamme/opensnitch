@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::services::task::naming as task_runtime_naming;
-use crate::utils::duration_parse::{parse_human_duration, TASK_INTERVAL_OPTIONS};
+use crate::utils::duration_parse::{TASK_INTERVAL_OPTIONS, parse_human_duration};
 use crate::utils::json_value;
 use crate::utils::proc_fs::proc_pid_exists;
 
@@ -24,7 +24,7 @@ pub(crate) fn validate_task_start_input(task_name: &str, data: &Value) -> Result
                 task_name,
                 task_runtime_naming::TASK_NODE_MONITOR,
             )
-                .is_none()
+            .is_none()
             {
                 return Err("invalid node for node-monitor".to_string());
             }
@@ -48,8 +48,7 @@ pub(crate) fn validate_task_start_input(task_name: &str, data: &Value) -> Result
         "pid",
         task_name,
         task_runtime_naming::TASK_PID_MONITOR,
-    )
-    else {
+    ) else {
         return Err("invalid pid for pid-monitor".to_string());
     };
 

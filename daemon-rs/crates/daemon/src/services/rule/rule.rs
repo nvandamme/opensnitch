@@ -6,9 +6,7 @@ use std::{
 use super::cache_types::RuleMatchCaches;
 use super::dispatch::ActiveOperatorDispatch;
 use super::matching::{AttemptDerived, AttemptTextNeeds};
-use super::{
-    rule_record_from_proto, rule_record_now_timestamp, rule_record_to_proto,
-};
+use super::{rule_record_from_proto, rule_record_now_timestamp, rule_record_to_proto};
 use crate::models::{
     connection_state::ConnectionAttempt,
     process_state::ProcessInfo,
@@ -43,6 +41,7 @@ pub struct RuleService {
     snapshot_tx: watch::Sender<Arc<RuleSnapshot>>,
     snapshot_rx: watch::Receiver<Arc<RuleSnapshot>>,
     pub(super) update_lock: Arc<Mutex<()>>,
+    pub(super) network_aliases_path: Arc<PathBuf>,
 }
 
 impl Default for RuleService {
@@ -52,6 +51,7 @@ impl Default for RuleService {
             snapshot_tx,
             snapshot_rx,
             update_lock: Arc::new(Mutex::new(())),
+            network_aliases_path: Arc::new(Self::resolve_default_network_aliases_path()),
         }
     }
 }
@@ -65,13 +65,42 @@ impl RuleService {
         self.snapshot_tx.send_replace(Arc::new(next));
     }
 
+    /// Resolve the network aliases file path at service construction time.
+    ///
+    /// Priority order mirrors the Go daemon's fixed `/etc/opensnitchd/network_aliases.json`
+    /// default, extended with an env-var escape hatch for tests and a dev-tree fallback:
+    ///   1. `OPENSNITCH_NETWORK_ALIASES_FILE` env var (tests + CI override)
+    ///   2. `/etc/opensnitchd/network_aliases.json` (system install)
+    ///   3. `daemon/data/network_aliases.json` relative to crate root (dev checkout)
+    pub(super) fn resolve_default_network_aliases_path() -> PathBuf {
+        if let Some(path) = std::env::var_os("OPENSNITCH_NETWORK_ALIASES_FILE").map(PathBuf::from)
+            && path.exists()
+        {
+            return path;
+        }
+        let system = PathBuf::from("/etc/opensnitchd/network_aliases.json");
+        if system.exists() {
+            return system;
+        }
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join("daemon/data/network_aliases.json")
+    }
+
+    /// Override the network aliases path resolved at construction time with an
+    /// explicit path from the loaded `Config`.  Call this in daemon bootstrap
+    /// after the config is loaded.
+    pub fn set_network_aliases_path(&mut self, path: PathBuf) {
+        self.network_aliases_path = Arc::new(path);
+    }
+
     pub(super) async fn build_and_publish_snapshot(
         &self,
         rules_path: &Path,
         rules: Vec<RuleRecord>,
     ) -> Result<usize> {
         let count = rules.len();
-        let caches = Self::build_match_caches(&rules).await?;
+        let caches = Self::build_match_caches(&rules, self.network_aliases_path.as_path()).await?;
         let active_rules = rules
             .iter()
             .filter(|rule| rule.enabled)
@@ -123,8 +152,25 @@ impl RuleService {
         self.load_path(snapshot.rules_path.as_path()).await
     }
 
+    /// Rebuilds rule match caches from the current in-memory snapshot (no disk I/O).
+    ///
+    /// Called after a firewall reload so that network alias entries stay
+    /// consistent with firewall-native zone/set definitions.  When a
+    /// `FirewallZonePort` is added in the future, this is the correct call-site
+    /// to merge those zone definitions into `RuleMatchCaches::network_aliases`.
+    pub async fn rebuild_caches_from_snapshot(&self) -> Result<usize> {
+        let _update_guard = self.update_lock.lock().await;
+        let (rules_path, rules) = {
+            let snap = self.snapshot();
+            (snap.rules_path.as_ref().clone(), snap.rules.clone())
+        };
+        self.build_and_publish_snapshot(&rules_path, rules).await
+    }
+
     /// Reload using synchronous file I/O batched in a single blocking call.
-    /// Avoids per-file `spawn_blocking` roundtrips on the inotify fast path.
+    /// Uses `spawn_blocking` to keep the tokio thread free. Prefer
+    /// `reload_inline` on fast paths where the blocking-pool hop is costly.
+    #[allow(dead_code)]
     pub async fn reload_sync(&self) -> Result<usize> {
         let _update_guard = self.update_lock.lock().await;
         let snapshot = self.snapshot();
@@ -133,6 +179,26 @@ impl RuleService {
             tokio::task::spawn_blocking(move || Self::load_rules_from_path_sync(&path))
                 .await
                 .map_err(|e| anyhow::anyhow!("sync rule load join: {e}"))??;
+        let loaded_count = self
+            .build_and_publish_snapshot(snapshot.rules_path.as_path(), loaded)
+            .await?;
+        for (rule_name, duration) in temporary_rules {
+            self.schedule_temporary_rule(rule_name, duration);
+        }
+        Ok(loaded_count)
+    }
+
+    /// Reload rules inline on the current thread — no `spawn_blocking` hop.
+    ///
+    /// The rules directory typically contains a handful of small JSON files
+    /// (< 1 KB each).  Reading them synchronously takes microseconds, well
+    /// below tokio's cooperative budget.  Skipping the blocking-pool round-
+    /// trip saves ~3-5 ms per reload, which is the dominant cost on the
+    /// inotify-triggered cold path.
+    pub async fn reload_inline(&self) -> Result<usize> {
+        let _update_guard = self.update_lock.lock().await;
+        let snapshot = self.snapshot();
+        let (loaded, temporary_rules) = Self::load_rules_from_path_sync(&snapshot.rules_path)?;
         let loaded_count = self
             .build_and_publish_snapshot(snapshot.rules_path.as_path(), loaded)
             .await?;
@@ -214,8 +280,12 @@ impl RuleService {
             .map(|(decision, _)| decision))
     }
 
+    #[allow(dead_code)] // used by tests; production hook point for gRPC rule upsert
     pub async fn upsert_from_proto(&self, rule: &pb::Rule) -> Result<RuleMatchDecision> {
-        let mut record = rule_record_from_proto(rule);
+        self.upsert_rule_record(rule_record_from_proto(rule)).await
+    }
+
+    pub async fn upsert_rule_record(&self, mut record: RuleRecord) -> Result<RuleMatchDecision> {
         let now = rule_record_now_timestamp();
         if record.created_at.is_none() {
             record.created_at = Some(now);
@@ -235,6 +305,10 @@ impl RuleService {
         self.upsert_record(record).await?;
         Ok(decision)
     }
+
+    pub fn get_rule_record_snapshot(&self) -> Arc<Vec<RuleRecord>> {
+        Arc::new(self.snapshot().rules.clone())
+    }
 }
 
 impl RuleService {
@@ -253,7 +327,10 @@ impl RuleService {
     /// The operator tree is walked recursively, so composite `list` rules whose children
     /// are `lists.*` operators are included as well.
     pub fn list_rule_data_paths(&self) -> Vec<(Arc<str>, std::path::PathBuf)> {
-        fn collect(op: &crate::models::rule_record::RuleOperator, out: &mut Vec<std::path::PathBuf>) {
+        fn collect(
+            op: &crate::models::rule_record::RuleOperator,
+            out: &mut Vec<std::path::PathBuf>,
+        ) {
             if RuleService::operator_is_lists(&op.type_name, &op.operand) && !op.data.is_empty() {
                 out.push(std::path::PathBuf::from(&op.data));
             }

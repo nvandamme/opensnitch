@@ -19,6 +19,7 @@ use crate::{
             EventSubscription, ServiceLifecycle, ServiceMonitorStats, ServiceState, ServiceStatus,
             StatusSubscription,
         },
+        rule::RuleService,
     },
     workers::firewall::watch_worker as firewall_watch_worker,
 };
@@ -176,7 +177,7 @@ impl FirewallService {
         self.runtime_snapshot()
     }
 
-    pub async fn heal_if_drifted(&self) -> Result<()> {
+    pub async fn heal_if_drifted(&self) -> Result<bool> {
         let snapshot = self.runtime_snapshot();
         let backend = snapshot.state.backend;
         let queue_num = snapshot.queue_num;
@@ -185,7 +186,7 @@ impl FirewallService {
         let interception_enabled = snapshot.interception_enabled;
 
         if !enabled || !interception_enabled {
-            return Ok(());
+            return Ok(false);
         }
 
         let health = Self::backend_rules_health(backend, queue_num, queue_bypass).await?;
@@ -193,7 +194,7 @@ impl FirewallService {
         if health.valid {
             self.drift_recovery_blocked_until_epoch_ms
                 .store(0, Ordering::Relaxed);
-            return Ok(());
+            return Ok(false);
         }
 
         let now_ms = Self::now_epoch_ms();
@@ -209,7 +210,7 @@ impl FirewallService {
                 detail = %health.detail.as_deref().unwrap_or("health-check invalid"),
                 "firewall drift detected but recovery backoff is active; skipping immediate reapply"
             );
-            return Ok(());
+            return Ok(false);
         }
 
         tracing::warn!(
@@ -227,7 +228,7 @@ impl FirewallService {
             self.drift_recovery_blocked_until_epoch_ms
                 .store(0, Ordering::Relaxed);
             tracing::info!(backend = ?backend, queue = queue_num, bypass = queue_bypass, "firewall drift recovery converged");
-            return Ok(());
+            return Ok(true);
         }
 
         let next_retry_at = now_ms + Self::DRIFT_RECOVERY_BACKOFF.as_millis() as u64;
@@ -249,7 +250,8 @@ impl FirewallService {
         &self,
         shutdown: CancellationToken,
         config: ConfigService,
+        rules: RuleService,
     ) -> Box<dyn crate::workers::runtime::control::WorkerControl> {
-        firewall_watch_worker::start(self.clone(), config, shutdown)
+        firewall_watch_worker::start(self.clone(), config, rules, shutdown)
     }
 }

@@ -10,15 +10,18 @@ use tokio::sync::watch;
 
 use std::sync::Arc;
 
-pub(crate) const CONTROL_SESSION_ID: &str = "control-plane";
+pub(crate) const CLIENT_SESSION_ID: &str = "client";
 
-impl From<ClientPrincipal> for crate::models::policy_tx::PolicyOwner {
+impl From<ClientPrincipal> for crate::models::policy_tx_storage::PolicyOwner {
     fn from(value: ClientPrincipal) -> Self {
         match value {
             ClientPrincipal::LocalUid(uid) => Self::LocalUid(uid),
             ClientPrincipal::UnixAbstractName(name) => Self::UnixAbstractName(name),
             ClientPrincipal::NetworkIdentity(identity) => Self::NetworkIdentity(identity),
             ClientPrincipal::IpFallback(ip) => Self::IpFallback(ip.to_string()),
+            ClientPrincipal::RemoteCert { binding_name, .. } => {
+                Self::NetworkIdentity(format!("remote-cert:{binding_name}"))
+            }
         }
     }
 }
@@ -30,6 +33,14 @@ pub enum ClientPrincipal {
     UnixAbstractName(String),
     NetworkIdentity(String),
     IpFallback(IpAddr),
+    /// Remote principal resolved from a TLS certificate binding.
+    ///
+    /// `mapped_uid` is the local UID from the matched `RemotePrincipalBinding`;
+    /// it anchors owner-scope checks for remote sessions.
+    RemoteCert {
+        binding_name: String,
+        mapped_uid: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +48,12 @@ pub struct ClientSession {
     pub id: String,
     pub owner: ClientPrincipal,
     pub default_action: crate::config::DefaultAction,
+    /// Capability grants for this session (populated from `RemotePrincipalBindings`).
+    ///
+    /// Empty for local sessions (local authorization uses UID/GID checks).
+    /// For remote cert-authenticated sessions, this carries the normalized
+    /// capability strings from the matched binding.
+    pub capabilities: Vec<String>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -46,6 +63,7 @@ impl ClientSession {
             id: format!("uid:{uid}"),
             owner: ClientPrincipal::LocalUid(uid),
             default_action,
+            capabilities: Vec::new(),
         }
     }
 
@@ -58,6 +76,7 @@ impl ClientSession {
             id: format!("net:{identity}"),
             owner: ClientPrincipal::NetworkIdentity(identity),
             default_action,
+            capabilities: Vec::new(),
         }
     }
 
@@ -70,6 +89,7 @@ impl ClientSession {
             id: format!("abs:{name}"),
             owner: ClientPrincipal::UnixAbstractName(name),
             default_action,
+            capabilities: Vec::new(),
         }
     }
 
@@ -78,7 +98,36 @@ impl ClientSession {
             id: format!("ip:{ip}"),
             owner: ClientPrincipal::IpFallback(ip),
             default_action,
+            capabilities: Vec::new(),
         }
+    }
+
+    /// Create a session for a remote principal resolved from a TLS cert binding.
+    ///
+    /// `binding_name` is the human-readable name from `RemotePrincipalBindings`.
+    /// `mapped_uid` is the local UID that owner-scope checks will use.
+    /// `capabilities` are the normalized capability grants from the binding.
+    pub fn for_remote_principal(
+        binding_name: impl Into<String>,
+        mapped_uid: u32,
+        capabilities: Vec<String>,
+        default_action: crate::config::DefaultAction,
+    ) -> Self {
+        let binding_name = binding_name.into();
+        Self {
+            id: format!("remote-cert:{binding_name}"),
+            owner: ClientPrincipal::RemoteCert {
+                binding_name,
+                mapped_uid,
+            },
+            default_action,
+            capabilities,
+        }
+    }
+
+    /// Returns `true` if this session has the given capability grant.
+    pub fn has_capability(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|c| c == capability)
     }
 }
 
@@ -108,8 +157,7 @@ pub(super) struct SessionState {
 
 impl SessionState {
     pub(super) fn new() -> Self {
-        let (snapshot_tx, snapshot_rx) =
-            watch::channel(ClientSessionSnapshot::default_snapshot());
+        let (snapshot_tx, snapshot_rx) = watch::channel(ClientSessionSnapshot::default_snapshot());
         Self {
             snapshot_tx,
             snapshot_rx,
@@ -130,8 +178,9 @@ impl SessionState {
         match owner {
             ClientPrincipal::LocalUid(_) => 0,
             ClientPrincipal::UnixAbstractName(_) => 1,
-            ClientPrincipal::NetworkIdentity(_) => 2,
-            ClientPrincipal::IpFallback(_) => 3,
+            ClientPrincipal::RemoteCert { .. } => 2,
+            ClientPrincipal::NetworkIdentity(_) => 3,
+            ClientPrincipal::IpFallback(_) => 4,
         }
     }
 }

@@ -7,11 +7,11 @@ use std::{
     time::Duration,
 };
 
-use crate::{DynError, compact_timestamp, env_flag};
 use crate::test_guard::{
-    PrivCmd, ensure_privileged_ready, pick_priv_cmd, preflight_cleanup,
-    restart_stopped_services, run_privileged_command,
+    PrivCmd, ensure_privileged_ready, pick_priv_cmd, preflight_cleanup, restart_stopped_services,
+    run_privileged_command,
 };
+use crate::{DynError, compact_timestamp, env_flag};
 
 // ── live-test isolation ───────────────────────────────────────────────────────
 
@@ -40,7 +40,6 @@ fn create_live_test_rules_dir(ts: &str, repo_root: &Path) -> Result<PathBuf, Dyn
     println!("live test rules: {}", rules_dir.display());
     Ok(rules_dir)
 }
-
 
 pub(crate) fn launch_daemon_live_logs() -> Result<(), DynError> {
     let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -99,12 +98,10 @@ pub(crate) fn launch_daemon_live_logs() -> Result<(), DynError> {
             cmd
         }
     };
-    command
-        .arg(format!("RUST_LOG={rust_log}"))
-        .arg(format!(
-            "OPENSNITCH_DAEMON_RS_LOG_FILE={}",
-            daemon_log_path.display()
-        ));
+    command.arg(format!("RUST_LOG={rust_log}")).arg(format!(
+        "OPENSNITCH_DAEMON_RS_LOG_FILE={}",
+        daemon_log_path.display()
+    ));
 
     command.arg(format!("OPENSNITCH_EBPF_PIN_DOMAIN={pin_domain}"));
 
@@ -228,12 +225,7 @@ pub(crate) fn stop_daemon_live_logs() -> Result<(), DynError> {
 
     ensure_privileged_ready(repo_root, priv_cmd, "stop-daemon-live-logs")?;
 
-    match run_privileged_command(
-        repo_root,
-        priv_cmd,
-        "kill",
-        &["-0", pid_str.as_str()],
-    ) {
+    match run_privileged_command(repo_root, priv_cmd, "kill", &["-0", pid_str.as_str()]) {
         Ok(_) => {
             let root_pid: u32 = pid_str
                 .parse()
@@ -338,8 +330,8 @@ pub(crate) fn run_daemon_mock_ui_live_session() -> Result<(), DynError> {
     let mock_stderr = logs_dir.join(format!("mock-ui-live-{ts}-stderr.log"));
     let ready_file = logs_dir.join(format!("mock-ui-live-{ts}.ready"));
 
-    let mock_socket = env::var("OPENSNITCH_MOCK_UI_SOCKET")
-        .unwrap_or_else(|_| "/tmp/osui.sock".to_string());
+    let mock_socket =
+        env::var("OPENSNITCH_MOCK_UI_SOCKET").unwrap_or_else(|_| "/tmp/osui.sock".to_string());
     let session_secs = env::var("OPENSNITCH_MOCK_UI_SESSION_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())

@@ -73,6 +73,7 @@ async fn command_flow_dispatches_log_level_and_shutdown() {
         ports.clone(),
         ports.clone(),
         ports.clone(),
+        crate::services::audit::AuditService::new(64),
     );
 
     let join = flow.spawn(client_cmd_rx);

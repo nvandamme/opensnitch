@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use crate::models::{connection_state::ConnectionAttempt, process_state::ProcessInfo};
+use std::sync::Arc;
 
 pub struct ConnectionContext {
     pub attempt: ConnectionAttempt,

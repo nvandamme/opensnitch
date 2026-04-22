@@ -13,8 +13,8 @@ use quick_cache::Weighter;
 use crate::models::process_state::ProcessInfo;
 use crate::utils::lru_cache::ConcurrentLruCache;
 
-use super::hash_cache::PersistentHashCache;
 use super::ProcessService;
+use super::hash_cache::PersistentHashCache;
 
 pub(super) struct ProcessCache {
     pub(super) entries: Arc<ConcurrentLruCache<u32, CachedProcessEntry, ProcessInfoWeighter>>,
@@ -106,11 +106,7 @@ impl Weighter<u32, CachedProcessEntry> for ProcessInfoWeighter {
 pub(super) const EXIT_CACHE_TTL: Duration = Duration::from_secs(2);
 pub(super) const EXIT_CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
 const fn default_process_info_cache_capacity() -> usize {
-    if cfg!(test) {
-        8_192
-    } else {
-        131_072
-    }
+    if cfg!(test) { 8_192 } else { 131_072 }
 }
 
 const DEFAULT_PROCESS_INFO_CACHE_CAPACITY: usize = default_process_info_cache_capacity();

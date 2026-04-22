@@ -1,4 +1,7 @@
-use std::{net::{IpAddr, Ipv4Addr, Ipv6Addr}, sync::Arc};
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    sync::Arc,
+};
 
 use crate::{models::dns_payload::DnsAnswerRecord, services::dns::DnsService};
 
@@ -92,11 +95,15 @@ async fn track_answers_accepts_mixed_ip_batches() {
     service.track_answers(record).await;
 
     assert_eq!(
-        service.lookup_ip("198.51.100.10".parse().unwrap()).as_deref(),
+        service
+            .lookup_ip("198.51.100.10".parse().unwrap())
+            .as_deref(),
         Some("mixed.example.test")
     );
     assert_eq!(
-        service.lookup_ip("2001:db8::10".parse().unwrap()).as_deref(),
+        service
+            .lookup_ip("2001:db8::10".parse().unwrap())
+            .as_deref(),
         Some("mixed.example.test")
     );
 }

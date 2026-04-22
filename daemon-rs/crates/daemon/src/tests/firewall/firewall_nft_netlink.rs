@@ -1,7 +1,7 @@
+use crate::platform::adapters::firewall_nft::FirewallNftAdapter;
 use crate::platform::adapters::firewall_nft_netlink::{
     FirewallNftNetlinkAdapter, NftNetlinkOperation, NftRuleChain,
 };
-use crate::platform::adapters::firewall_nft::FirewallNftAdapter;
 use opensnitch_proto::pb;
 
 #[test]
@@ -267,7 +267,9 @@ fn apply_plan_generated_expressions_are_netlink_supported() {
                         pb::FwRule {
                             enabled: true,
                             uuid: "icmp-allow".to_string(),
-                            parameters: "icmp type { echo-request, echo-reply, destination-unreachable }".to_string(),
+                            parameters:
+                                "icmp type { echo-request, echo-reply, destination-unreachable }"
+                                    .to_string(),
                             target: "accept".to_string(),
                             ..Default::default()
                         },
@@ -292,7 +294,9 @@ fn apply_plan_generated_expressions_are_netlink_supported() {
                         pb::FwRule {
                             enabled: true,
                             uuid: "icmpv6-allow".to_string(),
-                            parameters: "icmpv6 type { echo-request, echo-reply, destination-unreachable }".to_string(),
+                            parameters:
+                                "icmpv6 type { echo-request, echo-reply, destination-unreachable }"
+                                    .to_string(),
                             target: "accept".to_string(),
                             ..Default::default()
                         },
@@ -322,7 +326,10 @@ fn apply_plan_generated_expressions_are_netlink_supported() {
         })
         .collect();
 
-    assert!(!expressions.is_empty(), "expected at least one planned ApplySystemRule expression");
+    assert!(
+        !expressions.is_empty(),
+        "expected at least one planned ApplySystemRule expression"
+    );
 
     for expression in expressions {
         assert!(
@@ -365,7 +372,8 @@ fn apply_plan_keeps_unsupported_expression_for_fallback_path() {
         _ => None,
     });
 
-    let planned_expression = planned_expression.expect("expected planned ApplySystemRule expression");
+    let planned_expression =
+        planned_expression.expect("expected planned ApplySystemRule expression");
     assert_eq!(planned_expression, "meta nfproto ipv4 accept");
     assert!(
         !FirewallNftNetlinkAdapter::probe_is_system_rule_expression_supported(planned_expression),
@@ -429,10 +437,10 @@ fn cli_normalized_expression_support_matrix_stays_explicit() {
 
     for (rule, expected_supported) in cases {
         let expression = FirewallNftAdapter::probe_nft_expression(&rule, 0);
-        let supported = FirewallNftNetlinkAdapter::probe_is_system_rule_expression_supported(&expression);
+        let supported =
+            FirewallNftNetlinkAdapter::probe_is_system_rule_expression_supported(&expression);
         assert_eq!(
-            supported,
-            expected_supported,
+            supported, expected_supported,
             "unexpected support state for CLI-normalized expression: {expression}"
         );
     }
@@ -494,7 +502,10 @@ fn unsupported_expression_family_classifier_is_stable() {
         ("ip6 daddr 2001:db8::/129 accept", "cidr"),
         ("ct state bogus accept", "ct_state"),
         ("queue bogus 3", "queue"),
-        ("icmp type { echo-request, echo-reply } accept", "set_or_list"),
+        (
+            "icmp type { echo-request, echo-reply } accept",
+            "set_or_list",
+        ),
         ("meta mark 0x10 accept", "meta"),
         ("tcp dport 22 accept", "transport"),
         ("ip protocol 250 accept", "ip_addr_or_proto"),
@@ -503,8 +514,7 @@ fn unsupported_expression_family_classifier_is_stable() {
     for (expression, expected_family) in cases {
         let family = FirewallNftNetlinkAdapter::probe_unsupported_expression_family(expression);
         assert_eq!(
-            family,
-            expected_family,
+            family, expected_family,
             "unexpected classifier family for expression: {expression}"
         );
     }

@@ -20,9 +20,7 @@ pub(crate) fn fanout_kernel_ingress_event(
     event: KernelEvent,
     dns_ingress_tx: &tokio::sync::mpsc::Sender<DnsPayload>,
     process_ingress_tx: &tokio::sync::mpsc::Sender<ProcessKernelEvent>,
-    firewall_ingress_tx: &tokio::sync::mpsc::Sender<
-        crate::models::firewall_state::FirewallState,
-    >,
+    firewall_ingress_tx: &tokio::sync::mpsc::Sender<crate::models::firewall_state::FirewallState>,
     counters: &KernelPipelineCounters,
 ) -> bool {
     match event {
@@ -35,9 +33,7 @@ pub(crate) fn fanout_kernel_ingress_event(
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
         },
         KernelEvent::ProcStateChanged { pid, kind } => {
-            match process_ingress_tx
-                .try_send(ProcessKernelEvent::ProcStateChanged { pid, kind })
-            {
+            match process_ingress_tx.try_send(ProcessKernelEvent::ProcStateChanged { pid, kind }) {
                 Ok(()) => true,
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     counters.increment_drop(KernelPipeline::Process);

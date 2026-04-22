@@ -129,7 +129,12 @@ fn derive_filename(p: &pb::Subscription) -> String {
     if !p.name.is_empty() {
         return sanitize_ascii_name(&p.name);
     }
-    let path = p.url.split('?').next().unwrap_or(&p.url).trim_end_matches('/');
+    let path = p
+        .url
+        .split('?')
+        .next()
+        .unwrap_or(&p.url)
+        .trim_end_matches('/');
     let last = path.rsplit('/').next().unwrap_or(path);
     if !last.is_empty() {
         return sanitize_ascii_name(last);

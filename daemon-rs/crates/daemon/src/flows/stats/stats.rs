@@ -6,12 +6,16 @@ use tracing::{debug, warn};
 
 use crate::{
     daemon::{KernelPipelineDropStats, KernelPipelineIngressStats},
+    models::audit::{
+        AuditEvent, AuditEventKind, KernelAction, StatsFlowAction, StatsFlowLifecycle,
+        StorageLifecycle,
+    },
+    services::dns::DnsService,
     services::{
-        client::ClientService, config::ConfigService, rule::RuleService, stats::StatsService,
-        storage::StorageService,
+        audit::AuditService, client::ClientService, config::ConfigService, rule::RuleService,
+        stats::StatsService, storage::StorageService,
     },
     utils::lru_cache::global_dual_layer_metrics_snapshot,
-    services::dns::DnsService,
 };
 
 pub(crate) use crate::models::worker_telemetry::WorkerTelemetrySnapshot;
@@ -29,10 +33,10 @@ pub(crate) struct StatsFlow {
     worker_name: &'static str,
     worker_snapshot: Arc<dyn Fn() -> WorkerTelemetrySnapshot + Send + Sync>,
     dns: DnsService,
+    audit: AuditService,
     /// Optional stats snapshot exporter (Prometheus scrape, push-gateway, Loki, etc.)
     stats_exporter: Option<Arc<dyn StatsExporterPort>>,
 }
-
 
 impl StatsFlow {
     pub(crate) fn new(
@@ -46,6 +50,7 @@ impl StatsFlow {
         worker_name: &'static str,
         worker_snapshot: Arc<dyn Fn() -> WorkerTelemetrySnapshot + Send + Sync>,
         dns: DnsService,
+        audit: AuditService,
     ) -> Self {
         Self {
             shutdown,
@@ -59,6 +64,7 @@ impl StatsFlow {
             worker_snapshot,
             stats_exporter: None,
             dns,
+            audit,
         }
     }
 
@@ -71,10 +77,7 @@ impl StatsFlow {
     ///
     /// See `platform::ports::stats_exporter_port::StatsExporterPort`.
     #[allow(dead_code)]
-    pub(crate) fn with_stats_exporter(
-        mut self,
-        exporter: Arc<dyn StatsExporterPort>,
-    ) -> Self {
+    pub(crate) fn with_stats_exporter(mut self, exporter: Arc<dyn StatsExporterPort>) -> Self {
         self.stats_exporter = Some(exporter);
         self
     }
@@ -92,11 +95,16 @@ impl StatsFlow {
             worker_snapshot,
             stats_exporter,
             dns,
+            audit,
         } = self;
 
         tokio::spawn(async move {
+            audit.emit(AuditEvent::cold(AuditEventKind::StatsFlowLifecycle(
+                StatsFlowLifecycle::Started,
+            )));
             let storage_shutdown = shutdown.clone();
             let storage_stats = stats.clone();
+            let storage_audit = audit.clone();
             let mut storage_events = StorageService::global().subscribe_events();
             let mut storage_reload = StorageService::subscribe_global_reload();
             let storage_observer = tokio::spawn(async move {
@@ -109,18 +117,44 @@ impl StatsFlow {
                             }
                             let generation = *storage_reload.borrow_and_update();
                             storage_events = StorageService::global().subscribe_events();
+                            storage_audit.emit(AuditEvent::cold(
+                                AuditEventKind::StorageLifecycle(
+                                    StorageLifecycle::StorageObserverRebound {
+                                        reason: "storage-runtime-reload",
+                                    },
+                                ),
+                            ));
                             debug!(generation, "rebound storage event subscriber after storage runtime reload");
                         }
                         storage_event = storage_events.recv() => {
                             match storage_event {
                                 Ok(event) => {
+                                    // FileRead / FileWritten audit emits belong at the
+                                    // service-owned write sites (RuleService, ConfigService, etc.)
+                                    // where the operation has domain context.  Emitting here
+                                    // on every raw I/O event produces operational noise without
+                                    // security value; reserved for verbose-audit mode.
                                     storage_stats.on_storage_event(event.operation);
                                 }
                                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                    storage_audit.emit(AuditEvent::cold(
+                                        AuditEventKind::StorageLifecycle(
+                                            StorageLifecycle::StorageObserverLagged {
+                                                skipped: skipped as u64,
+                                            },
+                                        ),
+                                    ));
                                     warn!(skipped, "storage event subscriber lagged; events dropped");
                                 }
                                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                     storage_events = StorageService::global().subscribe_events();
+                                    storage_audit.emit(AuditEvent::cold(
+                                        AuditEventKind::StorageLifecycle(
+                                            StorageLifecycle::StorageObserverRebound {
+                                                reason: "storage-event-bus-closed",
+                                            },
+                                        ),
+                                    ));
                                     warn!("storage event bus closed; rebound stats storage observer to current storage runtime");
                                 }
                             }
@@ -149,6 +183,16 @@ impl StatsFlow {
                             let ingress_current = ingress_stats_snapshot();
                             let ingress_delta = ingress_current.saturating_delta(last_ingress_snapshot);
                             if delta.total() > 0 {
+                                audit.emit(AuditEvent::cold(
+                                    AuditEventKind::KernelAction(
+                                        KernelAction::KernelPipelineDropsObserved {
+                                            dns: delta.dns,
+                                            process: delta.process,
+                                            firewall: delta.firewall,
+                                            total: delta.total(),
+                                        },
+                                    ),
+                                ));
                                 warn!(
                                     dns = delta.dns,
                                     process = delta.process,
@@ -266,6 +310,12 @@ impl StatsFlow {
                             continue;
                         };
 
+                        audit.emit(AuditEvent::cold(AuditEventKind::StatsFlowAction(
+                            StatsFlowAction::SnapshotPublished {
+                                connections: metrics_snapshot.stats.connections as u32,
+                            },
+                        )));
+
                         if let Some(ref exporter) = stats_exporter {
                             exporter.export_snapshot(&metrics_snapshot);
                         }
@@ -297,6 +347,9 @@ impl StatsFlow {
             }
 
             storage_observer.abort();
+            audit.emit(AuditEvent::cold(AuditEventKind::StatsFlowLifecycle(
+                StatsFlowLifecycle::Stopped,
+            )));
         })
     }
 }

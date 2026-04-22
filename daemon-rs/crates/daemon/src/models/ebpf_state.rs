@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct BpfMap {
+pub struct RawBpfMap {
     pub id: u32,
     #[serde(default)]
     pub name: String,

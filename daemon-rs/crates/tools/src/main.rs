@@ -84,7 +84,11 @@ fn run() -> Result<(), DynError> {
         Some("launch-daemon-live-logs") => launch_daemon_live_logs(),
         Some("stop-daemon-live-logs") => stop_daemon_live_logs(),
         Some("run-daemon-mock-ui-live-session") => run_daemon_mock_ui_live_session(),
-        Some(command) => Err(format!("unsupported tools command: {command}\n\n{}", cli::help_text()).into()),
+        Some(command) => Err(format!(
+            "unsupported tools command: {command}\n\n{}",
+            cli::help_text()
+        )
+        .into()),
         None => Err(cli::help_text().into()),
     }
 }
@@ -104,7 +108,8 @@ fn apply_tools_env_defaults() -> Result<(), DynError> {
         }
     }
     if env::var_os("OPENSNITCH_CARGO_TARGET_DIR").is_none() {
-        let resolved = env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| default_target.into_os_string());
+        let resolved =
+            env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| default_target.into_os_string());
         unsafe {
             env::set_var("OPENSNITCH_CARGO_TARGET_DIR", resolved);
         }
@@ -323,267 +328,267 @@ impl TunableSet {
 
 fn auto_tune_kernel_pressure_tunables() -> Result<(), DynError> {
     test_guard::with_guard("auto-tune-kernel-pressure-tunables", || {
-    let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let daemon_rs_dir = tools_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .ok_or("tools dir missing daemon-rs parent")?;
-    let repo_root = daemon_rs_dir
-        .parent()
-        .ok_or("daemon-rs dir missing parent")?;
+        let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let daemon_rs_dir = tools_dir
+            .parent()
+            .and_then(|path| path.parent())
+            .ok_or("tools dir missing daemon-rs parent")?;
+        let repo_root = daemon_rs_dir
+            .parent()
+            .ok_or("daemon-rs dir missing parent")?;
 
-    let runs_per_step = env::var("OPENSNITCH_AUTOTUNE_RUNS_PER_STEP")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(3)
-        .clamp(2, 3);
-    let hysteresis_gain = env::var("OPENSNITCH_AUTOTUNE_HYSTERESIS_GAIN")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(0.02)
-        .clamp(0.0, 0.5);
-    let max_drop_ratio = env::var("OPENSNITCH_AUTOTUNE_MAX_DROP_RATIO")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(0.10)
-        .clamp(0.0, 1.0);
-    let safety_factor = env::var("OPENSNITCH_AUTOTUNE_SAFETY_FACTOR")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(0.5)
-        .clamp(0.1, 1.0);
-    let max_steps = env::var("OPENSNITCH_AUTOTUNE_MAX_STEPS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(6)
-        .clamp(1, 8);
-    let regression_tolerance = env::var("OPENSNITCH_AUTOTUNE_REGRESSION_TOLERANCE")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(0.03)
-        .clamp(0.0, 0.5);
-    let regression_drop_delta_max = env::var("OPENSNITCH_AUTOTUNE_REGRESSION_DROP_DELTA_MAX")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(0.02)
-        .clamp(0.0, 1.0);
-    let validation_runs = env::var("OPENSNITCH_AUTOTUNE_VALIDATION_RUNS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(runs_per_step)
-        .clamp(2, 3);
-    let sweetspot_factors = parse_factor_list(
-        &env::var("OPENSNITCH_AUTOTUNE_SWEETSPOT_FACTORS")
-            .unwrap_or_else(|_| "1.10,1.25,1.50,1.75".to_string()),
-    );
-    let sweetspot_min_uplift = env::var("OPENSNITCH_AUTOTUNE_SWEETSPOT_MIN_UPLIFT")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(0.005)
-        .clamp(0.0, 0.5);
-    let sweetspot_drop_delta_max = env::var("OPENSNITCH_AUTOTUNE_SWEETSPOT_DROP_DELTA_MAX")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(0.01)
-        .clamp(0.0, 1.0);
+        let runs_per_step = env::var("OPENSNITCH_AUTOTUNE_RUNS_PER_STEP")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(3)
+            .clamp(2, 3);
+        let hysteresis_gain = env::var("OPENSNITCH_AUTOTUNE_HYSTERESIS_GAIN")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.02)
+            .clamp(0.0, 0.5);
+        let max_drop_ratio = env::var("OPENSNITCH_AUTOTUNE_MAX_DROP_RATIO")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.10)
+            .clamp(0.0, 1.0);
+        let safety_factor = env::var("OPENSNITCH_AUTOTUNE_SAFETY_FACTOR")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.5)
+            .clamp(0.1, 1.0);
+        let max_steps = env::var("OPENSNITCH_AUTOTUNE_MAX_STEPS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(6)
+            .clamp(1, 8);
+        let regression_tolerance = env::var("OPENSNITCH_AUTOTUNE_REGRESSION_TOLERANCE")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.03)
+            .clamp(0.0, 0.5);
+        let regression_drop_delta_max = env::var("OPENSNITCH_AUTOTUNE_REGRESSION_DROP_DELTA_MAX")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.02)
+            .clamp(0.0, 1.0);
+        let validation_runs = env::var("OPENSNITCH_AUTOTUNE_VALIDATION_RUNS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(runs_per_step)
+            .clamp(2, 3);
+        let sweetspot_factors = parse_factor_list(
+            &env::var("OPENSNITCH_AUTOTUNE_SWEETSPOT_FACTORS")
+                .unwrap_or_else(|_| "1.10,1.25,1.50,1.75".to_string()),
+        );
+        let sweetspot_min_uplift = env::var("OPENSNITCH_AUTOTUNE_SWEETSPOT_MIN_UPLIFT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.005)
+            .clamp(0.0, 0.5);
+        let sweetspot_drop_delta_max = env::var("OPENSNITCH_AUTOTUNE_SWEETSPOT_DROP_DELTA_MAX")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.01)
+            .clamp(0.0, 1.0);
 
-    let pressure_secs =
-        env::var("OPENSNITCH_AUTOTUNE_PRESSURE_SECS").unwrap_or_else(|_| "1".to_string());
-    let pressure_tasks =
-        env::var("OPENSNITCH_AUTOTUNE_PRESSURE_TASKS").unwrap_or_else(|_| "2".to_string());
-    let enqueue_mode =
-        env::var("OPENSNITCH_AUTOTUNE_ENQUEUE_MODE").unwrap_or_else(|_| "timeout".to_string());
-    let enqueue_timeout_us =
-        env::var("OPENSNITCH_AUTOTUNE_ENQUEUE_TIMEOUT_US").unwrap_or_else(|_| "200".to_string());
+        let pressure_secs =
+            env::var("OPENSNITCH_AUTOTUNE_PRESSURE_SECS").unwrap_or_else(|_| "1".to_string());
+        let pressure_tasks =
+            env::var("OPENSNITCH_AUTOTUNE_PRESSURE_TASKS").unwrap_or_else(|_| "2".to_string());
+        let enqueue_mode =
+            env::var("OPENSNITCH_AUTOTUNE_ENQUEUE_MODE").unwrap_or_else(|_| "timeout".to_string());
+        let enqueue_timeout_us = env::var("OPENSNITCH_AUTOTUNE_ENQUEUE_TIMEOUT_US")
+            .unwrap_or_else(|_| "200".to_string());
 
-    let output_path = env::var("OPENSNITCH_TUNABLES_OUTPUT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| daemon_rs_dir.join("data/tunables.json"));
-    let tmp_dir = env::var("OPENSNITCH_AUTOTUNE_TMP_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| env::temp_dir());
-    let run_parity_gate_after = env_flag("OPENSNITCH_AUTOTUNE_RUN_PARITY_GATE");
-    let logical_cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
+        let output_path = env::var("OPENSNITCH_TUNABLES_OUTPUT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| daemon_rs_dir.join("data/tunables.json"));
+        let tmp_dir = env::var("OPENSNITCH_AUTOTUNE_TMP_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| env::temp_dir());
+        let run_parity_gate_after = env_flag("OPENSNITCH_AUTOTUNE_RUN_PARITY_GATE");
+        let logical_cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
 
-    let base = TunableSet::conservative();
-    let max_bounds = TunableSet::max_bounds_for_cores(logical_cores);
-    let mut last_candidate = None;
-    let mut last_stable: Option<(TunableSet, f64, f64)> = None;
-    let mut stop_reason = "max-steps".to_string();
-
-    println!(
-        "Auto-tune start: runs_per_step={} hysteresis_gain={:.3} max_drop_ratio={:.3} safety_factor={:.2} max_steps={} logical_cores={} worker_cap={} connect_queue_cap={} kernel_queue_cap={}",
-        runs_per_step,
-        hysteresis_gain,
-        max_drop_ratio,
-        safety_factor,
-        max_steps,
-        logical_cores,
-        max_bounds.max_concurrent_connect_attempts,
-        max_bounds.connect_worker_queue_capacity,
-        max_bounds.kernel_dns_queue_capacity,
-    );
-
-    for step in 0..max_steps {
-        let factor = 1usize << step;
-        let candidate = TunableSet::scaled(base, factor, max_bounds);
-        if last_candidate.is_some_and(|prev| prev == candidate) {
-            stop_reason = "reached-bounds".to_string();
-            break;
-        }
-        last_candidate = Some(candidate);
-
-        let (median_enqueued_pps, median_drop_ratio, any_abort) = benchmark_tunable_set(
-            repo_root,
-            daemon_rs_dir,
-            &tmp_dir,
-            candidate,
-            runs_per_step,
-            pressure_secs.as_str(),
-            pressure_tasks.as_str(),
-            enqueue_mode.as_str(),
-            enqueue_timeout_us.as_str(),
-            format!("step-{step}"),
-        )?;
-        let is_stable = !any_abort && median_drop_ratio <= max_drop_ratio;
-
-        let gain_vs_prev = if let Some((_, prev_pps, _)) = last_stable {
-            if prev_pps > 0.0 {
-                (median_enqueued_pps - prev_pps) / prev_pps
-            } else {
-                1.0
-            }
-        } else {
-            1.0
-        };
+        let base = TunableSet::conservative();
+        let max_bounds = TunableSet::max_bounds_for_cores(logical_cores);
+        let mut last_candidate = None;
+        let mut last_stable: Option<(TunableSet, f64, f64)> = None;
+        let mut stop_reason = "max-steps".to_string();
 
         println!(
-            "autotune-step={} factor={} stable={} median_enqueued_pps={:.0} median_drop_ratio={:.4} any_abort={} gain_vs_prev={:.4}",
-            step,
-            factor,
-            is_stable,
-            median_enqueued_pps,
-            median_drop_ratio,
-            any_abort,
-            gain_vs_prev,
+            "Auto-tune start: runs_per_step={} hysteresis_gain={:.3} max_drop_ratio={:.3} safety_factor={:.2} max_steps={} logical_cores={} worker_cap={} connect_queue_cap={} kernel_queue_cap={}",
+            runs_per_step,
+            hysteresis_gain,
+            max_drop_ratio,
+            safety_factor,
+            max_steps,
+            logical_cores,
+            max_bounds.max_concurrent_connect_attempts,
+            max_bounds.connect_worker_queue_capacity,
+            max_bounds.kernel_dns_queue_capacity,
         );
 
-        if !is_stable {
-            stop_reason = "instability-or-drops".to_string();
-            break;
+        for step in 0..max_steps {
+            let factor = 1usize << step;
+            let candidate = TunableSet::scaled(base, factor, max_bounds);
+            if last_candidate.is_some_and(|prev| prev == candidate) {
+                stop_reason = "reached-bounds".to_string();
+                break;
+            }
+            last_candidate = Some(candidate);
+
+            let (median_enqueued_pps, median_drop_ratio, any_abort) = benchmark_tunable_set(
+                repo_root,
+                daemon_rs_dir,
+                &tmp_dir,
+                candidate,
+                runs_per_step,
+                pressure_secs.as_str(),
+                pressure_tasks.as_str(),
+                enqueue_mode.as_str(),
+                enqueue_timeout_us.as_str(),
+                format!("step-{step}"),
+            )?;
+            let is_stable = !any_abort && median_drop_ratio <= max_drop_ratio;
+
+            let gain_vs_prev = if let Some((_, prev_pps, _)) = last_stable {
+                if prev_pps > 0.0 {
+                    (median_enqueued_pps - prev_pps) / prev_pps
+                } else {
+                    1.0
+                }
+            } else {
+                1.0
+            };
+
+            println!(
+                "autotune-step={} factor={} stable={} median_enqueued_pps={:.0} median_drop_ratio={:.4} any_abort={} gain_vs_prev={:.4}",
+                step,
+                factor,
+                is_stable,
+                median_enqueued_pps,
+                median_drop_ratio,
+                any_abort,
+                gain_vs_prev,
+            );
+
+            if !is_stable {
+                stop_reason = "instability-or-drops".to_string();
+                break;
+            }
+
+            if last_stable.is_some() && gain_vs_prev < hysteresis_gain {
+                stop_reason = "hysteresis-no-significant-gain".to_string();
+                break;
+            }
+
+            last_stable = Some((candidate, median_enqueued_pps, median_drop_ratio));
         }
 
-        if last_stable.is_some() && gain_vs_prev < hysteresis_gain {
-            stop_reason = "hysteresis-no-significant-gain".to_string();
-            break;
-        }
+        let (max_stable, stable_pps, stable_drop_ratio) = last_stable.unwrap_or((base, 0.0, 1.0));
+        let mut final_tunables = max_stable.apply_safety(safety_factor, base);
 
-        last_stable = Some((candidate, median_enqueued_pps, median_drop_ratio));
-    }
-
-    let (max_stable, stable_pps, stable_drop_ratio) = last_stable.unwrap_or((base, 0.0, 1.0));
-    let mut final_tunables = max_stable.apply_safety(safety_factor, base);
-
-    let (baseline_pps, baseline_drop, baseline_abort) = benchmark_tunable_set(
-        repo_root,
-        daemon_rs_dir,
-        &tmp_dir,
-        base,
-        validation_runs,
-        pressure_secs.as_str(),
-        pressure_tasks.as_str(),
-        enqueue_mode.as_str(),
-        enqueue_timeout_us.as_str(),
-        "validation-baseline".to_string(),
-    )?;
-    let (selected_pps, selected_drop, selected_abort) = benchmark_tunable_set(
-        repo_root,
-        daemon_rs_dir,
-        &tmp_dir,
-        final_tunables,
-        validation_runs,
-        pressure_secs.as_str(),
-        pressure_tasks.as_str(),
-        enqueue_mode.as_str(),
-        enqueue_timeout_us.as_str(),
-        "validation-selected".to_string(),
-    )?;
-
-    let regression = selected_abort
-        || (baseline_pps > 0.0 && selected_pps < baseline_pps * (1.0 - regression_tolerance))
-        || (selected_drop > baseline_drop + regression_drop_delta_max);
-    if regression {
-        if let Some((sweet_tunables, sweet_pps, sweet_drop)) = find_sweetspot_candidate(
+        let (baseline_pps, baseline_drop, baseline_abort) = benchmark_tunable_set(
             repo_root,
             daemon_rs_dir,
             &tmp_dir,
             base,
-            max_bounds,
-            &sweetspot_factors,
             validation_runs,
             pressure_secs.as_str(),
             pressure_tasks.as_str(),
             enqueue_mode.as_str(),
             enqueue_timeout_us.as_str(),
+            "validation-baseline".to_string(),
+        )?;
+        let (selected_pps, selected_drop, selected_abort) = benchmark_tunable_set(
+            repo_root,
+            daemon_rs_dir,
+            &tmp_dir,
+            final_tunables,
+            validation_runs,
+            pressure_secs.as_str(),
+            pressure_tasks.as_str(),
+            enqueue_mode.as_str(),
+            enqueue_timeout_us.as_str(),
+            "validation-selected".to_string(),
+        )?;
+
+        let regression = selected_abort
+            || (baseline_pps > 0.0 && selected_pps < baseline_pps * (1.0 - regression_tolerance))
+            || (selected_drop > baseline_drop + regression_drop_delta_max);
+        if regression {
+            if let Some((sweet_tunables, sweet_pps, sweet_drop)) = find_sweetspot_candidate(
+                repo_root,
+                daemon_rs_dir,
+                &tmp_dir,
+                base,
+                max_bounds,
+                &sweetspot_factors,
+                validation_runs,
+                pressure_secs.as_str(),
+                pressure_tasks.as_str(),
+                enqueue_mode.as_str(),
+                enqueue_timeout_us.as_str(),
+                baseline_pps,
+                baseline_drop,
+                sweetspot_min_uplift,
+                sweetspot_drop_delta_max,
+            )? {
+                final_tunables = sweet_tunables;
+                stop_reason.push_str("+sweetspot-recover");
+                println!(
+                    "autotune-sweetspot selected median_enqueued_pps={:.0} median_drop_ratio={:.4}",
+                    sweet_pps, sweet_drop
+                );
+            } else {
+                final_tunables = base;
+                stop_reason.push_str("+regression-fallback");
+            }
+        }
+
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let metadata = format!(
+            "autotune stop_reason={} safety_factor={:.2} stable_enqueued_pps={:.0} stable_drop_ratio={:.4} validation_baseline_pps={:.0} validation_baseline_drop_ratio={:.4} validation_baseline_abort={} validation_selected_pps={:.0} validation_selected_drop_ratio={:.4} validation_selected_abort={} regression_tolerance={:.4} regression_drop_delta_max={:.4}",
+            stop_reason,
+            safety_factor,
+            stable_pps,
+            stable_drop_ratio,
             baseline_pps,
             baseline_drop,
-            sweetspot_min_uplift,
-            sweetspot_drop_delta_max,
-        )? {
-            final_tunables = sweet_tunables;
-            stop_reason.push_str("+sweetspot-recover");
-            println!(
-                "autotune-sweetspot selected median_enqueued_pps={:.0} median_drop_ratio={:.4}",
-                sweet_pps, sweet_drop
-            );
-        } else {
-            final_tunables = base;
-            stop_reason.push_str("+regression-fallback");
+            baseline_abort,
+            selected_pps,
+            selected_drop,
+            selected_abort,
+            regression_tolerance,
+            regression_drop_delta_max,
+        );
+        fs::write(
+            &output_path,
+            tunables_profile_json("auto-tuned", final_tunables, &metadata),
+        )?;
+
+        println!(
+            "Auto-tune wrote {} with stop_reason={} final(max_concurrent_connect_attempts={}, connect_worker_queue_capacity={}, connect_dispatch_batch_size={}, kernel_dns_queue_capacity={}, kernel_process_queue_capacity={}, kernel_firewall_queue_capacity={})",
+            output_path.display(),
+            stop_reason,
+            final_tunables.max_concurrent_connect_attempts,
+            final_tunables.connect_worker_queue_capacity,
+            final_tunables.connect_dispatch_batch_size,
+            final_tunables.kernel_dns_queue_capacity,
+            final_tunables.kernel_process_queue_capacity,
+            final_tunables.kernel_firewall_queue_capacity,
+        );
+
+        if run_parity_gate_after {
+            run_parity_gate_internal(repo_root)?;
         }
-    }
 
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let metadata = format!(
-        "autotune stop_reason={} safety_factor={:.2} stable_enqueued_pps={:.0} stable_drop_ratio={:.4} validation_baseline_pps={:.0} validation_baseline_drop_ratio={:.4} validation_baseline_abort={} validation_selected_pps={:.0} validation_selected_drop_ratio={:.4} validation_selected_abort={} regression_tolerance={:.4} regression_drop_delta_max={:.4}",
-        stop_reason,
-        safety_factor,
-        stable_pps,
-        stable_drop_ratio,
-        baseline_pps,
-        baseline_drop,
-        baseline_abort,
-        selected_pps,
-        selected_drop,
-        selected_abort,
-        regression_tolerance,
-        regression_drop_delta_max,
-    );
-    fs::write(
-        &output_path,
-        tunables_profile_json("auto-tuned", final_tunables, &metadata),
-    )?;
-
-    println!(
-        "Auto-tune wrote {} with stop_reason={} final(max_concurrent_connect_attempts={}, connect_worker_queue_capacity={}, connect_dispatch_batch_size={}, kernel_dns_queue_capacity={}, kernel_process_queue_capacity={}, kernel_firewall_queue_capacity={})",
-        output_path.display(),
-        stop_reason,
-        final_tunables.max_concurrent_connect_attempts,
-        final_tunables.connect_worker_queue_capacity,
-        final_tunables.connect_dispatch_batch_size,
-        final_tunables.kernel_dns_queue_capacity,
-        final_tunables.kernel_process_queue_capacity,
-        final_tunables.kernel_firewall_queue_capacity,
-    );
-
-    if run_parity_gate_after {
-        run_parity_gate_internal(repo_root)?;
-    }
-
-    Ok(())
+        Ok(())
     }) // with_guard auto_tune_kernel_pressure_tunables
 }
 
@@ -797,149 +802,150 @@ fn tunables_profile_json(profile: &str, tunables: TunableSet, note: &str) -> Str
 
 fn quick_pressure_sweep_tunables() -> Result<(), DynError> {
     test_guard::with_guard("quick-pressure-sweep-tunables", || {
-    let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let daemon_rs_dir = tools_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .ok_or("tools dir missing daemon-rs parent")?;
-    let repo_root = daemon_rs_dir
-        .parent()
-        .ok_or("daemon-rs dir missing parent")?;
+        let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let daemon_rs_dir = tools_dir
+            .parent()
+            .and_then(|path| path.parent())
+            .ok_or("tools dir missing daemon-rs parent")?;
+        let repo_root = daemon_rs_dir
+            .parent()
+            .ok_or("daemon-rs dir missing parent")?;
 
-    let sweep_secs = env::var("OPENSNITCH_TUNABLES_SWEEP_SECS").unwrap_or_else(|_| "1".to_string());
-    let sweep_tasks =
-        env::var("OPENSNITCH_TUNABLES_SWEEP_TASKS").unwrap_or_else(|_| "2".to_string());
-    let sweep_us = env::var("OPENSNITCH_TUNABLES_SWEEP_US")
-        .unwrap_or_else(|_| "50,100,200,500,1000".to_string());
-    let drop_ratio_max = env::var("OPENSNITCH_TUNABLES_DROP_RATIO_MAX")
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-        .unwrap_or(0.10);
-    let min_enqueued_pps = env::var("OPENSNITCH_TUNABLES_MIN_ENQUEUED_PPS")
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-        .unwrap_or(10_000.0);
+        let sweep_secs =
+            env::var("OPENSNITCH_TUNABLES_SWEEP_SECS").unwrap_or_else(|_| "1".to_string());
+        let sweep_tasks =
+            env::var("OPENSNITCH_TUNABLES_SWEEP_TASKS").unwrap_or_else(|_| "2".to_string());
+        let sweep_us = env::var("OPENSNITCH_TUNABLES_SWEEP_US")
+            .unwrap_or_else(|_| "50,100,200,500,1000".to_string());
+        let drop_ratio_max = env::var("OPENSNITCH_TUNABLES_DROP_RATIO_MAX")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.10);
+        let min_enqueued_pps = env::var("OPENSNITCH_TUNABLES_MIN_ENQUEUED_PPS")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(10_000.0);
 
-    let output_path = env::var("OPENSNITCH_TUNABLES_OUTPUT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| daemon_rs_dir.join("data/tunables.json"));
+        let output_path = env::var("OPENSNITCH_TUNABLES_OUTPUT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| daemon_rs_dir.join("data/tunables.json"));
 
-    println!(
-        "Running quick kernel-pressure sweep (secs={}, tasks={}, us={})...",
-        sweep_secs, sweep_tasks, sweep_us
-    );
-    let sweep_output = run_command(
-        repo_root,
-        "cargo",
-        [
-            "test",
-            "--release",
-            "--manifest-path",
-            daemon_rs_dir.join("Cargo.toml").to_string_lossy().as_ref(),
-            "-p",
-            "opensnitchd-rs",
-            "stress_profile_reports_kernel_pipeline_timeout_sweep",
-            "--",
-            "--ignored",
-            "--nocapture",
-        ],
-        &[
-            ("RUST_LOG", "error"),
-            ("OPENSNITCH_KERNEL_PRESSURE_SWEEP_SECS", sweep_secs.as_str()),
-            (
-                "OPENSNITCH_KERNEL_PRESSURE_SWEEP_TASKS",
-                sweep_tasks.as_str(),
+        println!(
+            "Running quick kernel-pressure sweep (secs={}, tasks={}, us={})...",
+            sweep_secs, sweep_tasks, sweep_us
+        );
+        let sweep_output = run_command(
+            repo_root,
+            "cargo",
+            [
+                "test",
+                "--release",
+                "--manifest-path",
+                daemon_rs_dir.join("Cargo.toml").to_string_lossy().as_ref(),
+                "-p",
+                "opensnitchd-rs",
+                "stress_profile_reports_kernel_pipeline_timeout_sweep",
+                "--",
+                "--ignored",
+                "--nocapture",
+            ],
+            &[
+                ("RUST_LOG", "error"),
+                ("OPENSNITCH_KERNEL_PRESSURE_SWEEP_SECS", sweep_secs.as_str()),
+                (
+                    "OPENSNITCH_KERNEL_PRESSURE_SWEEP_TASKS",
+                    sweep_tasks.as_str(),
+                ),
+                ("OPENSNITCH_KERNEL_PRESSURE_SWEEP_US", sweep_us.as_str()),
+            ],
+        )?;
+
+        let rows = parse_sweep_rows(&sweep_output)?;
+        let recommended_timeout = parse_recommended_timeout(&sweep_output).ok();
+        let selected_row = if let Some(timeout_us) = recommended_timeout {
+            rows.iter()
+                .find(|row| row.timeout_us == timeout_us)
+                .copied()
+                .unwrap_or_else(|| choose_best_sweep_row(&rows))
+        } else {
+            choose_best_sweep_row(&rows)
+        };
+
+        let use_high_profile = !selected_row.forced_kernel_abort
+            && selected_row.enqueue_drop_ratio <= drop_ratio_max
+            && selected_row.enqueued_pps >= min_enqueued_pps;
+        let selected_profile = if use_high_profile {
+            "high-throughput"
+        } else {
+            "conservative"
+        };
+
+        let (
+            max_concurrent_connect_attempts,
+            connect_worker_queue_capacity,
+            connect_dispatch_batch_size,
+            kernel_dns_queue_capacity,
+            kernel_process_queue_capacity,
+            kernel_firewall_queue_capacity,
+        ) = if use_high_profile {
+            (64, 128, 16, 2048, 2048, 512)
+        } else {
+            (32, 64, 64, 512, 512, 128)
+        };
+
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let json = format!(
+            concat!(
+                "{{\n",
+                "  \"profile\": \"{}\",\n",
+                "  \"max_concurrent_connect_attempts\": {},\n",
+                "  \"connect_worker_queue_capacity\": {},\n",
+                "  \"connect_dispatch_batch_size\": {},\n",
+                "  \"kernel_dns_queue_capacity\": {},\n",
+                "  \"kernel_process_queue_capacity\": {},\n",
+                "  \"kernel_firewall_queue_capacity\": {},\n",
+                "  \"generated_by\": \"cargo run -p tools -- quick-pressure-sweep-tunables\",\n",
+                "  \"sweep\": {{\n",
+                "    \"recommended_timeout_us\": {},\n",
+                "    \"enqueued_pps\": {:.0},\n",
+                "    \"enqueue_drop_ratio\": {:.4},\n",
+                "    \"forced_kernel_abort\": {},\n",
+                "    \"decision_thresholds\": {{\n",
+                "      \"max_drop_ratio\": {:.4},\n",
+                "      \"min_enqueued_pps\": {:.0}\n",
+                "    }}\n",
+                "  }}\n",
+                "}}\n"
             ),
-            ("OPENSNITCH_KERNEL_PRESSURE_SWEEP_US", sweep_us.as_str()),
-        ],
-    )?;
+            selected_profile,
+            max_concurrent_connect_attempts,
+            connect_worker_queue_capacity,
+            connect_dispatch_batch_size,
+            kernel_dns_queue_capacity,
+            kernel_process_queue_capacity,
+            kernel_firewall_queue_capacity,
+            selected_row.timeout_us,
+            selected_row.enqueued_pps,
+            selected_row.enqueue_drop_ratio,
+            selected_row.forced_kernel_abort,
+            drop_ratio_max,
+            min_enqueued_pps,
+        );
+        fs::write(&output_path, json)?;
 
-    let rows = parse_sweep_rows(&sweep_output)?;
-    let recommended_timeout = parse_recommended_timeout(&sweep_output).ok();
-    let selected_row = if let Some(timeout_us) = recommended_timeout {
-        rows.iter()
-            .find(|row| row.timeout_us == timeout_us)
-            .copied()
-            .unwrap_or_else(|| choose_best_sweep_row(&rows))
-    } else {
-        choose_best_sweep_row(&rows)
-    };
-
-    let use_high_profile = !selected_row.forced_kernel_abort
-        && selected_row.enqueue_drop_ratio <= drop_ratio_max
-        && selected_row.enqueued_pps >= min_enqueued_pps;
-    let selected_profile = if use_high_profile {
-        "high-throughput"
-    } else {
-        "conservative"
-    };
-
-    let (
-        max_concurrent_connect_attempts,
-        connect_worker_queue_capacity,
-        connect_dispatch_batch_size,
-        kernel_dns_queue_capacity,
-        kernel_process_queue_capacity,
-        kernel_firewall_queue_capacity,
-    ) = if use_high_profile {
-        (64, 128, 16, 2048, 2048, 512)
-    } else {
-        (32, 64, 64, 512, 512, 128)
-    };
-
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let json = format!(
-        concat!(
-            "{{\n",
-            "  \"profile\": \"{}\",\n",
-            "  \"max_concurrent_connect_attempts\": {},\n",
-            "  \"connect_worker_queue_capacity\": {},\n",
-            "  \"connect_dispatch_batch_size\": {},\n",
-            "  \"kernel_dns_queue_capacity\": {},\n",
-            "  \"kernel_process_queue_capacity\": {},\n",
-            "  \"kernel_firewall_queue_capacity\": {},\n",
-            "  \"generated_by\": \"cargo run -p tools -- quick-pressure-sweep-tunables\",\n",
-            "  \"sweep\": {{\n",
-            "    \"recommended_timeout_us\": {},\n",
-            "    \"enqueued_pps\": {:.0},\n",
-            "    \"enqueue_drop_ratio\": {:.4},\n",
-            "    \"forced_kernel_abort\": {},\n",
-            "    \"decision_thresholds\": {{\n",
-            "      \"max_drop_ratio\": {:.4},\n",
-            "      \"min_enqueued_pps\": {:.0}\n",
-            "    }}\n",
-            "  }}\n",
-            "}}\n"
-        ),
-        selected_profile,
-        max_concurrent_connect_attempts,
-        connect_worker_queue_capacity,
-        connect_dispatch_batch_size,
-        kernel_dns_queue_capacity,
-        kernel_process_queue_capacity,
-        kernel_firewall_queue_capacity,
-        selected_row.timeout_us,
-        selected_row.enqueued_pps,
-        selected_row.enqueue_drop_ratio,
-        selected_row.forced_kernel_abort,
-        drop_ratio_max,
-        min_enqueued_pps,
-    );
-    fs::write(&output_path, json)?;
-
-    println!(
-        "Wrote tunables profile '{}' to {} (timeout_us={}, enqueued_pps={:.0}, drop_ratio={:.4}, forced_abort={})",
-        selected_profile,
-        output_path.display(),
-        selected_row.timeout_us,
-        selected_row.enqueued_pps,
-        selected_row.enqueue_drop_ratio,
-        selected_row.forced_kernel_abort,
-    );
-    Ok(())
+        println!(
+            "Wrote tunables profile '{}' to {} (timeout_us={}, enqueued_pps={:.0}, drop_ratio={:.4}, forced_abort={})",
+            selected_profile,
+            output_path.display(),
+            selected_row.timeout_us,
+            selected_row.enqueued_pps,
+            selected_row.enqueue_drop_ratio,
+            selected_row.forced_kernel_abort,
+        );
+        Ok(())
     }) // with_guard quick_pressure_sweep_tunables
 }
 
@@ -1051,234 +1057,237 @@ fn run_daemon_mock_ui_live_session() -> Result<(), DynError> {
 
 fn update_perf_md() -> Result<(), DynError> {
     test_guard::with_guard("update-run-perf", || {
-    let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let daemon_rs_dir = tools_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .ok_or("tools dir missing daemon-rs parent")?;
-    let repo_root = daemon_rs_dir
-        .parent()
-        .ok_or("daemon-rs dir missing parent")?;
-    let perf_md = env::var("PERF_MD_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| daemon_rs_dir.join("PERF.md"));
-    let stress_rounds = env::var("STRESS_ROUNDS").unwrap_or_else(|_| "500".to_string());
-    let perf_repeats = perf_repeats();
-    let parity_rounds = parity_stress_rounds();
-    let rust_log = perf_rust_log_level();
-    let go_log = perf_go_log_level();
-    let run_date = run_git(daemon_rs_dir, ["log", "-1", "--date=short", "--pretty=%ad"]);
-    let current_commit = run_git(daemon_rs_dir, ["rev-parse", "--short", "HEAD"]);
-    let current_subject = run_git(daemon_rs_dir, ["log", "-1", "--pretty=%s"]);
-    let prev_commit = run_git(daemon_rs_dir, ["rev-parse", "--short", "HEAD^"]);
-    let prev_commit_full = run_git(daemon_rs_dir, ["rev-parse", "HEAD^"]);
-    let prev_subject = run_git(daemon_rs_dir, ["log", "-1", "--pretty=%s", "HEAD^"]);
-    let cache_root = cache_root(repo_root);
-    let refresh_prev_base = env_flag("OPENSNITCH_PERF_REFRESH_BASE");
-    let workspace_state = if run_git(repo_root, ["status", "--short"]).is_empty() {
-        "clean"
-    } else {
-        "dirty"
-    };
+        let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let daemon_rs_dir = tools_dir
+            .parent()
+            .and_then(|path| path.parent())
+            .ok_or("tools dir missing daemon-rs parent")?;
+        let repo_root = daemon_rs_dir
+            .parent()
+            .ok_or("daemon-rs dir missing parent")?;
+        let perf_md = env::var("PERF_MD_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| daemon_rs_dir.join("PERF.md"));
+        let stress_rounds = env::var("STRESS_ROUNDS").unwrap_or_else(|_| "500".to_string());
+        let perf_repeats = perf_repeats();
+        let parity_rounds = parity_stress_rounds();
+        let rust_log = perf_rust_log_level();
+        let go_log = perf_go_log_level();
+        let run_date = run_git(daemon_rs_dir, ["log", "-1", "--date=short", "--pretty=%ad"]);
+        let current_commit = run_git(daemon_rs_dir, ["rev-parse", "--short", "HEAD"]);
+        let current_subject = run_git(daemon_rs_dir, ["log", "-1", "--pretty=%s"]);
+        let prev_commit = run_git(daemon_rs_dir, ["rev-parse", "--short", "HEAD^"]);
+        let prev_commit_full = run_git(daemon_rs_dir, ["rev-parse", "HEAD^"]);
+        let prev_subject = run_git(daemon_rs_dir, ["log", "-1", "--pretty=%s", "HEAD^"]);
+        let cache_root = cache_root(repo_root);
+        let refresh_prev_base = env_flag("OPENSNITCH_PERF_REFRESH_BASE");
+        let workspace_state = if run_git(repo_root, ["status", "--short"]).is_empty() {
+            "clean"
+        } else {
+            "dirty"
+        };
 
-    println!(
-        "Running current Rust release stress profile ({}x, median by p95)...",
-        perf_repeats
-    );
-    let mut current_rust_runs = Vec::with_capacity(perf_repeats);
-    for run_idx in 0..perf_repeats {
-        let current_rust_output = run_command(
+        println!(
+            "Running current Rust release stress profile ({}x, median by p95)...",
+            perf_repeats
+        );
+        let mut current_rust_runs = Vec::with_capacity(perf_repeats);
+        for run_idx in 0..perf_repeats {
+            let current_rust_output = run_command(
+                repo_root,
+                "cargo",
+                [
+                    "test",
+                    "--manifest-path",
+                    daemon_rs_dir.join("Cargo.toml").to_string_lossy().as_ref(),
+                    "--release",
+                    "-p",
+                    "opensnitchd-rs",
+                    "stress_profile_reports_connect_latency_and_pipeline_drops",
+                    "--",
+                    "--ignored",
+                    "--nocapture",
+                ],
+                &[
+                    ("RUST_LOG", rust_log.as_str()),
+                    ("OPENSNITCH_STRESS_ROUNDS", stress_rounds.as_str()),
+                ],
+            )?;
+            let current_rust_line = find_stress_profile_line(&current_rust_output)?.to_string();
+            let current_rust_metrics = Metrics::parse(&current_rust_line)?;
+            println!(
+                "  rust-run {}/{} p95_ms={:.3}",
+                run_idx + 1,
+                perf_repeats,
+                current_rust_metrics.p95,
+            );
+            current_rust_runs.push((current_rust_metrics, current_rust_line));
+        }
+        let (current_rust, current_rust_line) = select_median_metrics_run(current_rust_runs);
+
+        println!(
+            "Running current Go stress profile ({}x, median by p95)...",
+            perf_repeats
+        );
+        let mut current_go_runs = Vec::with_capacity(perf_repeats);
+        for run_idx in 0..perf_repeats {
+            let current_go_output = run_command(
+                &repo_root.join("daemon"),
+                "go",
+                [
+                    "test",
+                    "./runtimeprofile",
+                    "-run",
+                    "TestStressProfileReportsConnectLatencyAndPipelineDrops",
+                    "-count=1",
+                    "-v",
+                ],
+                &[
+                    ("OPENSNITCH_HARNESS_GO_LOG_LEVEL", go_log.as_str()),
+                    ("OPENSNITCH_STRESS_PROFILE", "1"),
+                    ("OPENSNITCH_STRESS_ROUNDS", stress_rounds.as_str()),
+                ],
+            )?;
+            let current_go_line =
+                find_line(&current_go_output, "stress-profile backend=go")?.to_string();
+            let current_go_metrics = Metrics::parse(&current_go_line)?;
+            println!(
+                "  go-run   {}/{} p95_ms={:.3}",
+                run_idx + 1,
+                perf_repeats,
+                current_go_metrics.p95,
+            );
+            current_go_runs.push((current_go_metrics, current_go_line));
+        }
+        let (current_go, current_go_line) = select_median_metrics_run(current_go_runs);
+
+        let prev_rust_line = cached_or_run_prev_rust_profile(
             repo_root,
-            "cargo",
-            [
-                "test",
-                "--manifest-path",
-                daemon_rs_dir.join("Cargo.toml").to_string_lossy().as_ref(),
-                "--release",
-                "-p",
-                "opensnitchd-rs",
-                "stress_profile_reports_connect_latency_and_pipeline_drops",
-                "--",
-                "--ignored",
-                "--nocapture",
-            ],
-            &[
-                ("RUST_LOG", rust_log.as_str()),
-                ("OPENSNITCH_STRESS_ROUNDS", stress_rounds.as_str()),
-            ],
-        )?;
-        let current_rust_line = find_stress_profile_line(&current_rust_output)?.to_string();
-        let current_rust_metrics = Metrics::parse(&current_rust_line)?;
-        println!(
-            "  rust-run {}/{} p95_ms={:.3}",
-            run_idx + 1,
+            &cache_root,
+            &prev_commit,
+            &prev_commit_full,
+            &stress_rounds,
             perf_repeats,
-            current_rust_metrics.p95,
-        );
-        current_rust_runs.push((current_rust_metrics, current_rust_line));
-    }
-    let (current_rust, current_rust_line) = select_median_metrics_run(current_rust_runs);
-
-    println!(
-        "Running current Go stress profile ({}x, median by p95)...",
-        perf_repeats
-    );
-    let mut current_go_runs = Vec::with_capacity(perf_repeats);
-    for run_idx in 0..perf_repeats {
-        let current_go_output = run_command(
-            &repo_root.join("daemon"),
-            "go",
-            [
-                "test",
-                "./runtimeprofile",
-                "-run",
-                "TestStressProfileReportsConnectLatencyAndPipelineDrops",
-                "-count=1",
-                "-v",
-            ],
-            &[
-                ("OPENSNITCH_HARNESS_GO_LOG_LEVEL", go_log.as_str()),
-                ("OPENSNITCH_STRESS_PROFILE", "1"),
-                ("OPENSNITCH_STRESS_ROUNDS", stress_rounds.as_str()),
-            ],
-        )?;
-        let current_go_line =
-            find_line(&current_go_output, "stress-profile backend=go")?.to_string();
-        let current_go_metrics = Metrics::parse(&current_go_line)?;
-        println!(
-            "  go-run   {}/{} p95_ms={:.3}",
-            run_idx + 1,
-            perf_repeats,
-            current_go_metrics.p95,
-        );
-        current_go_runs.push((current_go_metrics, current_go_line));
-    }
-    let (current_go, current_go_line) = select_median_metrics_run(current_go_runs);
-
-    let prev_rust_line = cached_or_run_prev_rust_profile(
-        repo_root,
-        &cache_root,
-        &prev_commit,
-        &prev_commit_full,
-        &stress_rounds,
-        perf_repeats,
-        refresh_prev_base,
-    )
-    .ok();
-    let prev_rust = prev_rust_line
-        .as_ref()
-        .and_then(|line| Metrics::parse(line).ok());
-
-    let prev_commit_cell = if prev_rust.is_some() {
-        format!("`{prev_commit}`")
-    } else {
-        "unavailable".to_string()
-    };
-    let vs_prev_cell = if let Some(prev) = prev_rust.as_ref() {
-        current_rust.delta_string(prev)
-    } else {
-        "n/a".to_string()
-    };
-
-    let row_rust = format!(
-        "| {run_date} | Rust | release (ThinLTO) | {stress_rounds} | `{current_commit}` | {current_rust} | pass | Go default same run | {vs_go} | {prev_commit_cell} | {vs_prev_cell} | Auto-updated current reference Rust run ({current_subject}); workspace {workspace_state}. |",
-        current_rust = current_rust.format_values(),
-        vs_go = current_rust.delta_string(&current_go),
-    );
-    let row_go = format!(
-        "| {run_date} | Go | default | {stress_rounds} | `{current_commit}` | {current_go} | pass | {empty} | Auto-updated current Go comparison row paired with Rust actual. |",
-        current_go = current_go.format_values(),
-        empty = EMPTY_COMPARISON_COLUMNS,
-    );
-    let row_prev = if let Some(prev) = prev_rust.as_ref() {
-        format!(
-            "| {run_date} | Rust | release (ThinLTO) | {stress_rounds} | `{prev_commit}` | {prev_rust} | pass | {empty} | Auto-updated previous commit benchmark ({prev_subject}) using cached previous-commit worktree/results when available. |",
-            prev_rust = prev.format_values(),
-            empty = EMPTY_COMPARISON_COLUMNS,
+            refresh_prev_base,
         )
-    } else {
-        format!(
-            "| {run_date} | Rust | release (ThinLTO) | {stress_rounds} | `{prev_commit}` | unavailable | fail | {empty} | Previous-commit benchmark unavailable (build/compat issue in previous commit). |",
-            empty = EMPTY_COMPARISON_COLUMNS,
-        )
-    };
+        .ok();
+        let prev_rust = prev_rust_line
+            .as_ref()
+            .and_then(|line| Metrics::parse(line).ok());
 
-    prepend_rows(&perf_md, TABLE_HEADER, &[row_rust, row_go, row_prev])?;
+        let prev_commit_cell = if prev_rust.is_some() {
+            format!("`{prev_commit}`")
+        } else {
+            "unavailable".to_string()
+        };
+        let vs_prev_cell = if let Some(prev) = prev_rust.as_ref() {
+            current_rust.delta_string(prev)
+        } else {
+            "n/a".to_string()
+        };
 
-    println!(
-        "Running parity hot/cold delta harness ({}x, median by hot p95 delta)...",
-        perf_repeats
-    );
-    let mut parity_runs = Vec::with_capacity(perf_repeats);
-    for run_idx in 0..perf_repeats {
-        // Call in-process instead of spawning `make parity-hot-cold-delta`, which
-        // avoids a full subprocess launch + cargo warm start per repeat.
-        let parity_output = harness_cmds::run_parity_delta_to_string(repo_root)?;
-        print!("{}", harness_cmds::format_parity_delta_table(&parity_output));
-        let parsed = parse_parity_delta_summary(&parity_output)?;
-        println!(
-            "  parity-run {}/{} hot_p95_delta_ms={:+.3} status={}",
-            run_idx + 1,
-            perf_repeats,
-            parsed.hot_p95,
-            parsed.status,
+        let row_rust = format!(
+            "| {run_date} | Rust | release (ThinLTO) | {stress_rounds} | `{current_commit}` | {current_rust} | pass | Go default same run | {vs_go} | {prev_commit_cell} | {vs_prev_cell} | Auto-updated current reference Rust run ({current_subject}); workspace {workspace_state}. |",
+            current_rust = current_rust.format_values(),
+            vs_go = current_rust.delta_string(&current_go),
         );
-        parity_runs.push(parsed);
-    }
-    let parity = select_median_parity_run(parity_runs);
+        let row_go = format!(
+            "| {run_date} | Go | default | {stress_rounds} | `{current_commit}` | {current_go} | pass | {empty} | Auto-updated current Go comparison row paired with Rust actual. |",
+            current_go = current_go.format_values(),
+            empty = EMPTY_COMPARISON_COLUMNS,
+        );
+        let row_prev = if let Some(prev) = prev_rust.as_ref() {
+            format!(
+                "| {run_date} | Rust | release (ThinLTO) | {stress_rounds} | `{prev_commit}` | {prev_rust} | pass | {empty} | Auto-updated previous commit benchmark ({prev_subject}) using cached previous-commit worktree/results when available. |",
+                prev_rust = prev.format_values(),
+                empty = EMPTY_COMPARISON_COLUMNS,
+            )
+        } else {
+            format!(
+                "| {run_date} | Rust | release (ThinLTO) | {stress_rounds} | `{prev_commit}` | unavailable | fail | {empty} | Previous-commit benchmark unavailable (build/compat issue in previous commit). |",
+                empty = EMPTY_COMPARISON_COLUMNS,
+            )
+        };
 
-    let hot_mixed_go_ms = parity.hot_mixed_go_ms;
-    let hot_mixed_rust_ms = parity.hot_mixed_rust_ms;
-    let hot_mixed_delta_ms = parity.hot_mixed_delta_ms;
-    let hot_thr_go_time_op_us = parity.hot_thr_go_time_op_us;
-    let hot_thr_rust_time_op_us = parity.hot_thr_rust_time_op_us;
-    let hot_thr_go_ops_s = parity.hot_thr_go_ops_s;
-    let hot_thr_rust_ops_s = parity.hot_thr_rust_ops_s;
-    let hot_p50 = parity.hot_p50;
-    let hot_p95 = parity.hot_p95;
-    let hot_p99 = parity.hot_p99;
-    let hot_max = parity.hot_max;
-    let hot_drop_total = parity.hot_drop_total;
-    let cold_go_rule = parity.cold_go_rule;
-    let cold_rust_rule = parity.cold_rust_rule;
-    let cold_rule_delta = parity.cold_rule_delta;
-    let cold_go_ui = parity.cold_go_ui;
-    let cold_rust_ui = parity.cold_rust_ui;
-    let cold_ui_delta = parity.cold_ui_delta;
-    let cold_go_tasks = parity.cold_go_tasks;
-    let cold_rust_tasks = parity.cold_rust_tasks;
-    let cold_tasks_delta = parity.cold_tasks_delta;
-    let cold_go = parity.cold_go;
-    let cold_rust = parity.cold_rust;
-    let cold_delta = parity.cold_delta;
-    let status = parity.status.as_str();
+        prepend_rows(&perf_md, TABLE_HEADER, &[row_rust, row_go, row_prev])?;
 
-    let delta_row = format!(
-        "| {run_date} | `make parity-hot-cold-delta` | {parity_rounds} | `{current_commit}` | {hot_mixed_go_ms:.3} | {hot_mixed_rust_ms:.3} | {hot_mixed_delta_ms:+.3} | {hot_thr_go_time_op_us:.3} | {hot_thr_rust_time_op_us:.3} | {hot_thr_go_ops_s:.1} | {hot_thr_rust_ops_s:.1} | {hot_p50:+.3} | {hot_p95:+.3} | {hot_p99:+.3} | {hot_max:+.3} | {hot_drop:+.0} | {cold_go_rule:.3} | {cold_rust_rule:.3} | {cold_rule_delta:+.3} | {cold_go_ui:.3} | {cold_rust_ui:.3} | {cold_ui_delta:+.3} | {cold_go_tasks:.3} | {cold_rust_tasks:.3} | {cold_tasks_delta:+.3} | {cold_go:.3} | {cold_rust:.3} | {cold_delta:+.3} | {status} | Auto-updated parity hot/cold delta row from tools command. |",
-        hot_drop = hot_drop_total,
-    );
+        println!(
+            "Running parity hot/cold delta harness ({}x, median by hot p95 delta)...",
+            perf_repeats
+        );
+        let mut parity_runs = Vec::with_capacity(perf_repeats);
+        for run_idx in 0..perf_repeats {
+            // Call in-process instead of spawning `make parity-hot-cold-delta`, which
+            // avoids a full subprocess launch + cargo warm start per repeat.
+            let parity_output = harness_cmds::run_parity_delta_to_string(repo_root)?;
+            print!(
+                "{}",
+                harness_cmds::format_parity_delta_table(&parity_output)
+            );
+            let parsed = parse_parity_delta_summary(&parity_output)?;
+            println!(
+                "  parity-run {}/{} hot_p95_delta_ms={:+.3} status={}",
+                run_idx + 1,
+                perf_repeats,
+                parsed.hot_p95,
+                parsed.status,
+            );
+            parity_runs.push(parsed);
+        }
+        let parity = select_median_parity_run(parity_runs);
 
-    prepend_rows_any_header(
-        &perf_md,
-        &[
-            DELTA_TABLE_HEADER,
-            DELTA_TABLE_HEADER_LEGACY,
-            DELTA_TABLE_HEADER_LEGACY_ALT,
-        ],
-        &[delta_row],
-    )?;
+        let hot_mixed_go_ms = parity.hot_mixed_go_ms;
+        let hot_mixed_rust_ms = parity.hot_mixed_rust_ms;
+        let hot_mixed_delta_ms = parity.hot_mixed_delta_ms;
+        let hot_thr_go_time_op_us = parity.hot_thr_go_time_op_us;
+        let hot_thr_rust_time_op_us = parity.hot_thr_rust_time_op_us;
+        let hot_thr_go_ops_s = parity.hot_thr_go_ops_s;
+        let hot_thr_rust_ops_s = parity.hot_thr_rust_ops_s;
+        let hot_p50 = parity.hot_p50;
+        let hot_p95 = parity.hot_p95;
+        let hot_p99 = parity.hot_p99;
+        let hot_max = parity.hot_max;
+        let hot_drop_total = parity.hot_drop_total;
+        let cold_go_rule = parity.cold_go_rule;
+        let cold_rust_rule = parity.cold_rust_rule;
+        let cold_rule_delta = parity.cold_rule_delta;
+        let cold_go_ui = parity.cold_go_ui;
+        let cold_rust_ui = parity.cold_rust_ui;
+        let cold_ui_delta = parity.cold_ui_delta;
+        let cold_go_tasks = parity.cold_go_tasks;
+        let cold_rust_tasks = parity.cold_rust_tasks;
+        let cold_tasks_delta = parity.cold_tasks_delta;
+        let cold_go = parity.cold_go;
+        let cold_rust = parity.cold_rust;
+        let cold_delta = parity.cold_delta;
+        let status = parity.status.as_str();
 
-    println!("Updated {}", perf_md.display());
-    println!("Current Rust (median): {current_rust_line}");
-    println!("Current Go (median):   {current_go_line}");
-    if let Some(prev_rust_line) = prev_rust_line.as_ref() {
-        println!("Prev Rust:    {prev_rust_line}");
-    } else {
-        println!("Prev Rust:    unavailable (previous commit benchmark failed)");
-    }
-    println!("Prev cache:   {}", cache_root.display());
+        let delta_row = format!(
+            "| {run_date} | `make parity-hot-cold-delta` | {parity_rounds} | `{current_commit}` | {hot_mixed_go_ms:.3} | {hot_mixed_rust_ms:.3} | {hot_mixed_delta_ms:+.3} | {hot_thr_go_time_op_us:.3} | {hot_thr_rust_time_op_us:.3} | {hot_thr_go_ops_s:.1} | {hot_thr_rust_ops_s:.1} | {hot_p50:+.3} | {hot_p95:+.3} | {hot_p99:+.3} | {hot_max:+.3} | {hot_drop:+.0} | {cold_go_rule:.3} | {cold_rust_rule:.3} | {cold_rule_delta:+.3} | {cold_go_ui:.3} | {cold_rust_ui:.3} | {cold_ui_delta:+.3} | {cold_go_tasks:.3} | {cold_rust_tasks:.3} | {cold_tasks_delta:+.3} | {cold_go:.3} | {cold_rust:.3} | {cold_delta:+.3} | {status} | Auto-updated parity hot/cold delta row from tools command. |",
+            hot_drop = hot_drop_total,
+        );
 
-    Ok(())
+        prepend_rows_any_header(
+            &perf_md,
+            &[
+                DELTA_TABLE_HEADER,
+                DELTA_TABLE_HEADER_LEGACY,
+                DELTA_TABLE_HEADER_LEGACY_ALT,
+            ],
+            &[delta_row],
+        )?;
+
+        println!("Updated {}", perf_md.display());
+        println!("Current Rust (median): {current_rust_line}");
+        println!("Current Go (median):   {current_go_line}");
+        if let Some(prev_rust_line) = prev_rust_line.as_ref() {
+            println!("Prev Rust:    {prev_rust_line}");
+        } else {
+            println!("Prev Rust:    unavailable (previous commit benchmark failed)");
+        }
+        println!("Prev cache:   {}", cache_root.display());
+
+        Ok(())
     }) // with_guard update_perf_md
 }
 
@@ -1553,12 +1562,21 @@ fn prepend_rows(perf_md: &Path, header: &str, rows: &[String]) -> Result<(), Dyn
     prepend_rows_any_header(perf_md, &[header], rows)
 }
 
-fn prepend_rows_any_header(perf_md: &Path, headers: &[&str], rows: &[String]) -> Result<(), DynError> {
+fn prepend_rows_any_header(
+    perf_md: &Path,
+    headers: &[&str],
+    rows: &[String],
+) -> Result<(), DynError> {
     let text = fs::read_to_string(perf_md)?;
     let header_idx = headers
         .iter()
         .find_map(|candidate| text.find(candidate))
-        .ok_or_else(|| format!("table header not found in PERF.md: {}", headers.join(" || ")))?;
+        .ok_or_else(|| {
+            format!(
+                "table header not found in PERF.md: {}",
+                headers.join(" || ")
+            )
+        })?;
     let first_newline = text[header_idx..]
         .find('\n')
         .ok_or("run history header line not terminated")?

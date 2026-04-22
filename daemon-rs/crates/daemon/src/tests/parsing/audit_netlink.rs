@@ -21,8 +21,14 @@ fn enable_events_payload_sets_mask_enabled_and_pid() {
     let payload = AuditNetlinkSocket::probe_build_enable_events_payload();
 
     assert_eq!(payload.len(), STATUS_MESSAGE_LEN);
-    assert_eq!(u32::from_ne_bytes(payload[0..4].try_into().expect("mask bytes")), 5);
-    assert_eq!(u32::from_ne_bytes(payload[4..8].try_into().expect("enabled bytes")), 1);
+    assert_eq!(
+        u32::from_ne_bytes(payload[0..4].try_into().expect("mask bytes")),
+        5
+    );
+    assert_eq!(
+        u32::from_ne_bytes(payload[4..8].try_into().expect("enabled bytes")),
+        1
+    );
     assert_eq!(
         u32::from_ne_bytes(payload[12..16].try_into().expect("pid bytes")),
         std::process::id()
@@ -31,7 +37,10 @@ fn enable_events_payload_sets_mask_enabled_and_pid() {
 
 #[test]
 fn parse_event_datagram_extracts_audit_payload() {
-    let datagram = build_datagram(1300, b"type=SYSCALL msg=audit(1:2): pid=4242 key=\"opensnitch\"\0");
+    let datagram = build_datagram(
+        1300,
+        b"type=SYSCALL msg=audit(1:2): pid=4242 key=\"opensnitch\"\0",
+    );
     let event = AuditNetlinkSocket::probe_parse_event_datagram(&datagram)
         .expect("parse event datagram")
         .expect("event payload");

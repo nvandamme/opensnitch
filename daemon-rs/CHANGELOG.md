@@ -12,6 +12,352 @@ Versioning baseline:
 - `v0.6.0`
 - `v0.7.0`
 
+## [Unreleased]
+
+### Added
+
+- **Cross-service audit domain model** (`crates/daemon/src/models/audit/`):
+  - Replaced single-file `audit_event.rs` with a per-domain module tree under `models/audit/`:
+    `client.rs`, `config.rs`, `connection.rs`, `dns.rs`, `event.rs`, `family.rs`, `firewall.rs`,
+    `kernel.rs`, `kind.rs`, `process.rs`, `rule.rs`, `severity.rs`, `stats.rs`, `storage.rs`,
+    `subscription.rs`, `task.rs`, `verdict.rs`.
+  - Each domain file contains a `*Lifecycle` enum (service lifecycle transitions: `Initialized`,
+    `Started`, `Stopped`, `ReloadStarted`, `ReloadCompleted`, `ReloadFailed`, etc.) and a
+    `*Action` enum (runtime behavior: CRUD, I/O, cache, pressure, authorization decisions).
+  - `AuditEventKind` in `kind.rs` is the top-level sum type, composing every per-domain
+    `*Lifecycle` and `*Action` variant into a single exhaustive enum.
+  - `AuditEvent` in `event.rs` wraps kind + family + severity + nanosecond timestamp.
+    Constructors `AuditEvent::hot(kind)` / `AuditEvent::cold(kind)` tag events as hot-path
+    or cold-path; severity is auto-derived from kind via `AuditSeverity::from_kind`.
+  - `AuditSeverity` in `severity.rs`: `Error` / `Warning` / `Info` / `Debug` — drives syslog
+    level selection; computed automatically, never chosen by emit sites.
+  - `AuditEventFamily` in `family.rs`: `HotPath` / `ColdPath` — latency tagging orthogonal to severity.
+
+- **Cross-service audit bus (phase 1)** (`crates/daemon/src/services/audit/`):
+  - `AuditService` (`audit.rs`): non-blocking fan-out over a sync ingress queue +
+    dedicated dispatcher thread → `tokio::sync::broadcast` + bounded `AuditRing`.
+    `emit` is fail-open (`TrySendError::Full` is silently dropped); `subscribe()` returns
+    a broadcast receiver for downstream sinks; `ring().drain_recent()` for UI query/drain.
+  - `AuditSinks` (`sink.rs`): multiplexes broadcast output to three independent additive sinks:
+    - **log-lines** (default on): emits `tracing` log lines at the event's severity level.
+    - **NDJSON file** (default off, `--audit-sink-file <path>` / `OPENSNITCH_AUDIT_SINK_FILE`):
+      dedicated worker thread appends `{"ts":..,"path":..,"level":..,"event":..}` lines.
+    - **syslog** (default off, `--audit-sink-syslog` / `OPENSNITCH_AUDIT_SINK_SYSLOG`):
+      dedicated worker thread emits to `LOG_DAEMON` via `syslog::Formatter3164`; severity maps
+      `Error→LOG_ERR`, `Warning→LOG_WARNING`, `Info→LOG_NOTICE`, `Debug→LOG_DEBUG`.
+    - Workers are detached std threads; channels are fail-open bounded queues.
+  - `ServiceFactory` impl in `runtime_lifecycle.rs` constructs `AuditService` via the standard
+    lifecycle factory pattern (`init(capacity)`).
+  - `AuditSinkConfig` added to `models/config_runtime.rs` (`sink_file`, `sink_syslog`,
+    `sink_log_lines`); parsed in `config.rs` with full `SinkFile`/`SinkSyslog`/`SinkLogLines`
+    field alias normalisation; CLI flags (`--audit-sink-file`, `--audit-sink-syslog`,
+    `--audit-sink-log`) and env vars (`OPENSNITCH_AUDIT_SINK_*`) added to `main.rs` with
+    §7 precedence (CLI > env > config file).
+  - Audit bootstrap + runtime wiring (`daemon/bootstrap.rs`, `daemon/tasks.rs`,
+    `daemon/worker_startup.rs`, `daemon/serve.rs`): `AuditService` injected into `DaemonRuntime`;
+    `spawn_audit_sink_task` launches the subscriber/sink task; `AuditLifecycle::SinkStarted`
+    emitted on ready.
+  - Notification flow now emits audit events for owner-scope normalization denials and
+    authorization-policy denials before replying with error.
+  - Verdict flow now emits `VerdictAction::AskTimeoutFallback` audit events when the ask-timeout
+    fallback policy is applied.
+  - Command flow emits `CommandFlowLifecycle` and `ClientLifecycle` startup events.
+  - Stats flow, connect flow, kernel flow, verdict-reply flow, and notification flow each emit
+    `*FlowLifecycle::Started` events on task launch.
+  - Subscription command flow (feature-gated) emits `SubscriptionFlowLifecycle::CommandStreamFailed`
+    on bidi stream errors.
+  - `SubscriptionService::spawn_scheduler` in the disabled stub now accepts `AuditService`
+    parameter for API parity with the gated implementation.
+  - Added runtime tunable `audit_ring_capacity` (existing configuration surface).
+
+- **Canonical firewall domain model + transport discriminator model** (`crates/daemon/src/models/firewall_config.rs`,
+  `crates/daemon/src/models/command_action.rs`):
+  - Added proto-free `FirewallConfig` / `FirewallRule` / `FirewallChain` /
+    `FirewallExpression` / `FirewallStatement` / `FirewallStatementValue` domain types.
+  - Added transport-neutral `CommandAction` discriminant for notification/control policy.
+  - Notification authorization, owner-scope normalization, and firewall command handling now operate on
+    canonical domain models instead of `pb::*` wire types.
+
+- **Config-driven network alias file path** (`crates/daemon/src/models/config_storage.rs`,
+  `crates/daemon/src/models/config_runtime.rs`, `crates/daemon/src/config.rs`,
+  `crates/daemon/src/daemon/bootstrap.rs`, `crates/daemon/src/services/rule/rule.rs`):
+  - Added `Rules.NetworkAliasesFile` to config parsing and canonical key normalization.
+  - Added runtime `network_aliases_path` and bootstrap wiring into `RuleService`.
+  - `RuleService` now resolves aliases from config first and falls back to the system/dev defaults.
+
+- **Explicit client authorization modes** (`crates/daemon/src/models/config_runtime.rs`,
+  `crates/daemon/src/models/config_storage.rs`, `crates/daemon/src/config.rs`):
+  - New runtime `AuthMode` model with `legacy`, `local-only`, and `local+remote`.
+  - `Server.Authentication.Mode` is parsed case-insensitively and defaults to `legacy`.
+  - Runtime config now carries explicit rollout state for client authorization instead of
+    inferring behavior from missing allowlist fields.
+
+- **Local client principal/group policy in runtime config** (`crates/daemon/src/models/config_runtime.rs`,
+  `crates/daemon/src/models/config_storage.rs`, `crates/daemon/src/config.rs`):
+  - New runtime model `LocalPrincipal { uid, gid }`.
+  - New auth config fields in storage model: `AllowedPrincipals`, `AllowedUsers`, `AllowedGroups`.
+  - New runtime fields: `local_control_allowed_principals: Option<Vec<LocalPrincipal>>` and
+    `local_control_allowed_group_gids: Option<Vec<u32>>`.
+  - Case-insensitive canonical key normalization added for `AllowedPrincipals`, `AllowedUsers`,
+    `AllowedGroups`, `UID`, and `GID`.
+  - `AllowedUsers` resolves usernames to `(uid,gid)` via libc account lookup; `AllowedGroups`
+    resolves group names to GIDs via libc group lookup; invalid/unresolvable entries are ignored
+    with warnings; resolved sets are sorted and deduplicated.
+
+- **Notification flow peer-identity enforcement for local endpoints** (`crates/daemon/src/flows/notification/notification.rs`):
+  - UNIX peer extraction upgraded from UID-only to full SO_PEERCRED tuple `(uid,gid,pid)`.
+  - Supplementary group extraction added via `/proc/<pid>/status` (`Groups:` line).
+  - New local policy gate `local_peer_principal_allowed` applied before notification reconnect/handshake.
+  - Session binding now receives config and binds as `LocalUid` for verified local UNIX and loopback TCP listeners.
+
+- **Loopback TCP ownership hardening path** (`crates/daemon/src/flows/notification/notification.rs`):
+  - For local `http(s)://127.0.0.1` / `::1` endpoints, daemon can inspect `/proc/net/tcp*`
+    to resolve listener owner UID (+ inode) and enforce principal policy.
+  - Optional group policy for loopback TCP uses inode-to-pid resolution through `/proc/<pid>/fd/*`
+    and then supplementary groups from `/proc/<pid>/status`.
+
+- **Privileged notification ingress authorization** (`crates/daemon/src/flows/notification/notification.rs`):
+  - Privileged notification actions are classified before command queueing.
+  - In hardened modes, remote privileged commands are denied by default.
+  - Non-root local rule mutations are accepted only when every rule payload is provably scoped to
+    the caller via `user.id` / `user.name`.
+  - Non-root local firewall reloads are accepted only for explicit owner-matched rule payloads
+    (`--uid-owner`, `meta skuid`); chain/table/policy edits remain elevated-only.
+
+- **Authorization-mode bootstrap warnings** (`crates/daemon/src/daemon/bootstrap.rs`):
+  - Startup logs now emit explicit warnings for `legacy`, transitional `local-only`, and
+    `local+remote` fallback behavior.
+  - `local+remote` warnings now distinguish between an empty remote binding table and a configured
+    `RemotePrincipalBindings` foundation that still lacks enforcement wiring.
+
+- **Remote principal binding config foundation** (`crates/daemon/src/models/config_storage.rs`,
+  `crates/daemon/src/models/config_runtime.rs`, `crates/daemon/src/config.rs`,
+  `crates/daemon/src/flows/notification/notification.rs`):
+  - Added `Server.Authentication.RemotePrincipalBindings` to the storage model with certificate
+    fingerprint / subject / SAN selectors, resolved local principal targets, and capability lists.
+  - Added runtime `RemotePrincipalBinding` records for future `local+remote` authorization.
+  - Config parsing resolves `LocalUser` through libc account lookup, accepts explicit `LocalPrincipal`
+    UID/GID tuples, normalizes capability names, and fails closed on invalid/incomplete bindings.
+  - Auth reload fingerprints now include auth mode, local allowlists, and remote principal bindings so
+    client policy changes are treated as auth-relevant session state.
+
+- **Phase-2 ingress authorization and owner-scope hardening** (`crates/daemon/src/flows/notification/notification.rs`):
+  - Added explicit privileged-action classification at notification ingress with
+    `AlwaysAllowed`, `UserScopedAllowed`, `ElevatedRequired`, and `AlwaysDenied` classes.
+  - Added owner-scope normalization for non-root local rule mutations, including
+    compatibility injection of `user.id=<caller uid>` for eligible payloads.
+  - Added conservative firewall owner-scope normalization for compatible payloads,
+    including nftables statement-path support (`meta skuid == <uid>`).
+  - Added auth decision logging aligned with verdict fallback context, improving
+    operator visibility across `legacy` and hardened modes.
+
+- **Legacy ownerless rule migration mode** (`crates/daemon/src/daemon/migration.rs`,
+  `crates/daemon/src/main.rs`, `crates/daemon/src/daemon.rs`):
+  - Added one-shot CLI migration entrypoint:
+    `--migrate-ownerless-rules --migrate-owner-uid <uid>` (dry-run by default),
+    with `--migrate-write` for persistence.
+  - Migration planning classifies rules into eligible/already-scoped/ambiguous/conflicting,
+    emits a full report, and fails closed in write mode when ambiguous/conflicting rules remain.
+
+- **Action-scoped schema hardening for rule mutations** (`crates/daemon/src/flows/notification/notification.rs`):
+  - `CHANGE_RULE` now requires explicit operand semantics (non-empty operator operands)
+    in hardened modes; payloads without operands are denied.
+  - `ENABLE_RULE` / `DISABLE_RULE` / `DELETE_RULE` retain legacy minimal-stub compatibility
+    via owner-scope/elevated arbitration.
+  - Authorization for legacy rule stubs now resolves against stored rules by name,
+    allowing non-elevated operations when stored owner scope matches caller identity.
+
+- **Group-scoped owner authorization with syscall-backed resolution** (`crates/daemon/src/flows/notification/notification.rs`):
+  - Added `user.gid` owner-scope support for rule authorization when caller UID is
+    a member of the referenced group.
+  - Extended firewall owner-scope checks/conflict detection to support group selectors
+    (`--gid-owner`, `meta skgid`).
+  - Group membership is derived from OS account/group resolution (`getpwuid` +
+    `getgrouplist`) rather than ad-hoc group-file parsing.
+
+- **Nested firewall-chain payloads kept elevated-only** (`crates/daemon/src/flows/notification/notification.rs`):
+  - Nested `FwChain.rules` payloads remain elevated-required in hardened modes even when
+    inner rules carry owner matches.
+  - Compatibility normalization continues to apply only to flat owner-matchable firewall
+    rule payloads, not chain-bearing payloads that can create or reshape global chain metadata.
+
+- **Remote capability-based authorization for `local+remote` mode** (`crates/daemon/src/flows/notification/`,
+  `crates/daemon/src/models/auth_capability.rs`, `crates/daemon/src/services/client/session.rs`,
+  `crates/daemon/src/services/client/transport.rs`):
+  - Added canonical capability constants model (`auth_capability.rs`): 10 capability strings
+    (`rules.owner.write`, `rules.global.write`, `firewall.owner.write`, `firewall.global.write`,
+    `config.write`, `daemon.control.stop`, `task.control`, `log.level`, `firewall.toggle`,
+    `interception.toggle`) with `required_capability(action, class)` mapping.
+  - Extended `ClientPrincipal` with `RemoteCert { binding_name, mapped_uid }` variant.
+  - Extended `ClientSession` with `capabilities` field, `for_remote_principal()` constructor,
+    and `has_capability()` method.
+  - Added `resolve_remote_principal_binding()` matching cert identity against configured
+    `RemotePrincipalBindings` (priority: fingerprint > subject > SAN).
+  - `notification_command_allowed` routes `RemoteCert` sessions with capabilities through
+    `check_remote_capability_authorization` instead of local peer-principal gate.
+  - Owner-scope normalization and classification handle `RemoteCert { mapped_uid }` for
+    remote sessions.
+  - Added TLS cert identity extraction infrastructure (`CapturedServerCertIdentity`,
+    `CertCapturingVerifier`, `extract_identity_from_pem`) using `x509-cert` + `sha2`.
+  - Config-based remote principal resolution wired into `session_binding_from_client_addr`.
+  - Added 3 audit event variants: `AllowedRemoteCapability`, `DeniedRemoteCapability`,
+    `RemotePrincipalResolved` with Display formatting and notification flow emit sites.
+  - 24 new tests covering remote principal binding resolution, capability mapping,
+    remote authorization allow/deny paths, session construction, and audit formatting.
+  - Full test suite: 515 passed, 0 failed, 7 ignored.
+
+### Changed
+
+- **Firewall wire/file compatibility now maps through the canonical domain model** (`crates/daemon/src/services/firewall/conversions.rs`,
+  `crates/daemon/src/services/firewall/storage.rs`, `crates/daemon/src/platform/ports/firewall_port.rs`,
+  `crates/daemon/src/services/client/client.rs`, `crates/daemon/src/models/firewall_storage.rs`):
+  - `pb::SysFirewall` was removed from core firewall/runtime/policy code and retained only at gRPC/adapter boundaries.
+  - The deprecated `pb::FwChains` wrapper is flattened at ingress into `FirewallConfig.rules` and `FirewallConfig.chains`,
+    then reconstructed only for wire/file egress compatibility.
+  - Legacy `system-fw.json` nested chain rules now inherit missing `Table` / `Chain` values from the parent chain,
+    matching the Go daemon's compatibility behavior.
+
+- **Firewall-triggered rule-cache refresh now includes alias inputs** (`crates/daemon/src/commands/control/control.rs`,
+  `crates/daemon/src/platform/adapters/nft_monitor.rs`, `crates/daemon/src/workers/firewall/watch_worker.rs`,
+  `crates/daemon/src/workers/firewall/firewall_worker.rs`, `crates/daemon/src/services/rule/rule.rs`,
+  `crates/daemon/src/services/firewall/firewall.rs`):
+  - Added `RuleService::rebuild_caches_from_snapshot()` to rebuild match caches without reloading rules from disk.
+  - Successful explicit firewall reloads, nftables netlink events, and drift-heal recoveries now refresh rule caches.
+  - This keeps `network_aliases.json` and future firewall-native alias/zone sources synchronized with runtime firewall state
+    without adding work to the verdict hot path.
+
+- `Config::default()` now initializes `auth_mode` to `legacy` and preserves allowlist defaults as `None`.
+- Hardened local modes now fall back to root-only local privileged access when no explicit principal/group policy is configured.
+
+### Changed
+
+- **Wire-type naming: `policy_tx`, `hash_cache`, `task_payload` modules renamed** (`crates/daemon/src/models/`):
+  - `models/policy_tx.rs` → `models/policy_tx_storage.rs`: `PolicyChangeSet`, `PolicyOwner`, and `TxPhase` are persisted-changeset types; file name now matches the `*_storage.rs` exemption in §4.
+  - `models/hash_cache.rs` → `models/hash_cache_storage.rs`: on-disk JSON cache format types (`HashCacheKey`, `HashCacheEntry`, `HashCacheFile`, `HashCacheRecord`) correctly signal storage intent via file name.
+  - `models/task_payload.rs` → `models/task_wire.rs`: `LegacyTaskResultPayload` and `TaskErrorPayload` are outgoing transient IPC frames sent to the UI over gRPC, never stored.  Unused `Deserialize` derive removed from both types; `*_wire.rs` suffix now codified as a §4 exempt file pattern.
+  - `models/ebpf_state.rs`: `BpfMap` renamed to `RawBpfMap` to follow the `Raw*` prefix convention for ingress-only serde shapes sourced from kernel/OS state (`bpffs`/`procfs`).
+  - All import sites updated (`services/policy_tx/policy_tx.rs`, `services/client/session.rs`, `services/process/hash_cache.rs`, `services/task/reply.rs`, `services/task/runtime_handlers.rs`, `workers/runtime/ebpf/control.rs`).
+
+- **Storage event bus refactored to async ingress queue** (`crates/daemon/src/services/storage/event_bus.rs`):
+  - `StorageEventBus` now uses a bounded sync ingress queue (`SyncSender<StorageIngressEvent>`) +
+    dedicated dispatcher thread instead of dispatching inline on every emit call.
+  - Added `dropped_ingress_events` `AtomicUsize` counter exposed via
+    `StorageService::dropped_ingress_events_count()` for health monitoring.
+  - Prefix-keyed broadcast routing and path-keyed fan-out moved into the dispatcher thread;
+    emit sites are fully non-blocking.
+
+- **Stats diagnostic counters expanded** (`crates/daemon/src/services/stats/`, `crates/daemon/src/services/stats/snapshot_ops.rs`):
+  - `StatsService` now records `dropped_events_contention` (lock-contention drops on the event
+    ring) and surfaces it as `diag.stats.dropped_events_contention` in stat snapshots.
+  - Storage event bus dropped-ingress count added as `diag.storage.event_bus.dropped_ingress`
+    in stat snapshots via `StorageService` reference.
+
+### Documentation
+
+- **`DESIGN_RULES.md` restructured into four parts** (`DESIGN_RULES.md`):
+  - Reorganised from a flat section list into **Part I — Cross-Cutting Architectural Rules** (§1–§5), **Part II — Per-Domain Rules** (§6–§8), **Part III — Infrastructure Rules** (§9–§10), and **Part IV — Implementation Quality Rules** (§11).
+  - Added `#### Hot-Path State Access Rule` to §1: codifies wait-free/lock-free read discipline for per-packet paths, a primitive table (`ArcSwap`, `ConcurrentLruCache`, `DashMap::get`, firewall `watch::Receiver`, eBPF `ArcSwap<HashMap>`), six violation signals (mutex in hot path, deep clone at read, `DashMap` iteration, `async fn` snapshot accessor, `tokio::sync::Mutex`/`RwLock` on read-dominant state), and a cross-reference to §9.
+  - §9 `DashMap` entry updated to cross-reference the §1 hot-path iteration prohibition.
+  - §4 naming rule extended with: `*_wire.rs` as a new file-level exempt suffix (outgoing transient IPC payloads, `Serialize`-only), clarification that `Raw*` prefix also applies to kernel/OS ingress state (e.g. `RawBpfMap`), and an updated violation-signal line that includes `*_wire.rs` in the exempt-file list.
+
+- **Firewall domain + alias refresh docs updated** (`DESIGN_RULES.md`, `COMPATIBILITY.md`, `DOCS.md`, `TODO.md`):
+  - Documented the canonical flattened firewall domain model and the future `FirewallZone` design anchor.
+  - Documented `Rules.NetworkAliasesFile` and runtime alias-cache rebuild behavior.
+  - Documented that explicit firewall reloads, nftables netlink events, and drift-heal recovery all refresh rule caches.
+
+- **Control-plane authorization docs updated** (`DOCS.md`, `TODO.md`, `DESIGN_RULES.md`):
+  - Added `Server.Authentication.Mode`, `AllowedPrincipals`, `AllowedUsers`, and `AllowedGroups`
+    to config documentation.
+  - Documented conservative owner-scope enforcement, elevated-only command classes, and loopback
+    TCP local identity handling.
+  - Added planning guidance for dedicated `auth.proto` elevation RPCs, PAM-backed remote grants,
+    and daemon-side owner-scope injection for backward-compatible UI rule creation.
+
+- **Phase-2 policy clarification docs** (`DESIGN_RULES.md`, `DOCS.md`, `TODO.md`):
+  - Clarified local principal semantics: UID is the identity anchor; GID/group selectors are
+    supplementary gating and not an independent identity authority.
+  - Clarified service/elevation boundary: daemon enforces authorization but does not host
+    interactive elevation prompts; UI-mediated host backends (polkit/pkexec) remain the model.
+  - Documented explicit ownerless-rule migration workflow and fail-closed write semantics.
+
+### Testing
+
+- **Audit service coverage** (`crates/daemon/src/tests/services/audit.rs`,
+  `crates/daemon/src/tests/services/audit_sink.rs`):
+  - `audit.rs`: ring-overwrite eviction (capacity-2 ring discards oldest on overflow), broadcast
+    subscriber receives cold-path `ClientAuthorizationAction` events, `VerdictAction::AskRuleRulePersisted`
+    payload round-trip survives ring store/drain.
+  - `audit_sink.rs`: NDJSON render produces valid JSON with correct `ts`/`path`/`level`/`event` fields;
+    severity labels (`error`/`warn`/`info`) from `AuditSeverity`; JSON escaping for `\"` and `\\`;
+    syslog message uses `Display` (not `Debug`) output; disabled-sink config spawns no worker threads.
+
+- **Firewall domain + alias compatibility coverage** (`crates/daemon/src/tests/firewall/firewall_service.rs`,
+  `crates/daemon/src/tests/rules/rule_service.rs`, `crates/daemon/src/tests/services/client.rs`,
+  `crates/daemon/src/tests/flows/notification_flow.rs`):
+  - Added legacy `system-fw.json` chain inheritance coverage for nested rules missing `Table` / `Chain`.
+  - Added `network_aliases.json` smoke coverage for `LAN` CIDR matching.
+  - Updated firewall/client/notification tests to use canonical domain models instead of proto firewall payloads.
+
+- **Config parsing coverage** (`crates/daemon/src/tests/parsing/config_parsing.rs`):
+  - Added tests for missing/null local allowlist behavior, UID/GID pair parsing, username resolution,
+    and `auth.mode` parsing/defaults.
+
+- **Notification flow coverage** (`crates/daemon/src/tests/flows/notification_flow.rs`):
+  - Updated session binding tests to pass config context.
+  - Added UNIX local principal allow/deny tests.
+  - Added Linux loopback TCP principal allow/deny test.
+  - Added coverage for remote privileged denial in `local-only`, legacy compatibility behavior,
+    root-only fallback, owner-scoped local rule/firewall mutation acceptance, elevated-only global
+    firewall commands, and loopback TCP local-UID session binding.
+
+- **Additional authorization and migration coverage** (`crates/daemon/src/tests/flows/notification_flow.rs`,
+  `crates/daemon/src/tests/rules/rule_migration.rs`):
+  - Added tests for action-scoped `CHANGE_RULE` operand hard denial.
+  - Added tests proving legacy `ENABLE_RULE`/`DISABLE_RULE`/`DELETE_RULE` stubs can resolve
+    to stored owner-scoped rules without elevation, including group-scoped owner selectors.
+  - Added tests proving nested `FwChain.rules` firewall payloads remain elevated-required and
+    are not owner-scope normalized for non-root local clients.
+  - Added migration tests for dry-run/write paths, owner-scope injection, and fail-closed
+    behavior on ambiguous/conflicting legacy rules.
+
+- **Inline rule reload on inotify fast path** (2026-03-30):
+  - Added `RuleService::reload_inline()`: reads rule JSON files directly on the tokio thread
+    (no `spawn_blocking` scheduling hop). Rules directories hold a handful of small files
+    (< 1 KB) — sync I/O completes in microseconds, well within tokio's cooperative budget.
+  - Inotify-triggered scan path in `RuleWatchControl` switched from `reload_sync` to
+    `reload_inline`, eliminating ~3-5 ms blocking-pool round-trip per reload.
+  - Cold:rule parity median improved from +12 ms to +7 ms (Rust vs Go).
+
+- **§2 file-size enforcement splits** (2026-03-30):
+  - `services/task/runtime_handlers.rs` (1181 → 913 lines): extracted socket-table helper functions
+    (`ensure_process_entry`, `resolve_cached_socket_pid/iface_name`, `fetch_iface_name_map_rtnetlink`,
+    `prepare_socket_monitor_row`, `socket_monitor_{row,diag_row,packet_row,xdp_row}_json`,
+    `AF_XDP_FAMILY`) to new `services/task/socket_monitor.rs` as `pub(super)` free functions.
+  - `tunables.rs` (755 lines) converted to a directory module: `tunables/mod.rs` (linker-only,
+    re-exports `RuntimeTunables` and `NfqueueOverloadPolicy`); `tunables/tunables.rs` (457 lines,
+    all impl: `publish_global`, `global`, `reload_global`, `load_effective`, `apply_raw`,
+    `apply_env_overrides`, `parse_env_usize`, `parse_env_bool`, `clamp`); `tunables/autotune.rs`
+    (308 lines: `maybe_autotune_on_startup`, `check_autotune_preflight`, preflight probes,
+    autotune subprocess control, `env_flag`, `resolve_optin_tunables_path`, `load_raw_tunables`).
+  - `commands/control/control.rs` (812 → 383 lines): extracted `set_firewall`, `reload_firewall`,
+    `collect_firewall_errors{,_impl}` to `commands/control/firewall_cmd.rs` (295 lines);
+    `apply_config` and `set_log_level` to `commands/control/config_cmd.rs` (169 lines).
+    Private helpers (`policy_tx`, `owner_from_client`, `tx_error_message`, `selective_reload_services`,
+    `audit` field) made `pub(super)` for cross-impl access within the module.
+  - `flows/notification/notification.rs` (1965 → 1309 lines): extracted peer credential and
+    principal check functions (`try_unix_peer_credentials`, `try_loopback_tcp_listen_socket`,
+    `find_pid_for_socket_inode`, `peer_group_memberships`, `local_policy_explicitly_configured`,
+    `unix_principal_allowed`, `loopback_tcp_principal_allowed`, `username_for_uid`,
+    `group_memberships_for_uid`) to `flows/notification/authorization.rs` (pub(super) impl blocks);
+    operator/rule/firewall owner-scope functions to `flows/notification/owner_scope.rs`; action
+    classification discriminants (`is_privileged_notification_action`, `is_rule_mutation_action`,
+    `is_rule_toggle_or_delete_action`, `is_firewall_reload_action`) to `flows/notification/classification.rs`.
+    `UnixPeerCredentials` made `pub(super)` for cross-submodule access.
+  - Deferred split plans for 14 remaining over-threshold files documented in `TODO.md`.
+  - All `mod.rs` files in affected areas comply with the linker-only rule.
+  - `cargo fmt` applied codebase-wide.
+  - 491 tests passing, zero warnings.
+
 ## [v0.7.0] - 2026-03-27
 
 ### Added
@@ -128,7 +474,6 @@ Versioning baseline:
 
 ## [v0.6.0] - 2026-03-27
 
-
 ### Added
 - **Persistent file-based hash cache** (`services/process/hash_cache.rs`, `models/hash_cache.rs`):
   - `PersistentHashCache` stores process binary checksums (md5/sha1/sha256) to disk as JSON,
@@ -213,7 +558,6 @@ Versioning baseline:
 - `||domain^` entries now match subdomains (`www.example.org`) in addition to the exact
   domain — `DomainWildcardTrie::insert_domain_and_subdomains` uses `required = labels.len()`
   instead of `labels.len() + 1`.
-
 
 #### Included from unreleased v0.5.1
 
@@ -588,7 +932,6 @@ Versioning baseline:
   and `StatsFlow` hook are already wired; concrete Prometheus/push-style adapter
   implementations deferred to a dedicated future feature.
 
-
 ## [v0.5.0] - 2026-03-26
 
 ### Added
@@ -707,7 +1050,7 @@ Versioning baseline:
   log-based lifecycle fallback activates automatically.
 - `Makefile` `install-rs`: init system detection added; probes `/run/systemd/private`
   for systemd and `/run/openrc` / `openrc-run` for OpenRC; falls back to `none` (binary
-  + config only).  Override with `INIT_SYSTEM=systemd|openrc|procd|none`.  Added
+  and config only).  Override with `INIT_SYSTEM=systemd|openrc|procd|none`.  Added
   `BINDIR` variable (default `bin`; set to `sbin` for OpenWrt).  `systemctl
   daemon-reload` is skipped when `DESTDIR` is set (staging builds).  `PREFIX` defaults
   to `/usr/local`; packagers use `PREFIX=/usr SYSCONFDIR=/etc DESTDIR=<staging>`;

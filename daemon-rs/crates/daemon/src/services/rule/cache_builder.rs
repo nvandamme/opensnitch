@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use anyhow::Result;
@@ -31,7 +31,10 @@ struct OperatorNeeds {
 }
 
 impl RuleService {
-    pub(super) async fn build_match_caches(rules: &[RuleRecord]) -> Result<RuleMatchCaches> {
+    pub(super) async fn build_match_caches(
+        rules: &[RuleRecord],
+        network_aliases_path: &Path,
+    ) -> Result<RuleMatchCaches> {
         let mut list_path_needs = HashMap::new();
         let mut regex_keys = HashSet::new();
         let mut needs_network_aliases = false;
@@ -130,8 +133,9 @@ impl RuleService {
                     .filter_map(|entry| RuleService::extract_domain_list_regex_pattern(entry))
                     .collect::<Vec<_>>();
                 if !regex_patterns.is_empty() {
-                    caches.list_slots[slot_idx].domains_regex =
-                        Some(RuleService::build_list_regex_cache(regex_patterns.iter(), false));
+                    caches.list_slots[slot_idx].domains_regex = Some(
+                        RuleService::build_list_regex_cache(regex_patterns.iter(), false),
+                    );
                 }
             }
 
@@ -210,7 +214,7 @@ impl RuleService {
         }
 
         if needs_network_aliases {
-            caches.network_aliases = Self::load_network_aliases_map().await;
+            caches.network_aliases = Self::load_network_aliases_map(network_aliases_path).await;
         }
 
         for network_value in operator_needs.network_values {

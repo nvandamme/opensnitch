@@ -8,7 +8,9 @@ use tracing::debug;
 
 use crate::{
     commands::subscription::SubscriptionCommandService,
+    models::audit::{AuditEvent, AuditEventKind, SubscriptionFlowLifecycle},
     services::{
+        audit::AuditService,
         client::{ClientService, GrpcChannelCache},
         config::ConfigService,
         subscription::SubscriptionService,
@@ -29,6 +31,7 @@ pub(crate) struct SubscriptionCommandFlow {
     shutdown: CancellationToken,
     config: ConfigService,
     subscriptions: SubscriptionService,
+    audit: AuditService,
 }
 
 impl SubscriptionCommandFlow {
@@ -36,11 +39,13 @@ impl SubscriptionCommandFlow {
         shutdown: CancellationToken,
         config: ConfigService,
         subscriptions: SubscriptionService,
+        audit: AuditService,
     ) -> Self {
         Self {
             shutdown,
             config,
             subscriptions,
+            audit,
         }
     }
 
@@ -49,6 +54,7 @@ impl SubscriptionCommandFlow {
             shutdown,
             config,
             subscriptions,
+            audit,
         } = self;
 
         let command_service = SubscriptionCommandService::new(subscriptions);
@@ -84,17 +90,19 @@ impl SubscriptionCommandFlow {
                     mpsc::channel::<pb::SubscriptionCommandAck>(ACK_CHANNEL_CAPACITY);
                 let ack_stream = ReceiverStream::new(ack_rx);
 
-                let mut cmd_stream =
-                    match client.subscription_commands(ack_stream).await {
-                        Ok(stream) => stream,
-                        Err(err) => {
-                            debug!(
-                                "subscription command flow: Commands stream open failed: {err}"
-                            );
-                            grpc_cache.invalidate();
-                            continue;
-                        }
-                    };
+                let mut cmd_stream = match client.subscription_commands(ack_stream).await {
+                    Ok(stream) => stream,
+                    Err(err) => {
+                        debug!("subscription command flow: Commands stream open failed: {err}");
+                        audit.emit(AuditEvent::cold(AuditEventKind::SubscriptionFlowLifecycle(
+                            SubscriptionFlowLifecycle::CommandStreamFailed {
+                                reason: "stream-open-failed",
+                            },
+                        )));
+                        grpc_cache.invalidate();
+                        continue;
+                    }
+                };
 
                 debug!("subscription command flow: Commands stream open");
 
@@ -112,12 +120,18 @@ impl SubscriptionCommandFlow {
                                         .await;
                                     if ack_tx.send(ack).await.is_err() {
                                         debug!("subscription command flow: ack channel closed; reconnecting");
+                                        audit.emit(AuditEvent::cold(AuditEventKind::SubscriptionFlowLifecycle(
+                                            SubscriptionFlowLifecycle::CommandStreamFailed { reason: "ack-channel-closed" },
+                                        )));
                                         grpc_cache.invalidate();
                                         continue 'reconnect;
                                     }
                                 }
                                 Ok(None) => {
                                     debug!("subscription command flow: Commands stream closed by server; reconnecting");
+                                    audit.emit(AuditEvent::cold(AuditEventKind::SubscriptionFlowLifecycle(
+                                        SubscriptionFlowLifecycle::CommandStreamFailed { reason: "stream-closed-by-server" },
+                                    )));
                                     grpc_cache.invalidate();
                                     continue 'reconnect;
                                 }
@@ -125,6 +139,9 @@ impl SubscriptionCommandFlow {
                                     debug!(
                                         "subscription command flow: Commands stream error: {err}; reconnecting"
                                     );
+                                    audit.emit(AuditEvent::cold(AuditEventKind::SubscriptionFlowLifecycle(
+                                        SubscriptionFlowLifecycle::CommandStreamFailed { reason: "stream-error" },
+                                    )));
                                     grpc_cache.invalidate();
                                     continue 'reconnect;
                                 }

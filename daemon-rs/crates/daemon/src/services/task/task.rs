@@ -1,11 +1,7 @@
-use std::sync::{
-    Arc,
-};
+use std::sync::Arc;
 
 use opensnitch_proto::pb;
-use tokio::{
-    task::JoinHandle,
-};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::{

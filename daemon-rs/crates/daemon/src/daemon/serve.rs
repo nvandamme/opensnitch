@@ -15,7 +15,10 @@ impl Daemon {
         let config = self.runtime.config.get_snapshot();
         notify(NotifyState::Status("Starting daemon runtime bootstrap..."));
         info!(addr = %config.client_addr, "daemon runtime: starting serve loop");
-        info!(queue = self.runtime.nfqueue_num, "running on netfilter queue");
+        info!(
+            queue = self.runtime.nfqueue_num,
+            "running on netfilter queue"
+        );
         if let Err(err) = crate::logging::LoggingState::apply_config(&config) {
             warn!("failed to apply startup logging config: {err}");
         }
@@ -40,6 +43,7 @@ impl Daemon {
             self.runtime.rules.clone(),
             self.runtime.connections.clone(),
             self.runtime.stats.clone(),
+            self.runtime.audit.clone(),
         );
 
         let exporter = Arc::new(
@@ -61,6 +65,7 @@ impl Daemon {
             self.runtime.client.clone(),
             self.runtime.rules.clone(),
             self.runtime.firewall.clone(),
+            self.runtime.audit.clone(),
         );
 
         self.spawn_workers(&mut handles).await;

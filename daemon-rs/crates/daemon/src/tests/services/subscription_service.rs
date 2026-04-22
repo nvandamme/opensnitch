@@ -173,9 +173,7 @@ async fn refresh_downloads_source_and_persists_http_metadata() {
     assert_eq!(records[0].etag, "\"v1\"");
     assert_eq!(records[0].last_modified, "Wed, 21 Oct 2015 07:28:00 GMT");
     assert_eq!(records[0].consecutive_failures, 0);
-    assert!(
-        records[0].next_refresh_after > crate::utils::time_nonce::unix_timestamp_now_utc()
-    );
+    assert!(records[0].next_refresh_after > crate::utils::time_nonce::unix_timestamp_now_utc());
 }
 
 #[tokio::test]

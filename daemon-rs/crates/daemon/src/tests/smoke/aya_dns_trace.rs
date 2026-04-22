@@ -45,7 +45,10 @@ fn run_status(cmd: &mut Command, context: &str) {
     let status = cmd.status().unwrap_or_else(|err| {
         panic!("{context}: failed to spawn command: {err}");
     });
-    assert!(status.success(), "{context}: command failed with status {status}");
+    assert!(
+        status.success(),
+        "{context}: command failed with status {status}"
+    );
 }
 
 fn resolve_built_rust_ebpf_obj(target_dir: &PathBuf) -> Option<PathBuf> {
@@ -132,7 +135,10 @@ fn aya_dns_trace_smoke_reports_explicit_runtime_active() {
     fs::copy(&rust_dns_obj, "/etc/opensnitchd/opensnitch-ebpf")
         .expect("copy /etc/opensnitchd/opensnitch-ebpf");
 
-    let _ = Command::new("pkill").arg("-x").arg("opensnitchd-rs").status();
+    let _ = Command::new("pkill")
+        .arg("-x")
+        .arg("opensnitchd-rs")
+        .status();
 
     // Remove stale pinned ringbuf maps from previous runs so pinning can succeed.
     let _ = fs::remove_file("/sys/fs/bpf/opensnitch-rs/dns/events");

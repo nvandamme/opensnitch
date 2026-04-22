@@ -481,27 +481,25 @@ fn parse_task_interval_parses_supported_units() {
         ),
         Some(std::time::Duration::from_secs(3600))
     );
-    assert!(crate::utils::duration_parse::parse_human_duration(
-        "oops",
-        crate::utils::duration_parse::TASK_INTERVAL_OPTIONS,
-    )
-    .is_none());
+    assert!(
+        crate::utils::duration_parse::parse_human_duration(
+            "oops",
+            crate::utils::duration_parse::TASK_INTERVAL_OPTIONS,
+        )
+        .is_none()
+    );
 }
 
 #[test]
 fn ioc_schedule_time_matches_hh_mm_and_hh_mm_ss() {
-    assert!(crate::utils::time_spec::matches_hms_spec(
-        "09:15", 9, 15, 0
-    ));
+    assert!(crate::utils::time_spec::matches_hms_spec("09:15", 9, 15, 0));
     assert!(crate::utils::time_spec::matches_hms_spec(
         "09:15:30", 9, 15, 30
     ));
     assert!(!crate::utils::time_spec::matches_hms_spec(
         "09:15", 9, 15, 31
     ));
-    assert!(!crate::utils::time_spec::matches_hms_spec(
-        "bad", 9, 15, 0
-    ));
+    assert!(!crate::utils::time_spec::matches_hms_spec("bad", 9, 15, 0));
 }
 
 #[test]
@@ -566,12 +564,13 @@ fn validate_task_start_input_reuses_storage_task_interval_classification() {
         "downloader-list-a",
         &json!({"interval": "bogus"}),
     );
-    assert_eq!(invalid_interval, Err("invalid interval for downloader".to_string()));
-
-    let looper_ok = task_runtime_validation::validate_task_start_input(
-        "looptask",
-        &json!({"interval": "1s"}),
+    assert_eq!(
+        invalid_interval,
+        Err("invalid interval for downloader".to_string())
     );
+
+    let looper_ok =
+        task_runtime_validation::validate_task_start_input("looptask", &json!({"interval": "1s"}));
     assert!(looper_ok.is_ok());
 }
 

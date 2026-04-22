@@ -1,9 +1,6 @@
 use std::{
     net::IpAddr,
-    sync::{
-        Arc,
-        atomic::Ordering,
-    },
+    sync::{Arc, atomic::Ordering},
 };
 
 use crate::models::dns_payload::DnsAnswerRecord;
@@ -46,7 +43,9 @@ impl DnsService {
         // HashSet. Real DNS alias chains are ≤ 3 hops; the limit guards against any
         // injected cycle without allocating.
         for _ in 0..8 {
-            let Some(next) = self.alias_lookup.get(&host) else { break };
+            let Some(next) = self.alias_lookup.get(&host) else {
+                break;
+            };
             host = next;
         }
         Some(host)

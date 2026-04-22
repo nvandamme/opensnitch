@@ -23,9 +23,8 @@ use crate::platform::ports::stats_exporter_port::StatsExporterPort;
 
 // Pull all private items from the parent adapter module.
 use super::{
-    CompactStats, PrometheusStatsExporter, ResponseFormat, gzip_compress,
-    negotiate_format, prom_proto, render_openmetrics_text, render_prometheus_proto,
-    render_prometheus_text,
+    CompactStats, PrometheusStatsExporter, ResponseFormat, gzip_compress, negotiate_format,
+    prom_proto, render_openmetrics_text, render_prometheus_proto, render_prometheus_text,
 };
 
 // ---------------------------------------------------------------------------
@@ -114,15 +113,39 @@ fn text_scalars_are_correct() {
     let cs = CompactStats::from(&make_snapshot());
     let out = render_prometheus_text(&cs);
 
-    assert!(out.contains("opensnitch_connections_total 400\n"), "connections\n{out}");
-    assert!(out.contains("opensnitch_accepted_total 380\n"), "accepted\n{out}");
-    assert!(out.contains("opensnitch_dropped_total 15\n"), "dropped\n{out}");
-    assert!(out.contains("opensnitch_dns_responses_total 150\n"), "dns\n{out}");
-    assert!(out.contains("opensnitch_ignored_total 5\n"), "ignored\n{out}");
-    assert!(out.contains("opensnitch_rule_hits_total 250\n"), "rule_hits\n{out}");
-    assert!(out.contains("opensnitch_rule_misses_total 40\n"), "rule_misses\n{out}");
+    assert!(
+        out.contains("opensnitch_connections_total 400\n"),
+        "connections\n{out}"
+    );
+    assert!(
+        out.contains("opensnitch_accepted_total 380\n"),
+        "accepted\n{out}"
+    );
+    assert!(
+        out.contains("opensnitch_dropped_total 15\n"),
+        "dropped\n{out}"
+    );
+    assert!(
+        out.contains("opensnitch_dns_responses_total 150\n"),
+        "dns\n{out}"
+    );
+    assert!(
+        out.contains("opensnitch_ignored_total 5\n"),
+        "ignored\n{out}"
+    );
+    assert!(
+        out.contains("opensnitch_rule_hits_total 250\n"),
+        "rule_hits\n{out}"
+    );
+    assert!(
+        out.contains("opensnitch_rule_misses_total 40\n"),
+        "rule_misses\n{out}"
+    );
     assert!(out.contains("opensnitch_rules 8\n"), "rules\n{out}");
-    assert!(out.contains("opensnitch_uptime_seconds 7200\n"), "uptime\n{out}");
+    assert!(
+        out.contains("opensnitch_uptime_seconds 7200\n"),
+        "uptime\n{out}"
+    );
 }
 
 #[test]
@@ -131,7 +154,10 @@ fn text_type_and_help_lines_emitted() {
     let out = render_prometheus_text(&cs);
 
     assert!(out.contains("# HELP opensnitch_connections_total"), "{out}");
-    assert!(out.contains("# TYPE opensnitch_connections_total counter"), "{out}");
+    assert!(
+        out.contains("# TYPE opensnitch_connections_total counter"),
+        "{out}"
+    );
     assert!(out.contains("# HELP opensnitch_rules"), "{out}");
     assert!(out.contains("# TYPE opensnitch_rules gauge"), "{out}");
 }
@@ -141,10 +167,22 @@ fn text_breakdown_maps_emit_labeled_lines() {
     let cs = CompactStats::from(&make_snapshot());
     let out = render_prometheus_text(&cs);
 
-    assert!(out.contains("opensnitch_connections_by_proto{proto=\"tcp\"} 300"), "{out}");
-    assert!(out.contains("opensnitch_connections_by_proto{proto=\"udp\"} 100"), "{out}");
-    assert!(out.contains("opensnitch_connections_by_host{host=\"example.com\"} 9"), "{out}");
-    assert!(out.contains("opensnitch_rule_hits_by_rule{rule=\"allow-dns\"} 8"), "{out}");
+    assert!(
+        out.contains("opensnitch_connections_by_proto{proto=\"tcp\"} 300"),
+        "{out}"
+    );
+    assert!(
+        out.contains("opensnitch_connections_by_proto{proto=\"udp\"} 100"),
+        "{out}"
+    );
+    assert!(
+        out.contains("opensnitch_connections_by_host{host=\"example.com\"} 9"),
+        "{out}"
+    );
+    assert!(
+        out.contains("opensnitch_rule_hits_by_rule{rule=\"allow-dns\"} 8"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -152,7 +190,10 @@ fn text_omits_subscription_gauges_when_none() {
     let cs = CompactStats::from(&make_snapshot());
     let out = render_prometheus_text(&cs);
 
-    assert!(!out.contains("opensnitch_subscription"), "unexpected sub lines\n{out}");
+    assert!(
+        !out.contains("opensnitch_subscription"),
+        "unexpected sub lines\n{out}"
+    );
 }
 
 #[test]
@@ -165,8 +206,14 @@ fn text_subscription_scalars_emitted() {
     assert!(out.contains("opensnitch_subscription_total 5\n"), "{out}");
     assert!(out.contains("opensnitch_subscription_ready 4\n"), "{out}");
     assert!(out.contains("opensnitch_subscription_error 1\n"), "{out}");
-    assert!(out.contains("opensnitch_subscription_refresh_count 200\n"), "{out}");
-    assert!(out.contains("opensnitch_subscription_refresh_errors 7\n"), "{out}");
+    assert!(
+        out.contains("opensnitch_subscription_refresh_count 200\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("opensnitch_subscription_refresh_errors 7\n"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -176,11 +223,26 @@ fn text_subscription_breakdown_maps_emitted() {
     let cs = CompactStats::from(&snap);
     let out = render_prometheus_text(&cs);
 
-    assert!(out.contains("opensnitch_subscription_by_status{status=\"ready\"} 4"), "{out}");
-    assert!(out.contains("opensnitch_subscription_by_status{status=\"error\"} 1"), "{out}");
-    assert!(out.contains("opensnitch_subscription_by_group{group=\"ads\"} 2"), "{out}");
-    assert!(out.contains("opensnitch_subscription_by_group{group=\"security\"} 3"), "{out}");
-    assert!(out.contains("opensnitch_subscription_by_node{node=\"node-1\"} 5"), "{out}");
+    assert!(
+        out.contains("opensnitch_subscription_by_status{status=\"ready\"} 4"),
+        "{out}"
+    );
+    assert!(
+        out.contains("opensnitch_subscription_by_status{status=\"error\"} 1"),
+        "{out}"
+    );
+    assert!(
+        out.contains("opensnitch_subscription_by_group{group=\"ads\"} 2"),
+        "{out}"
+    );
+    assert!(
+        out.contains("opensnitch_subscription_by_group{group=\"security\"} 3"),
+        "{out}"
+    );
+    assert!(
+        out.contains("opensnitch_subscription_by_node{node=\"node-1\"} 5"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -206,7 +268,11 @@ fn text_label_value_escaping_backslash_quote_newline() {
 fn openmetrics_ends_with_eof_newline() {
     let cs = CompactStats::from(&make_snapshot());
     let out = render_openmetrics_text(&cs);
-    assert!(out.ends_with("# EOF\n"), "must end with # EOF\n, got:\n…{}", &out[out.len().saturating_sub(30)..]);
+    assert!(
+        out.ends_with("# EOF\n"),
+        "must end with # EOF\n, got:\n…{}",
+        &out[out.len().saturating_sub(30)..]
+    );
 }
 
 #[test]
@@ -215,7 +281,10 @@ fn openmetrics_counters_use_base_name_in_type_line() {
     let out = render_openmetrics_text(&cs);
 
     // OpenMetrics: TYPE line uses base name (no _total), sample uses _total
-    assert!(out.contains("# TYPE opensnitch_connections counter"), "{out}");
+    assert!(
+        out.contains("# TYPE opensnitch_connections counter"),
+        "{out}"
+    );
     assert!(out.contains("opensnitch_connections_total 400"), "{out}");
 }
 
@@ -243,7 +312,10 @@ fn openmetrics_no_subscription_when_none() {
     let cs = CompactStats::from(&make_snapshot());
     let out = render_openmetrics_text(&cs);
 
-    assert!(!out.contains("opensnitch_subscription"), "no sub lines expected\n{out}");
+    assert!(
+        !out.contains("opensnitch_subscription"),
+        "no sub lines expected\n{out}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -294,7 +366,10 @@ fn proto_contains_scalar_metric_families() {
     assert!(names.contains(&"opensnitch_connections_total"), "{names:?}");
     assert!(names.contains(&"opensnitch_uptime_seconds"), "{names:?}");
     assert!(names.contains(&"opensnitch_rules"), "{names:?}");
-    assert!(names.contains(&"opensnitch_connections_by_proto"), "{names:?}");
+    assert!(
+        names.contains(&"opensnitch_connections_by_proto"),
+        "{names:?}"
+    );
 }
 
 #[test]
@@ -305,7 +380,9 @@ fn proto_no_subscription_families_when_none() {
     let names: Vec<_> = fams.iter().filter_map(|f| f.name.as_deref()).collect();
 
     assert!(
-        !names.iter().any(|n| n.starts_with("opensnitch_subscription")),
+        !names
+            .iter()
+            .any(|n| n.starts_with("opensnitch_subscription")),
         "unexpected subscription families: {names:?}"
     );
 }
@@ -319,12 +396,30 @@ fn proto_contains_subscription_families_when_some() {
     let fams = decode_proto_families(&buf);
     let names: Vec<_> = fams.iter().filter_map(|f| f.name.as_deref()).collect();
 
-    assert!(names.contains(&"opensnitch_subscription_total"), "{names:?}");
-    assert!(names.contains(&"opensnitch_subscription_ready"), "{names:?}");
-    assert!(names.contains(&"opensnitch_subscription_error"), "{names:?}");
-    assert!(names.contains(&"opensnitch_subscription_by_status"), "{names:?}");
-    assert!(names.contains(&"opensnitch_subscription_by_group"), "{names:?}");
-    assert!(names.contains(&"opensnitch_subscription_by_node"), "{names:?}");
+    assert!(
+        names.contains(&"opensnitch_subscription_total"),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"opensnitch_subscription_ready"),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"opensnitch_subscription_error"),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"opensnitch_subscription_by_status"),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"opensnitch_subscription_by_group"),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"opensnitch_subscription_by_node"),
+        "{names:?}"
+    );
 }
 
 #[test]
@@ -367,8 +462,16 @@ fn proto_by_status_family_has_correct_label_values() {
         let gv = m.gauge.as_ref().and_then(|g| g.value).unwrap_or(0.0) as u64;
         status_vals.insert(lv, gv);
     }
-    assert_eq!(status_vals.get("ready").copied(), Some(4), "{status_vals:?}");
-    assert_eq!(status_vals.get("error").copied(), Some(1), "{status_vals:?}");
+    assert_eq!(
+        status_vals.get("ready").copied(),
+        Some(4),
+        "{status_vals:?}"
+    );
+    assert_eq!(
+        status_vals.get("error").copied(),
+        Some(1),
+        "{status_vals:?}"
+    );
 }
 
 #[test]
@@ -379,7 +482,9 @@ fn text_subscription_rule_info_emitted() {
     let out = render_prometheus_text(&cs);
 
     assert!(
-        out.contains(r#"opensnitch_subscription_rule_info{rule="block-ads",subscription="easylist"} 1"#),
+        out.contains(
+            r#"opensnitch_subscription_rule_info{rule="block-ads",subscription="easylist"} 1"#
+        ),
         "block-ads rule_info missing\n{out}"
     );
     assert!(
@@ -388,7 +493,9 @@ fn text_subscription_rule_info_emitted() {
     );
     // block-combined references two subscriptions (N:N)
     assert!(
-        out.contains(r#"opensnitch_subscription_rule_info{rule="block-combined",subscription="easylist"} 1"#),
+        out.contains(
+            r#"opensnitch_subscription_rule_info{rule="block-combined",subscription="easylist"} 1"#
+        ),
         "block-combined×easylist rule_info missing\n{out}"
     );
     assert!(
@@ -420,7 +527,9 @@ fn openmetrics_subscription_rule_info_emitted() {
     let out = render_openmetrics_text(&cs);
 
     assert!(
-        out.contains(r#"opensnitch_subscription_rule_info{rule="block-ads",subscription="easylist"} 1"#),
+        out.contains(
+            r#"opensnitch_subscription_rule_info{rule="block-ads",subscription="easylist"} 1"#
+        ),
         "rule_info missing in openmetrics\n{out}"
     );
 }
@@ -434,7 +543,10 @@ fn proto_subscription_rule_info_family_present() {
     let fams = decode_proto_families(&buf);
     let names: Vec<_> = fams.iter().filter_map(|f| f.name.as_deref()).collect();
 
-    assert!(names.contains(&"opensnitch_subscription_rule_info"), "{names:?}");
+    assert!(
+        names.contains(&"opensnitch_subscription_rule_info"),
+        "{names:?}"
+    );
 }
 
 #[test]
@@ -451,15 +563,31 @@ fn proto_subscription_rule_info_has_two_labels() {
         .expect("opensnitch_subscription_rule_info family missing");
 
     // make_sub_stats: block-ads×1 + block-combined×2 + block-malware×1 = 4 metric rows (N:N)
-    assert_eq!(fam.metric.len(), 4, "expected 4 rule_info metrics (block-combined has 2)");
+    assert_eq!(
+        fam.metric.len(),
+        4,
+        "expected 4 rule_info metrics (block-combined has 2)"
+    );
     for m in &fam.metric {
-        let rule = m.label.iter().find(|l| l.name.as_deref() == Some("rule"))
-            .and_then(|l| l.value.as_deref()).unwrap_or("");
-        let sub  = m.label.iter().find(|l| l.name.as_deref() == Some("subscription"))
-            .and_then(|l| l.value.as_deref()).unwrap_or("");
+        let rule = m
+            .label
+            .iter()
+            .find(|l| l.name.as_deref() == Some("rule"))
+            .and_then(|l| l.value.as_deref())
+            .unwrap_or("");
+        let sub = m
+            .label
+            .iter()
+            .find(|l| l.name.as_deref() == Some("subscription"))
+            .and_then(|l| l.value.as_deref())
+            .unwrap_or("");
         assert!(!rule.is_empty(), "rule label missing");
         assert!(!sub.is_empty(), "subscription label missing");
-        assert_eq!(m.gauge.as_ref().and_then(|g| g.value), Some(1.0), "value must be 1");
+        assert_eq!(
+            m.gauge.as_ref().and_then(|g| g.value),
+            Some(1.0),
+            "value must be 1"
+        );
     }
 }
 
@@ -506,7 +634,10 @@ fn negotiate_none_defaults_to_text() {
 #[test]
 fn negotiate_openmetrics_beats_plain_text() {
     let accept = "application/openmetrics-text; version=1.0.0; charset=utf-8, text/plain;q=0.9";
-    assert!(matches!(negotiate_format(Some(accept)), ResponseFormat::OpenMetrics));
+    assert!(matches!(
+        negotiate_format(Some(accept)),
+        ResponseFormat::OpenMetrics
+    ));
 }
 
 #[test]
@@ -514,20 +645,29 @@ fn negotiate_proto_wins_when_explicitly_requested() {
     let accept = "application/vnd.google.protobuf; \
                   proto=io.prometheus.client.MetricFamily; encoding=delimited;q=0.9, \
                   text/plain;q=0.1";
-    assert!(matches!(negotiate_format(Some(accept)), ResponseFormat::Proto));
+    assert!(matches!(
+        negotiate_format(Some(accept)),
+        ResponseFormat::Proto
+    ));
 }
 
 #[test]
 fn negotiate_text_fallback_for_unknown_mime() {
     let accept = "application/json, application/xml";
-    assert!(matches!(negotiate_format(Some(accept)), ResponseFormat::Text));
+    assert!(matches!(
+        negotiate_format(Some(accept)),
+        ResponseFormat::Text
+    ));
 }
 
 #[test]
 fn negotiate_proto_requires_all_required_params() {
     // Missing proto= param → must NOT resolve to Proto.
     let accept = "application/vnd.google.protobuf; encoding=delimited";
-    assert!(!matches!(negotiate_format(Some(accept)), ResponseFormat::Proto));
+    assert!(!matches!(
+        negotiate_format(Some(accept)),
+        ResponseFormat::Proto
+    ));
 }
 
 #[test]
@@ -537,7 +677,10 @@ fn negotiate_empty_accept_string_defaults_to_text() {
 
 #[test]
 fn negotiate_wildcard_accept_defaults_to_text() {
-    assert!(matches!(negotiate_format(Some("*/*")), ResponseFormat::Text));
+    assert!(matches!(
+        negotiate_format(Some("*/*")),
+        ResponseFormat::Text
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -567,7 +710,8 @@ fn gzip_compress_is_smaller_and_roundtrips() {
 
     let mut gz = GzDecoder::new(compressed.as_slice());
     let mut decompressed = Vec::new();
-    gz.read_to_end(&mut decompressed).expect("decompression failed");
+    gz.read_to_end(&mut decompressed)
+        .expect("decompression failed");
     assert_eq!(decompressed, data, "round-trip mismatch");
 }
 
@@ -603,7 +747,9 @@ async fn http_endpoint_returns_prometheus_text_by_default() {
 
     let addr = reserve_port();
     let shutdown = CancellationToken::new();
-    let _handle = exporter.clone().spawn_metrics_server(addr, shutdown.clone());
+    let _handle = exporter
+        .clone()
+        .spawn_metrics_server(addr, shutdown.clone());
     wait_ready(addr).await;
 
     let resp = reqwest::Client::new()
@@ -617,8 +763,14 @@ async fn http_endpoint_returns_prometheus_text_by_default() {
     assert!(ct.contains("text/plain"), "content-type: {ct}");
 
     let body = resp.text().await.unwrap();
-    assert!(body.contains("opensnitch_connections_total 400"), "connections\n{body}");
-    assert!(body.contains("opensnitch_subscription_total 5"), "sub_total\n{body}");
+    assert!(
+        body.contains("opensnitch_connections_total 400"),
+        "connections\n{body}"
+    );
+    assert!(
+        body.contains("opensnitch_subscription_total 5"),
+        "sub_total\n{body}"
+    );
     assert!(
         body.contains("opensnitch_subscription_by_status{status=\"ready\"} 4"),
         "by_status\n{body}"
@@ -634,7 +786,9 @@ async fn http_endpoint_returns_openmetrics_on_accept_header() {
 
     let addr = reserve_port();
     let shutdown = CancellationToken::new();
-    let _handle = exporter.clone().spawn_metrics_server(addr, shutdown.clone());
+    let _handle = exporter
+        .clone()
+        .spawn_metrics_server(addr, shutdown.clone());
     wait_ready(addr).await;
 
     let resp = reqwest::Client::new()
@@ -663,7 +817,9 @@ async fn http_endpoint_returns_proto_on_accept_header() {
 
     let addr = reserve_port();
     let shutdown = CancellationToken::new();
-    let _handle = exporter.clone().spawn_metrics_server(addr, shutdown.clone());
+    let _handle = exporter
+        .clone()
+        .spawn_metrics_server(addr, shutdown.clone());
     wait_ready(addr).await;
 
     let resp = reqwest::Client::new()
@@ -679,7 +835,10 @@ async fn http_endpoint_returns_proto_on_accept_header() {
 
     assert_eq!(resp.status().as_u16(), 200);
     let ct = resp.headers()["content-type"].to_str().unwrap().to_string();
-    assert!(ct.contains("application/vnd.google.protobuf"), "content-type: {ct}");
+    assert!(
+        ct.contains("application/vnd.google.protobuf"),
+        "content-type: {ct}"
+    );
 
     let body = resp.bytes().await.unwrap();
     let fams = decode_proto_families(&body);
@@ -695,7 +854,9 @@ async fn http_endpoint_returns_404_for_unknown_paths() {
 
     let addr = reserve_port();
     let shutdown = CancellationToken::new();
-    let _handle = exporter.clone().spawn_metrics_server(addr, shutdown.clone());
+    let _handle = exporter
+        .clone()
+        .spawn_metrics_server(addr, shutdown.clone());
     wait_ready(addr).await;
 
     let resp = reqwest::Client::new()
@@ -716,7 +877,9 @@ async fn http_endpoint_empty_body_when_no_snapshot_yet() {
 
     let addr = reserve_port();
     let shutdown = CancellationToken::new();
-    let _handle = exporter.clone().spawn_metrics_server(addr, shutdown.clone());
+    let _handle = exporter
+        .clone()
+        .spawn_metrics_server(addr, shutdown.clone());
     wait_ready(addr).await;
 
     let resp = reqwest::Client::new()
@@ -727,7 +890,10 @@ async fn http_endpoint_empty_body_when_no_snapshot_yet() {
 
     assert_eq!(resp.status().as_u16(), 200);
     let body = resp.text().await.unwrap();
-    assert!(body.is_empty(), "expected empty body before first snapshot, got:\n{body}");
+    assert!(
+        body.is_empty(),
+        "expected empty body before first snapshot, got:\n{body}"
+    );
 
     shutdown.cancel();
 }

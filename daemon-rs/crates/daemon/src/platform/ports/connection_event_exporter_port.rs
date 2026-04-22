@@ -1,6 +1,6 @@
 use opensnitch_proto::pb;
 
-use crate::models::config_runtime::LoggerSinkConfig;
+use crate::config::LoggerSinkConfig;
 
 /// Trait for pluggable per-connection event exporters.
 ///

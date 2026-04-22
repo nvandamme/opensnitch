@@ -1,4 +1,5 @@
-use crate::config::Config;
+use crate::config::{ClientAuthType, Config};
+use crate::models::firewall_config::FirewallConfig;
 use crate::services::client::ClientService;
 use opensnitch_proto::pb;
 use std::sync::Arc;
@@ -24,10 +25,11 @@ async fn build_subscribe_config_keeps_expected_payload_fields() {
         ..Default::default()
     }];
 
-    let system_firewall = Some(pb::SysFirewall {
+    let system_firewall = Some(FirewallConfig {
         enabled: true,
         version: 3,
-        system_rules: Vec::new(),
+        rules: Vec::new(),
+        chains: Vec::new(),
     });
 
     let subscribe = ClientService::build_subscribe_config_from_snapshots(
@@ -50,4 +52,21 @@ async fn build_subscribe_config_keeps_expected_payload_fields() {
         subscribe.system_firewall.as_ref().map(|fw| fw.version),
         Some(3)
     );
+}
+
+#[tokio::test]
+async fn tls_channel_requires_explicit_trust_material_when_skip_verify_is_false() {
+    let mut cfg = Config::default();
+    cfg.client_addr = "https://127.0.0.1:50051".to_string();
+    cfg.client_auth.auth_type = ClientAuthType::TlsSimple;
+    cfg.client_auth.tls_options.skip_verify = false;
+    cfg.client_auth.tls_options.ca_cert.clear();
+    cfg.client_auth.tls_options.server_cert.clear();
+
+    let result = ClientService::connect_with_config(&cfg).await;
+    let msg = match result {
+        Ok(_) => panic!("tls-simple without CA/server trust material must fail closed"),
+        Err(err) => err.to_string(),
+    };
+    assert!(msg.contains("requires explicit trust material"), "{msg}");
 }

@@ -119,6 +119,7 @@ Prioritized hot-path findings from full codebase scan. Tracked as actionable ite
 - `services/process/inspection.rs`: deferred hash computation in background task
 - `flows/connect/connect.rs`: pre-sized worker handle/tx vectors and burst draining
 - `services/process/cache.rs`: weighted cache sizing with quick-cache
+- `services/rule/rule.rs`: `reload_inline` (no `spawn_blocking`) on inotify fast path
 
 ## Regression Policy
 

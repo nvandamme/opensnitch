@@ -1,6 +1,9 @@
 use crate::{
-    models::command_rpc::ClientCommand,
-    services::{lifecycle::ServiceLifecycle, task::TaskRuntime},
+    models::{
+        audit::{AuditEvent, AuditEventKind, TaskAction},
+        command_rpc::ClientCommand,
+    },
+    services::{audit::AuditService, lifecycle::ServiceLifecycle, task::TaskRuntime},
 };
 
 pub(crate) enum TaskCommandDispatch {
@@ -8,10 +11,16 @@ pub(crate) enum TaskCommandDispatch {
     Unhandled(ClientCommand),
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct TaskCommandService;
+#[derive(Clone)]
+pub(crate) struct TaskCommandService {
+    audit: AuditService,
+}
 
 impl TaskCommandService {
+    pub(crate) fn new(audit: AuditService) -> Self {
+        Self { audit }
+    }
+
     pub(crate) async fn try_handle_client_command(
         &self,
         cmd: ClientCommand,
@@ -27,20 +36,50 @@ impl TaskCommandService {
                 TaskCommandDispatch::HandledContinue
             }
             ClientCommand::PauseRuntimeTasks => {
-                if let Err(err) = task_runtime.pause().await {
-                    tracing::warn!("task runtime pause failed: {err}");
+                match task_runtime.pause().await {
+                    Ok(()) => {
+                        self.audit.emit(AuditEvent::cold(AuditEventKind::TaskAction(
+                            TaskAction::TaskRuntimePaused,
+                        )));
+                    }
+                    Err(err) => {
+                        tracing::warn!("task runtime pause failed: {err}");
+                        self.audit.emit(AuditEvent::cold(AuditEventKind::TaskAction(
+                            TaskAction::TaskRuntimePauseFailed,
+                        )));
+                    }
                 }
                 TaskCommandDispatch::HandledContinue
             }
             ClientCommand::ResumeRuntimeTasks => {
-                if let Err(err) = task_runtime.resume().await {
-                    tracing::warn!("task runtime resume failed: {err}");
+                match task_runtime.resume().await {
+                    Ok(()) => {
+                        self.audit.emit(AuditEvent::cold(AuditEventKind::TaskAction(
+                            TaskAction::TaskRuntimeResumed,
+                        )));
+                    }
+                    Err(err) => {
+                        tracing::warn!("task runtime resume failed: {err}");
+                        self.audit.emit(AuditEvent::cold(AuditEventKind::TaskAction(
+                            TaskAction::TaskRuntimeResumeFailed,
+                        )));
+                    }
                 }
                 TaskCommandDispatch::HandledContinue
             }
             ClientCommand::StopRuntimeTasks => {
-                if let Err(err) = task_runtime.stop().await {
-                    tracing::warn!("task runtime stop failed: {err}");
+                match task_runtime.stop().await {
+                    Ok(()) => {
+                        self.audit.emit(AuditEvent::cold(AuditEventKind::TaskAction(
+                            TaskAction::TaskRuntimeStopped,
+                        )));
+                    }
+                    Err(err) => {
+                        tracing::warn!("task runtime stop failed: {err}");
+                        self.audit.emit(AuditEvent::cold(AuditEventKind::TaskAction(
+                            TaskAction::TaskRuntimeStopFailed,
+                        )));
+                    }
                 }
                 TaskCommandDispatch::HandledContinue
             }

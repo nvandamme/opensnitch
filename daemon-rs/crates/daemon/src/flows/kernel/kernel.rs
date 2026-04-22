@@ -4,8 +4,15 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     daemon::{KernelPipeline, KernelPipelineCounters, ProcessKernelEvent},
-    models::{dns_payload::DnsPayload, kernel_event::KernelEvent},
-    services::{dns::DnsService, process::ProcessService, stats::StatsService},
+    models::{
+        audit::{AuditEvent, AuditEventKind, DnsAction, ProcessAction},
+        dns_payload::DnsPayload,
+        kernel_event::KernelEvent,
+        proc_event::ProcEventKind,
+    },
+    services::{
+        audit::AuditService, dns::DnsService, process::ProcessService, stats::StatsService,
+    },
     tunables::RuntimeTunables,
     workers::runtime::{
         kernel::{
@@ -20,6 +27,7 @@ pub struct KernelFlow {
     shutdown: CancellationToken,
     tunables: RuntimeTunables,
     counters: std::sync::Arc<KernelPipelineCounters>,
+    verbose_hot_path_audit: bool,
 }
 
 impl KernelFlow {
@@ -27,11 +35,13 @@ impl KernelFlow {
         shutdown: CancellationToken,
         tunables: RuntimeTunables,
         counters: std::sync::Arc<KernelPipelineCounters>,
+        verbose_hot_path_audit: bool,
     ) -> Self {
         Self {
             shutdown,
             tunables,
             counters,
+            verbose_hot_path_audit,
         }
     }
 
@@ -132,11 +142,13 @@ impl KernelFlow {
         process: ProcessService,
         dns: DnsService,
         stats: StatsService,
+        audit: AuditService,
         mut kernel_rx: tokio::sync::mpsc::Receiver<KernelEvent>,
     ) -> JoinHandle<()> {
         let shutdown = self.shutdown.clone();
         let tunables = self.tunables;
         let counters = self.counters.clone();
+        let verbose_hot_path_audit = self.verbose_hot_path_audit;
 
         tokio::spawn(async move {
             let kernel_fanout_batch = tunables.kernel_ingress_dispatch_batch_size;
@@ -162,42 +174,128 @@ impl KernelFlow {
                 tokio::sync::mpsc::channel::<ProcessKernelEvent>(
                     tunables.kernel_process_queue_capacity,
                 );
-            let (firewall_ingress_tx, firewall_ingress_rx) = tokio::sync::mpsc::channel::<
-                crate::models::firewall_state::FirewallState,
-            >(tunables.kernel_firewall_queue_capacity);
+            let (firewall_ingress_tx, firewall_ingress_rx) =
+                tokio::sync::mpsc::channel::<crate::models::firewall_state::FirewallState>(
+                    tunables.kernel_firewall_queue_capacity,
+                );
 
             let dns_service = dns.clone();
             let dns_stats = stats.clone();
-            let dns_handle =
-                Self::spawn_consumer_task(dns_rx, shutdown.clone(), move |update| {
-                    let dns_service = dns_service.clone();
-                    let dns_stats = dns_stats.clone();
-                    async move {
-                        match update {
-                            DnsPayload::Answers(record) => {
-                                dns_stats.on_dns_resolved();
-                                dns_service.track_answers(record).await;
+            let dns_audit = audit.clone();
+            let dns_handle = Self::spawn_consumer_task(dns_rx, shutdown.clone(), move |update| {
+                let dns_service = dns_service.clone();
+                let dns_stats = dns_stats.clone();
+                let dns_audit = dns_audit.clone();
+                async move {
+                    match update {
+                        DnsPayload::Answers(record) => {
+                            dns_stats.on_dns_resolved();
+                            if verbose_hot_path_audit {
+                                dns_audit.emit(AuditEvent::hot(AuditEventKind::DnsAction(
+                                    DnsAction::ResolutionReceived {
+                                        hostname: record.host.as_ref().into(),
+                                    },
+                                )));
+                                let entries = record
+                                    .addresses
+                                    .iter()
+                                    .filter(|ip| !ip.is_loopback())
+                                    .count();
+                                if entries > 0 {
+                                    let entries = entries.min(u32::MAX as usize) as u32;
+                                    dns_audit.emit(AuditEvent::hot(AuditEventKind::DnsAction(
+                                        DnsAction::CacheUpdated { entries },
+                                    )));
+                                }
                             }
-                            DnsPayload::Alias { alias, host } => {
-                                dns_stats.on_dns_resolved();
-                                dns_service.track_alias(alias, host).await;
+                            dns_service.track_answers(record).await;
+                        }
+                        DnsPayload::Alias { alias, host } => {
+                            dns_stats.on_dns_resolved();
+                            if verbose_hot_path_audit {
+                                dns_audit.emit(AuditEvent::hot(AuditEventKind::DnsAction(
+                                    DnsAction::ResolutionReceived {
+                                        hostname: host.as_ref().into(),
+                                    },
+                                )));
+                                dns_audit.emit(AuditEvent::hot(AuditEventKind::DnsAction(
+                                    DnsAction::CacheUpdated { entries: 1 },
+                                )));
                             }
-                            DnsPayload::NxDomain { host, error_code } => {
-                                tracing::debug!(
-                                    host = %host,
-                                    error_code = %error_code,
-                                    "[DNS] resolution failed"
-                                );
-                            }
+                            dns_service.track_alias(alias, host).await;
+                        }
+                        DnsPayload::NxDomain { host, error_code } => {
+                            // Emit failure unconditionally; operational tracking
+                            // events are emitted separately only when verbose
+                            // hot-path audit mode is enabled.
+                            dns_audit.emit(AuditEvent::hot(AuditEventKind::DnsAction(
+                                DnsAction::ResolutionFailed {
+                                    hostname: host.as_ref().into(),
+                                    reason: "nxdomain",
+                                },
+                            )));
+                            tracing::debug!(
+                                host = %host,
+                                error_code = %error_code,
+                                "[DNS] resolution failed"
+                            );
                         }
                     }
-                });
+                }
+            });
 
             let process_service = process.clone();
+            let process_audit = audit.clone();
             let process_handle =
                 Self::spawn_consumer_task(process_rx, shutdown.clone(), move |event| {
                     let process_service = process_service.clone();
+                    let process_audit = process_audit.clone();
                     async move {
+                        if verbose_hot_path_audit {
+                            match &event {
+                                ProcessKernelEvent::ProcStateChanged { pid, kind } => match kind {
+                                    ProcEventKind::Exit => process_audit.emit(AuditEvent::hot(
+                                        AuditEventKind::ProcessAction(
+                                            ProcessAction::ProcessEvicted { pid: *pid },
+                                        ),
+                                    )),
+                                    ProcEventKind::Fork | ProcEventKind::Exec => process_audit.emit(
+                                        AuditEvent::hot(AuditEventKind::ProcessAction(
+                                            ProcessAction::ProcessTracked { pid: *pid },
+                                        )),
+                                    ),
+                                },
+                                ProcessKernelEvent::EbpfProcStateChanged(payload) => {
+                                    match payload.kind {
+                                        ProcEventKind::Exit => process_audit.emit(AuditEvent::hot(
+                                            AuditEventKind::ProcessAction(
+                                                ProcessAction::ProcessEvicted { pid: payload.pid },
+                                            ),
+                                        )),
+                                        ProcEventKind::Fork | ProcEventKind::Exec => {
+                                            process_audit.emit(AuditEvent::hot(
+                                                AuditEventKind::ProcessAction(
+                                                    ProcessAction::ProcessTracked {
+                                                        pid: payload.pid,
+                                                    },
+                                                ),
+                                            ))
+                                        }
+                                    }
+                                }
+                                ProcessKernelEvent::EbpfProcessMapHit { pid, note, .. } => {
+                                    let kind = if note.contains("sched_exit") {
+                                        ProcessAction::ProcessEvicted { pid: *pid }
+                                    } else {
+                                        ProcessAction::ProcessTracked { pid: *pid }
+                                    };
+                                    process_audit.emit(AuditEvent::hot(
+                                        AuditEventKind::ProcessAction(kind),
+                                    ));
+                                }
+                            }
+                        }
+
                         kernel_process::handle_process_kernel_event(&process_service, event).await;
                     }
                 });

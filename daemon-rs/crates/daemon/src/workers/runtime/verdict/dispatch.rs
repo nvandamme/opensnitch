@@ -1,5 +1,5 @@
-use std::borrow::Cow;
 use crate::models::verdict_rpc::VerdictReply;
+use std::borrow::Cow;
 
 pub(crate) fn decision_label(verdict: &VerdictReply) -> &'static str {
     if verdict.allow {
@@ -13,9 +13,7 @@ pub(crate) fn decision_label(verdict: &VerdictReply) -> &'static str {
 
 pub(crate) fn source_label(verdict: &VerdictReply) -> Cow<'static, str> {
     match (verdict.source, verdict.rule_name.as_deref()) {
-        (src, Some(rule_name)) if src.contains("rule") => {
-            format!("rule:[{rule_name}]").into()
-        }
+        (src, Some(rule_name)) if src.contains("rule") => format!("rule:[{rule_name}]").into(),
         (src, Some(rule_name)) => format!("{src}:[{rule_name}]").into(),
         ("runtime-fast-allow", None) => Cow::Borrowed("fast-allow"),
         ("runtime-fast-drop", None) | ("runtime-fast-deny", None) => Cow::Borrowed("fast-drop"),

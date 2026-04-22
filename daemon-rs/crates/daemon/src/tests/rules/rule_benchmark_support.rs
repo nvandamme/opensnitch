@@ -11,8 +11,8 @@ use crate::{
     },
     services::rule::rule_probe_support::ListsDomainsRegexpCacheMode,
     services::rule::{
-        CidrTrieIndex, DomainWildcardTrie, ListRegexCache, ListRegexCacheKey,
-        RuleMatchCaches, RuleService,
+        CidrTrieIndex, DomainWildcardTrie, ListRegexCache, ListRegexCacheKey, RuleMatchCaches,
+        RuleService,
     },
 };
 

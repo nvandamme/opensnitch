@@ -1,16 +1,13 @@
-use std::sync::{
-    Arc,
-    atomic::AtomicUsize,
-};
+use std::sync::{Arc, atomic::AtomicUsize};
 
 use tokio::sync::{broadcast, watch};
 
+use crate::services::firewall::FirewallService;
 use crate::services::lifecycle::{
     EventSubscription, ServiceEvent, ServiceFactory, ServiceLifecycle, ServiceMonitorStats,
     ServiceRuntimeControl, ServiceState, ServiceStatus, StatusSubscription,
     monitor_stats_from_counters, subscribe_events_with_counter, subscribe_status_with_counter,
 };
-use crate::services::firewall::FirewallService;
 
 #[derive(Clone)]
 pub(crate) struct FirewallLifecycle {

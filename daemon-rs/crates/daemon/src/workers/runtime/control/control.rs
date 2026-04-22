@@ -13,7 +13,6 @@ pub use crate::models::worker_runtime_control::{
 const WORKER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 const WORKER_JOIN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-
 pub(crate) fn worker_state_from_thread_handle(handle: &ThreadJoinHandle<()>) -> WorkerState {
     if handle.is_finished() {
         WorkerState::Stopped
@@ -44,7 +43,9 @@ pub(crate) fn restartable_worker_state_from_runtime(
     }
 }
 
-pub(crate) fn restartable_worker_is_finished_from_runtime(handle: Option<&ThreadJoinHandle<()>>) -> bool {
+pub(crate) fn restartable_worker_is_finished_from_runtime(
+    handle: Option<&ThreadJoinHandle<()>>,
+) -> bool {
     handle.is_none_or(|handle| handle.is_finished())
 }
 
@@ -99,12 +100,15 @@ macro_rules! impl_restartable_thread_worker_control {
                     .and_then(|mut runtime| runtime.handle.take());
 
                 match handle {
-                    Some(handle) => $crate::workers::runtime::control::worker_join_status_from_thread_result(handle.join()),
+                    Some(handle) => {
+                        $crate::workers::runtime::control::worker_join_status_from_thread_result(
+                            handle.join(),
+                        )
+                    }
                     None => $crate::workers::runtime::control::WorkerJoinStatus::Stopped,
                 }
             }
         }
-
     };
 }
 

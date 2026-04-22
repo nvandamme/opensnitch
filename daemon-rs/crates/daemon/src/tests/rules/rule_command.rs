@@ -1,8 +1,9 @@
 use opensnitch_proto::pb;
 
 use crate::commands::rule::RuleCommandService;
+use crate::models::rule_record::RuleRecord;
 use crate::services::client::ClientService;
-use crate::services::rule::RuleService;
+use crate::services::rule::{RuleService, rule_record_from_proto};
 use crate::tests::support::TestDir;
 
 #[tokio::test]
@@ -116,8 +117,8 @@ async fn initialized_rule_service(temp_dir: &TestDir) -> RuleService {
     rules
 }
 
-fn sample_rule(name: &str) -> pb::Rule {
-    pb::Rule {
+fn sample_rule(name: &str) -> RuleRecord {
+    let proto = pb::Rule {
         name: name.to_string(),
         action: "allow".to_string(),
         duration: "always".to_string(),
@@ -130,5 +131,6 @@ fn sample_rule(name: &str) -> pb::Rule {
             list: Vec::new(),
         }),
         ..Default::default()
-    }
+    };
+    rule_record_from_proto(&proto)
 }

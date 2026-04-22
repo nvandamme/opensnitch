@@ -11,11 +11,7 @@ use opensnitch_proto::pb;
 use crate::utils::ring_buffer::RingBuffer;
 
 const fn default_stats_event_ring_capacity() -> usize {
-    if cfg!(test) {
-        64
-    } else {
-        250
-    }
+    if cfg!(test) { 64 } else { 250 }
 }
 
 const DEFAULT_STATS_EVENT_RING_CAPACITY: usize = default_stats_event_ring_capacity();
@@ -54,6 +50,7 @@ pub(super) struct StatsCounters {
     pub(super) storage_writes: CacheAlignedAtomicU64,
     pub(super) storage_deletes: CacheAlignedAtomicU64,
     pub(super) storage_scans: CacheAlignedAtomicU64,
+    pub(super) dropped_events_contention: CacheAlignedAtomicU64,
 }
 
 /// Breakdown counters: top-N entries per connection attribute.

@@ -47,10 +47,7 @@ impl EbpfService {
             return self.pin_domain.conn_root();
         };
 
-        let file_name = obj
-            .file_name()
-            .and_then(|v| v.to_str())
-            .unwrap_or_default();
+        let file_name = obj.file_name().and_then(|v| v.to_str()).unwrap_or_default();
 
         if file_name.to_lowercase().contains("procs") {
             self.pin_domain.proc_root()

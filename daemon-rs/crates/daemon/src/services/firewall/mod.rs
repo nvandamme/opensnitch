@@ -4,8 +4,8 @@ mod firewall;
 #[cfg(test)]
 #[path = "../../tests/firewall/firewall_probe_support.rs"]
 mod firewall_probe_support;
-mod runtime_lifecycle;
 mod runtime;
+mod runtime_lifecycle;
 mod runtime_store;
 mod storage;
 

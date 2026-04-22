@@ -64,7 +64,10 @@ fn extract_dns_events_from_varlink_reads_address_and_cname_answers() {
             "1.1.1.1".parse().expect("test ip should parse"),
         )
     );
-    assert_eq!(events[1], DnsPayload::alias("www.example.com", "example.com"));
+    assert_eq!(
+        events[1],
+        DnsPayload::alias("www.example.com", "example.com")
+    );
 }
 
 #[test]
@@ -156,5 +159,8 @@ fn extract_dns_events_from_varlink_filters_non_a_aaaa_cname_records() {
             "::1".parse().expect("test ip should parse"),
         )
     );
-    assert_eq!(events[2], DnsPayload::alias("www.example.com", "example.com"));
+    assert_eq!(
+        events[2],
+        DnsPayload::alias("www.example.com", "example.com")
+    );
 }

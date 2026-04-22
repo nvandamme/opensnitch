@@ -7,10 +7,7 @@ use serde_json::Value;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::ConnectionService;
-use crate::utils::{
-    hex_parse::parse_hex_token,
-    json_value::find_numeric_for_keys,
-};
+use crate::utils::{hex_parse::parse_hex_token, json_value::find_numeric_for_keys};
 
 impl ConnectionService {
     pub(crate) fn extract_ebpf_map_hit_pid_uid(entry: &Value) -> Option<(u32, u32)> {

@@ -40,9 +40,7 @@ fn parse_ebpf_dns_sample_reads_ipv4_answer() {
 
 #[test]
 fn parse_ebpf_dns_sample_reads_ipv6_answer() {
-    let ip = [
-        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-    ];
+    let ip = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
     let sample = build_dns_sample(AF_INET6, ip, "ipv6.example");
 
     let payload = DnsService::parse_ebpf_dns_sample(&sample);

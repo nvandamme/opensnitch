@@ -1,15 +1,14 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use opensnitch_proto::pb;
 
 use crate::{
-    models::firewall_state::FirewallBackend,
+    models::{firewall_config::FirewallConfig, firewall_state::FirewallBackend},
     platform::ports::firewall_port::InterceptionHealth,
-    services::lifecycle::ServiceState,
     platform::ports::firewall_port::{
         FirewallPlatformPort, IptablesFirewallPort, NftablesFirewallPort,
     },
+    services::lifecycle::ServiceState,
 };
 
 use super::{FirewallService, runtime_store::FirewallRuntime};
@@ -21,7 +20,8 @@ impl FirewallService {
 
     pub(super) fn publish_runtime_snapshot(&self, next: FirewallRuntime) {
         self.runtime.publish(next);
-        self.lifecycle.clear_error_and_transition(ServiceState::Running);
+        self.lifecycle
+            .clear_error_and_transition(ServiceState::Running);
     }
 
     pub(super) fn build_and_publish_runtime<F>(&self, build: F) -> Arc<FirewallRuntime>
@@ -29,7 +29,8 @@ impl FirewallService {
         F: FnOnce(&FirewallRuntime) -> FirewallRuntime,
     {
         let next = self.runtime.build_and_publish(build);
-        self.lifecycle.clear_error_and_transition(ServiceState::Running);
+        self.lifecycle
+            .clear_error_and_transition(ServiceState::Running);
         next
     }
 
@@ -64,7 +65,7 @@ impl FirewallService {
 
     pub(super) async fn clear_system_firewall_for_backend(
         backend: FirewallBackend,
-        sysfw: Option<&pb::SysFirewall>,
+        sysfw: Option<&FirewallConfig>,
     ) {
         let Some(sysfw) = sysfw else {
             return;
@@ -127,7 +128,7 @@ impl FirewallService {
     pub(super) async fn apply_system_firewall_for_backend(
         &self,
         backend: FirewallBackend,
-        sysfw: &pb::SysFirewall,
+        sysfw: &FirewallConfig,
         queue_num: u16,
     ) -> Result<()> {
         match backend {

@@ -18,10 +18,16 @@ pub(crate) use crate::models::storage_dir_entry::StorageDirEntry;
 pub(crate) use crate::models::storage_event::{StorageEvent, StorageOperation};
 
 use crate::utils::atomic_write::{write_bytes_atomic_async, write_bytes_atomic_sync};
+use crate::{
+    models::audit::{AuditEvent, AuditEventKind, StorageAction},
+    services::audit::AuditService,
+};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct StorageService {
     events: StorageEventBus,
+    audit: Option<AuditService>,
+    verbose_hot_path_audit: bool,
 }
 
 #[allow(dead_code)]
@@ -29,11 +35,43 @@ impl StorageService {
     pub(crate) fn new() -> Self {
         Self {
             events: StorageEventBus::new(),
+            audit: None,
+            verbose_hot_path_audit: false,
         }
+    }
+
+    pub(crate) fn with_audit(mut self, audit: AuditService) -> Self {
+        self.audit = Some(audit);
+        self
+    }
+
+    pub(crate) fn with_verbose_hot_path_audit(mut self, enabled: bool) -> Self {
+        self.verbose_hot_path_audit = enabled;
+        self
+    }
+
+    pub(super) fn with_optional_audit(mut self, audit: Option<AuditService>) -> Self {
+        self.audit = audit;
+        self
+    }
+
+    pub(super) fn audit_handle(&self) -> Option<AuditService> {
+        self.audit.clone()
+    }
+
+    pub(super) fn verbose_hot_path_audit_enabled(&self) -> bool {
+        self.verbose_hot_path_audit
     }
 
     pub(crate) fn global() -> Self {
         global_storage_service()
+    }
+
+    pub(crate) fn install_global_audit(audit: AuditService, verbose_hot_path: bool) -> Self {
+        let mut current = global_storage_service();
+        current.audit = Some(audit);
+        current.verbose_hot_path_audit = verbose_hot_path;
+        super::runtime_lifecycle::replace_global_storage_service(current)
     }
 
     #[allow(dead_code)]
@@ -61,6 +99,10 @@ impl StorageService {
         self.events.subscribe_for_prefix(path)
     }
 
+    pub(crate) fn dropped_ingress_events_count(&self) -> u64 {
+        self.events.dropped_ingress_events() as u64
+    }
+
     pub(crate) async fn read_to_string(
         &self,
         _domain: &'static str,
@@ -74,9 +116,16 @@ impl StorageService {
         domain: &'static str,
         path: &Path,
     ) -> io::Result<String> {
-        let contents = tokio::fs::read_to_string(path).await?;
-        self.events.emit_read(domain, path);
-        Ok(contents)
+        match tokio::fs::read_to_string(path).await {
+            Ok(contents) => {
+                self.emit_storage_read(domain, path);
+                Ok(contents)
+            }
+            Err(err) => {
+                self.emit_storage_read_failed(path, &err);
+                Err(err)
+            }
+        }
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -95,7 +144,7 @@ impl StorageService {
     ) -> io::Result<Option<String>> {
         let maybe_contents = option_if_not_found(tokio::fs::read_to_string(path).await)?;
         if maybe_contents.is_some() {
-            self.events.emit_read(domain, path);
+            self.emit_storage_read(domain, path);
         }
         Ok(maybe_contents)
     }
@@ -114,7 +163,7 @@ impl StorageService {
         path: &Path,
     ) -> io::Result<String> {
         let contents = std::fs::read_to_string(path)?;
-        self.events.emit_read(domain, path);
+        self.emit_storage_read(domain, path);
         Ok(contents)
     }
 
@@ -133,7 +182,7 @@ impl StorageService {
         path: &Path,
     ) -> io::Result<Vec<u8>> {
         let contents = std::fs::read(path)?;
-        self.events.emit_read(domain, path);
+        self.emit_storage_read(domain, path);
         Ok(contents)
     }
 
@@ -289,7 +338,7 @@ impl StorageService {
         path: &Path,
     ) -> io::Result<()> {
         tokio::fs::create_dir_all(path).await?;
-        self.events.emit_write(domain, path);
+        self.emit_write(domain, path);
         Ok(())
     }
 
@@ -304,7 +353,7 @@ impl StorageService {
         path: &Path,
     ) -> io::Result<()> {
         std::fs::create_dir_all(path)?;
-        self.events.emit_write(domain, path);
+        self.emit_write(domain, path);
         Ok(())
     }
 
@@ -320,7 +369,7 @@ impl StorageService {
     ) -> io::Result<bool> {
         let exists = exists_if_not_found(tokio::fs::metadata(path).await)?;
         if exists {
-            self.events.emit_read(domain, path);
+            self.emit_storage_read(domain, path);
         }
         Ok(exists)
     }
@@ -337,7 +386,7 @@ impl StorageService {
     ) -> io::Result<bool> {
         let exists = exists_if_not_found(std::fs::metadata(path))?;
         if exists {
-            self.events.emit_read(domain, path);
+            self.emit_storage_read(domain, path);
         }
         Ok(exists)
     }
@@ -359,7 +408,7 @@ impl StorageService {
     ) -> io::Result<Option<SystemTime>> {
         let maybe_metadata = option_if_not_found(tokio::fs::metadata(path).await)?;
         if let Some(metadata) = maybe_metadata {
-            self.events.emit_read(domain, path);
+            self.emit_storage_read(domain, path);
             return Ok(metadata.modified().ok());
         }
         Ok(None)
@@ -434,7 +483,7 @@ impl StorageService {
     ) -> io::Result<Option<PathBuf>> {
         let maybe_target = option_if_not_found(tokio::fs::read_link(path).await)?;
         if maybe_target.is_some() {
-            self.events.emit_read(domain, path);
+            self.emit_storage_read(domain, path);
         }
         Ok(maybe_target)
     }
@@ -466,7 +515,7 @@ impl StorageService {
         tokio::task::spawn_blocking(move || std::os::unix::fs::symlink(&target, &link_path))
             .await
             .map_err(|err| io::Error::other(format!("joining symlink task: {err}")))??;
-        self.events.emit_write(domain, emitted_path.as_path());
+        self.emit_write(domain, emitted_path.as_path());
         Ok(())
     }
 
@@ -478,7 +527,11 @@ impl StorageService {
         path: &Path,
         bytes: &[u8],
     ) -> Result<()> {
-        write_bytes_atomic_async(temp_path, path, bytes, domain).await
+        if let Err(err) = write_bytes_atomic_async(temp_path, path, bytes, domain).await {
+            self.emit_storage_write_failed(path, &err);
+            return Err(err);
+        }
+        Ok(())
     }
 
     pub(crate) async fn write_bytes_atomic_and_notify(
@@ -488,8 +541,11 @@ impl StorageService {
         path: &Path,
         bytes: &[u8],
     ) -> Result<()> {
-        write_bytes_atomic_async(temp_path, path, bytes, domain).await?;
-        self.events.emit_write(domain, path);
+        if let Err(err) = write_bytes_atomic_async(temp_path, path, bytes, domain).await {
+            self.emit_storage_write_failed(path, &err);
+            return Err(err);
+        }
+        self.emit_write(domain, path);
         Ok(())
     }
 
@@ -528,7 +584,7 @@ impl StorageService {
         bytes: &[u8],
     ) -> Result<()> {
         write_bytes_atomic_sync(temp_path, path, bytes, domain)?;
-        self.events.emit_write(domain, path);
+        self.emit_write(domain, path);
         Ok(())
     }
 
@@ -537,6 +593,76 @@ impl StorageService {
     }
 
     pub(crate) fn emit_write(&self, domain: &'static str, path: &Path) {
-        self.events.emit(domain, StorageOperation::Write, path);
+        self.events.emit_write(domain, path);
+        self.emit_storage_write(domain, path);
+    }
+
+    fn emit_storage_read(&self, domain: &'static str, path: &Path) {
+        self.events.emit_read(domain, path);
+        if self.verbose_hot_path_audit {
+            self.emit_storage_read_tracked(domain, path);
+        }
+    }
+
+    fn emit_storage_read_tracked(&self, _domain: &'static str, path: &Path) {
+        let Some(audit) = &self.audit else {
+            return;
+        };
+        audit.emit(AuditEvent::hot(AuditEventKind::StorageAction(
+            StorageAction::FileRead {
+                path: path.display().to_string().into_boxed_str(),
+            },
+        )));
+    }
+
+    fn emit_storage_write(&self, _domain: &'static str, path: &Path) {
+        if !self.verbose_hot_path_audit {
+            return;
+        }
+        let Some(audit) = &self.audit else {
+            return;
+        };
+        audit.emit(AuditEvent::hot(AuditEventKind::StorageAction(
+            StorageAction::FileWritten {
+                path: path.display().to_string().into_boxed_str(),
+            },
+        )));
+    }
+
+    fn emit_storage_read_failed(&self, path: &Path, err: &io::Error) {
+        let Some(audit) = &self.audit else {
+            return;
+        };
+        audit.emit(AuditEvent::cold(AuditEventKind::StorageAction(
+            StorageAction::FileReadFailed {
+                path: path.display().to_string().into_boxed_str(),
+                reason: Self::storage_io_reason(err),
+            },
+        )));
+    }
+
+    fn emit_storage_write_failed(&self, path: &Path, err: &anyhow::Error) {
+        let Some(audit) = &self.audit else {
+            return;
+        };
+        let reason = err
+            .downcast_ref::<io::Error>()
+            .map(Self::storage_io_reason)
+            .unwrap_or("io-error");
+        audit.emit(AuditEvent::cold(AuditEventKind::StorageAction(
+            StorageAction::FileWriteFailed {
+                path: path.display().to_string().into_boxed_str(),
+                reason,
+            },
+        )));
+    }
+
+    fn storage_io_reason(err: &io::Error) -> &'static str {
+        match err.kind() {
+            io::ErrorKind::NotFound => "not-found",
+            io::ErrorKind::PermissionDenied => "permission-denied",
+            io::ErrorKind::AlreadyExists => "already-exists",
+            _ => "io-error",
+        }
     }
 }

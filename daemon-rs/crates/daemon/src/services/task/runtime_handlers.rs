@@ -5,25 +5,25 @@ use opensnitch_proto::pb;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::{TaskService, naming as task_runtime_naming, reply as task_runtime_reply};
+use super::{
+    TaskService, naming as task_runtime_naming, reply as task_runtime_reply, socket_monitor,
+};
 use crate::{
     models::{
-        proc_net_packet::{ProcNetPacketRow, ProcNetXdpRow},
-        socket_state::SocketInfo,
         task_config::{
             DownloaderTaskConfig, IocReportConfig, IocScannerTaskConfig, IocScheduleConfig,
             IocToolConfig,
         },
-        task_payload::TaskErrorPayload,
+        task_wire::TaskErrorPayload,
     },
     platform::ports::socket_diag_port::NativeSocketDiagPort,
-    services::{connection::ConnectionService, process::ProcessService, storage::StorageService},
+    services::{process::ProcessService, storage::StorageService},
     utils::{
-        duration_parse::{parse_human_duration, TASK_INTERVAL_OPTIONS},
+        duration_parse::{TASK_INTERVAL_OPTIONS, parse_human_duration},
         json_value,
-        proc_net::{read_proc_net_packet_rows, read_proc_net_xdp_rows},
-        proc_fs::proc_sys_kernel_value,
         name_parsing::case_folded,
+        proc_fs::proc_sys_kernel_value,
+        proc_net::{read_proc_net_packet_rows, read_proc_net_xdp_rows},
         time_spec::matches_hms_spec,
     },
 };
@@ -82,9 +82,11 @@ impl TaskService {
             return false;
         }
 
-        if entry.time.iter().any(|value| {
-            matches_hms_spec(value.as_str(), now.hour(), now.minute(), now.second())
-        }) {
+        if entry
+            .time
+            .iter()
+            .any(|value| matches_hms_spec(value.as_str(), now.hour(), now.minute(), now.second()))
+        {
             return true;
         }
 
@@ -188,13 +190,7 @@ impl TaskService {
 
     fn task_error_payload(task_name: &str, err: impl Display) -> String {
         serde_json::to_string(&TaskErrorPayload::new(task_name, err.to_string()))
-            .unwrap_or_else(|_| {
-                format!(
-                    "{{\"Task\":\"{}\",\"Error\":\"{}\"}}",
-                    task_name,
-                    err
-                )
-            })
+            .unwrap_or_else(|_| format!("{{\"Task\":\"{}\",\"Error\":\"{}\"}}", task_name, err))
     }
 
     async fn emit_task_ok(
@@ -357,7 +353,11 @@ impl TaskService {
                                     message,
                                 )
                                 .await;
-                                tracing::debug!(task = task_runtime_naming::TASK_PID_MONITOR, pid, "task error: {err}");
+                                tracing::debug!(
+                                    task = task_runtime_naming::TASK_PID_MONITOR,
+                                    pid,
+                                    "task error: {err}"
+                                );
                                 break;
                             }
                         }
@@ -403,7 +403,11 @@ impl TaskService {
                             payload,
                         )
                         .await;
-                        tracing::debug!(task = task_runtime_naming::TASK_NODE_MONITOR, node, "task result");
+                        tracing::debug!(
+                            task = task_runtime_naming::TASK_NODE_MONITOR,
+                            node,
+                            "task result"
+                        );
                     }
                 })
             }
@@ -425,7 +429,8 @@ impl TaskService {
                             Ok(sockets) => {
                                 let mut inode_pid_cache: HashMap<u32, Option<u32>> = HashMap::new();
                                 let mut iface_cache: HashMap<u32, String> = HashMap::new();
-                                let rtnl_iface_map = Self::fetch_iface_name_map_rtnetlink().await;
+                                let rtnl_iface_map =
+                                    socket_monitor::fetch_iface_name_map_rtnetlink().await;
                                 let mut process_map =
                                     serde_json::Map::<String, serde_json::Value>::new();
                                 let mut table = Vec::with_capacity(sockets.len());
@@ -435,18 +440,19 @@ impl TaskService {
                                         continue;
                                     }
 
-                                    let (pid, iface_name) = Self::prepare_socket_monitor_row(
-                                        &process,
-                                        &mut process_map,
-                                        &mut inode_pid_cache,
-                                        &mut iface_cache,
-                                        rtnl_iface_map.as_ref(),
-                                        s.inode,
-                                        s.iface,
-                                    )
-                                    .await;
+                                    let (pid, iface_name) =
+                                        socket_monitor::prepare_socket_monitor_row(
+                                            &process,
+                                            &mut process_map,
+                                            &mut inode_pid_cache,
+                                            &mut iface_cache,
+                                            rtnl_iface_map.as_ref(),
+                                            s.inode,
+                                            s.iface,
+                                        )
+                                        .await;
 
-                                    table.push(Self::socket_monitor_diag_row_json(
+                                    table.push(socket_monitor::socket_monitor_diag_row_json(
                                         s,
                                         iface_name,
                                         pid,
@@ -458,42 +464,42 @@ impl TaskService {
                                     && state_filter == 0
                                 {
                                     for pkt in read_proc_net_packet_rows() {
-                                        let (pid, iface_name) = Self::prepare_socket_monitor_row(
-                                            &process,
-                                            &mut process_map,
-                                            &mut inode_pid_cache,
-                                            &mut iface_cache,
-                                            rtnl_iface_map.as_ref(),
-                                            pkt.inode,
-                                            pkt.iface,
-                                        )
-                                        .await;
+                                        let (pid, iface_name) =
+                                            socket_monitor::prepare_socket_monitor_row(
+                                                &process,
+                                                &mut process_map,
+                                                &mut inode_pid_cache,
+                                                &mut iface_cache,
+                                                rtnl_iface_map.as_ref(),
+                                                pkt.inode,
+                                                pkt.iface,
+                                            )
+                                            .await;
 
-                                        table.push(Self::socket_monitor_packet_row_json(
-                                            &pkt,
-                                            iface_name,
-                                            pid,
+                                        table.push(socket_monitor::socket_monitor_packet_row_json(
+                                            &pkt, iface_name, pid,
                                         ));
                                     }
                                 }
 
-                                if (family == 0 || family == AF_XDP_FAMILY) && state_filter == 0 {
+                                if (family == 0 || family == socket_monitor::AF_XDP_FAMILY)
+                                    && state_filter == 0
+                                {
                                     for xdp in read_proc_net_xdp_rows() {
-                                        let (pid, iface_name) = Self::prepare_socket_monitor_row(
-                                            &process,
-                                            &mut process_map,
-                                            &mut inode_pid_cache,
-                                            &mut iface_cache,
-                                            rtnl_iface_map.as_ref(),
-                                            xdp.inode,
-                                            xdp.iface,
-                                        )
-                                        .await;
+                                        let (pid, iface_name) =
+                                            socket_monitor::prepare_socket_monitor_row(
+                                                &process,
+                                                &mut process_map,
+                                                &mut inode_pid_cache,
+                                                &mut iface_cache,
+                                                rtnl_iface_map.as_ref(),
+                                                xdp.inode,
+                                                xdp.iface,
+                                            )
+                                            .await;
 
-                                        table.push(Self::socket_monitor_xdp_row_json(
-                                            &xdp,
-                                            iface_name,
-                                            pid,
+                                        table.push(socket_monitor::socket_monitor_xdp_row_json(
+                                            &xdp, iface_name, pid,
                                         ));
                                     }
                                 }
@@ -616,10 +622,7 @@ impl TaskService {
                             if ioc_cfg
                                 .as_ref()
                                 .map(|cfg| {
-                                    TaskService::ioc_schedule_matches_now_cfg(
-                                        cfg.as_ref(),
-                                        now,
-                                    )
+                                    TaskService::ioc_schedule_matches_now_cfg(cfg.as_ref(), now)
                                 })
                                 .unwrap_or(false)
                                 && now_second != last_schedule_second
@@ -746,8 +749,7 @@ impl TaskService {
                 }
             }
             Err(err) => {
-                let payload =
-                    Self::task_error_payload(task_runtime_naming::TASK_IOC_SCANNER, &err);
+                let payload = Self::task_error_payload(task_runtime_naming::TASK_IOC_SCANNER, &err);
                 Self::emit_task_error(
                     task_reply_tx,
                     task_runtime_naming::TASK_IOC_SCANNER,
@@ -822,8 +824,8 @@ impl TaskService {
     async fn run_ioc_scanner_once_cfg(cfg: &IocScannerTaskConfig) -> Result<Vec<String>> {
         let global_timeout =
             Self::parse_interval_or_default(&cfg.timeout, std::time::Duration::from_secs(30));
-        let hostname = proc_sys_kernel_value("hostname")
-            .unwrap_or_else(|| "unknown-host".to_string());
+        let hostname =
+            proc_sys_kernel_value("hostname").unwrap_or_else(|| "unknown-host".to_string());
 
         let mut reports = Vec::new();
         let mut tools_ran = 0usize;
@@ -898,9 +900,11 @@ impl TaskService {
     }
 
     async fn write_ioc_report_files(tool: &IocToolConfig, report: &str) -> Result<()> {
-        for report_cfg in tool.options.reports.iter().filter(|cfg| {
-            case_folded(cfg.r#type.trim()) == "file" && !cfg.path.trim().is_empty()
-        }) {
+        for report_cfg in
+            tool.options.reports.iter().filter(|cfg| {
+                case_folded(cfg.r#type.trim()) == "file" && !cfg.path.trim().is_empty()
+            })
+        {
             let report_path = Self::build_report_path(report_cfg, tool)?;
             StorageService::global()
                 .write_bytes_to_path_and_notify("task", &report_path, report.as_bytes())
@@ -909,273 +913,4 @@ impl TaskService {
 
         Ok(())
     }
-
-    async fn ensure_process_entry(
-        process: &ProcessService,
-        process_map: &mut serde_json::Map<String, serde_json::Value>,
-        pid: Option<u32>,
-    ) {
-        let key = pid
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "-1".to_string());
-
-        if process_map.contains_key(&key) {
-            return;
-        }
-
-        if let Some(pid) = pid {
-            if let Ok(info) = process.inspect(pid).await {
-                let process_path = info.path.clone();
-                let comm = std::path::Path::new(&process_path)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                process_map.insert(
-                    key,
-                    serde_json::json!({
-                        "Pid": pid,
-                        "Path": process_path,
-                        "Comm": comm,
-                        "Args": info.args,
-                        "CWD": info.cwd.unwrap_or_default(),
-                    }),
-                );
-                return;
-            }
-
-            process_map.insert(
-                key,
-                serde_json::json!({
-                    "Pid": pid,
-                    "Path": "",
-                    "Comm": "",
-                    "Args": [],
-                    "CWD": "",
-                }),
-            );
-            return;
-        }
-
-        process_map.insert(
-            key,
-            serde_json::json!({
-                "Pid": -1,
-                "Path": "",
-                "Comm": "",
-                "Args": [],
-                "CWD": "",
-            }),
-        );
-    }
-
-    async fn resolve_cached_socket_pid(
-        inode_pid_cache: &mut HashMap<u32, Option<u32>>,
-        inode: u32,
-    ) -> Option<u32> {
-        if inode == 0 {
-            return None;
-        }
-
-        if let Some(cached) = inode_pid_cache.get(&inode) {
-            return *cached;
-        }
-
-        let resolved = ConnectionService::resolve_pid_by_inode_async(inode).await;
-        inode_pid_cache.insert(inode, resolved);
-        resolved
-    }
-
-    async fn prepare_socket_monitor_row(
-        process: &ProcessService,
-        process_map: &mut serde_json::Map<String, serde_json::Value>,
-        inode_pid_cache: &mut HashMap<u32, Option<u32>>,
-        iface_cache: &mut HashMap<u32, String>,
-        rtnl_iface_map: Option<&HashMap<u32, String>>,
-        inode: u32,
-        iface: u32,
-    ) -> (Option<u32>, String) {
-        let pid = Self::resolve_cached_socket_pid(inode_pid_cache, inode).await;
-        Self::ensure_process_entry(process, process_map, pid).await;
-        let iface_name = Self::resolve_cached_iface_name(iface_cache, rtnl_iface_map, iface).await;
-        (pid, iface_name)
-    }
-
-    async fn resolve_cached_iface_name(
-        iface_cache: &mut HashMap<u32, String>,
-        rtnl_iface_map: Option<&HashMap<u32, String>>,
-        iface: u32,
-    ) -> String {
-        if iface == 0 {
-            return String::new();
-        }
-
-        if let Some(name) = iface_cache.get(&iface) {
-            return name.clone();
-        }
-
-        let name = if let Some(name) = rtnl_iface_map.and_then(|m| m.get(&iface).cloned()) {
-            name
-        } else {
-            match crate::platform::adapters::net_iface::NetIfaceAdapter::interface_name_by_index_async(iface)
-                .await
-            {
-                Ok(Some(name)) => name,
-                Ok(None) => String::new(),
-                Err(err) => {
-                    tracing::warn!(iface, detail = %err, "failed to resolve interface name via rtnetlink");
-                    String::new()
-                }
-            }
-        };
-        iface_cache.insert(iface, name.clone());
-        name
-    }
-
-    fn socket_monitor_row_json(
-        source: &str,
-        destination: &str,
-        cookie: [u32; 2],
-        iface: u32,
-        source_port: u16,
-        destination_port: u16,
-        expires: u32,
-        rqueue: u32,
-        wqueue: u32,
-        uid: u32,
-        inode: u32,
-        family: u8,
-        state: u8,
-        timer: u8,
-        retrans: u8,
-        iface_name: String,
-        pid: Option<u32>,
-        mark: u32,
-        proto: u32,
-    ) -> serde_json::Value {
-        serde_json::json!({
-            "Socket": {
-                "ID": {
-                    "Source": source,
-                    "Destination": destination,
-                    "Cookie": cookie,
-                    "Interface": iface,
-                    "SourcePort": source_port,
-                    "DestinationPort": destination_port,
-                },
-                "Expires": expires,
-                "RQueue": rqueue,
-                "WQueue": wqueue,
-                "UID": uid,
-                "INode": inode,
-                "Family": family,
-                "State": state,
-                "Timer": timer,
-                "Retrans": retrans,
-            },
-            "Iface": iface_name,
-            "PID": pid.map(|value| value as i32).unwrap_or(-1),
-            "Mark": mark,
-            "Proto": proto,
-        })
-    }
-
-    fn socket_monitor_diag_row_json(
-        socket: &SocketInfo,
-        iface_name: String,
-        pid: Option<u32>,
-        proto: u32,
-    ) -> serde_json::Value {
-        Self::socket_monitor_row_json(
-            socket.src.to_string().as_str(),
-            socket.dst.to_string().as_str(),
-            [socket.cookie0, socket.cookie1],
-            socket.iface,
-            socket.src_port,
-            socket.dst_port,
-            socket.expires,
-            socket.rqueue,
-            socket.wqueue,
-            socket.uid,
-            socket.inode,
-            socket.family,
-            socket.state,
-            socket.timer,
-            socket.retrans,
-            iface_name,
-            pid,
-            socket.mark,
-            proto,
-        )
-    }
-
-    fn socket_monitor_packet_row_json(
-        packet: &ProcNetPacketRow,
-        iface_name: String,
-        pid: Option<u32>,
-    ) -> serde_json::Value {
-        // Keep Go parity: /proc fallback packet sockets are tagged as raw.
-        Self::socket_monitor_row_json(
-            "",
-            "",
-            [0, 0],
-            packet.iface,
-            0,
-            0,
-            0,
-            0,
-            0,
-            packet.uid,
-            packet.inode,
-            nix::libc::AF_PACKET as u8,
-            0,
-            0,
-            0,
-            iface_name,
-            pid,
-            0,
-            nix::libc::IPPROTO_RAW as u32,
-        )
-    }
-
-    fn socket_monitor_xdp_row_json(
-        xdp: &ProcNetXdpRow,
-        iface_name: String,
-        pid: Option<u32>,
-    ) -> serde_json::Value {
-        Self::socket_monitor_row_json(
-            "",
-            "",
-            [xdp.cookie0, xdp.cookie1],
-            xdp.iface,
-            0,
-            0,
-            0,
-            0,
-            0,
-            xdp.uid,
-            xdp.inode,
-            AF_XDP_FAMILY,
-            0,
-            0,
-            0,
-            iface_name,
-            pid,
-            0,
-            nix::libc::IPPROTO_RAW as u32,
-        )
-    }
-
-    async fn fetch_iface_name_map_rtnetlink() -> Option<HashMap<u32, String>> {
-        match crate::platform::adapters::net_iface::NetIfaceAdapter::interface_name_map_async().await {
-            Ok(map) if map.is_empty() => None,
-            Ok(map) => Some(map),
-            Err(err) => {
-                tracing::warn!(detail = %err, "failed to enumerate interfaces via rtnetlink");
-                None
-            }
-        }
-    }
 }
-
-const AF_XDP_FAMILY: u8 = 44;

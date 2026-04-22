@@ -59,27 +59,29 @@ impl NetlinkRecoveryGate {
 
     fn ensure_recovery_loop_started(&'static self, recovery_probe: fn() -> bool) {
         self.loop_started.call_once(|| {
-            thread::spawn(move || loop {
-                if !self.degraded.load(Ordering::Relaxed) {
-                    thread::sleep(Duration::from_millis(self.poll_interval_ms()));
-                    continue;
-                }
+            thread::spawn(move || {
+                loop {
+                    if !self.degraded.load(Ordering::Relaxed) {
+                        thread::sleep(Duration::from_millis(self.poll_interval_ms()));
+                        continue;
+                    }
 
-                let sleep_ms = if self.retry_pending.swap(false, Ordering::Relaxed) {
-                    self.retry_delay_ms()
-                } else {
-                    self.poll_interval_ms()
-                };
-                thread::sleep(Duration::from_millis(sleep_ms));
+                    let sleep_ms = if self.retry_pending.swap(false, Ordering::Relaxed) {
+                        self.retry_delay_ms()
+                    } else {
+                        self.poll_interval_ms()
+                    };
+                    thread::sleep(Duration::from_millis(sleep_ms));
 
-                if recovery_probe() {
-                    self.degraded.store(false, Ordering::Relaxed);
-                    tracing::info!(
-                        domain = self.domain_name,
-                        retry_delay_ms = self.retry_delay_ms(),
-                        poll_interval_ms = self.poll_interval_ms(),
-                        "netlink recovered; resuming primary path"
-                    );
+                    if recovery_probe() {
+                        self.degraded.store(false, Ordering::Relaxed);
+                        tracing::info!(
+                            domain = self.domain_name,
+                            retry_delay_ms = self.retry_delay_ms(),
+                            poll_interval_ms = self.poll_interval_ms(),
+                            "netlink recovered; resuming primary path"
+                        );
+                    }
                 }
             });
         });

@@ -20,8 +20,15 @@ async fn kernel_flow_dns_event_updates_dns_cache() {
         shutdown.clone(),
         RuntimeTunables::default(),
         std::sync::Arc::new(crate::daemon::KernelPipelineCounters::default()),
+        false,
     );
-    let join = flow.spawn(process, dns.clone(), stats, kernel_rx);
+    let join = flow.spawn(
+        process,
+        dns.clone(),
+        stats,
+        crate::services::audit::AuditService::new(32),
+        kernel_rx,
+    );
 
     kernel_tx
         .send(KernelEvent::DnsUpdate(DnsPayload::answer(
@@ -66,8 +73,15 @@ async fn kernel_flow_respects_custom_ingress_dispatch_batch_tunable() {
         shutdown.clone(),
         tunables,
         std::sync::Arc::new(crate::daemon::KernelPipelineCounters::default()),
+        false,
     );
-    let join = flow.spawn(process, dns.clone(), stats, kernel_rx);
+    let join = flow.spawn(
+        process,
+        dns.clone(),
+        stats,
+        crate::services::audit::AuditService::new(32),
+        kernel_rx,
+    );
 
     kernel_tx
         .send(KernelEvent::DnsUpdate(DnsPayload::answer(

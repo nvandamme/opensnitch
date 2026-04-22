@@ -113,7 +113,10 @@ pub(crate) fn pick_priv_cmd() -> PrivCmd {
     if is_root() {
         return PrivCmd::Direct;
     }
-    for var in &["OPENSNITCH_TEST_GUARD_PRIV_CMD", "OPENSNITCH_TOOLS_PRIV_CMD"] {
+    for var in &[
+        "OPENSNITCH_TEST_GUARD_PRIV_CMD",
+        "OPENSNITCH_TOOLS_PRIV_CMD",
+    ] {
         if let Ok(raw) = env::var(var) {
             match raw.trim().to_ascii_lowercase().as_str() {
                 "direct" | "none" => return PrivCmd::Direct,
@@ -259,10 +262,7 @@ fn stop_service_if_active(repo_root: &Path, priv_cmd: PrivCmd, scope: &str, svc:
 /// Stop all opensnitch-related services and processes.  Returns the list of
 /// `(scope, service)` pairs that were stopped so they can be restarted via
 /// [`restart_stopped_services`].
-pub(crate) fn preflight_cleanup(
-    repo_root: &Path,
-    priv_cmd: PrivCmd,
-) -> Vec<(String, String)> {
+pub(crate) fn preflight_cleanup(repo_root: &Path, priv_cmd: PrivCmd) -> Vec<(String, String)> {
     let mut stopped = Vec::new();
     if command_exists("systemctl") {
         for svc in ["opensnitchd-rs", "opensnitchd", "opensnitch-ui"] {
@@ -335,8 +335,8 @@ pub(crate) fn reexec_privileged_if_needed() -> Result<(), DynError> {
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     ensure_privileged_ready(&cwd, priv_cmd, "tools")?;
 
-    let bin = std::env::current_exe()
-        .map_err(|e| format!("cannot resolve tools binary path: {e}"))?;
+    let bin =
+        std::env::current_exe().map_err(|e| format!("cannot resolve tools binary path: {e}"))?;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let pairs = forwarded_env_pairs();
 

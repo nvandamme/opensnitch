@@ -122,7 +122,12 @@ impl ConnectionService {
                 continue;
             };
             match &found {
-                None => found = Some(ConnectionOwner { uid: entry.uid, pid }),
+                None => {
+                    found = Some(ConnectionOwner {
+                        uid: entry.uid,
+                        pid,
+                    })
+                }
                 Some(_) => return None, // ambiguous: more than one socket owner
             }
         }

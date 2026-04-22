@@ -121,7 +121,7 @@ fn decision_rule_summary_maps_action_names() {
         reject: false,
         nolog: false,
     }
-    .to_summary_rule();
+    .to_summary();
     assert_eq!(allow.action, "allow");
 
     let reject = RuleMatchDecision {
@@ -129,7 +129,7 @@ fn decision_rule_summary_maps_action_names() {
         reject: true,
         nolog: false,
     }
-    .to_summary_rule();
+    .to_summary();
     assert_eq!(reject.action, "reject");
 }
 
@@ -146,6 +146,7 @@ async fn handle_event_ignores_non_connection_events() -> Result<()> {
         RuleService::default(),
         ConnectionService::new(process, dns),
         StatsService::default(),
+        crate::services::audit::AuditService::new(32),
     );
 
     let _ = bus
@@ -173,6 +174,7 @@ async fn self_connection_is_fast_allowed() -> Result<()> {
         RuleService::default(),
         ConnectionService::new(process, dns),
         StatsService::default(),
+        crate::services::audit::AuditService::new(32),
     );
 
     flow.handle_connect_attempt(ConnectionAttempt {
@@ -240,6 +242,7 @@ async fn concurrent_ui_ask_uses_single_inflight_gate() -> Result<()> {
         rules,
         ConnectionService::new(process, dns),
         stats.clone(),
+        crate::services::audit::AuditService::new(32),
     );
 
     let a1 = ConnectionAttempt {

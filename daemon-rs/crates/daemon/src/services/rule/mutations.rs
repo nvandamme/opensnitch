@@ -35,7 +35,8 @@ impl RuleService {
         let file_path = Self::rule_json_path(rules_path, rule_name);
         Self::remove_rule_file_if_missing_ok(&file_path).await?;
 
-        self.build_and_publish_snapshot(rules_path, next_rules).await?;
+        self.build_and_publish_snapshot(rules_path, next_rules)
+            .await?;
 
         Ok(())
     }
@@ -72,7 +73,8 @@ impl RuleService {
                 .await?;
         }
 
-            self.build_and_publish_snapshot(rules_path, next_rules).await?;
+        self.build_and_publish_snapshot(rules_path, next_rules)
+            .await?;
 
         if record.enabled && rule_duration_temporary_spec(&record.duration).is_some() {
             self.schedule_temporary_rule(record.name.clone(), record.duration.clone());

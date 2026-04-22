@@ -1,9 +1,9 @@
 use std::{collections::HashMap, path::Path};
 
 use anyhow::{Context, Result};
-use opensnitch_proto::pb;
 use tracing::warn;
 
+use super::SubscriptionRecord;
 use super::SubscriptionService;
 use crate::services::storage::StorageService;
 use crate::utils::name_parsing::sanitize_ascii_name;
@@ -15,7 +15,10 @@ impl SubscriptionService {
         rules_dir: &Path,
         desired_groups: &HashMap<String, Vec<(String, std::path::PathBuf)>>,
     ) {
-        if let Ok(entries) = StorageService::global().list_dir("subscription", rules_dir).await {
+        if let Ok(entries) = StorageService::global()
+            .list_dir("subscription", rules_dir)
+            .await
+        {
             for stale_path in entries {
                 let Some(name) = stale_path.file_name().and_then(|value| value.to_str()) else {
                     continue;
@@ -64,20 +67,20 @@ impl SubscriptionService {
             .create_dir_all_and_notify("subscription", &rules_dir)
             .await?;
 
-        let items = self.storage.list();
+        let items = self.storage.list_records();
         self.sync_rule_links(&items, &rules_dir).await?;
         Ok(())
     }
 
     pub(super) async fn sync_rule_links(
         &self,
-        items: &[pb::Subscription],
+        items: &[SubscriptionRecord],
         rules_dir: &Path,
     ) -> Result<()> {
         let sources_dir = self.root_dir.join("sources.list.d");
         let mut desired_groups: HashMap<String, Vec<(String, std::path::PathBuf)>> = HashMap::new();
 
-        let mut enabled: Vec<&pb::Subscription> = items.iter().filter(|s| s.enabled).collect();
+        let mut enabled: Vec<&SubscriptionRecord> = items.iter().filter(|s| s.enabled).collect();
         sort_by_string_key(&mut enabled, |sub| sub.id.as_str());
 
         for (idx, sub) in enabled.iter().enumerate() {
@@ -108,7 +111,8 @@ impl SubscriptionService {
             }
         }
 
-        self.prune_stale_rule_groups(rules_dir, &desired_groups).await;
+        self.prune_stale_rule_groups(rules_dir, &desired_groups)
+            .await;
 
         for (group, links) in &desired_groups {
             let group_dir = rules_dir.join(group);

@@ -10,11 +10,7 @@ pub(crate) const TASK_LOOPER: &str = "looper";
 pub(crate) const TASK_DOWNLOADER: &str = "downloader";
 pub(crate) const TASK_IOC_SCANNER: &str = "ioc-scanner";
 
-const RUNTIME_TASK_NAMES: &[&str] = &[
-    TASK_PID_MONITOR,
-    TASK_NODE_MONITOR,
-    TASK_SOCKETS_MONITOR,
-];
+const RUNTIME_TASK_NAMES: &[&str] = &[TASK_PID_MONITOR, TASK_NODE_MONITOR, TASK_SOCKETS_MONITOR];
 const STORAGE_TASK_NAMES: &[&str] = &[TASK_LOOPER, TASK_DOWNLOADER, TASK_IOC_SCANNER];
 const INTERVAL_VALIDATED_TASK_NAMES: &[&str] = &[
     TASK_PID_MONITOR,

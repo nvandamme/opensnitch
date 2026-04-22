@@ -1,25 +1,25 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Deserialize)]
-pub struct RawSysFirewall {
+pub struct RawFirewallConfig {
     #[serde(rename = "Enabled", default)]
     pub enabled: bool,
     #[serde(rename = "Version", default)]
     pub version: u32,
     #[serde(rename = "SystemRules", default)]
-    pub system_rules: Vec<RawFwChains>,
+    pub system_rules: Vec<RawFirewallGroup>,
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub struct RawFwChains {
+pub struct RawFirewallGroup {
     #[serde(rename = "Rule", default)]
-    pub rule: Option<RawFwRule>,
+    pub rule: Option<RawFirewallRule>,
     #[serde(rename = "Chains", default)]
-    pub chains: Vec<RawFwChain>,
+    pub chains: Vec<RawFirewallChain>,
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub struct RawFwChain {
+pub struct RawFirewallChain {
     #[serde(rename = "Name", default)]
     pub name: String,
     #[serde(rename = "Table", default)]
@@ -35,11 +35,11 @@ pub struct RawFwChain {
     #[serde(rename = "Policy", default)]
     pub policy: String,
     #[serde(rename = "Rules", default)]
-    pub rules: Vec<RawFwRule>,
+    pub rules: Vec<RawFirewallRule>,
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub struct RawFwRule {
+pub struct RawFirewallRule {
     #[serde(rename = "Table", default)]
     pub table: String,
     #[serde(rename = "Chain", default)]
@@ -59,7 +59,7 @@ pub struct RawFwRule {
     #[serde(rename = "Parameters", default)]
     pub parameters: String,
     #[serde(rename = "Expressions", default)]
-    pub expressions: Vec<RawExpressions>,
+    pub expressions: Vec<RawFirewallExpression>,
     #[serde(rename = "Target", default)]
     pub target: String,
     #[serde(rename = "TargetParameters", default)]
@@ -67,23 +67,23 @@ pub struct RawFwRule {
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub struct RawExpressions {
+pub struct RawFirewallExpression {
     #[serde(rename = "Statement", default)]
-    pub statement: Option<RawStatement>,
+    pub statement: Option<RawFirewallStatement>,
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub struct RawStatement {
+pub struct RawFirewallStatement {
     #[serde(rename = "Op", default)]
     pub op: String,
     #[serde(rename = "Name", default)]
     pub name: String,
     #[serde(rename = "Values", default)]
-    pub values: Vec<RawStatementValue>,
+    pub values: Vec<RawFirewallStatementValue>,
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub struct RawStatementValue {
+pub struct RawFirewallStatementValue {
     #[serde(rename = "Key", default)]
     pub key: String,
     #[serde(rename = "Value", default)]
@@ -91,25 +91,25 @@ pub struct RawStatementValue {
 }
 
 #[derive(Debug, Serialize)]
-pub struct PersistedSysFirewall {
+pub struct PersistedFirewallConfig {
     #[serde(rename = "Enabled")]
     pub enabled: bool,
     #[serde(rename = "Version")]
     pub version: u32,
     #[serde(rename = "SystemRules")]
-    pub system_rules: Vec<PersistedFwChains>,
+    pub system_rules: Vec<PersistedFirewallGroup>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct PersistedFwChains {
+pub struct PersistedFirewallGroup {
     #[serde(rename = "Rule")]
-    pub rule: Option<PersistedFwRule>,
+    pub rule: Option<PersistedFirewallRule>,
     #[serde(rename = "Chains")]
-    pub chains: Vec<PersistedFwChain>,
+    pub chains: Vec<PersistedFirewallChain>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct PersistedFwChain {
+pub struct PersistedFirewallChain {
     #[serde(rename = "Name")]
     pub name: String,
     #[serde(rename = "Table")]
@@ -125,11 +125,11 @@ pub struct PersistedFwChain {
     #[serde(rename = "Policy")]
     pub policy: String,
     #[serde(rename = "Rules")]
-    pub rules: Vec<PersistedFwRule>,
+    pub rules: Vec<PersistedFirewallRule>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct PersistedFwRule {
+pub struct PersistedFirewallRule {
     #[serde(rename = "Table")]
     pub table: String,
     #[serde(rename = "Chain")]
@@ -145,7 +145,7 @@ pub struct PersistedFwRule {
     #[serde(rename = "Parameters")]
     pub parameters: String,
     #[serde(rename = "Expressions")]
-    pub expressions: Vec<PersistedExpressions>,
+    pub expressions: Vec<PersistedFirewallExpression>,
     #[serde(rename = "Target")]
     pub target: String,
     #[serde(rename = "TargetParameters")]
@@ -153,23 +153,23 @@ pub struct PersistedFwRule {
 }
 
 #[derive(Debug, Serialize)]
-pub struct PersistedExpressions {
+pub struct PersistedFirewallExpression {
     #[serde(rename = "Statement")]
-    pub statement: Option<PersistedStatement>,
+    pub statement: Option<PersistedFirewallStatement>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct PersistedStatement {
+pub struct PersistedFirewallStatement {
     #[serde(rename = "Op")]
     pub op: String,
     #[serde(rename = "Name")]
     pub name: String,
     #[serde(rename = "Values")]
-    pub values: Vec<PersistedStatementValue>,
+    pub values: Vec<PersistedFirewallStatementValue>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct PersistedStatementValue {
+pub struct PersistedFirewallStatementValue {
     #[serde(rename = "Key")]
     pub key: String,
     #[serde(rename = "Value")]

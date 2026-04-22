@@ -95,11 +95,7 @@ fn read_kernel<T: Copy>(src: *const T) -> Option<T> {
             src.cast(),
         )
     };
-    if ret == 0 {
-        Some(out)
-    } else {
-        None
-    }
+    if ret == 0 { Some(out) } else { None }
 }
 
 #[inline(always)]

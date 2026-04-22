@@ -1,31 +1,39 @@
+pub mod audit;
+pub mod auth_capability;
+pub mod command_action;
 pub mod command_rpc;
 pub mod config_reload;
 pub mod config_runtime;
 pub mod config_storage;
 pub mod connection_context;
-pub mod connection_worker_state;
 pub mod connection_owner;
 pub mod connection_state;
-pub mod dns_worker_state;
+pub mod connection_worker_state;
 pub mod dns_payload;
+pub mod dns_worker_state;
 pub mod ebpf_availability;
 pub mod ebpf_payload;
 pub mod ebpf_state;
 pub mod effective_tunables;
+pub mod firewall_config;
 pub mod firewall_runtime;
 pub mod firewall_state;
 pub mod firewall_storage;
-pub mod hash_cache;
+pub mod hash_cache_storage;
 pub mod kernel_event;
 pub mod kernel_pipeline;
 pub mod lifecycle_contract;
-pub mod notification_stream;
-pub mod policy_tx;
-pub mod proc_event;
+pub mod metrics_config;
 pub mod metrics_snapshot;
+pub mod policy_tx_storage;
+pub mod proc_event;
 pub mod proc_net_packet;
-pub mod process_worker_state;
 pub mod process_state;
+pub mod process_worker_state;
+/// Prometheus `io.prometheus.client` wire-format types (prost-derived).
+/// Only compiled under the `metrics-export` feature (prost is optional).
+#[cfg(feature = "metrics-export")]
+pub mod prometheus_wire;
 pub mod queue_metrics_snapshot;
 pub mod rule_match_decision;
 pub mod rule_record;
@@ -35,17 +43,14 @@ pub mod socket_state;
 pub mod storage_dir_entry;
 pub mod storage_event;
 pub mod storage_event_counters;
-pub mod metrics_config;
 pub mod subscription_refresh;
+#[cfg(feature = "subscriptions")]
+pub mod subscription_rpc;
 pub mod subscription_storage;
 pub mod task_config;
 pub mod task_lifecycle_event;
-pub mod task_payload;
 pub mod task_storage;
-/// Prometheus `io.prometheus.client` wire-format types (prost-derived).
-/// Only compiled under the `metrics-export` feature (prost is optional).
-#[cfg(feature = "metrics-export")]
-pub mod prometheus_wire;
+pub mod task_wire;
 pub mod ui_alert;
 pub mod verdict_rpc;
 pub mod worker_runtime_control;

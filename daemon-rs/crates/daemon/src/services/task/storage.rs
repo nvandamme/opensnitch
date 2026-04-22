@@ -245,14 +245,12 @@ impl WatchWorkerControl for TaskWatchControl {
 
             // Short lock scope: apply diff only.
             let mut task_handles = task_handles.lock().await;
-            if let Err(err) = task_service
-                .apply_storage_task_diff(
-                    desired,
-                    &mut task_handles,
-                    process.clone(),
-                    task_reply_tx.clone(),
-                )
-            {
+            if let Err(err) = task_service.apply_storage_task_diff(
+                desired,
+                &mut task_handles,
+                process.clone(),
+                task_reply_tx.clone(),
+            ) {
                 tracing::error!(path = %tasks_config_path.display(), "failed to sync disk tasks: {err}");
                 enqueue_alert(
                     &alert_buffer,

@@ -103,7 +103,10 @@ pub(crate) enum ReloadError {
     #[allow(dead_code)]
     ConfigLoad(anyhow::Error),
     /// One or more service apply stages failed.
-    ServicesApply { stage: RuntimeApplyStage, error: anyhow::Error },
+    ServicesApply {
+        stage: RuntimeApplyStage,
+        error: anyhow::Error,
+    },
     /// Process worker reconfiguration failed.
     ProcWorkers(anyhow::Error),
     /// Service runtime-control hook failed.
@@ -248,7 +251,9 @@ impl Daemon {
             Ok(config) => config,
             Err(err) => {
                 error!("failed to reload config from disk after SIGHUP: {err}");
-                notify(NotifyState::Status("SIGHUP reload failed while reading config"));
+                notify(NotifyState::Status(
+                    "SIGHUP reload failed while reading config",
+                ));
                 return;
             }
         };
@@ -300,7 +305,7 @@ impl Daemon {
     pub(super) fn reload_metrics_server(&self) {
         use crate::models::metrics_config::MetricsConfig;
         use crate::platform::adapters::stats_exporter_prometheus::{
-            PrometheusStatsExporter, PROMETHEUS_ADDR_ENV,
+            PROMETHEUS_ADDR_ENV, PrometheusStatsExporter,
         };
 
         let config_path = self.runtime.config.get_snapshot().config_path.clone();
@@ -352,7 +357,8 @@ impl Daemon {
                 }
                 let exp = old_exporter.unwrap_or_else(PrometheusStatsExporter::new);
                 let server_ct = self.runtime.shutdown.child_token();
-                exp.clone().spawn_metrics_server(new_addr, server_ct.clone());
+                exp.clone()
+                    .spawn_metrics_server(new_addr, server_ct.clone());
                 *slot = Some(super::MetricsServerSlot {
                     exporter: exp,
                     effective_addr: Some(new_addr),

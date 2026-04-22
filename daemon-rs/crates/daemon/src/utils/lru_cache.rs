@@ -41,8 +41,8 @@
 use std::{
     borrow::Borrow,
     hash::Hash,
-    sync::{Arc, OnceLock},
     sync::atomic::{AtomicU64, Ordering},
+    sync::{Arc, OnceLock},
 };
 
 use quick_cache::{
@@ -246,5 +246,3 @@ pub(crate) type DualLayerLruMap<K, V> = ConcurrentLruCache<K, V>;
 
 /// Sync-flavoured cache alias.
 pub(crate) type SyncDualLayerLruMap<K, V> = ConcurrentLruCache<K, V>;
-
-

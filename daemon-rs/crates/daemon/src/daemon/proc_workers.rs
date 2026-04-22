@@ -284,7 +284,7 @@ impl Daemon {
                         self.spawn_proc_worker_handles(previous_method, runtime.shutdown.clone());
                 }
                 return Err(anyhow::anyhow!(
-                    "failed to start process monitor workers for {:?}",
+                    "failed to start process monitor workers for {}",
                     method
                 ));
             }

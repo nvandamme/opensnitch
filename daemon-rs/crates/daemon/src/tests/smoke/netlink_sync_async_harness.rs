@@ -92,7 +92,8 @@ fn net_iface_sync_vs_async_harness() {
 
     for _ in 0..ITERS {
         let t0 = Instant::now();
-        let sync_result = crate::platform::adapters::net_iface::NetIfaceAdapter::interface_name_map();
+        let sync_result =
+            crate::platform::adapters::net_iface::NetIfaceAdapter::interface_name_map();
         sync_samples.push(t0.elapsed());
 
         if let Err(err) = sync_result {

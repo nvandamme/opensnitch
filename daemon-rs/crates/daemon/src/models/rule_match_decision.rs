@@ -1,6 +1,10 @@
-use opensnitch_proto::pb;
-
 use crate::models::rule_record::RuleAction;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuleMatchSummary {
+    pub action: &'static str,
+    pub nolog: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuleMatchDecision {
@@ -18,23 +22,16 @@ impl RuleMatchDecision {
         }
     }
 
-    pub(crate) fn to_summary_rule(self) -> pb::Rule {
-        pb::Rule {
-            created: 0,
-            name: "runtime-match".to_owned(),
-            description: "matched existing runtime rule".to_owned(),
-            enabled: true,
-            precedence: false,
-            nolog: self.nolog,
+    pub(crate) fn to_summary(self) -> RuleMatchSummary {
+        RuleMatchSummary {
             action: if self.allow {
-                "allow".to_owned()
+                "allow"
             } else if self.reject {
-                "reject".to_owned()
+                "reject"
             } else {
-                "deny".to_owned()
+                "deny"
             },
-            duration: "always".to_owned(),
-            operator: None,
+            nolog: self.nolog,
         }
     }
 }

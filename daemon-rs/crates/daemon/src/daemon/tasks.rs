@@ -1,13 +1,17 @@
 use std::sync::Arc;
 
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use super::{
     Daemon,
     proc_workers::{DaemonProcWorkerControlPort, DaemonProcWorkerReconfigurePort},
     reload::DaemonReloadPortAdapter,
 };
+#[cfg(feature = "subscriptions")]
+use crate::flows::subscription::{SubscriptionCommandFlow, SubscriptionFlow};
+#[cfg(feature = "subscriptions")]
+use crate::models::audit::{SubscriptionFlowLifecycle, SubscriptionLifecycle};
 use crate::{
     bus::BusRx,
     flows::{
@@ -17,6 +21,11 @@ use crate::{
         notification::NotificationFlow,
         stats::{StatsFlow, WorkerTelemetrySnapshot},
         verdict::{VerdictFlow, VerdictSubmitFlow},
+    },
+    models::audit::{
+        AuditEventKind, AuditLifecycle, AuditSeverity, ClientLifecycle, CommandFlowLifecycle,
+        ConnectFlowLifecycle, KernelFlowLifecycle, NotificationFlowLifecycle, StatsFlowLifecycle,
+        StatsLifecycle, TaskAction, VerdictFlowLifecycle,
     },
     models::connection_state::ConnectionAttempt,
     services::{
@@ -28,8 +37,6 @@ use crate::{
     },
     workers::runtime::control::{RuntimeHandles, WorkerControl},
 };
-#[cfg(feature = "subscriptions")]
-use crate::flows::subscription::{SubscriptionCommandFlow, SubscriptionFlow};
 
 impl Daemon {
     pub(super) fn spawn_tasks(
@@ -46,12 +53,36 @@ impl Daemon {
             "notifications",
             self.spawn_notification_task(notification_flow, task_reply_rx, alert_rx),
         );
+        self.runtime
+            .audit
+            .emit(crate::models::audit::AuditEvent::cold(
+                AuditEventKind::ClientLifecycle(ClientLifecycle::NotificationFlowStarted),
+            ));
+        self.runtime
+            .audit
+            .emit(crate::models::audit::AuditEvent::cold(
+                AuditEventKind::NotificationFlowLifecycle(NotificationFlowLifecycle::Started),
+            ));
         debug!("notification task started");
 
         handles.push_task(
             "connect-attempts",
-            self.spawn_connect_attempt_task(verdict_flow, self.runtime.stats.clone(), rx.connect_rx),
+            self.spawn_connect_attempt_task(
+                verdict_flow,
+                self.runtime.stats.clone(),
+                rx.connect_rx,
+            ),
         );
+        self.runtime
+            .audit
+            .emit(crate::models::audit::AuditEvent::cold(
+                AuditEventKind::ConnectFlowLifecycle(ConnectFlowLifecycle::Started),
+            ));
+        self.runtime
+            .audit
+            .emit(crate::models::audit::AuditEvent::cold(
+                AuditEventKind::VerdictFlowLifecycle(VerdictFlowLifecycle::Started),
+            ));
         debug!("connect-attempt task started");
 
         handles.push_task(
@@ -63,6 +94,11 @@ impl Daemon {
                 rx.kernel_rx,
             ),
         );
+        self.runtime
+            .audit
+            .emit(crate::models::audit::AuditEvent::cold(
+                AuditEventKind::KernelFlowLifecycle(KernelFlowLifecycle::Started),
+            ));
         debug!("kernel-events task started");
 
         handles.push_task(
@@ -102,15 +138,31 @@ impl Daemon {
                 Arc::new(DaemonReloadPortAdapter {
                     daemon: self.clone(),
                 }),
+                self.runtime.audit.clone(),
             )
             .spawn(rx.client_cmd_rx),
         );
+        self.runtime
+            .audit
+            .emit(crate::models::audit::AuditEvent::cold(
+                AuditEventKind::ClientLifecycle(ClientLifecycle::CommandFlowStarted),
+            ));
+        self.runtime
+            .audit
+            .emit(crate::models::audit::AuditEvent::cold(
+                AuditEventKind::CommandFlowLifecycle(CommandFlowLifecycle::Started),
+            ));
         debug!("client-command task started");
 
         handles.push_task(
             "verdict-replies",
             self.spawn_verdict_rpc_task(rx.verdict_rx, self.runtime.stats.clone()),
         );
+        self.runtime
+            .audit
+            .emit(crate::models::audit::AuditEvent::cold(
+                AuditEventKind::VerdictFlowLifecycle(VerdictFlowLifecycle::RepliesStarted),
+            ));
         debug!("verdict-rpc task started");
 
         handles.push_task(
@@ -122,15 +174,51 @@ impl Daemon {
                 self.runtime.dns.clone(),
             ),
         );
+        self.runtime
+            .audit
+            .emit(crate::models::audit::AuditEvent::cold(
+                AuditEventKind::StatsLifecycle(StatsLifecycle::FlowStarted),
+            ));
+        self.runtime
+            .audit
+            .emit(crate::models::audit::AuditEvent::cold(
+                AuditEventKind::StatsFlowLifecycle(StatsFlowLifecycle::Started),
+            ));
         debug!("stats task started");
 
-        handles.push_task(
-            "subscription-scheduler",
+        handles.push_task("audit-sink", self.spawn_audit_sink_task());
+        self.runtime
+            .audit
+            .emit(crate::models::audit::AuditEvent::cold(
+                AuditEventKind::AuditLifecycle(AuditLifecycle::SinkStarted),
+            ));
+        debug!("audit-sink task started");
+
+        #[cfg(feature = "subscriptions")]
+        {
+            handles.push_task(
+                "subscription-scheduler",
+                self.runtime.subscriptions.spawn_scheduler(
+                    self.runtime.shutdown.clone(),
+                    self.runtime.stats.clone(),
+                    self.runtime.rules.clone(),
+                    self.runtime.audit.clone(),
+                ),
+            );
             self.runtime
-                .subscriptions
-                .spawn_scheduler(self.runtime.shutdown.clone(), self.runtime.stats.clone(), self.runtime.rules.clone()),
-        );
-        debug!("subscription-scheduler task started");
+                .audit
+                .emit(crate::models::audit::AuditEvent::cold(
+                    AuditEventKind::SubscriptionLifecycle(SubscriptionLifecycle::SchedulerStarted),
+                ));
+            self.runtime
+                .audit
+                .emit(crate::models::audit::AuditEvent::cold(
+                    AuditEventKind::SubscriptionFlowLifecycle(
+                        SubscriptionFlowLifecycle::SchedulerStarted,
+                    ),
+                ));
+            debug!("subscription-scheduler task started");
+        }
 
         #[cfg(feature = "subscriptions")]
         {
@@ -143,6 +231,13 @@ impl Daemon {
                 )
                 .spawn(),
             );
+            self.runtime
+                .audit
+                .emit(crate::models::audit::AuditEvent::cold(
+                    AuditEventKind::SubscriptionFlowLifecycle(
+                        SubscriptionFlowLifecycle::StreamStarted,
+                    ),
+                ));
             debug!("subscription-flow task started");
         }
 
@@ -154,9 +249,17 @@ impl Daemon {
                     self.runtime.shutdown.clone(),
                     self.runtime.config.clone(),
                     self.runtime.subscriptions.clone(),
+                    self.runtime.audit.clone(),
                 )
                 .spawn(),
             );
+            self.runtime
+                .audit
+                .emit(crate::models::audit::AuditEvent::cold(
+                    AuditEventKind::SubscriptionFlowLifecycle(
+                        SubscriptionFlowLifecycle::CommandStreamStarted,
+                    ),
+                ));
             debug!("subscription-command-flow task started");
         }
 
@@ -188,11 +291,16 @@ impl Daemon {
             self.runtime.alert_buffer.clone(),
             self.runtime.bus.alert_tx.clone(),
         ));
-        handles.push_worker_control(
-            self.runtime
-                .firewall
-                .spawn_watch_task(self.runtime.shutdown.clone(), self.runtime.config.clone()),
-        );
+        handles.push_worker_control(self.runtime.firewall.spawn_watch_task(
+            self.runtime.shutdown.clone(),
+            self.runtime.config.clone(),
+            self.runtime.rules.clone(),
+        ));
+        self.runtime
+            .audit
+            .emit(crate::models::audit::AuditEvent::cold(
+                AuditEventKind::TaskAction(TaskAction::RuntimeTasksStarted),
+            ));
         debug!("watch tasks started");
     }
 
@@ -203,12 +311,16 @@ impl Daemon {
         alert_rx: tokio::sync::mpsc::Receiver<crate::models::ui_alert::UiAlert>,
     ) -> JoinHandle<()> {
         let shutdown = self.runtime.shutdown.clone();
+        let audit = self.runtime.audit.clone();
 
         tokio::spawn(async move {
             tokio::select! {
                 _ = shutdown.cancelled() => {}
                 res = flow.run(task_reply_rx, alert_rx) => {
                     if let Err(err) = res {
+                        audit.emit(crate::models::audit::AuditEvent::cold(
+                            AuditEventKind::NotificationFlowLifecycle(NotificationFlowLifecycle::Failed),
+                        ));
                         error!("notification flow failed: {err}");
                     }
                 }
@@ -222,12 +334,14 @@ impl Daemon {
         stats: StatsService,
         connect_rx: tokio::sync::mpsc::Receiver<ConnectionAttempt>,
     ) -> JoinHandle<()> {
+        let verbose_hot_path_audit = self.runtime.config.get_snapshot().audit_sinks.verbose_hot_path;
         ConnectFlow::new(
             self.runtime.shutdown.clone(),
             self.runtime.tunables,
             self.runtime.bus.verdict_tx.clone(),
+            verbose_hot_path_audit,
         )
-        .spawn(flow, stats, connect_rx)
+        .spawn(flow, stats, self.runtime.audit.clone(), connect_rx)
     }
 
     pub(crate) fn spawn_kernel_task(
@@ -237,12 +351,14 @@ impl Daemon {
         stats: StatsService,
         kernel_rx: tokio::sync::mpsc::Receiver<crate::models::kernel_event::KernelEvent>,
     ) -> JoinHandle<()> {
+        let verbose_hot_path_audit = self.runtime.config.get_snapshot().audit_sinks.verbose_hot_path;
         KernelFlow::new(
             self.runtime.shutdown.clone(),
             self.runtime.tunables,
             self.runtime.kernel_pipeline_counters.clone(),
+            verbose_hot_path_audit,
         )
-            .spawn(process, dns, stats, kernel_rx)
+        .spawn(process, dns, stats, self.runtime.audit.clone(), kernel_rx)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -269,6 +385,7 @@ impl Daemon {
             Arc::new(DaemonReloadPortAdapter {
                 daemon: self.clone(),
             }),
+            self.runtime.audit.clone(),
         )
         .spawn(client_cmd_rx)
     }
@@ -319,17 +436,18 @@ impl Daemon {
             worker_name,
             worker_snapshot,
             dns,
+            self.runtime.audit.clone(),
         );
 
         #[cfg(feature = "metrics-export")]
         let flow = {
             use crate::platform::adapters::stats_exporter_prometheus::{
-                PrometheusStatsExporter, PROMETHEUS_ADDR_ENV,
+                PROMETHEUS_ADDR_ENV, PrometheusStatsExporter,
             };
             use crate::platform::adapters::stats_exporter_push::{
-                MultiStatsExporter, PushConfig, PushFormat, PushStatsExporter, PUSH_BUCKET_ENV,
-                PUSH_FORMAT_ENV, PUSH_GZIP_ENV, PUSH_JOB_ENV, PUSH_ORG_ENV, PUSH_TOKEN_ENV,
-                PUSH_URL_ENV,
+                MultiStatsExporter, PUSH_BUCKET_ENV, PUSH_FORMAT_ENV, PUSH_GZIP_ENV, PUSH_JOB_ENV,
+                PUSH_ORG_ENV, PUSH_TOKEN_ENV, PUSH_URL_ENV, PushConfig, PushFormat,
+                PushStatsExporter,
             };
             use crate::platform::ports::stats_exporter_port::StatsExporterPort;
 
@@ -383,11 +501,7 @@ impl Daemon {
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
-                .or_else(|| {
-                    std::env::var(PUSH_URL_ENV)
-                        .ok()
-                        .filter(|s| !s.is_empty())
-                })
+                .or_else(|| std::env::var(PUSH_URL_ENV).ok().filter(|s| !s.is_empty()))
                 .or_else(|| mc.push.url.clone().filter(|s| !s.is_empty()));
 
             let push: Option<Arc<dyn StatsExporterPort>> = push_url.map(|url| {
@@ -409,12 +523,7 @@ impl Daemon {
                             None
                         }
                     });
-                let format = match format_str
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_lowercase()
-                    .as_str()
-                {
+                let format = match format_str.as_deref().unwrap_or("").to_lowercase().as_str() {
                     "influxdb" | "influx" => PushFormat::InfluxDb,
                     "pushgateway-proto" | "proto" => PushFormat::PushgatewayProto,
                     _ => PushFormat::Pushgateway,
@@ -424,11 +533,7 @@ impl Daemon {
                     .push_job
                     .clone()
                     .filter(|s| !s.is_empty())
-                    .or_else(|| {
-                        std::env::var(PUSH_JOB_ENV)
-                            .ok()
-                            .filter(|s| !s.is_empty())
-                    })
+                    .or_else(|| std::env::var(PUSH_JOB_ENV).ok().filter(|s| !s.is_empty()))
                     .or_else(|| mc.push.job.clone().filter(|s| !s.is_empty()))
                     .unwrap_or_else(|| "opensnitchd".to_string());
                 // Auth token: CLI → env var → JSON.
@@ -436,11 +541,7 @@ impl Daemon {
                     .push_token
                     .clone()
                     .filter(|s| !s.is_empty())
-                    .or_else(|| {
-                        std::env::var(PUSH_TOKEN_ENV)
-                            .ok()
-                            .filter(|s| !s.is_empty())
-                    })
+                    .or_else(|| std::env::var(PUSH_TOKEN_ENV).ok().filter(|s| !s.is_empty()))
                     .or_else(|| mc.push.token.clone().filter(|s| !s.is_empty()));
                 // Gzip: CLI flag (highest) → env var → JSON config.
                 let gzip = cli.push_gzip.unwrap_or(false)
@@ -461,7 +562,15 @@ impl Daemon {
                     .or_else(|| mc.push.org.clone().filter(|s| !s.is_empty()))
                     .unwrap_or_default();
                 PushStatsExporter::new(
-                    PushConfig { url, format, job, token, gzip, bucket, org },
+                    PushConfig {
+                        url,
+                        format,
+                        job,
+                        token,
+                        gzip,
+                        bucket,
+                        org,
+                    },
                     self.runtime.shutdown.clone(),
                 ) as Arc<dyn StatsExporterPort>
             });
@@ -475,5 +584,48 @@ impl Daemon {
         };
 
         flow.spawn()
+    }
+
+    pub(super) fn spawn_audit_sink_task(&self) -> JoinHandle<()> {
+        let shutdown = self.runtime.shutdown.clone();
+        let mut rx = self.runtime.audit.subscribe();
+        let sinks = self.runtime.audit_sinks.clone();
+        let audit = self.runtime.audit.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => {
+                        audit.emit(crate::models::audit::AuditEvent::cold(
+                            AuditEventKind::AuditLifecycle(AuditLifecycle::Stopped),
+                        ));
+                        break;
+                    }
+                    next = rx.recv() => {
+                        match next {
+                            Ok(event) => {
+                                // Dispatch to file / syslog sinks (fail-open).
+                                sinks.dispatch(&event);
+                                // Log-line sink: emit as tracing events with span context.
+                                if !sinks.log_lines_enabled_for(event.severity) {
+                                    continue;
+                                }
+                                let _span = tracing::info_span!("audit", family = %event.family).entered();
+                                match event.severity {
+                                    AuditSeverity::Error => tracing::error!(kind = %event.kind),
+                                    AuditSeverity::Warning => tracing::warn!(kind = %event.kind),
+                                    AuditSeverity::Info => tracing::info!(kind = %event.kind),
+                                    AuditSeverity::Debug => tracing::debug!(kind = %event.kind),
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                warn!(skipped, "audit sink lagged behind audit stream");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                }
+            }
+        })
     }
 }

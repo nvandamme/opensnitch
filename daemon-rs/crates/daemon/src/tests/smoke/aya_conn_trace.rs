@@ -45,7 +45,10 @@ fn run_status(cmd: &mut Command, context: &str) {
     let status = cmd.status().unwrap_or_else(|err| {
         panic!("{context}: failed to spawn command: {err}");
     });
-    assert!(status.success(), "{context}: command failed with status {status}");
+    assert!(
+        status.success(),
+        "{context}: command failed with status {status}"
+    );
 }
 
 fn command_success(cmd: &mut Command) -> bool {
@@ -103,7 +106,7 @@ fn try_exercise_ipip_tunnel() -> bool {
         ip tunnel add osns-ipip-smoke mode ipip local 127.0.0.1 remote 127.0.0.1 ttl 64; \
         ip addr add 10.250.42.1/30 dev osns-ipip-smoke >/dev/null 2>&1 || true; \
         ip link set osns-ipip-smoke up; \
-        ping -n -c 1 -W 1 -I osns-ipip-smoke 10.250.42.2 >/dev/null 2>&1"
+        ping -n -c 1 -W 1 -I osns-ipip-smoke 10.250.42.2 >/dev/null 2>&1",
     )
 }
 
@@ -119,7 +122,7 @@ fn try_exercise_vxlan_tunnel() -> bool {
         ip link set osns-vxlan-smoke up; \
         ip -6 addr add fd00:42::1/64 dev osns-vxlan-smoke >/dev/null 2>&1 || true; \
         bridge fdb append 00:00:00:00:00:00 dev osns-vxlan-smoke dst ::1 >/dev/null 2>&1 || true; \
-        ping -6 -n -c 1 -W 1 -I osns-vxlan-smoke fd00:42::2 >/dev/null 2>&1"
+        ping -6 -n -c 1 -W 1 -I osns-vxlan-smoke fd00:42::2 >/dev/null 2>&1",
     )
 }
 
@@ -235,14 +238,21 @@ fn aya_conn_trace_smoke_reports_explicit_runtime_active() {
 
     let _ = fs::create_dir_all(target_dir.join("bpfel-unknown-none/release"));
     let normalized_obj = target_dir.join("bpfel-unknown-none/release/opensnitch-ebpf");
-    fs::copy(&rust_obj, &normalized_obj)
-        .unwrap_or_else(|err| panic!("copy rust eBPF object to {} failed: {err}", normalized_obj.display()));
+    fs::copy(&rust_obj, &normalized_obj).unwrap_or_else(|err| {
+        panic!(
+            "copy rust eBPF object to {} failed: {err}",
+            normalized_obj.display()
+        )
+    });
 
     fs::create_dir_all("/etc/opensnitchd").expect("create /etc/opensnitchd");
     fs::copy(&rust_obj, "/etc/opensnitchd/opensnitch-ebpf")
         .expect("copy /etc/opensnitchd/opensnitch-ebpf");
 
-    let _ = Command::new("pkill").arg("-x").arg("opensnitchd-rs").status();
+    let _ = Command::new("pkill")
+        .arg("-x")
+        .arg("opensnitchd-rs")
+        .status();
 
     let _ = fs::remove_file("/sys/fs/bpf/opensnitch-rs/tcpMap");
 
@@ -250,7 +260,8 @@ fn aya_conn_trace_smoke_reports_explicit_runtime_active() {
         .duration_since(UNIX_EPOCH)
         .expect("time went backwards")
         .as_nanos();
-    let smoke_log = std::env::temp_dir().join(format!("opensnitch-aya-conn-trace-test-{unique}.log"));
+    let smoke_log =
+        std::env::temp_dir().join(format!("opensnitch-aya-conn-trace-test-{unique}.log"));
 
     let mut daemon = Command::new("timeout")
         .arg("24s")

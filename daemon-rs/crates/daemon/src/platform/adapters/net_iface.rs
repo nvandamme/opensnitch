@@ -81,7 +81,10 @@ impl NetIfaceAdapter {
         while let Some(reply) = iter.recv().await {
             let (msg, attrs) =
                 reply.map_err(|err| Self::map_reply_error("RTM_GETLINK reply", err))?;
-            let Some(index) = u32::try_from(msg.ifi_index).ok().filter(|value| *value != 0) else {
+            let Some(index) = u32::try_from(msg.ifi_index)
+                .ok()
+                .filter(|value| *value != 0)
+            else {
                 continue;
             };
             let Ok(name) = attrs.get_ifname() else {

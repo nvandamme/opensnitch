@@ -1,10 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use crate::{
-    models::{
-        connection_owner::ConnectionOwnerCacheKey,
-        connection_state::TransportProtocol,
-    },
+    models::{connection_owner::ConnectionOwnerCacheKey, connection_state::TransportProtocol},
     services::connection::ConnectionService,
 };
 

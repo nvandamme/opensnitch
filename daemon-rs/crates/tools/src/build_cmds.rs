@@ -10,8 +10,7 @@
 //! (listed in brackets for each option).
 
 use std::{
-    env,
-    fs,
+    env, fs,
     io::{BufRead, BufReader},
     path::Path,
     process::Command,
@@ -37,7 +36,9 @@ use crate::{DynError, env_flag, perf_repeats, perf_rust_log_level};
 pub(crate) fn run_build() -> Result<(), DynError> {
     let (daemon_rs, crate_name, target) = common_params()?;
     let profile = build_profile();
-    let triple = env::var("OPENSNITCH_BUILD_TARGET").ok().filter(|s| !s.is_empty());
+    let triple = env::var("OPENSNITCH_BUILD_TARGET")
+        .ok()
+        .filter(|s| !s.is_empty());
     let mut args = vec![
         "build",
         "--manifest-path",
@@ -70,9 +71,7 @@ pub(crate) fn run_check_kernel_caps() -> Result<(), DynError> {
     let diag = opensnitch_kernel_caps::run();
     diag.print_report();
     if !diag.all_pass {
-        return Err(
-            "kernel capability check reported missing features (see output above)".into(),
-        );
+        return Err("kernel capability check reported missing features (see output above)".into());
     }
     Ok(())
 }
@@ -83,53 +82,61 @@ pub(crate) fn run_check_kernel_caps() -> Result<(), DynError> {
 /// Flags: `--smoke-timeout=N` [`DAEMON_RS_EBPF_SMOKE_TIMEOUT_SECS`],
 ///        `--smoke-kill-after=N` [`DAEMON_RS_EBPF_SMOKE_TIMEOUT_KILL_AFTER_SECS`].
 pub(crate) fn run_aya_proc_smoke() -> Result<(), DynError> {
-    crate::test_guard::with_guard("aya-smoke-proc", || run_aya_smoke(&AyaSmokeSpec {
-        label: "proc",
-        test_name: "aya_proc_trace_smoke_reports_explicit_runtime_active",
-        log_pattern: LogPattern::Glob {
-            prefix: "opensnitch-aya-proc-trace-test-",
-            suffix: ".log",
-            not_found_msg: "no process smoke log found under /tmp/opensnitch-aya-proc-trace-test-*.log",
-        },
-    }))
+    crate::test_guard::with_guard("aya-smoke-proc", || {
+        run_aya_smoke(&AyaSmokeSpec {
+            label: "proc",
+            test_name: "aya_proc_trace_smoke_reports_explicit_runtime_active",
+            log_pattern: LogPattern::Glob {
+                prefix: "opensnitch-aya-proc-trace-test-",
+                suffix: ".log",
+                not_found_msg: "no process smoke log found under /tmp/opensnitch-aya-proc-trace-test-*.log",
+            },
+        })
+    })
 }
 
 /// `aya-smoke-dns`: run `aya_dns_trace_smoke_reports_explicit_runtime_active`.
 pub(crate) fn run_aya_dns_smoke() -> Result<(), DynError> {
-    crate::test_guard::with_guard("aya-smoke-dns", || run_aya_smoke(&AyaSmokeSpec {
-        label: "dns",
-        test_name: "aya_dns_trace_smoke_reports_explicit_runtime_active",
-        log_pattern: LogPattern::Fixed {
-            path: "/tmp/opensnitch-aya-dns-trace-test.log",
-            not_found_msg: "missing /tmp/opensnitch-aya-dns-trace-test.log",
-        },
-    }))
+    crate::test_guard::with_guard("aya-smoke-dns", || {
+        run_aya_smoke(&AyaSmokeSpec {
+            label: "dns",
+            test_name: "aya_dns_trace_smoke_reports_explicit_runtime_active",
+            log_pattern: LogPattern::Fixed {
+                path: "/tmp/opensnitch-aya-dns-trace-test.log",
+                not_found_msg: "missing /tmp/opensnitch-aya-dns-trace-test.log",
+            },
+        })
+    })
 }
 
 /// `aya-smoke-conn`: run `aya_conn_trace_smoke_reports_explicit_runtime_active`.
 pub(crate) fn run_aya_conn_smoke() -> Result<(), DynError> {
-    crate::test_guard::with_guard("aya-smoke-conn", || run_aya_smoke(&AyaSmokeSpec {
-        label: "conn",
-        test_name: "aya_conn_trace_smoke_reports_explicit_runtime_active",
-        log_pattern: LogPattern::Glob {
-            prefix: "opensnitch-aya-conn-trace-test-",
-            suffix: ".log",
-            not_found_msg: "no connection smoke log found under /tmp/opensnitch-aya-conn-trace-test-*.log",
-        },
-    }))
+    crate::test_guard::with_guard("aya-smoke-conn", || {
+        run_aya_smoke(&AyaSmokeSpec {
+            label: "conn",
+            test_name: "aya_conn_trace_smoke_reports_explicit_runtime_active",
+            log_pattern: LogPattern::Glob {
+                prefix: "opensnitch-aya-conn-trace-test-",
+                suffix: ".log",
+                not_found_msg: "no connection smoke log found under /tmp/opensnitch-aya-conn-trace-test-*.log",
+            },
+        })
+    })
 }
 
 /// `aya-smoke-tunnel`: run `aya_tunnel_trace_smoke_reports_tunnel_probe_activity`.
 pub(crate) fn run_aya_tunnel_smoke() -> Result<(), DynError> {
-    crate::test_guard::with_guard("aya-smoke-tunnel", || run_aya_smoke(&AyaSmokeSpec {
-        label: "tunnel",
-        test_name: "aya_tunnel_trace_smoke_reports_tunnel_probe_activity",
-        log_pattern: LogPattern::Glob {
-            prefix: "opensnitch-aya-tunnel-trace-test-",
-            suffix: ".log",
-            not_found_msg: "no tunnel smoke log found under /tmp/opensnitch-aya-tunnel-trace-test-*.log",
-        },
-    }))
+    crate::test_guard::with_guard("aya-smoke-tunnel", || {
+        run_aya_smoke(&AyaSmokeSpec {
+            label: "tunnel",
+            test_name: "aya_tunnel_trace_smoke_reports_tunnel_probe_activity",
+            log_pattern: LogPattern::Glob {
+                prefix: "opensnitch-aya-tunnel-trace-test-",
+                suffix: ".log",
+                not_found_msg: "no tunnel smoke log found under /tmp/opensnitch-aya-tunnel-trace-test-*.log",
+            },
+        })
+    })
 }
 
 /// `kernel-profile-harness`: run Rust kernel-pressure and sweep stress tests
@@ -138,45 +145,46 @@ pub(crate) fn run_aya_tunnel_smoke() -> Result<(), DynError> {
 /// Flags: `--repeats=N`, `--rust-log=LEVEL` (should be warn/error for clean output).
 pub(crate) fn run_kernel_profile_harness() -> Result<(), DynError> {
     crate::test_guard::with_guard("kernel-profile-harness", || {
-    let (daemon_rs, crate_name, target) = common_params()?;
-    let repeats = perf_repeats();
-    let rust_log = perf_rust_log_level();
+        let (daemon_rs, crate_name, target) = common_params()?;
+        let repeats = perf_repeats();
+        let rust_log = perf_rust_log_level();
 
-    let base_envs: &[(&str, &str)] = &[
-        ("CARGO_TARGET_DIR", &target),
-        ("RUST_LOG", &rust_log),
-        ("OPENSNITCH_STRESS_SKIP_REGRESSION_CHECK", "1"),
-    ];
+        let base_envs: &[(&str, &str)] = &[
+            ("CARGO_TARGET_DIR", &target),
+            ("RUST_LOG", &rust_log),
+            ("OPENSNITCH_STRESS_SKIP_REGRESSION_CHECK", "1"),
+        ];
 
-    for test_name in &[
-        "stress_profile_reports_kernel_pipeline_pressure",
-        "stress_profile_reports_kernel_pipeline_timeout_sweep",
-    ] {
-        for i in 1..=repeats {
-            let kind = if test_name.contains("timeout_sweep") { "sweep" } else { "pressure" };
-            eprintln!(
-                "[tools] kernel-profile-harness {} run {i}/{repeats}",
-                kind
-            );
-            run_live(
-                &daemon_rs,
-                &[
-                    "test",
-                    "--manifest-path",
-                    "Cargo.toml",
-                    "--release",
-                    "-p",
-                    &crate_name,
-                    test_name,
-                    "--",
-                    "--ignored",
-                    "--nocapture",
-                ],
-                base_envs,
-            )?;
+        for test_name in &[
+            "stress_profile_reports_kernel_pipeline_pressure",
+            "stress_profile_reports_kernel_pipeline_timeout_sweep",
+        ] {
+            for i in 1..=repeats {
+                let kind = if test_name.contains("timeout_sweep") {
+                    "sweep"
+                } else {
+                    "pressure"
+                };
+                eprintln!("[tools] kernel-profile-harness {} run {i}/{repeats}", kind);
+                run_live(
+                    &daemon_rs,
+                    &[
+                        "test",
+                        "--manifest-path",
+                        "Cargo.toml",
+                        "--release",
+                        "-p",
+                        &crate_name,
+                        test_name,
+                        "--",
+                        "--ignored",
+                        "--nocapture",
+                    ],
+                    base_envs,
+                )?;
+            }
         }
-    }
-    Ok(())
+        Ok(())
     }) // with_guard
 }
 
@@ -184,7 +192,10 @@ pub(crate) fn run_kernel_profile_harness() -> Result<(), DynError> {
 
 enum LogPattern {
     /// Single fixed path.
-    Fixed { path: &'static str, not_found_msg: &'static str },
+    Fixed {
+        path: &'static str,
+        not_found_msg: &'static str,
+    },
     /// Newest file under /tmp/ whose name starts with `prefix` and ends with `suffix`.
     Glob {
         prefix: &'static str,
@@ -224,7 +235,15 @@ fn run_aya_smoke(spec: &AyaSmokeSpec) -> Result<(), DynError> {
 
     let mut cmd = Command::new("cargo");
     cmd.current_dir(&daemon_rs)
-        .args(["test", "-p", "opensnitchd-rs", spec.test_name, "--", "--ignored", "--nocapture"])
+        .args([
+            "test",
+            "-p",
+            "opensnitchd-rs",
+            spec.test_name,
+            "--",
+            "--ignored",
+            "--nocapture",
+        ])
         .env("OPENSNITCH_RUN_PRIVILEGED_TESTS", "1")
         .env("OPENSNITCH_CARGO_TARGET_DIR", &kernel_target)
         .env("CARGO_TARGET_DIR", &kernel_target);
@@ -236,9 +255,15 @@ fn run_aya_smoke(spec: &AyaSmokeSpec) -> Result<(), DynError> {
     let watchdog = std::thread::spawn(move || {
         std::thread::sleep(timeout);
         timed_out_clone.store(true, Ordering::Relaxed);
-        Command::new("kill").args(["-TERM", &child_id.to_string()]).status().ok();
+        Command::new("kill")
+            .args(["-TERM", &child_id.to_string()])
+            .status()
+            .ok();
         std::thread::sleep(kill_after);
-        Command::new("kill").args(["-KILL", &child_id.to_string()]).status().ok();
+        Command::new("kill")
+            .args(["-KILL", &child_id.to_string()])
+            .status()
+            .ok();
     });
 
     let status = child.wait()?;
@@ -276,7 +301,10 @@ fn run_aya_smoke(spec: &AyaSmokeSpec) -> Result<(), DynError> {
 /// Resolve the newest log file for `spec` and print any verifier output block.
 fn print_verifier_log(spec: &AyaSmokeSpec) {
     let log_path = match &spec.log_pattern {
-        LogPattern::Fixed { path, not_found_msg } => {
+        LogPattern::Fixed {
+            path,
+            not_found_msg,
+        } => {
             if std::path::Path::new(path).exists() {
                 path.to_string()
             } else {
@@ -284,19 +312,24 @@ fn print_verifier_log(spec: &AyaSmokeSpec) {
                 return;
             }
         }
-        LogPattern::Glob { prefix, suffix, not_found_msg } => {
-            match newest_tmp_file_matching(prefix, suffix) {
-                Some(p) => p,
-                None => {
-                    eprintln!("[tools] aya-smoke-{}: {}", spec.label, not_found_msg);
-                    return;
-                }
+        LogPattern::Glob {
+            prefix,
+            suffix,
+            not_found_msg,
+        } => match newest_tmp_file_matching(prefix, suffix) {
+            Some(p) => p,
+            None => {
+                eprintln!("[tools] aya-smoke-{}: {}", spec.label, not_found_msg);
+                return;
             }
-        }
+        },
     };
 
     let Ok(f) = fs::File::open(&log_path) else {
-        eprintln!("[tools] aya-smoke-{}: could not open {log_path}", spec.label);
+        eprintln!(
+            "[tools] aya-smoke-{}: could not open {log_path}",
+            spec.label
+        );
         return;
     };
 
@@ -325,7 +358,10 @@ fn print_verifier_log(spec: &AyaSmokeSpec) {
     }
 
     if !found {
-        eprintln!("[tools] aya-smoke-{}: no verifier stack trace found in {log_path}", spec.label);
+        eprintln!(
+            "[tools] aya-smoke-{}: no verifier stack trace found in {log_path}",
+            spec.label
+        );
     }
 }
 
@@ -361,7 +397,12 @@ fn looks_like_log_timestamp(line: &str) -> bool {
 fn kernel_target_dir(daemon_rs: &Path) -> String {
     env::var("DAEMON_RS_KERNEL_TARGET_DIR")
         .or_else(|_| env::var("CARGO_TARGET_DIR"))
-        .unwrap_or_else(|_| daemon_rs.join("target-kernel").to_string_lossy().to_string())
+        .unwrap_or_else(|_| {
+            daemon_rs
+                .join("target-kernel")
+                .to_string_lossy()
+                .to_string()
+        })
 }
 
 /// `build-all`: `cargo build --profile <profile>` (full workspace) in daemon-rs.
@@ -371,8 +412,16 @@ fn kernel_target_dir(daemon_rs: &Path) -> String {
 pub(crate) fn run_build_all() -> Result<(), DynError> {
     let (daemon_rs, _crate, target) = common_params()?;
     let profile = build_profile();
-    let triple = env::var("OPENSNITCH_BUILD_TARGET").ok().filter(|s| !s.is_empty());
-    let mut args = vec!["build", "--manifest-path", "Cargo.toml", "--profile", &profile];
+    let triple = env::var("OPENSNITCH_BUILD_TARGET")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let mut args = vec![
+        "build",
+        "--manifest-path",
+        "Cargo.toml",
+        "--profile",
+        &profile,
+    ];
     if let Some(ref t) = triple {
         args.extend(["--target", t.as_str()]);
     }
@@ -388,39 +437,39 @@ pub(crate) fn run_build_all() -> Result<(), DynError> {
 /// The privilege routing is handled by the caller (Makefile uses TEST_GUARD).
 pub(crate) fn run_build_ebpf() -> Result<(), DynError> {
     crate::test_guard::with_guard("build-ebpf", || {
-    let tools_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let daemon_rs = tools_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .ok_or("tools dir missing daemon-rs parent")?
-        .to_path_buf();
+        let tools_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let daemon_rs = tools_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .ok_or("tools dir missing daemon-rs parent")?
+            .to_path_buf();
 
-    let script = daemon_rs.join("scripts/build_ebpf.sh");
-    if !script.exists() {
-        return Err(format!("build_ebpf.sh not found at {}", script.display()).into());
-    }
+        let script = daemon_rs.join("scripts/build_ebpf.sh");
+        if !script.exists() {
+            return Err(format!("build_ebpf.sh not found at {}", script.display()).into());
+        }
 
-    let target = kernel_target_dir(&daemon_rs);
-    let pkg = env::var("DAEMON_RS_EBPF_PACKAGE")
-        .unwrap_or_else(|_| "opensnitch-ebpf".to_string());
-    let tgt = env::var("DAEMON_RS_EBPF_TARGET")
-        .unwrap_or_else(|_| "bpfel-unknown-none".to_string());
-    let toolchain = env::var("DAEMON_RS_EBPF_TOOLCHAIN")
-        .unwrap_or_else(|_| "nightly".to_string());
+        let target = kernel_target_dir(&daemon_rs);
+        let pkg =
+            env::var("DAEMON_RS_EBPF_PACKAGE").unwrap_or_else(|_| "opensnitch-ebpf".to_string());
+        let tgt =
+            env::var("DAEMON_RS_EBPF_TARGET").unwrap_or_else(|_| "bpfel-unknown-none".to_string());
+        let toolchain =
+            env::var("DAEMON_RS_EBPF_TOOLCHAIN").unwrap_or_else(|_| "nightly".to_string());
 
-    let status = Command::new("bash")
-        .arg(&script)
-        .arg("--release")
-        .env("CARGO_TARGET_DIR", &target)
-        .env("DAEMON_RS_EBPF_PACKAGE", &pkg)
-        .env("DAEMON_RS_EBPF_TARGET", &tgt)
-        .env("DAEMON_RS_EBPF_TOOLCHAIN", &toolchain)
-        .status()?;
+        let status = Command::new("bash")
+            .arg(&script)
+            .arg("--release")
+            .env("CARGO_TARGET_DIR", &target)
+            .env("DAEMON_RS_EBPF_PACKAGE", &pkg)
+            .env("DAEMON_RS_EBPF_TARGET", &tgt)
+            .env("DAEMON_RS_EBPF_TOOLCHAIN", &toolchain)
+            .status()?;
 
-    if !status.success() {
-        return Err(format!("build_ebpf.sh failed: {status}").into());
-    }
-    Ok(())
+        if !status.success() {
+            return Err(format!("build_ebpf.sh failed: {status}").into());
+        }
+        Ok(())
     }) // with_guard
 }
 
@@ -431,29 +480,29 @@ pub(crate) fn run_build_ebpf() -> Result<(), DynError> {
 ///        `--crate=NAME` [`OPENSNITCH_BUILD_CRATE`].
 pub(crate) fn run_parity_tests() -> Result<(), DynError> {
     crate::test_guard::with_guard("test", || {
-    let (daemon_rs, crate_name, target) = common_params()?;
-    let log = rust_test_log_level();
-    for suite in &[
-        "tests::config_service::",
-        "tests::firewall_service::",
-        "tests::client::",
-    ] {
-        run_live(
-            &daemon_rs,
-            &[
-                "test",
-                "--manifest-path",
-                "Cargo.toml",
-                "-p",
-                &crate_name,
-                suite,
-                "--",
-                "--nocapture",
-            ],
-            &[("CARGO_TARGET_DIR", &target), ("RUST_LOG", &log)],
-        )?;
-    }
-    Ok(())
+        let (daemon_rs, crate_name, target) = common_params()?;
+        let log = rust_test_log_level();
+        for suite in &[
+            "tests::config_service::",
+            "tests::firewall_service::",
+            "tests::client::",
+        ] {
+            run_live(
+                &daemon_rs,
+                &[
+                    "test",
+                    "--manifest-path",
+                    "Cargo.toml",
+                    "-p",
+                    &crate_name,
+                    suite,
+                    "--",
+                    "--nocapture",
+                ],
+                &[("CARGO_TARGET_DIR", &target), ("RUST_LOG", &log)],
+            )?;
+        }
+        Ok(())
     }) // with_guard
 }
 
@@ -463,27 +512,27 @@ pub(crate) fn run_parity_tests() -> Result<(), DynError> {
 /// Flags: `--test-log=LEVEL`, `--crate=NAME`.
 pub(crate) fn run_kernel_it() -> Result<(), DynError> {
     crate::test_guard::with_guard("test-kernel-it", || {
-    let (daemon_rs, crate_name, target) = common_params()?;
-    let log = rust_test_log_level();
-    run_live(
-        &daemon_rs,
-        &[
-            "test",
-            "--manifest-path",
-            "Cargo.toml",
-            "-p",
-            &crate_name,
-            "integration_kernel_tests::",
-            "--",
-            "--nocapture",
-        ],
-        &[
-            ("CARGO_TARGET_DIR", &target),
-            ("RUST_LOG", &log),
-            ("OPENSNITCH_RUN_PRIVILEGED_TESTS", "1"),
-            ("OPENSNITCH_KERNEL_IT_STRICT", "1"),
-        ],
-    )
+        let (daemon_rs, crate_name, target) = common_params()?;
+        let log = rust_test_log_level();
+        run_live(
+            &daemon_rs,
+            &[
+                "test",
+                "--manifest-path",
+                "Cargo.toml",
+                "-p",
+                &crate_name,
+                "integration_kernel_tests::",
+                "--",
+                "--nocapture",
+            ],
+            &[
+                ("CARGO_TARGET_DIR", &target),
+                ("RUST_LOG", &log),
+                ("OPENSNITCH_RUN_PRIVILEGED_TESTS", "1"),
+                ("OPENSNITCH_KERNEL_IT_STRICT", "1"),
+            ],
+        )
     }) // with_guard
 }
 
@@ -498,12 +547,20 @@ pub(crate) fn run_kernel_it() -> Result<(), DynError> {
 /// - `--release`                      [`OPENSNITCH_TEST_RELEASE`]
 /// - `--ignored`                      [`OPENSNITCH_TEST_IGNORED`]
 pub(crate) fn run_test_filter() -> Result<(), DynError> {
-    let filter = env::var("OPENSNITCH_TEST_FILTER")
-        .map_err(|_| "test-filter requires --filter=PATTERN")?;
+    let filter =
+        env::var("OPENSNITCH_TEST_FILTER").map_err(|_| "test-filter requires --filter=PATTERN")?;
     let (daemon_rs, crate_name, target) = common_params()?;
     let log = rust_test_log_level();
-    let privileged = if env_flag("OPENSNITCH_RUN_PRIVILEGED_TESTS") { "1" } else { "0" };
-    let strict = if env_flag("OPENSNITCH_KERNEL_IT_STRICT") { "1" } else { "0" };
+    let privileged = if env_flag("OPENSNITCH_RUN_PRIVILEGED_TESTS") {
+        "1"
+    } else {
+        "0"
+    };
+    let strict = if env_flag("OPENSNITCH_KERNEL_IT_STRICT") {
+        "1"
+    } else {
+        "0"
+    };
 
     // Build args as Strings so dynamic values (filter, crate_name) stay alive.
     let mut owned: Vec<String> = vec![
@@ -541,16 +598,19 @@ pub(crate) fn run_test_filter() -> Result<(), DynError> {
 fn common_params() -> Result<(std::path::PathBuf, String, String), DynError> {
     let tools_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let daemon_rs = tools_dir
-        .parent()           // crates/
+        .parent() // crates/
         .and_then(|p| p.parent()) // daemon-rs/
         .ok_or("tools crate missing daemon-rs grandparent")?
         .to_path_buf();
 
-    let crate_name = env::var("OPENSNITCH_BUILD_CRATE")
-        .unwrap_or_else(|_| "opensnitchd-rs".to_string());
+    let crate_name =
+        env::var("OPENSNITCH_BUILD_CRATE").unwrap_or_else(|_| "opensnitchd-rs".to_string());
 
     let target = env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| {
-        daemon_rs.join("target-kernel").to_string_lossy().to_string()
+        daemon_rs
+            .join("target-kernel")
+            .to_string_lossy()
+            .to_string()
     });
 
     Ok((daemon_rs, crate_name, target))
@@ -575,7 +635,11 @@ fn check_bool_flag(name: &str) -> bool {
 
 /// Run `cargo <cargo_args>` in `cwd` with `envs` set in the child environment.
 /// Output streams live to the calling terminal (inherited stdio).
-pub(crate) fn run_live(cwd: &Path, cargo_args: &[&str], envs: &[(&str, &str)]) -> Result<(), DynError> {
+pub(crate) fn run_live(
+    cwd: &Path,
+    cargo_args: &[&str],
+    envs: &[(&str, &str)],
+) -> Result<(), DynError> {
     let label = cargo_args.first().copied().unwrap_or("");
     let mut cmd = Command::new("cargo");
     cmd.current_dir(cwd).args(cargo_args);

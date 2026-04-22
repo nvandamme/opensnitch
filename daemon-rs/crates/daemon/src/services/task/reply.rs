@@ -1,7 +1,7 @@
 use opensnitch_proto::pb;
 use serde_json::Value;
 
-use crate::models::{task_payload::LegacyTaskResultPayload, ui_alert::UiAlert};
+use crate::models::{task_wire::LegacyTaskResultPayload, ui_alert::UiAlert};
 use crate::services::client::{AlertBuffer, enqueue_alert, error_alert, info_alert};
 use crate::utils::notification_reply::{is_ok_reply_code, send_notification_reply};
 
@@ -28,9 +28,14 @@ pub(crate) async fn send_task_event(
     let is_stream_notification = notification_id > 10_000;
 
     if is_stream_notification {
-        let _ =
-            send_notification_reply(task_reply_tx, notification_id, code, data, "task notification")
-                .await;
+        let _ = send_notification_reply(
+            task_reply_tx,
+            notification_id,
+            code,
+            data,
+            "task notification",
+        )
+        .await;
         return;
     }
 

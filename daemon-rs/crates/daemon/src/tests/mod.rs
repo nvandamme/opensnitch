@@ -8,42 +8,50 @@ mod probe_bootstrap {
 
 pub(crate) mod support;
 
+#[path = "parsing/atomic_write.rs"]
+mod atomic_write;
+#[path = "services/audit.rs"]
+mod audit;
+#[path = "parsing/audit_netlink.rs"]
+mod audit_netlink;
+#[path = "smoke/aya_conn_trace.rs"]
+mod aya_conn_trace;
+#[path = "smoke/aya_dns_trace.rs"]
+mod aya_dns_trace;
+#[path = "smoke/aya_proc_trace.rs"]
+mod aya_proc_trace;
+#[path = "smoke/aya_tunnel_trace.rs"]
+mod aya_tunnel_trace;
 #[path = "services/client.rs"]
 mod client;
-#[path = "services/ebpf_paths.rs"]
-mod ebpf_paths;
-#[path = "services/ebpf_runtime_mode.rs"]
-mod ebpf_runtime_mode;
+#[path = "services/client_session_service.rs"]
+mod client_session_service;
 #[path = "runtime_tasks/command_control.rs"]
 mod command_control;
 #[path = "flows/command_flow.rs"]
 mod command_flow;
 #[path = "parsing/config_parsing.rs"]
 mod config_parsing;
-#[path = "parsing/data_contract_ownership.rs"]
-mod data_contract_ownership;
-#[path = "parsing/runtime_lifecycle_split.rs"]
-mod runtime_lifecycle_split;
 #[path = "watch_reload/config_service.rs"]
 mod config_service;
 #[path = "flows/connect_flow.rs"]
 mod connect_flow;
 #[path = "smoke/daemon_runtime.rs"]
 mod daemon_runtime;
-#[path = "smoke/aya_dns_trace.rs"]
-mod aya_dns_trace;
-#[path = "smoke/aya_proc_trace.rs"]
-mod aya_proc_trace;
-#[path = "smoke/aya_conn_trace.rs"]
-mod aya_conn_trace;
-#[path = "smoke/aya_tunnel_trace.rs"]
-mod aya_tunnel_trace;
+#[path = "parsing/data_contract_ownership.rs"]
+mod data_contract_ownership;
+#[path = "parsing/dns_ebpf.rs"]
+mod dns_ebpf;
 #[path = "workers/dns_service.rs"]
 mod dns_service;
+#[path = "services/ebpf_paths.rs"]
+mod ebpf_paths;
+#[path = "parsing/ebpf_ringbuf.rs"]
+mod ebpf_ringbuf;
+#[path = "services/ebpf_runtime_mode.rs"]
+mod ebpf_runtime_mode;
 #[path = "workers/ebpf_service.rs"]
 mod ebpf_service;
-#[path = "parsing/hex_parse.rs"]
-mod hex_parse;
 #[path = "firewall/firewall_iptables.rs"]
 mod firewall_iptables;
 #[path = "firewall/firewall_nft.rs"]
@@ -56,12 +64,18 @@ mod firewall_privileged;
 mod firewall_service;
 #[path = "firewall/gates.rs"]
 mod gates;
+#[path = "parsing/hex_parse.rs"]
+mod hex_parse;
 #[path = "flows/kernel_flow.rs"]
 mod kernel_flow;
 #[path = "flows/lifecycle_flow.rs"]
 mod lifecycle_flow;
+#[path = "parsing/lru_cache.rs"]
+mod lru_cache;
 #[path = "workers/netlink_addr_worker.rs"]
 mod netlink_addr_worker;
+#[path = "smoke/netlink_sync_async_harness.rs"]
+mod netlink_sync_async_harness;
 #[path = "firewall/nfqueue.rs"]
 mod nfqueue;
 #[path = "nfqueue/nfqueue_netlink.rs"]
@@ -80,12 +94,14 @@ mod proc_fs;
 mod process_service;
 #[path = "smoke/readonly_smoke.rs"]
 mod readonly_smoke;
-#[path = "smoke/netlink_sync_async_harness.rs"]
-mod netlink_sync_async_harness;
+#[path = "parsing/ring_buffer.rs"]
+mod ring_buffer;
 #[path = "rules/rule_benchmark_support.rs"]
 mod rule_benchmark_support;
 #[path = "rules/rule_command.rs"]
 mod rule_command;
+#[path = "rules/rule_migration.rs"]
+mod rule_migration;
 #[path = "rules/rule_record.rs"]
 mod rule_record;
 #[path = "rules/rule_service.rs"]
@@ -94,35 +110,37 @@ mod rule_service;
 mod rule_service_match_engine;
 #[path = "rules/rule_storage.rs"]
 mod rule_storage;
+#[path = "parsing/runtime_lifecycle_split.rs"]
+mod runtime_lifecycle_split;
+#[path = "services/service_lifecycle_contracts.rs"]
+mod service_lifecycle_contracts;
 #[path = "parsing/socket_diag.rs"]
 mod socket_diag;
 #[path = "parsing/socket_diag_backend_matrix.rs"]
 mod socket_diag_backend_matrix;
 #[path = "parsing/sort_key.rs"]
 mod sort_key;
-#[path = "parsing/string_iter.rs"]
-mod string_iter;
 #[path = "flows/stats_flow.rs"]
 mod stats_flow;
 #[path = "services/stats_service.rs"]
 mod stats_service;
-#[path = "services/service_lifecycle_contracts.rs"]
-mod service_lifecycle_contracts;
 #[path = "services/storage_service.rs"]
 mod storage_service;
-#[path = "services/subscription_service.rs"]
-#[cfg(feature = "subscriptions")]
-mod subscription_service;
+#[path = "parsing/string_iter.rs"]
+mod string_iter;
 #[path = "services/subscription_refresh_targets.rs"]
 #[cfg(feature = "subscriptions")]
 mod subscription_refresh_targets;
+#[path = "services/subscription_service.rs"]
+#[cfg(feature = "subscriptions")]
+mod subscription_service;
 #[path = "services/subscription_storage.rs"]
 #[cfg(feature = "subscriptions")]
 mod subscription_storage;
 #[path = "runtime_tasks/task_runtime.rs"]
 mod task_runtime;
-#[path = "services/client_session_service.rs"]
-mod client_session_service;
+#[path = "parsing/transient_files.rs"]
+mod transient_files;
 #[path = "flows/verdict_flow.rs"]
 mod verdict_flow;
 #[path = "watch_reload/watch_workers.rs"]
@@ -133,17 +151,3 @@ mod workers_dispatch;
 mod workers_dns;
 #[path = "workers/workers_ebpf.rs"]
 mod workers_ebpf;
-#[path = "parsing/atomic_write.rs"]
-mod atomic_write;
-#[path = "parsing/audit_netlink.rs"]
-mod audit_netlink;
-#[path = "parsing/dns_ebpf.rs"]
-mod dns_ebpf;
-#[path = "parsing/ebpf_ringbuf.rs"]
-mod ebpf_ringbuf;
-#[path = "parsing/lru_cache.rs"]
-mod lru_cache;
-#[path = "parsing/ring_buffer.rs"]
-mod ring_buffer;
-#[path = "parsing/transient_files.rs"]
-mod transient_files;

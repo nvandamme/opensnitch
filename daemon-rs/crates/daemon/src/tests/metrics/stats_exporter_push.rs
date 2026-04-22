@@ -30,9 +30,8 @@ use crate::models::prometheus_wire as prom_wire;
 
 // Pull all private items from the parent push adapter module.
 use super::{
-    build_endpoint, post_snapshot, render_influxdb_line_protocol,
-    render_prometheus_proto_push, render_prometheus_text, CompactSnapshot, PushConfig,
-    PushFormat,
+    CompactSnapshot, PushConfig, PushFormat, build_endpoint, post_snapshot,
+    render_influxdb_line_protocol, render_prometheus_proto_push, render_prometheus_text,
 };
 
 // ---------------------------------------------------------------------------
@@ -151,8 +150,14 @@ fn push_text_breakdown_maps_emitted() {
     let cs = CompactSnapshot::from(&make_snapshot());
     let out = render_prometheus_text(&cs);
 
-    assert!(out.contains("opensnitch_connections_by_proto{proto=\"tcp\"} 150"), "{out}");
-    assert!(out.contains("opensnitch_rule_hits_by_rule{rule=\"block-ads\"} 5"), "{out}");
+    assert!(
+        out.contains("opensnitch_connections_by_proto{proto=\"tcp\"} 150"),
+        "{out}"
+    );
+    assert!(
+        out.contains("opensnitch_rule_hits_by_rule{rule=\"block-ads\"} 5"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -165,8 +170,14 @@ fn push_text_subscription_gauges_emitted() {
     assert!(out.contains("opensnitch_subscription_total 3\n"), "{out}");
     assert!(out.contains("opensnitch_subscription_ready 2\n"), "{out}");
     assert!(out.contains("opensnitch_subscription_error 1\n"), "{out}");
-    assert!(out.contains("opensnitch_subscription_refresh_count 50\n"), "{out}");
-    assert!(out.contains("opensnitch_subscription_refresh_errors 3\n"), "{out}");
+    assert!(
+        out.contains("opensnitch_subscription_refresh_count 50\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("opensnitch_subscription_refresh_errors 3\n"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -176,11 +187,26 @@ fn push_text_subscription_breakdowns_emitted() {
     let cs = CompactSnapshot::from(&snap);
     let out = render_prometheus_text(&cs);
 
-    assert!(out.contains("opensnitch_subscription_by_status{status=\"ready\"} 2"), "{out}");
-    assert!(out.contains("opensnitch_subscription_by_status{status=\"error\"} 1"), "{out}");
-    assert!(out.contains("opensnitch_subscription_by_group{group=\"ads\"} 1"), "{out}");
-    assert!(out.contains("opensnitch_subscription_by_group{group=\"malware\"} 2"), "{out}");
-    assert!(out.contains("opensnitch_subscription_by_node{node=\"primary\"} 3"), "{out}");
+    assert!(
+        out.contains("opensnitch_subscription_by_status{status=\"ready\"} 2"),
+        "{out}"
+    );
+    assert!(
+        out.contains("opensnitch_subscription_by_status{status=\"error\"} 1"),
+        "{out}"
+    );
+    assert!(
+        out.contains("opensnitch_subscription_by_group{group=\"ads\"} 1"),
+        "{out}"
+    );
+    assert!(
+        out.contains("opensnitch_subscription_by_group{group=\"malware\"} 2"),
+        "{out}"
+    );
+    assert!(
+        out.contains("opensnitch_subscription_by_node{node=\"primary\"} 3"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -188,7 +214,10 @@ fn push_text_no_subscription_when_none() {
     let cs = CompactSnapshot::from(&make_snapshot());
     let out = render_prometheus_text(&cs);
 
-    assert!(!out.contains("opensnitch_subscription"), "unexpected sub lines\n{out}");
+    assert!(
+        !out.contains("opensnitch_subscription"),
+        "unexpected sub lines\n{out}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -223,8 +252,14 @@ fn influx_subscription_by_status_lines_emitted() {
     let cs = CompactSnapshot::from(&snap);
     let out = render_influxdb_line_protocol(&cs);
 
-    assert!(out.contains("opensnitch_subscription_by_status,status=ready count=2i"), "{out}");
-    assert!(out.contains("opensnitch_subscription_by_status,status=error count=1i"), "{out}");
+    assert!(
+        out.contains("opensnitch_subscription_by_status,status=ready count=2i"),
+        "{out}"
+    );
+    assert!(
+        out.contains("opensnitch_subscription_by_status,status=error count=1i"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -234,8 +269,14 @@ fn influx_subscription_by_group_lines_emitted() {
     let cs = CompactSnapshot::from(&snap);
     let out = render_influxdb_line_protocol(&cs);
 
-    assert!(out.contains("opensnitch_subscription_by_group,group=ads count=1i"), "{out}");
-    assert!(out.contains("opensnitch_subscription_by_group,group=malware count=2i"), "{out}");
+    assert!(
+        out.contains("opensnitch_subscription_by_group,group=ads count=1i"),
+        "{out}"
+    );
+    assert!(
+        out.contains("opensnitch_subscription_by_group,group=malware count=2i"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -245,7 +286,10 @@ fn influx_subscription_by_node_lines_emitted() {
     let cs = CompactSnapshot::from(&snap);
     let out = render_influxdb_line_protocol(&cs);
 
-    assert!(out.contains("opensnitch_subscription_by_node,node=primary count=3i"), "{out}");
+    assert!(
+        out.contains("opensnitch_subscription_by_node,node=primary count=3i"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -264,7 +308,10 @@ fn influx_by_proto_breakdown_present() {
     let cs = CompactSnapshot::from(&make_snapshot());
     let out = render_influxdb_line_protocol(&cs);
 
-    assert!(out.contains("opensnitch_by_proto,proto=tcp connections=150i"), "{out}");
+    assert!(
+        out.contains("opensnitch_by_proto,proto=tcp connections=150i"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -272,7 +319,10 @@ fn influx_by_rule_breakdown_emitted() {
     let cs = CompactSnapshot::from(&make_snapshot());
     let out = render_influxdb_line_protocol(&cs);
 
-    assert!(out.contains("opensnitch_by_rule,rule=block-ads connections=5i"), "{out}");
+    assert!(
+        out.contains("opensnitch_by_rule,rule=block-ads connections=5i"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -283,7 +333,10 @@ fn influx_tag_value_escaping_comma_space_equals() {
     let out = render_influxdb_line_protocol(&cs);
 
     // InfluxDB LP: , → \,   space → \ (escaped space)   = → \=
-    assert!(out.contains(r"host\,a\ b\=c"), "escaped tag value missing\n{out}");
+    assert!(
+        out.contains(r"host\,a\ b\=c"),
+        "escaped tag value missing\n{out}"
+    );
 }
 
 #[test]
@@ -347,7 +400,10 @@ fn proto_push_contains_scalar_families() {
     assert!(names.contains(&"opensnitch_connections_total"), "{names:?}");
     assert!(names.contains(&"opensnitch_uptime_seconds"), "{names:?}");
     assert!(names.contains(&"opensnitch_rules"), "{names:?}");
-    assert!(names.contains(&"opensnitch_connections_by_proto"), "{names:?}");
+    assert!(
+        names.contains(&"opensnitch_connections_by_proto"),
+        "{names:?}"
+    );
 }
 
 #[test]
@@ -358,7 +414,9 @@ fn proto_push_no_subscription_families_when_none() {
     let names: Vec<_> = fams.iter().filter_map(|f| f.name.as_deref()).collect();
 
     assert!(
-        !names.iter().any(|n| n.starts_with("opensnitch_subscription")),
+        !names
+            .iter()
+            .any(|n| n.starts_with("opensnitch_subscription")),
         "unexpected subscription families: {names:?}"
     );
 }
@@ -372,9 +430,18 @@ fn proto_push_contains_subscription_families_when_some() {
     let fams = decode_proto_families_push(&buf);
     let names: Vec<_> = fams.iter().filter_map(|f| f.name.as_deref()).collect();
 
-    assert!(names.contains(&"opensnitch_subscription_total"), "{names:?}");
-    assert!(names.contains(&"opensnitch_subscription_by_status"), "{names:?}");
-    assert!(names.contains(&"opensnitch_subscription_by_group"), "{names:?}");
+    assert!(
+        names.contains(&"opensnitch_subscription_total"),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"opensnitch_subscription_by_status"),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"opensnitch_subscription_by_group"),
+        "{names:?}"
+    );
 }
 
 #[test]
@@ -401,16 +468,22 @@ fn push_text_subscription_rule_info_emitted() {
     let out = render_prometheus_text(&cs);
 
     assert!(
-        out.contains(r#"opensnitch_subscription_rule_info{rule="block-ads",subscription="easylist"} 1"#),
+        out.contains(
+            r#"opensnitch_subscription_rule_info{rule="block-ads",subscription="easylist"} 1"#
+        ),
         "rule_info line missing in push text\n{out}"
     );
     // block-multi references two subscriptions (N:N)
     assert!(
-        out.contains(r#"opensnitch_subscription_rule_info{rule="block-multi",subscription="easylist"} 1"#),
+        out.contains(
+            r#"opensnitch_subscription_rule_info{rule="block-multi",subscription="easylist"} 1"#
+        ),
         "block-multi×easylist rule_info missing\n{out}"
     );
     assert!(
-        out.contains(r#"opensnitch_subscription_rule_info{rule="block-multi",subscription="malware-list"} 1"#),
+        out.contains(
+            r#"opensnitch_subscription_rule_info{rule="block-multi",subscription="malware-list"} 1"#
+        ),
         "block-multi×malware-list rule_info missing\n{out}"
     );
 }
@@ -439,7 +512,10 @@ fn proto_push_subscription_rule_info_family_present() {
     let fams = decode_proto_families_push(&buf);
     let names: Vec<_> = fams.iter().filter_map(|f| f.name.as_deref()).collect();
 
-    assert!(names.contains(&"opensnitch_subscription_rule_info"), "{names:?}");
+    assert!(
+        names.contains(&"opensnitch_subscription_rule_info"),
+        "{names:?}"
+    );
 }
 
 #[test]
@@ -459,13 +535,25 @@ fn proto_push_subscription_rule_info_has_two_labels() {
     assert_eq!(fam.metric.len(), 3, "expected 3 rule_info metrics");
     // Verify all metrics have non-empty rule+subscription labels and value 1
     for m in &fam.metric {
-        let rule = m.label.iter().find(|l| l.name.as_deref() == Some("rule"))
-            .and_then(|l| l.value.as_deref()).unwrap_or("");
-        let sub  = m.label.iter().find(|l| l.name.as_deref() == Some("subscription"))
-            .and_then(|l| l.value.as_deref()).unwrap_or("");
+        let rule = m
+            .label
+            .iter()
+            .find(|l| l.name.as_deref() == Some("rule"))
+            .and_then(|l| l.value.as_deref())
+            .unwrap_or("");
+        let sub = m
+            .label
+            .iter()
+            .find(|l| l.name.as_deref() == Some("subscription"))
+            .and_then(|l| l.value.as_deref())
+            .unwrap_or("");
         assert!(!rule.is_empty(), "rule label missing");
         assert!(!sub.is_empty(), "subscription label missing");
-        assert_eq!(m.gauge.as_ref().and_then(|g| g.value), Some(1.0), "value must be 1");
+        assert_eq!(
+            m.gauge.as_ref().and_then(|g| g.value),
+            Some(1.0),
+            "value must be 1"
+        );
     }
 }
 
@@ -485,7 +573,9 @@ fn influx_subscription_rule_line_emitted() {
         "block-multi×easylist influx line missing\n{out}"
     );
     assert!(
-        out.contains("opensnitch_subscription_rule,rule=block-multi,subscription=malware-list info=1i"),
+        out.contains(
+            "opensnitch_subscription_rule,rule=block-multi,subscription=malware-list info=1i"
+        ),
         "block-multi×malware-list influx line missing\n{out}"
     );
 }
@@ -565,7 +655,11 @@ fn build_endpoint_influxdb_no_duplicate_precision_when_already_present() {
     let cfg = influx_config("http://influxdb:8086/write?db=opensnitch&precision=ms");
     let ep = build_endpoint(&cfg);
 
-    assert_eq!(ep.matches("precision=").count(), 1, "duplicate precision in {ep}");
+    assert_eq!(
+        ep.matches("precision=").count(),
+        1,
+        "duplicate precision in {ep}"
+    );
 }
 
 #[test]
@@ -581,7 +675,9 @@ fn build_endpoint_trailing_slash_trimmed() {
     };
     let ep = build_endpoint(&cfg);
     // After trimming the trailing slash no double-slash should appear in the *path* portion.
-    let path = ep.trim_start_matches("http://").trim_start_matches("https://");
+    let path = ep
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
     assert!(!path.contains("//"), "double slash in path portion: {ep}");
     assert!(ep.ends_with("/metrics/job/svc"), "{ep}");
 }
@@ -662,8 +758,14 @@ async fn push_gateway_posts_prometheus_text_body() {
     assert!(ct.contains("text/plain"), "content-type: {ct}");
 
     let body = std::str::from_utf8(body_bytes).unwrap();
-    assert!(body.contains("opensnitch_connections_total 200"), "connections\n{body}");
-    assert!(body.contains("opensnitch_subscription_total 3"), "sub_total\n{body}");
+    assert!(
+        body.contains("opensnitch_connections_total 200"),
+        "connections\n{body}"
+    );
+    assert!(
+        body.contains("opensnitch_subscription_total 3"),
+        "sub_total\n{body}"
+    );
     assert!(
         body.contains("opensnitch_subscription_by_status{status=\"ready\"} 2"),
         "by_status ready\n{body}"
@@ -709,7 +811,10 @@ async fn push_gateway_proto_posts_protobuf_body() {
     let fams = decode_proto_families_push(body_bytes);
     let names: Vec<_> = fams.iter().filter_map(|f| f.name.as_deref()).collect();
     assert!(names.contains(&"opensnitch_connections_total"), "{names:?}");
-    assert!(names.contains(&"opensnitch_subscription_total"), "{names:?}");
+    assert!(
+        names.contains(&"opensnitch_subscription_total"),
+        "{names:?}"
+    );
 }
 
 #[tokio::test]
@@ -734,10 +839,22 @@ async fn influxdb_push_posts_line_protocol_body() {
     assert!(ct.contains("text/plain"), "content-type: {ct}");
 
     let body = std::str::from_utf8(body_bytes).unwrap();
-    assert!(body.starts_with("opensnitch_stats "), "stats measurement missing\n{body}");
-    assert!(body.contains("opensnitch_subscription_by_status,status=ready count=2i"), "{body}");
-    assert!(body.contains("opensnitch_subscription_by_group,group=ads count=1i"), "{body}");
-    assert!(body.contains("opensnitch_by_proto,proto=tcp connections=150i"), "{body}");
+    assert!(
+        body.starts_with("opensnitch_stats "),
+        "stats measurement missing\n{body}"
+    );
+    assert!(
+        body.contains("opensnitch_subscription_by_status,status=ready count=2i"),
+        "{body}"
+    );
+    assert!(
+        body.contains("opensnitch_subscription_by_group,group=ads count=1i"),
+        "{body}"
+    );
+    assert!(
+        body.contains("opensnitch_by_proto,proto=tcp connections=150i"),
+        "{body}"
+    );
 }
 
 #[tokio::test]
@@ -802,5 +919,8 @@ async fn push_gateway_bearer_token_sent_in_authorization_header() {
 
     let auth = received_auth.lock().await;
     let auth_val = auth.as_deref().unwrap_or("");
-    assert_eq!(auth_val, "Bearer secrettoken", "Authorization header: {auth_val}");
+    assert_eq!(
+        auth_val, "Bearer secrettoken",
+        "Authorization header: {auth_val}"
+    );
 }

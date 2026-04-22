@@ -52,10 +52,46 @@ pub struct RawServerConfig {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct RawServerAuth {
+    #[serde(rename = "Mode", default)]
+    pub mode: String,
     #[serde(rename = "Type", default)]
     pub r#type: String,
     #[serde(rename = "TLSOptions", default)]
     pub tls_options: RawServerTlsOptions,
+    #[serde(rename = "AllowedPrincipals", default)]
+    pub allowed_principals: Option<Vec<RawPrincipalEntry>>,
+    #[serde(rename = "AllowedUsers", default)]
+    pub allowed_users: Option<Vec<String>>,
+    #[serde(rename = "AllowedGroups", default)]
+    pub allowed_groups: Option<Vec<String>>,
+    #[serde(rename = "RemotePrincipalBindings", default)]
+    pub remote_principal_bindings: Option<Vec<RawRemotePrincipalBinding>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct RawPrincipalEntry {
+    #[serde(rename = "UID", alias = "Uid", alias = "uid", default)]
+    pub uid: Option<u32>,
+    #[serde(rename = "GID", alias = "Gid", alias = "gid", default)]
+    pub gid: Option<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct RawRemotePrincipalBinding {
+    #[serde(rename = "Name", default)]
+    pub name: String,
+    #[serde(rename = "CertFingerprint", default)]
+    pub cert_fingerprint: String,
+    #[serde(rename = "CertSubject", default)]
+    pub cert_subject: String,
+    #[serde(rename = "CertSAN", default)]
+    pub cert_san: String,
+    #[serde(rename = "LocalPrincipal", default)]
+    pub local_principal: Option<RawPrincipalEntry>,
+    #[serde(rename = "LocalUser", default)]
+    pub local_user: String,
+    #[serde(rename = "Capabilities", default)]
+    pub capabilities: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -116,6 +152,8 @@ pub struct RawRulesOptions {
     pub path: String,
     #[serde(rename = "EnableChecksums", default)]
     pub enable_checksums: Option<bool>,
+    #[serde(rename = "NetworkAliasesFile", default)]
+    pub network_aliases_file: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -128,6 +166,21 @@ pub struct RawTasksOptions {
 pub struct RawAuditOptions {
     #[serde(rename = "AudispSocketPath", default)]
     pub audisp_socket_path: String,
+    /// File path for the NDJSON audit sink. Empty string = disabled.
+    #[serde(rename = "SinkFile", default)]
+    pub sink_file: String,
+    /// Enable local syslog as an audit sink.
+    #[serde(rename = "SinkSyslog", default)]
+    pub sink_syslog: Option<bool>,
+    /// Emit audit events as tracing log lines (default: true).
+    #[serde(rename = "SinkLogLines", default)]
+    pub sink_log_lines: Option<bool>,
+    /// Emit high-volume hot-path audit events when enabled (default: false).
+    #[serde(rename = "VerboseHotPath", default)]
+    pub verbose_hot_path: Option<bool>,
+    /// Optional minimum severity threshold for sink output.
+    #[serde(rename = "MinSeverity", default)]
+    pub min_severity: String,
 }
 
 #[derive(Debug, Default, Deserialize)]

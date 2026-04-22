@@ -10,7 +10,7 @@ use serde_json::json;
 use syslog::{Facility, Formatter3164};
 use tracing::warn;
 
-use crate::models::config_runtime::LoggerSinkConfig;
+use crate::config::LoggerSinkConfig;
 use crate::platform::ports::connection_event_exporter_port::ConnectionEventExporterPort;
 use crate::utils::name_parsing::case_folded;
 
@@ -341,11 +341,19 @@ fn connect_tcp(server: &str, timeout: Duration) -> std::io::Result<TcpStream> {
     }
 
     Err(last_err.unwrap_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "no tcp addresses resolved")
+        std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "no tcp addresses resolved",
+        )
     }))
 }
 
-fn format_message_enum(format: SinkFormat, tag: &str, connection: &pb::Connection, rule: Option<&pb::Rule>) -> String {
+fn format_message_enum(
+    format: SinkFormat,
+    tag: &str,
+    connection: &pb::Connection,
+    rule: Option<&pb::Rule>,
+) -> String {
     let ts = now_unix_seconds();
     match format {
         SinkFormat::Json => format_json(ts, tag, connection, rule),
@@ -357,7 +365,12 @@ fn format_message_enum(format: SinkFormat, tag: &str, connection: &pb::Connectio
 
 /// Convenience wrapper for tests: accepts a format string and dispatches via [`SinkFormat`].
 #[cfg(test)]
-pub(crate) fn format_message(format: &str, tag: &str, connection: &pb::Connection, rule: Option<&pb::Rule>) -> String {
+pub(crate) fn format_message(
+    format: &str,
+    tag: &str,
+    connection: &pb::Connection,
+    rule: Option<&pb::Rule>,
+) -> String {
     format_message_enum(SinkFormat::from_str(format), tag, connection, rule)
 }
 
@@ -420,7 +433,12 @@ fn format_csv(ts: u64, connection: &pb::Connection, rule: Option<&pb::Rule>) -> 
     )
 }
 
-fn format_rfc5424(ts: u64, tag: &str, connection: &pb::Connection, rule: Option<&pb::Rule>) -> String {
+fn format_rfc5424(
+    ts: u64,
+    tag: &str,
+    connection: &pb::Connection,
+    rule: Option<&pb::Rule>,
+) -> String {
     let rule_name = rule.map(|r| r.name.as_str()).unwrap_or("");
     let rule_action = rule.map(|r| r.action.as_str()).unwrap_or("");
     format!(
@@ -438,7 +456,12 @@ fn format_rfc5424(ts: u64, tag: &str, connection: &pb::Connection, rule: Option<
     )
 }
 
-fn format_rfc3164(ts: u64, tag: &str, connection: &pb::Connection, rule: Option<&pb::Rule>) -> String {
+fn format_rfc3164(
+    ts: u64,
+    tag: &str,
+    connection: &pb::Connection,
+    rule: Option<&pb::Rule>,
+) -> String {
     let rule_name = rule.map(|r| r.name.as_str()).unwrap_or("");
     let rule_action = rule.map(|r| r.action.as_str()).unwrap_or("");
     format!(

@@ -1,11 +1,6 @@
-use opensnitch_ebpf_common::process::{
-    EV_TYPE_EXEC, EV_TYPE_FORK, EV_TYPE_SCHED_EXIT, ExecEvent,
-};
+use opensnitch_ebpf_common::process::{EV_TYPE_EXEC, EV_TYPE_FORK, EV_TYPE_SCHED_EXIT, ExecEvent};
 
-use crate::{
-    models::proc_event::ProcEventKind,
-    services::process::ProcessService,
-};
+use crate::{models::proc_event::ProcEventKind, services::process::ProcessService};
 
 fn base_exec_sample(ev_type: u64, pid: u32, uid: u32) -> [u8; ExecEvent::LEN] {
     let mut sample = [0_u8; ExecEvent::LEN];

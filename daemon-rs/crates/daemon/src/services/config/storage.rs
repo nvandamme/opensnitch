@@ -24,9 +24,9 @@ use crate::{
     utils::{
         atomic_write::unique_sibling_temp_path,
         config_reload::{
-            RuntimeApplyPolicy, apply_runtime_config_services, apply_runtime_core,
-            has_firewall_runtime_change, has_proc_runtime_change,
-            runtime_apply_stage_messages, RuntimeApplyMessageContext,
+            RuntimeApplyMessageContext, RuntimeApplyPolicy, apply_runtime_config_services,
+            apply_runtime_core, has_firewall_runtime_change, has_proc_runtime_change,
+            runtime_apply_stage_messages,
         },
     },
     workers::runtime::{control::WorkerControl, watch::control::WatchWorkerControl},
@@ -163,8 +163,10 @@ impl WatchWorkerControl for ConfigWatchControl {
                         let firewall_ok = apply_report.firewall_error.is_none();
 
                         for (stage, err) in apply_report.into_stage_errors() {
-                            let messages =
-                                runtime_apply_stage_messages(RuntimeApplyMessageContext::ConfigWatch, stage);
+                            let messages = runtime_apply_stage_messages(
+                                RuntimeApplyMessageContext::ConfigWatch,
+                                stage,
+                            );
 
                             tracing::error!("{}: {err}", messages.log);
                             enqueue_alert(

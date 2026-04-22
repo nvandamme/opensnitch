@@ -9,27 +9,18 @@ use crate::models::connection_owner::ConnectionOwnerCacheKey;
 use crate::services::lifecycle::{
     EventSubscription, ServiceEvent, ServiceFactory, ServiceLifecycle, ServiceMonitorStats,
     ServiceRuntimeControl, ServiceState, ServiceStatus, StatusSubscription,
-    monitor_stats_from_counters,
-    subscribe_events_with_counter, subscribe_status_with_counter,
+    monitor_stats_from_counters, subscribe_events_with_counter, subscribe_status_with_counter,
 };
 use crate::utils::lru_cache::SyncDualLayerLruMap;
 
 use super::ConnectionService;
 
 const fn default_inode_to_pid_cache_capacity() -> usize {
-    if cfg!(test) {
-        8_192
-    } else {
-        262_144
-    }
+    if cfg!(test) { 8_192 } else { 262_144 }
 }
 
 const fn default_inode_key_to_pid_cache_capacity() -> usize {
-    if cfg!(test) {
-        8_192
-    } else {
-        262_144
-    }
+    if cfg!(test) { 8_192 } else { 262_144 }
 }
 
 const DEFAULT_INODE_TO_PID_CACHE_CAPACITY: usize = default_inode_to_pid_cache_capacity();

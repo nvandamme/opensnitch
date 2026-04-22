@@ -1,8 +1,5 @@
+use std::sync::{Arc, atomic::AtomicUsize};
 use std::time::Duration;
-use std::sync::{
-    Arc,
-    atomic::AtomicUsize,
-};
 
 use tokio::sync::{broadcast, watch};
 
@@ -74,17 +71,18 @@ impl TaskLifecycle {
         self.set_error(None);
         self.transition_state(to);
     }
-
 }
 
 impl ServiceLifecycle for TaskRuntime {
     async fn init(&mut self) -> anyhow::Result<()> {
-        self.lifecycle.clear_error_and_transition(ServiceState::Stopped);
+        self.lifecycle
+            .clear_error_and_transition(ServiceState::Stopped);
         Ok(())
     }
 
     async fn start(&mut self) -> anyhow::Result<()> {
-        self.lifecycle.clear_error_and_transition(ServiceState::Running);
+        self.lifecycle
+            .clear_error_and_transition(ServiceState::Running);
         Ok(())
     }
 
@@ -92,7 +90,8 @@ impl ServiceLifecycle for TaskRuntime {
         let paused = self.task_handles.len();
         self.emit_lifecycle_event(TaskLifecycleEvent::PausedAll { task_count: paused })
             .await;
-        self.lifecycle.clear_error_and_transition(ServiceState::Paused);
+        self.lifecycle
+            .clear_error_and_transition(ServiceState::Paused);
         Ok(())
     }
 
@@ -102,7 +101,8 @@ impl ServiceLifecycle for TaskRuntime {
             task_count: resumed,
         })
         .await;
-        self.lifecycle.clear_error_and_transition(ServiceState::Running);
+        self.lifecycle
+            .clear_error_and_transition(ServiceState::Running);
         Ok(())
     }
 
@@ -120,7 +120,8 @@ impl ServiceLifecycle for TaskRuntime {
             stopped,
             "stopped temporary runtime tasks after notification disconnect"
         );
-        self.lifecycle.clear_error_and_transition(ServiceState::Stopped);
+        self.lifecycle
+            .clear_error_and_transition(ServiceState::Stopped);
         Ok(())
     }
 

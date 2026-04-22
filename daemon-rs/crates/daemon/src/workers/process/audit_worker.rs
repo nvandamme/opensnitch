@@ -6,7 +6,7 @@ use tracing::{debug, warn};
 use crate::{
     bus::Bus,
     models::{kernel_event::KernelEvent, proc_event::ProcEventKind},
-    platform::adapters::audit_netlink::AuditNetlinkSocket,
+    platform::ports::audit_netlink_port::AuditNetlinkPort,
     workers::{KernelEventDispatch, runtime::support::build_current_thread_runtime},
 };
 
@@ -53,7 +53,7 @@ impl AuditWorkerControl {
                         break;
                     }
 
-                    let mut socket = match AuditNetlinkSocket::open() {
+                    let mut socket = match AuditNetlinkPort::open() {
                         Ok(socket) => socket,
                         Err(err) => {
                             warn!("audit netlink unavailable, retrying: {err}");

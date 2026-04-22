@@ -10,7 +10,9 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::daemon::{Daemon, DaemonRuntime, KernelPipeline, ProcWorkersRuntime, ProcessKernelEvent};
+use crate::daemon::{
+    Daemon, DaemonRuntime, KernelPipeline, ProcWorkersRuntime, ProcessKernelEvent,
+};
 use crate::{
     bus::{Bus, BusCaps, BusState},
     config::Config,
@@ -25,8 +27,7 @@ use crate::{
     },
     services::{
         client::ClientService, config::ConfigService, connection::ConnectionService,
-        dns::DnsService, firewall::FirewallService,
-        process::ProcessService, rule::RuleService,
+        dns::DnsService, firewall::FirewallService, process::ProcessService, rule::RuleService,
         stats::StatsService,
     },
     tunables::RuntimeTunables,
@@ -71,6 +72,10 @@ fn build_test_daemon_with_tunables(bus: Bus, tunables: RuntimeTunables) -> Daemo
             shutdown: CancellationToken::new(),
             metrics_config: crate::models::metrics_config::MetricsConfig::default(),
             metrics_cli: crate::models::metrics_config::MetricsCliOverrides::default(),
+            audit: crate::services::audit::AuditService::new(64),
+            audit_sinks: crate::services::audit::AuditSinks::from_config(
+                &crate::config::AuditSinkConfig::default(),
+            ),
             #[cfg(feature = "metrics-export")]
             metrics_server: std::sync::Mutex::new(None),
         }),
@@ -85,15 +90,17 @@ fn build_test_daemon(bus: Bus) -> Daemon {
 async fn dispatch_kernel_pipeline_event_stops_when_channel_is_closed() {
     let (tx, rx) = mpsc::channel::<u8>(1);
     drop(rx);
-    let daemon = build_test_daemon(crate::bus::BusState::build_with_caps(crate::bus::BusCaps::uniform(1)).0);
+    let daemon =
+        build_test_daemon(crate::bus::BusState::build_with_caps(crate::bus::BusCaps::uniform(1)).0);
 
-    let keep_running = daemon.probe_dispatch_kernel_pipeline_event(
-        &tx,
-        7_u8,
-        &CancellationToken::new(),
-        KernelPipeline::Process,
-    )
-    .await;
+    let keep_running = daemon
+        .probe_dispatch_kernel_pipeline_event(
+            &tx,
+            7_u8,
+            &CancellationToken::new(),
+            KernelPipeline::Process,
+        )
+        .await;
 
     assert!(!keep_running);
 }
@@ -102,17 +109,19 @@ async fn dispatch_kernel_pipeline_event_stops_when_channel_is_closed() {
 async fn dispatch_kernel_pipeline_event_drops_after_bounded_backoff_when_full() {
     let (tx, mut rx) = mpsc::channel::<u8>(1);
     assert!(tx.try_send(1_u8).is_ok());
-    let daemon = build_test_daemon(crate::bus::BusState::build_with_caps(crate::bus::BusCaps::uniform(1)).0);
+    let daemon =
+        build_test_daemon(crate::bus::BusState::build_with_caps(crate::bus::BusCaps::uniform(1)).0);
 
     let before = daemon.probe_kernel_pipeline_drop_stats();
     let started = Instant::now();
-    let keep_running = daemon.probe_dispatch_kernel_pipeline_event(
-        &tx,
-        2_u8,
-        &CancellationToken::new(),
-        KernelPipeline::Dns,
-    )
-    .await;
+    let keep_running = daemon
+        .probe_dispatch_kernel_pipeline_event(
+            &tx,
+            2_u8,
+            &CancellationToken::new(),
+            KernelPipeline::Dns,
+        )
+        .await;
     let after = daemon.probe_kernel_pipeline_drop_stats();
 
     assert!(keep_running);
@@ -417,6 +426,7 @@ async fn connect_attempt_progresses_under_mixed_non_connect_saturation() {
         daemon.runtime.rules.clone(),
         daemon.runtime.connections.clone(),
         daemon.runtime.stats.clone(),
+        daemon.runtime.audit.clone(),
     );
 
     let crate::bus::BusRx {
@@ -761,13 +771,18 @@ fn enforce_stress_regression_guard(
     }
 
     let baseline_path = stress_baseline_path();
-    let baseline_content = fs::read_to_string(&baseline_path)
-        .unwrap_or_else(|err| panic!("failed to read stress baseline file '{}': {err}", baseline_path));
+    let baseline_content = fs::read_to_string(&baseline_path).unwrap_or_else(|err| {
+        panic!(
+            "failed to read stress baseline file '{}': {err}",
+            baseline_path
+        )
+    });
 
     let baseline = load_stress_perf_baseline(&baseline_content);
-    let factor = parse_baseline_f64(&baseline_content, "PERF_CLEAR_REGRESSION_FACTOR=").unwrap_or(1.75);
-    let min_delta_ms =
-        parse_baseline_f64(&baseline_content, "PERF_CLEAR_REGRESSION_MIN_DELTA_MS=").unwrap_or(0.050);
+    let factor =
+        parse_baseline_f64(&baseline_content, "PERF_CLEAR_REGRESSION_FACTOR=").unwrap_or(1.75);
+    let min_delta_ms = parse_baseline_f64(&baseline_content, "PERF_CLEAR_REGRESSION_MIN_DELTA_MS=")
+        .unwrap_or(0.050);
 
     let p95_ms = p95.as_secs_f64() * 1000.0;
     let p99_ms = p99.as_secs_f64() * 1000.0;
@@ -1094,6 +1109,7 @@ async fn stress_profile_reports_connect_latency_and_pipeline_drops() {
         daemon.runtime.rules.clone(),
         daemon.runtime.connections.clone(),
         daemon.runtime.stats.clone(),
+        daemon.runtime.audit.clone(),
     );
 
     let crate::bus::BusRx {

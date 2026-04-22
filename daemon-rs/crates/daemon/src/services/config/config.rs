@@ -7,7 +7,9 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::{Config, ProcMonitorMethod},
     models::ui_alert::UiAlert,
-    services::{client::AlertBuffer, firewall::FirewallService, rule::RuleService, stats::StatsService},
+    services::{
+        client::AlertBuffer, firewall::FirewallService, rule::RuleService, stats::StatsService,
+    },
     workers::runtime::control::WorkerControl,
 };
 

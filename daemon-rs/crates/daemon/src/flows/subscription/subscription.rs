@@ -1,10 +1,10 @@
 use std::time::Duration;
 
-use opensnitch_proto::pb;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
+use crate::models::subscription_rpc::{SubscriptionCommand, SubscriptionOperation};
 use crate::services::{
     client::{ClientService, GrpcChannelCache},
     config::ConfigService,
@@ -58,24 +58,26 @@ impl SubscriptionFlow {
                 }
 
                 let config_snapshot = config.get_snapshot();
-                let mut client = match ClientService::connect_or_reuse(&config_snapshot, &grpc_cache).await {
-                    Ok(c) => c,
-                    Err(err) => {
-                        debug!(
-                            addr = %config_snapshot.client_addr,
-                            "subscription flow: connect failed: {err}"
-                        );
-                        grpc_cache.invalidate();
-                        continue;
-                    }
-                };
+                let mut client =
+                    match ClientService::connect_or_reuse(&config_snapshot, &grpc_cache).await {
+                        Ok(c) => c,
+                        Err(err) => {
+                            debug!(
+                                addr = %config_snapshot.client_addr,
+                                "subscription flow: connect failed: {err}"
+                            );
+                            grpc_cache.invalidate();
+                            continue;
+                        }
+                    };
 
-                let req = pb::SubscriptionRequest {
-                    operation: pb::SubscriptionAction::List as i32,
-                    subscriptions: subscriptions.list(),
-                    ..Default::default()
+                let cmd = SubscriptionCommand {
+                    operation: SubscriptionOperation::List,
+                    subscriptions: subscriptions.list_records(),
+                    targets: Vec::new(),
+                    force: false,
                 };
-                if let Err(err) = client.subscription_list(req).await {
+                if let Err(err) = client.subscription_execute(cmd).await {
                     debug!("subscription flow: list sync failed: {err}");
                     grpc_cache.invalidate();
                 }

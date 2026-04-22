@@ -258,7 +258,7 @@ pub(crate) fn log_config_delta(
 
     if previous.proc_monitor_method != updated.proc_monitor_method {
         tracing::debug!(
-            "[config] reloading config.ProcMonMethod, old: {:?} -> new: {:?}",
+            "[config] reloading config.ProcMonMethod, old: {} -> new: {}",
             previous.proc_monitor_method,
             updated.proc_monitor_method
         );

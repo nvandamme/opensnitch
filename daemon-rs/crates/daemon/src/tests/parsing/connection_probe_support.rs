@@ -2,16 +2,11 @@ use std::net::IpAddr;
 use std::sync::atomic::Ordering;
 
 use crate::{
-    models::{
-        connection_owner::ConnectionOwnerCacheKey,
-        connection_state::TransportProtocol,
-    },
+    models::{connection_owner::ConnectionOwnerCacheKey, connection_state::TransportProtocol},
     services::connection::ConnectionService,
 };
 
-use super::runtime_lifecycle::{
-    INODE_KEY_TO_PID_CACHE_CAPACITY, INODE_TO_PID_CACHE_CAPACITY,
-};
+use super::runtime_lifecycle::{INODE_KEY_TO_PID_CACHE_CAPACITY, INODE_TO_PID_CACHE_CAPACITY};
 
 impl ConnectionService {
     pub(crate) fn probe_parse_proc_addr_port(value: &str) -> Option<(IpAddr, u16)> {

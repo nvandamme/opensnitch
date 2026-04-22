@@ -7,11 +7,13 @@
 use opensnitch_proto::pb;
 
 use crate::{
+    config::{AskFallbackPolicy, DefaultAction},
+    models::audit::{AuditEvent, AuditEventKind, VerdictAction},
     models::connection_state::ConnectionAttempt,
-    models::config_runtime::{AskFallbackPolicy, DefaultAction},
-    platform::adapters::proto_mapper::ProtoMapperAdapter,
-    platform::ffi::nfqueue::NfqueueRuntimeState,
     models::effective_tunables::NfqueueOverloadPolicy,
+    models::rule_record::RuleRecord,
+    platform::ports::nfqueue_runtime_port::NfqueueRuntimePort,
+    platform::ports::proto_mapper_port::ProtoMapperPort,
     services::client::enqueue_alert,
     services::client::{warning_connection_alert, warning_process_alert},
     services::policy_tx::PolicyOwner,
@@ -22,7 +24,7 @@ use super::verdict::{VerdictFlow, VerdictRulePersistRequest};
 impl VerdictFlow {
     pub(super) async fn restore_rules_snapshot(
         rules: &crate::services::rule::RuleService,
-        snapshot: &[pb::Rule],
+        snapshot: &[RuleRecord],
     ) -> Result<(), String> {
         use std::collections::BTreeSet;
         let target_names = snapshot
@@ -42,7 +44,7 @@ impl VerdictFlow {
 
         for rule in snapshot {
             rules
-                .upsert_from_proto(rule)
+                .upsert_rule_record(rule.clone())
                 .await
                 .map_err(|err| format!("rollback upsert {}: {err}", rule.name))?;
         }
@@ -53,7 +55,7 @@ impl VerdictFlow {
     pub(super) fn enqueue_rule_persist(
         &self,
         request_id: u64,
-        rule: pb::Rule,
+        rule: RuleRecord,
         idempotency_key: String,
     ) {
         let owner = self
@@ -67,7 +69,10 @@ impl VerdictFlow {
             idempotency_key,
         };
         if let Err(err) = self.rule_persist_tx.try_send(request) {
-            tracing::warn!(request_id, "dropping async verdict rule persist request: {err}");
+            tracing::warn!(
+                request_id,
+                "dropping async verdict rule persist request: {err}"
+            );
         }
     }
 
@@ -135,7 +140,7 @@ impl VerdictFlow {
 
     pub(super) fn strict_miss_accounting_enabled(&self) -> bool {
         matches!(
-            NfqueueRuntimeState::overload_policy(),
+            NfqueueRuntimePort::overload_policy(),
             NfqueueOverloadPolicy::DropFast
         )
     }
@@ -165,7 +170,7 @@ impl VerdictFlow {
         enqueue_alert(
             &self.alert_buffer,
             &self.bus.alert_tx,
-            warning_process_alert(ProtoMapperAdapter::to_proto_process(proc_info)),
+            warning_process_alert(ProtoMapperPort::to_proto_process(proc_info)),
         );
     }
 
@@ -178,7 +183,8 @@ impl VerdictFlow {
         self.emit_connection_event(conn.clone(), None);
         self.enqueue_connection_warning_alert(conn);
         self.enqueue_process_warning_alert(proc_info);
-        self.account_miss_and_apply_ask_timeout_policy(request_id).await;
+        self.account_miss_and_apply_ask_timeout_policy(request_id)
+            .await;
     }
 
     pub(super) async fn apply_action(
@@ -242,6 +248,14 @@ impl VerdictFlow {
     }
 
     pub(super) async fn account_miss_and_apply_ask_timeout_policy(&self, request_id: u64) {
+        let fallback_policy = self.config.get_snapshot().ask_timeout_policy;
+        self.audit
+            .emit(AuditEvent::hot(AuditEventKind::VerdictAction(
+                VerdictAction::AskTimeoutFallback {
+                    request_id,
+                    fallback_policy,
+                },
+            )));
         if self.strict_miss_accounting_enabled() {
             self.stats.on_rule_miss();
             self.apply_ask_timeout_policy(request_id, true).await;

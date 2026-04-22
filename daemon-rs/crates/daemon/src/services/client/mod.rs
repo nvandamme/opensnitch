@@ -3,7 +3,7 @@ mod client;
 mod notifications;
 mod runtime_lifecycle;
 mod session;
-mod transport;
+pub(crate) mod transport;
 
 pub(crate) use alerts::*;
 pub use client::*;

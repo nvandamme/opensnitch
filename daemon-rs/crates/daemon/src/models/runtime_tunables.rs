@@ -24,4 +24,5 @@ pub(crate) struct RawRuntimeTunables {
     pub pid_inode_key_cache_capacity: Option<usize>,
     pub stats_event_ring_capacity: Option<usize>,
     pub alert_overflow_ring_capacity: Option<usize>,
+    pub audit_ring_capacity: Option<usize>,
 }

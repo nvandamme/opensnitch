@@ -40,7 +40,10 @@ pub(crate) fn parse_and_apply(args: &[String]) -> Result<Option<String>, DynErro
         } else if command.is_none() {
             command = Some(arg.clone());
         } else {
-            return Err(format!("unexpected extra argument: {arg:?}; did you mean --{arg}=<value>?").into());
+            return Err(format!(
+                "unexpected extra argument: {arg:?}; did you mean --{arg}=<value>?"
+            )
+            .into());
         }
     }
 

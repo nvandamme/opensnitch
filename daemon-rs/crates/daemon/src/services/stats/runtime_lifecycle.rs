@@ -15,8 +15,8 @@ impl StatsService {
     }
 
     pub(super) fn daemon_version_string() -> String {
-        let cache = DAEMON_VERSION
-            .get_or_init(|| std::sync::RwLock::new(Self::resolve_daemon_version()));
+        let cache =
+            DAEMON_VERSION.get_or_init(|| std::sync::RwLock::new(Self::resolve_daemon_version()));
         cache
             .read()
             .map(|value| value.clone())

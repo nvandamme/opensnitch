@@ -129,7 +129,9 @@ impl Daemon {
 
     #[allow(dead_code)]
     pub(crate) fn increment_kernel_pipeline_drop(&self, pipeline: KernelPipeline) -> u64 {
-        self.runtime.kernel_pipeline_counters.increment_drop(pipeline)
+        self.runtime
+            .kernel_pipeline_counters
+            .increment_drop(pipeline)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]

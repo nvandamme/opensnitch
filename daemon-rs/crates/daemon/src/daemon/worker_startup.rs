@@ -4,8 +4,15 @@ use super::Daemon;
 use crate::{
     config::ProcMonitorMethod,
     flows::lifecycle::ServiceLifecycleFlow,
+    models::audit::{
+        AuditEvent, AuditEventKind, ConnectionLifecycle, DnsLifecycle, FirewallLifecycle,
+        ProcessLifecycle, ServiceObserverLifecycle,
+    },
     services::ebpf::EbpfService,
-    workers::{self, runtime::control::{RuntimeHandles, WorkerControl}},
+    workers::{
+        self,
+        runtime::control::{RuntimeHandles, WorkerControl},
+    },
 };
 
 impl Daemon {
@@ -18,6 +25,11 @@ impl Daemon {
             &self.runtime.dns,
             &self.runtime.firewall,
         );
+        self.runtime
+            .audit
+            .emit(AuditEvent::cold(AuditEventKind::ServiceObserverLifecycle(
+                ServiceObserverLifecycle::ServiceObserversStarted,
+            )));
         handles.push_worker_control(self.proc_workers_control().into_worker_control());
 
         handles.push_worker(
@@ -49,6 +61,11 @@ impl Daemon {
                 .reconfigure_proc_workers(Some(ProcMonitorMethod::Proc))
                 .await;
         }
+        self.runtime
+            .audit
+            .emit(AuditEvent::cold(AuditEventKind::ProcessLifecycle(
+                ProcessLifecycle::MonitorWorkersConfigured,
+            )));
 
         let proc_snapshot = self.proc_workers_snapshot();
         let process_worker_state = self.runtime.process.worker_state();
@@ -93,6 +110,11 @@ impl Daemon {
             worker_count = conn_workers_count,
             "connection worker selection resolved"
         );
+        self.runtime
+            .audit
+            .emit(AuditEvent::cold(AuditEventKind::ConnectionLifecycle(
+                ConnectionLifecycle::WorkersConfigured,
+            )));
 
         let dns_workers = self.runtime.dns.init_workers(
             self.runtime.bus.clone(),
@@ -117,16 +139,27 @@ impl Daemon {
             "dns worker selection resolved"
         );
         debug!("dns workers started");
+        self.runtime
+            .audit
+            .emit(AuditEvent::cold(AuditEventKind::DnsLifecycle(
+                DnsLifecycle::WorkersConfigured,
+            )));
 
         handles.push_worker(
             "firewall",
             workers::firewall::firewall_worker::FirewallWorkerControl::spawn(
                 self.runtime.bus.clone(),
                 self.runtime.firewall.clone(),
+                self.runtime.rules.clone(),
                 self.runtime.shutdown.clone(),
             ),
         );
         debug!("firewall worker started");
+        self.runtime
+            .audit
+            .emit(AuditEvent::cold(AuditEventKind::FirewallLifecycle(
+                FirewallLifecycle::WorkerStarted,
+            )));
 
         let (netlink_ifaces_handle, _netlink_local_addr_store) =
             workers::network::netlink_addr_worker::NetlinkAddrWorkerControl::spawn(

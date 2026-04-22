@@ -30,13 +30,7 @@ impl ProcessService {
                     let starttime = Self::read_proc_starttime(pid);
                     self.cache
                         .entries
-                        .insert(
-                        pid,
-                        CachedProcessEntry {
-                            info,
-                            starttime,
-                        },
-                    );
+                        .insert(pid, CachedProcessEntry { info, starttime });
                     Self::spawn_hash_update(self.cache.clone(), pid, starttime);
                 }
             }
@@ -58,7 +52,11 @@ impl ProcessService {
 
         // Read starttime once and reuse across both peek and get branches to
         // avoid a redundant /proc/{pid}/stat filesystem read on cache hits.
-        let current_starttime = if !expired { Self::read_proc_starttime(pid) } else { None };
+        let current_starttime = if !expired {
+            Self::read_proc_starttime(pid)
+        } else {
+            None
+        };
 
         if !expired {
             if let Some(entry) = self.cache.entries.peek(&pid) {
@@ -85,12 +83,11 @@ impl ProcessService {
             let _ = self.cache.entries.remove_by(&pid);
         }
 
-        let info = tokio::task::spawn_blocking(move || Self::inspect_process_no_hash(pid)).await??;
+        let info =
+            tokio::task::spawn_blocking(move || Self::inspect_process_no_hash(pid)).await??;
         let starttime = Self::read_proc_starttime(pid);
         self.cache.clear_exit_deadline(pid).await;
-        self.cache
-            .entries
-            .insert(
+        self.cache.entries.insert(
             pid,
             CachedProcessEntry {
                 info: info.clone(),
@@ -131,9 +128,7 @@ impl ProcessService {
                 let result = ProcessService::compute_process_hashes(pid);
 
                 // Store in persistent cache for future daemon restarts.
-                if let (Some(ref exe), Some((md5, sha1, sha256))) =
-                    (exe_path, &result)
-                {
+                if let (Some(ref exe), Some((md5, sha1, sha256))) = (exe_path, &result) {
                     hash_cache.insert(exe, md5, sha1, sha256);
                 }
 

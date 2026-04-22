@@ -270,17 +270,15 @@ fn persistent_hash_cache_survives_flush_and_reload() {
 
     // Populate and flush.
     {
-        let cache = crate::services::process::hash_cache::PersistentHashCache::load_or_new(
-            path.clone(),
-        );
+        let cache =
+            crate::services::process::hash_cache::PersistentHashCache::load_or_new(path.clone());
         cache.insert(&exe, "md5val", "sha1val", "sha256val");
         cache.flush();
     }
 
     // Reload from disk — entries whose stat still matches should survive.
     {
-        let cache =
-            crate::services::process::hash_cache::PersistentHashCache::load_or_new(path);
+        let cache = crate::services::process::hash_cache::PersistentHashCache::load_or_new(path);
         let hit = cache.get(&exe);
         assert!(hit.is_some(), "cache should survive reload");
         let (md5, sha1, sha256) = hit.unwrap();

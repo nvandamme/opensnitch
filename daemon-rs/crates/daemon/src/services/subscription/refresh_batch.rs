@@ -23,7 +23,7 @@ impl SubscriptionService {
             if !force && !self.is_refresh_due(&record) {
                 skipped += 1;
                 debug!(name = %record.name, "subscription refresh: skipped (not due yet)");
-                updated.push(record_to_proto(&record));
+                updated.push(record);
                 continue;
             }
 
@@ -34,7 +34,8 @@ impl SubscriptionService {
                 Ok(RefreshOutcome::Downloaded) => {
                     refreshed += 1;
                     sync_layout = true;
-                    self.refresh_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.refresh_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let proto = record_to_proto(&record);
                     self.push_event(proto, opensnitch_proto::pb::SubscriptionAction::Refresh);
                 }
@@ -44,7 +45,8 @@ impl SubscriptionService {
                 }
                 Err(err) => {
                     errors.push(format!("{}: {err}", subscription_label(&record)));
-                    self.refresh_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.refresh_errors
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let proto = record_to_proto(&record);
                     self.push_event(proto, opensnitch_proto::pb::SubscriptionAction::Refresh);
                 }

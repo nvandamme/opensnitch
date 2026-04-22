@@ -67,10 +67,8 @@ impl SocketDiagAdapter {
     }
 
     pub async fn dump_sockets_async(family: u8, protocol: u8) -> Result<Vec<SocketInfo>> {
-        super::socket_diag_bindings::SocketDiagBindingsAdapter::dump_sockets_async(
-            family, protocol,
-        )
-        .await
+        super::socket_diag_bindings::SocketDiagBindingsAdapter::dump_sockets_async(family, protocol)
+            .await
     }
 
     pub fn find_socket(

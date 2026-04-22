@@ -7,7 +7,10 @@ use crate::{
     bus::Bus,
     models::firewall_state::FirewallState,
     models::kernel_event::KernelEvent,
-    services::firewall::{FirewallService, firewall_backend_name},
+    services::{
+        firewall::{FirewallService, firewall_backend_name},
+        rule::RuleService,
+    },
     workers::runtime::support::build_current_thread_runtime,
 };
 
@@ -19,6 +22,7 @@ impl FirewallWorkerControl {
     pub fn spawn(
         bus: Bus,
         firewall: FirewallService,
+        rules: RuleService,
         shutdown: CancellationToken,
     ) -> JoinHandle<()> {
         thread::spawn(move || {
@@ -31,8 +35,18 @@ impl FirewallWorkerControl {
 
             while !shutdown.is_cancelled() {
                 rt.block_on(async {
-                    if let Err(err) = firewall.heal_if_drifted().await {
-                        warn!("failed to heal firewall drift: {err}");
+                    match firewall.heal_if_drifted().await {
+                        Ok(true) => {
+                            if let Err(err) = rules.rebuild_caches_from_snapshot().await {
+                                warn!(
+                                    "failed to rebuild rule caches after firewall drift heal: {err}"
+                                );
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(err) => {
+                            warn!("failed to heal firewall drift: {err}");
+                        }
                     }
 
                     let state = firewall.get_snapshot();

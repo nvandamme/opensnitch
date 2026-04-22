@@ -6,17 +6,28 @@ use pb::subscriptions_client::SubscriptionsClient;
 use pb::ui_client::UiClient;
 use std::net::IpAddr;
 use std::sync::Arc;
+#[cfg(feature = "grpc-ui")]
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 
 use super::session::{
-    ClientPrincipal, ClientSession, ClientSessionSnapshot, SessionState, CONTROL_SESSION_ID,
+    CLIENT_SESSION_ID, ClientPrincipal, ClientSession, ClientSessionSnapshot, SessionState,
 };
+#[cfg(feature = "grpc-ui")]
 use super::transport::{
-    SocketTarget, build_tls_config, classify_socket_target, connect_unix_abstract_channel,
-    connect_unix_channel, connect_with_skip_verify, endpoint_with_keepalive,
+    CapturedServerCertIdentity, SocketTarget, classify_socket_target,
+    connect_unix_abstract_channel, connect_unix_channel, connect_with_skip_verify,
+    connect_with_verified_tls, endpoint_with_keepalive,
 };
-use crate::config::{ClientAuthType, Config};
+#[cfg(not(feature = "grpc-ui"))]
+use super::transport::CapturedServerCertIdentity;
+#[cfg(feature = "grpc-ui")]
+use crate::config::ClientAuthType;
+use crate::config::Config;
+#[cfg(feature = "subscriptions")]
+use crate::models::subscription_rpc::{SubscriptionCommand, SubscriptionOperation};
+#[cfg(feature = "subscriptions")]
+use crate::services::subscription::record_to_proto;
 
 /// Shared cache for a gRPC `Channel` keyed on a config fingerprint.
 ///
@@ -105,17 +116,6 @@ impl ClientService {
         });
     }
 
-    #[allow(dead_code)]
-    pub fn connect_session(&self, session_id: impl Into<String>) {
-        let session_id = session_id.into();
-        let default_action = self.session.snapshot_rx.borrow().connected_default_action;
-        self.upsert_session(ClientSession {
-            id: session_id,
-            owner: ClientPrincipal::NetworkIdentity("legacy-session".to_string()),
-            default_action,
-        });
-    }
-
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn connect_local_uid_session(&self, uid: u32) {
         let default_action = self.session.snapshot_rx.borrow().connected_default_action;
@@ -125,7 +125,10 @@ impl ClientService {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn connect_network_identity_session(&self, identity: impl Into<String>) {
         let default_action = self.session.snapshot_rx.borrow().connected_default_action;
-        self.upsert_session(ClientSession::for_network_identity(identity, default_action));
+        self.upsert_session(ClientSession::for_network_identity(
+            identity,
+            default_action,
+        ));
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -157,8 +160,8 @@ impl ClientService {
 
     pub fn primary_owner(&self) -> Option<ClientPrincipal> {
         let snapshot = self.session.snapshot_rx.borrow();
-        if let Some(control_session) = snapshot.sessions.get(CONTROL_SESSION_ID) {
-            return Some(control_session.owner.clone());
+        if let Some(client_session) = snapshot.sessions.get(CLIENT_SESSION_ID) {
+            return Some(client_session.owner.clone());
         }
         snapshot
             .sessions
@@ -191,12 +194,13 @@ impl ClientService {
         if connected {
             let default_action = self.session.snapshot_rx.borrow().connected_default_action;
             self.upsert_session(ClientSession {
-                id: CONTROL_SESSION_ID.to_string(),
-                owner: ClientPrincipal::NetworkIdentity(CONTROL_SESSION_ID.to_string()),
+                id: CLIENT_SESSION_ID.to_string(),
+                owner: ClientPrincipal::NetworkIdentity(CLIENT_SESSION_ID.to_string()),
                 default_action,
+                capabilities: Vec::new(),
             });
         } else {
-            self.disconnect_session(CONTROL_SESSION_ID);
+            self.disconnect_session(CLIENT_SESSION_ID);
         }
     }
 
@@ -207,8 +211,8 @@ impl ClientService {
 
     pub fn set_connected_default_action(&self, action: crate::config::DefaultAction) {
         self.modify_snapshot(|s| {
-            if let Some(control_session) = s.sessions.get_mut(CONTROL_SESSION_ID) {
-                control_session.default_action = action;
+            if let Some(client_session) = s.sessions.get_mut(CLIENT_SESSION_ID) {
+                client_session.default_action = action;
             }
             s.connected_default_action = action;
         });
@@ -223,8 +227,8 @@ impl ClientService {
         disconnected_default_action: crate::config::DefaultAction,
     ) -> crate::config::DefaultAction {
         let snapshot = self.session.snapshot_rx.borrow();
-        if let Some(control_session) = snapshot.sessions.get(CONTROL_SESSION_ID) {
-            return control_session.default_action;
+        if let Some(client_session) = snapshot.sessions.get(CLIENT_SESSION_ID) {
+            return client_session.default_action;
         }
         snapshot
             .sessions
@@ -263,7 +267,21 @@ impl ClientService {
 // ---------------------------------------------------------------------------
 
 impl ClientService {
+    fn nonempty_server_identity(
+        identity: Arc<CapturedServerCertIdentity>,
+    ) -> Option<Arc<CapturedServerCertIdentity>> {
+        if identity.fingerprint_sha256.is_some()
+            || identity.subject.is_some()
+            || identity.san_dns.is_some()
+        {
+            Some(identity)
+        } else {
+            None
+        }
+    }
+
     #[allow(dead_code)]
+    #[cfg(feature = "grpc-ui")]
     pub async fn connect(addr: &str) -> Result<Self> {
         let channel = match classify_socket_target(addr) {
             SocketTarget::Tcp(target) => endpoint_with_keepalive(target)?.connect().await?,
@@ -275,26 +293,57 @@ impl ClientService {
         Ok(Self::from_channel(channel))
     }
 
+    #[allow(dead_code)]
+    #[cfg(not(feature = "grpc-ui"))]
+    pub async fn connect(_addr: &str) -> Result<Self> {
+        Ok(Self::default())
+    }
+
+    #[cfg(feature = "grpc-ui")]
     pub async fn connect_with_config(config: &Config) -> Result<Self> {
-        let channel = Self::connect_channel(config).await?;
-        Ok(Self::from_channel(channel))
+        let (service, _) = Self::connect_with_config_and_server_identity(config).await?;
+        Ok(service)
+    }
+
+    #[cfg(not(feature = "grpc-ui"))]
+    pub async fn connect_with_config(_config: &Config) -> Result<Self> {
+        Ok(Self::default())
+    }
+
+    #[cfg(feature = "grpc-ui")]
+    pub async fn connect_with_config_and_server_identity(
+        config: &Config,
+    ) -> Result<(Self, Option<Arc<CapturedServerCertIdentity>>)> {
+        let (channel, server_identity) = Self::connect_channel(config).await?;
+        Ok((Self::from_channel(channel), server_identity))
+    }
+
+    #[cfg(not(feature = "grpc-ui"))]
+    pub async fn connect_with_config_and_server_identity(
+        _config: &Config,
+    ) -> Result<(Self, Option<Arc<CapturedServerCertIdentity>>)> {
+        Ok((Self::default(), None))
     }
 
     /// Reuse a cached gRPC channel when the config fingerprint matches,
     /// falling back to a fresh connection on cache miss or config change.
-    pub async fn connect_or_reuse(
-        config: &Config,
-        cache: &GrpcChannelCache,
-    ) -> Result<Self> {
+    #[cfg(feature = "grpc-ui")]
+    pub async fn connect_or_reuse(config: &Config, cache: &GrpcChannelCache) -> Result<Self> {
         let fp = GrpcChannelCache::fingerprint(config);
         if let Some(channel) = cache.load(fp) {
             return Ok(Self::from_channel(channel));
         }
-        let channel = Self::connect_channel(config).await?;
+        let (channel, _) = Self::connect_channel(config).await?;
         cache.store(fp, channel.clone());
         Ok(Self::from_channel(channel))
     }
 
+    #[cfg(not(feature = "grpc-ui"))]
+    pub async fn connect_or_reuse(_config: &Config, _cache: &GrpcChannelCache) -> Result<Self> {
+        Ok(Self::default())
+    }
+
+    #[cfg(feature = "grpc-ui")]
     fn from_channel(channel: Channel) -> Self {
         let grpc = UiClient::new(channel.clone());
         #[cfg(feature = "subscriptions")]
@@ -302,11 +351,16 @@ impl ClientService {
         let mut service = Self::default();
         service.grpc = Some(grpc);
         #[cfg(feature = "subscriptions")]
-        { service.subscriptions_grpc = Some(subscriptions_grpc); }
+        {
+            service.subscriptions_grpc = Some(subscriptions_grpc);
+        }
         service
     }
 
-    async fn connect_channel(config: &Config) -> Result<Channel> {
+    #[cfg(feature = "grpc-ui")]
+    async fn connect_channel(
+        config: &Config,
+    ) -> Result<(Channel, Option<Arc<CapturedServerCertIdentity>>)> {
         if matches!(config.client_auth.auth_type, ClientAuthType::Simple) {
             let channel = match classify_socket_target(&config.client_addr) {
                 SocketTarget::Tcp(target) => endpoint_with_keepalive(target)?.connect().await?,
@@ -315,7 +369,7 @@ impl ClientService {
                     connect_unix_abstract_channel(name.to_string()).await?
                 }
             };
-            return Ok(channel);
+            return Ok((channel, None));
         }
 
         let addr = if config.client_addr.starts_with("http://") {
@@ -326,17 +380,13 @@ impl ClientService {
 
         let endpoint = endpoint_with_keepalive(&addr)?;
 
-        let channel = if config.client_auth.tls_options.skip_verify {
+        let (channel, server_identity) = if config.client_auth.tls_options.skip_verify {
             connect_with_skip_verify(&endpoint, config).await?
         } else {
-            endpoint
-                .clone()
-                .tls_config(build_tls_config(config)?)?
-                .connect()
-                .await?
+            connect_with_verified_tls(&endpoint, config).await?
         };
 
-        Ok(channel)
+        Ok((channel, Self::nonempty_server_identity(server_identity)))
     }
 
     pub(crate) fn runtime_identity() -> (String, String) {
@@ -353,12 +403,13 @@ impl ClientService {
         config: &Config,
         rules: &Arc<Vec<pb::Rule>>,
         is_firewall_running: bool,
-        system_firewall: &Arc<Option<pb::SysFirewall>>,
+        system_firewall: &Arc<Option<crate::models::firewall_config::FirewallConfig>>,
     ) -> pb::ClientConfig {
         let (name, version) = Self::runtime_identity();
 
         // Protobuf request messages are owned values. At the gRPC boundary,
         // clone once from Arc snapshots to preserve immutable runtime snapshots.
+        // Convert domain FirewallConfig → pb::SysFirewall here at the gRPC egress boundary.
         pb::ClientConfig {
             id: 1,
             name,
@@ -367,23 +418,47 @@ impl ClientService {
             config: config.raw_json.clone(),
             log_level: config.log_level,
             rules: rules.as_ref().clone(),
-            system_firewall: system_firewall.as_ref().clone(),
+            system_firewall: system_firewall.as_ref().as_ref().map(pb::SysFirewall::from),
         }
     }
 
     pub async fn subscribe(&mut self, cfg: pb::ClientConfig) -> Result<pb::ClientConfig> {
+        #[cfg(not(feature = "grpc-ui"))]
+        {
+            let _ = cfg;
+            anyhow::bail!("grpc-ui feature disabled: subscribe transport is not available")
+        }
+        #[cfg(feature = "grpc-ui")]
         Ok(self.grpc_mut().subscribe(cfg).await?.into_inner())
     }
 
     pub async fn ping(&mut self, req: pb::PingRequest) -> Result<pb::PingReply> {
+        #[cfg(not(feature = "grpc-ui"))]
+        {
+            let _ = req;
+            anyhow::bail!("grpc-ui feature disabled: ping transport is not available")
+        }
+        #[cfg(feature = "grpc-ui")]
         Ok(self.grpc_mut().ping(req).await?.into_inner())
     }
 
     pub async fn ask_rule(&mut self, conn: pb::Connection) -> Result<pb::Rule> {
+        #[cfg(not(feature = "grpc-ui"))]
+        {
+            let _ = conn;
+            anyhow::bail!("grpc-ui feature disabled: ask_rule transport is not available")
+        }
+        #[cfg(feature = "grpc-ui")]
         Ok(self.grpc_mut().ask_rule(conn).await?.into_inner())
     }
 
     pub async fn post_alert(&mut self, alert: pb::Alert) -> Result<pb::MsgResponse> {
+        #[cfg(not(feature = "grpc-ui"))]
+        {
+            let _ = alert;
+            anyhow::bail!("grpc-ui feature disabled: alert transport is not available")
+        }
+        #[cfg(feature = "grpc-ui")]
         Ok(self
             .grpc_mut()
             .clone()
@@ -393,6 +468,7 @@ impl ClientService {
             .into_inner())
     }
 
+    #[cfg(feature = "grpc-ui")]
     pub fn grpc_mut(&mut self) -> &mut UiClient<Channel> {
         self.grpc
             .as_mut()
@@ -405,28 +481,71 @@ impl ClientService {
 /// `SubscriptionFlow` which owns its own `GrpcChannelCache` and reconnect loop.
 #[cfg(feature = "subscriptions")]
 impl ClientService {
+    fn subscription_request_from_command(command: SubscriptionCommand) -> pb::SubscriptionRequest {
+        let operation = match command.operation {
+            SubscriptionOperation::List => pb::SubscriptionAction::List,
+            SubscriptionOperation::Apply => pb::SubscriptionAction::Apply,
+            SubscriptionOperation::Delete => pb::SubscriptionAction::Delete,
+            SubscriptionOperation::Refresh => pb::SubscriptionAction::Refresh,
+            SubscriptionOperation::Deploy => pb::SubscriptionAction::Deploy,
+            SubscriptionOperation::Unspecified => pb::SubscriptionAction::Unspecified,
+        };
+
+        pb::SubscriptionRequest {
+            operation: operation as i32,
+            subscriptions: command
+                .subscriptions
+                .iter()
+                .map(record_to_proto)
+                .collect(),
+            targets: command.targets,
+            force: command.force,
+        }
+    }
+
+    pub async fn subscription_execute(
+        &mut self,
+        command: SubscriptionCommand,
+    ) -> Result<pb::SubscriptionReply> {
+        let req = Self::subscription_request_from_command(command);
+        self.subscription_list(req).await
+    }
+
+    #[cfg(feature = "grpc-ui")]
     pub async fn subscription_list(
         &mut self,
         req: pb::SubscriptionRequest,
     ) -> Result<pb::SubscriptionReply> {
-        Ok(self
-            .subscriptions_grpc_mut()
-            .list(req)
-            .await?
-            .into_inner())
+        Ok(self.subscriptions_grpc_mut().list(req).await?.into_inner())
     }
 
+    #[cfg(not(feature = "grpc-ui"))]
+    pub async fn subscription_list(
+        &mut self,
+        req: pb::SubscriptionRequest,
+    ) -> Result<pb::SubscriptionReply> {
+        let _ = req;
+        anyhow::bail!("grpc-ui feature disabled: subscriptions transport is not available")
+    }
+
+    #[cfg(feature = "grpc-ui")]
     pub async fn subscription_apply(
         &mut self,
         req: pb::SubscriptionRequest,
     ) -> Result<pb::SubscriptionReply> {
-        Ok(self
-            .subscriptions_grpc_mut()
-            .apply(req)
-            .await?
-            .into_inner())
+        Ok(self.subscriptions_grpc_mut().apply(req).await?.into_inner())
     }
 
+    #[cfg(not(feature = "grpc-ui"))]
+    pub async fn subscription_apply(
+        &mut self,
+        req: pb::SubscriptionRequest,
+    ) -> Result<pb::SubscriptionReply> {
+        let _ = req;
+        anyhow::bail!("grpc-ui feature disabled: subscriptions transport is not available")
+    }
+
+    #[cfg(feature = "grpc-ui")]
     pub async fn subscription_delete(
         &mut self,
         req: pb::SubscriptionRequest,
@@ -438,6 +557,16 @@ impl ClientService {
             .into_inner())
     }
 
+    #[cfg(not(feature = "grpc-ui"))]
+    pub async fn subscription_delete(
+        &mut self,
+        req: pb::SubscriptionRequest,
+    ) -> Result<pb::SubscriptionReply> {
+        let _ = req;
+        anyhow::bail!("grpc-ui feature disabled: subscriptions transport is not available")
+    }
+
+    #[cfg(feature = "grpc-ui")]
     pub async fn subscription_refresh(
         &mut self,
         req: pb::SubscriptionRequest,
@@ -449,6 +578,16 @@ impl ClientService {
             .into_inner())
     }
 
+    #[cfg(not(feature = "grpc-ui"))]
+    pub async fn subscription_refresh(
+        &mut self,
+        req: pb::SubscriptionRequest,
+    ) -> Result<pb::SubscriptionReply> {
+        let _ = req;
+        anyhow::bail!("grpc-ui feature disabled: subscriptions transport is not available")
+    }
+
+    #[cfg(feature = "grpc-ui")]
     pub async fn subscription_deploy(
         &mut self,
         req: pb::SubscriptionRequest,
@@ -460,6 +599,16 @@ impl ClientService {
             .into_inner())
     }
 
+    #[cfg(not(feature = "grpc-ui"))]
+    pub async fn subscription_deploy(
+        &mut self,
+        req: pb::SubscriptionRequest,
+    ) -> Result<pb::SubscriptionReply> {
+        let _ = req;
+        anyhow::bail!("grpc-ui feature disabled: subscriptions transport is not available")
+    }
+
+    #[cfg(feature = "grpc-ui")]
     pub async fn subscription_commands(
         &mut self,
         acks: impl tonic::IntoStreamingRequest<Message = pb::SubscriptionCommandAck>,
@@ -471,6 +620,16 @@ impl ClientService {
             .into_inner())
     }
 
+    #[cfg(not(feature = "grpc-ui"))]
+    pub async fn subscription_commands(
+        &mut self,
+        acks: impl tonic::IntoStreamingRequest<Message = pb::SubscriptionCommandAck>,
+    ) -> Result<tonic::Streaming<pb::SubscriptionCommand>> {
+        let _ = acks;
+        anyhow::bail!("grpc-ui feature disabled: subscriptions transport is not available")
+    }
+
+    #[cfg(feature = "grpc-ui")]
     fn subscriptions_grpc_mut(&mut self) -> &mut SubscriptionsClient<Channel> {
         self.subscriptions_grpc
             .as_mut()

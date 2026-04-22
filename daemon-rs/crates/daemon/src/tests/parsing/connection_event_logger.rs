@@ -94,7 +94,12 @@ fn local_syslog_mode_detected_only_for_syslog_without_server() {
 
 #[test]
 fn formatter_json_contains_expected_fields() {
-    let payload = format_message("json", "opensnitchd", &sample_connection(), Some(&sample_rule()));
+    let payload = format_message(
+        "json",
+        "opensnitchd",
+        &sample_connection(),
+        Some(&sample_rule()),
+    );
     assert!(payload.contains("\"protocol\":\"tcp\""));
     assert!(payload.contains("\"dst_ip\":\"1.1.1.1\""));
     assert!(payload.contains("\"rule\":"));
@@ -102,7 +107,12 @@ fn formatter_json_contains_expected_fields() {
 
 #[test]
 fn formatter_csv_contains_expected_columns() {
-    let payload = format_message("csv", "opensnitchd", &sample_connection(), Some(&sample_rule()));
+    let payload = format_message(
+        "csv",
+        "opensnitchd",
+        &sample_connection(),
+        Some(&sample_rule()),
+    );
     assert!(payload.contains(",tcp,"));
     assert!(payload.contains(",1.1.1.1,"));
     assert!(payload.contains("allow-test"));

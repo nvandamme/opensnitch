@@ -2,8 +2,9 @@ use time::OffsetDateTime;
 
 use crate::utils::name_parsing::normalized_name;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RuleAction {
+    #[default]
     Allow,
     Deny,
     Reject,
@@ -31,8 +32,9 @@ impl RuleAction {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum RuleDuration {
+    #[default]
     Once,
     UntilRestart,
     Permanent,
@@ -75,7 +77,18 @@ pub struct RuleOperator {
     pub list: Vec<RuleOperator>,
 }
 
-#[derive(Debug, Clone)]
+impl RuleOperator {
+    /// Returns `true` when all fields are empty — i.e. no operator was provided
+    /// (equivalent to `pb::Rule.operator` being `None` on the wire).
+    pub fn is_empty(&self) -> bool {
+        self.type_name.is_empty()
+            && self.operand.is_empty()
+            && self.data.is_empty()
+            && self.list.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct RuleRecord {
     pub created_at: Option<OffsetDateTime>,
     pub updated_at: Option<OffsetDateTime>,

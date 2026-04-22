@@ -199,14 +199,38 @@ pub(crate) async fn remove_file_async(path: &Path, error_context: &str) {
 }
 
 pub(crate) fn assert_storage_event(
-    rx: &mut tokio::sync::broadcast::Receiver<std::sync::Arc<crate::services::storage::StorageEvent>>,
+    rx: &mut tokio::sync::broadcast::Receiver<
+        std::sync::Arc<crate::services::storage::StorageEvent>,
+    >,
     recv_label: &str,
     domain: &'static str,
     operation: crate::services::storage::StorageOperation,
     path: &Path,
 ) {
+    // The event bus dispatches through a background thread, so blocking_recv() is
+    // required here instead of try_recv() to avoid the race.
     assert_eq!(
-        *rx.try_recv().expect(recv_label),
+        *rx.blocking_recv().expect(recv_label),
+        crate::services::storage::StorageEvent {
+            domain,
+            operation,
+            path: path.to_path_buf(),
+        }
+    );
+}
+
+pub(crate) async fn assert_storage_event_async(
+    rx: &mut tokio::sync::broadcast::Receiver<
+        std::sync::Arc<crate::services::storage::StorageEvent>,
+    >,
+    recv_label: &str,
+    domain: &'static str,
+    operation: crate::services::storage::StorageOperation,
+    path: &Path,
+) {
+    // Async variant for use in #[tokio::test] contexts.
+    assert_eq!(
+        *rx.recv().await.expect(recv_label),
         crate::services::storage::StorageEvent {
             domain,
             operation,
@@ -216,7 +240,9 @@ pub(crate) fn assert_storage_event(
 }
 
 pub(crate) fn assert_storage_event_empty(
-    rx: &mut tokio::sync::broadcast::Receiver<std::sync::Arc<crate::services::storage::StorageEvent>>,
+    rx: &mut tokio::sync::broadcast::Receiver<
+        std::sync::Arc<crate::services::storage::StorageEvent>,
+    >,
 ) {
     assert!(matches!(
         rx.try_recv(),

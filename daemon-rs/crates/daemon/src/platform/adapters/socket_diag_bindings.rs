@@ -142,10 +142,12 @@ impl SocketDiagBindingsAdapter {
         let mut out = Vec::new();
         for af in families {
             for proto in &protocols {
-                out.extend(Self::find_socket_candidates_family_proto(
-                    &mut sock, af, *proto, src, src_port, dst, dst_port,
-                )
-                .await?);
+                out.extend(
+                    Self::find_socket_candidates_family_proto(
+                        &mut sock, af, *proto, src, src_port, dst, dst_port,
+                    )
+                    .await?,
+                );
             }
         }
 
@@ -199,10 +201,9 @@ impl SocketDiagBindingsAdapter {
                     request.encode().push_bytecode(bytecode);
                 }
 
-                let mut iter = sock
-                    .request(&request)
-                    .await
-                    .map_err(|err| Self::map_io_error("tcp_diag_dump request", family, protocol, err))?;
+                let mut iter = sock.request(&request).await.map_err(|err| {
+                    Self::map_io_error("tcp_diag_dump request", family, protocol, err)
+                })?;
 
                 while let Some(reply) = iter.recv().await {
                     let (msg, attrs) = reply.map_err(|err| {
@@ -225,10 +226,9 @@ impl SocketDiagBindingsAdapter {
                     request.encode().push_bytecode(bytecode);
                 }
 
-                let mut iter = sock
-                    .request(&request)
-                    .await
-                    .map_err(|err| Self::map_io_error("udp_diag_dump request", family, protocol, err))?;
+                let mut iter = sock.request(&request).await.map_err(|err| {
+                    Self::map_io_error("udp_diag_dump request", family, protocol, err)
+                })?;
 
                 while let Some(reply) = iter.recv().await {
                     let (msg, attrs) = reply.map_err(|err| {
@@ -251,7 +251,12 @@ impl SocketDiagBindingsAdapter {
         Ok(out)
     }
 
-    fn map_io_error(action: &'static str, family: u8, protocol: u8, err: std::io::Error) -> anyhow::Error {
+    fn map_io_error(
+        action: &'static str,
+        family: u8,
+        protocol: u8,
+        err: std::io::Error,
+    ) -> anyhow::Error {
         tracing::warn!(
             action,
             family,
@@ -356,7 +361,11 @@ impl SocketDiagBindingsAdapter {
     }
 
     pub(crate) fn kill_socket(family: u8, protocol: u8, socket: &SocketInfo) -> Result<()> {
-        super::netlink_rt::run_on_netlink_rt(Self::kill_socket_async(family, protocol, socket.clone()))
+        super::netlink_rt::run_on_netlink_rt(Self::kill_socket_async(
+            family,
+            protocol,
+            socket.clone(),
+        ))
     }
 
     pub(crate) async fn kill_socket_async(
@@ -418,11 +427,7 @@ impl SocketDiagBindingsAdapter {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn probe_build_kill_req_v2(
-        family: u8,
-        protocol: u8,
-        socket: &SocketInfo,
-    ) -> ReqV2 {
+    pub(crate) fn probe_build_kill_req_v2(family: u8, protocol: u8, socket: &SocketInfo) -> ReqV2 {
         Self::build_kill_req_v2(family, protocol, socket)
     }
 

@@ -7,11 +7,11 @@ use crate::models::{
     process_state::{ProcessInfo, ProcessNode},
     rule_record::RuleOperator,
 };
+use crate::platform::adapters::net_iface::NetIfaceAdapter;
 use crate::services::rule::{
     CidrTrieIndex, DomainWildcardTrie, ListRegexCache, ListRegexCacheKey, RegexCacheKey,
     RuleMatchCaches, RuleService,
 };
-use crate::platform::adapters::net_iface::NetIfaceAdapter;
 use crate::tests::support::{TestDir, path_string};
 
 fn loopback_ifindex() -> Option<u32> {

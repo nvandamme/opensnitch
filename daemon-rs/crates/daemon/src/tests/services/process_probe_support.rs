@@ -18,9 +18,7 @@ impl ProcessService {
                     .unwrap_or_else(Instant::now),
             )
             .await;
-        self.cache
-            .entries
-            .insert(
+        self.cache.entries.insert(
             pid,
             CachedProcessEntry {
                 info: ProcessInfo {
@@ -56,9 +54,7 @@ impl ProcessService {
         let env_map: HashMap<String, String> = (0..60_u32)
             .map(|i| (format!("VAR_{i}"), format!("val_{i}")))
             .collect();
-        self.cache
-            .entries
-            .insert(
+        self.cache.entries.insert(
             pid,
             CachedProcessEntry {
                 info: ProcessInfo {

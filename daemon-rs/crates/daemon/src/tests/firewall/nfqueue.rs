@@ -1,5 +1,8 @@
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::{collections::HashMap, time::{Duration, Instant}};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use dashmap::DashMap;
 

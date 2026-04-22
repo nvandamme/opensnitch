@@ -1,9 +1,9 @@
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
-use nix::libc;
 use netlink_bindings::traits::{NetlinkRequest, Protocol};
 use netlink_socket2::{MulticastSocketRaw, NetlinkSocket};
+use nix::libc;
 
 const NLMSG_HDR_LEN: usize = 16;
 const STATUS_MESSAGE_LEN: usize = 40;
@@ -81,7 +81,10 @@ impl AuditNetlinkSocket {
         iter.recv_ack().await.map_err(anyhow::Error::new)
     }
 
-    pub(crate) async fn recv_event(&mut self, timeout: Duration) -> Result<Option<AuditEventMessage>> {
+    pub(crate) async fn recv_event(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<AuditEventMessage>> {
         let recv = match tokio::time::timeout(timeout, self.event_sock.recv()).await {
             Ok(Ok(recv)) => recv,
             Ok(Err(err)) => return Err(anyhow::Error::new(err)),
@@ -137,7 +140,8 @@ impl AuditNetlinkSocket {
             if header.msg_type == libc::NLMSG_ERROR as u16 {
                 let payload = &datagram[(offset + NLMSG_HDR_LEN)..(offset + msg_len)];
                 if payload.len() >= 4 {
-                    let code = i32::from_ne_bytes(payload[0..4].try_into().expect("fixed-size slice"));
+                    let code =
+                        i32::from_ne_bytes(payload[0..4].try_into().expect("fixed-size slice"));
                     if code != 0 {
                         let err = std::io::Error::from_raw_os_error((-code).max(1));
                         return Err(err.into());
@@ -170,7 +174,9 @@ impl AuditNetlinkSocket {
             return 0;
         }
 
-        if remaining_len >= declared_len && remaining_len.saturating_sub(declared_len) <= NLMSG_HDR_LEN {
+        if remaining_len >= declared_len
+            && remaining_len.saturating_sub(declared_len) <= NLMSG_HDR_LEN
+        {
             return remaining_len;
         }
 

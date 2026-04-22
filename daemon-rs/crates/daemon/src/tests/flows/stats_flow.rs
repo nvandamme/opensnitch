@@ -147,6 +147,7 @@ async fn stats_flow_sends_stats_when_pending() {
             shutdown_requested: false,
         }),
         dns,
+        crate::services::audit::AuditService::new(64),
     );
 
     let flow_handle = flow.spawn();

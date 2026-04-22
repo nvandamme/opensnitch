@@ -1,8 +1,8 @@
 use crate::platform::adapters::nfqueue_netlink::{
-    NfqPacket, NfqueueNetlinkAdapter, NlMsg, NFGENMSG_LEN, NFQA_CFG_CMD, NFQA_CFG_FLAGS,
-    NFQA_CFG_MASK, NFQA_CFG_PARAMS, NFQA_CFG_QUEUE_MAXLEN, NFQA_IFINDEX_INDEV,
-    NFQA_IFINDEX_OUTDEV, NFQA_MARK, NFQA_PACKET_HDR, NFQA_PAYLOAD, NFQA_UID,
-    NFQA_VERDICT_HDR, NLA_HDR_LEN, NLMSG_HDR_LEN, nla_align, nlmsg_align, parse_nfq_packet,
+    NFGENMSG_LEN, NFQA_CFG_CMD, NFQA_CFG_FLAGS, NFQA_CFG_MASK, NFQA_CFG_PARAMS,
+    NFQA_CFG_QUEUE_MAXLEN, NFQA_IFINDEX_INDEV, NFQA_IFINDEX_OUTDEV, NFQA_MARK, NFQA_PACKET_HDR,
+    NFQA_PAYLOAD, NFQA_UID, NFQA_VERDICT_HDR, NLA_HDR_LEN, NLMSG_HDR_LEN, NfqPacket,
+    NfqueueNetlinkAdapter, NlMsg, nla_align, nlmsg_align, parse_nfq_packet,
 };
 
 // ─── NlMsg wire-shape tests ───────────────────────────────────────────────────
@@ -10,9 +10,7 @@ use crate::platform::adapters::nfqueue_netlink::{
 /// Minimum well-formed message: nlmsghdr + nfgenmsg only, no attributes.
 #[test]
 fn nlmsg_bare_shape_is_correct() {
-    let buf = NlMsg::new(0x302, 0x01, 1)
-        .nfgenmsg(0, 0)
-        .finalize();
+    let buf = NlMsg::new(0x302, 0x01, 1).nfgenmsg(0, 0).finalize();
 
     assert_eq!(buf.len(), NLMSG_HDR_LEN + NFGENMSG_LEN);
 
@@ -46,9 +44,7 @@ fn nlmsg_bare_shape_is_correct() {
 /// nfgenmsg.res_id is written in big-endian (queue_num=7 → bytes [0x00, 0x07]).
 #[test]
 fn nfgenmsg_res_id_is_big_endian() {
-    let buf = NlMsg::new(0x302, 0x01, 1)
-        .nfgenmsg(0, 7)
-        .finalize();
+    let buf = NlMsg::new(0x302, 0x01, 1).nfgenmsg(0, 7).finalize();
     assert_eq!(buf[18], 0x00);
     assert_eq!(buf[19], 0x07);
 }
@@ -74,7 +70,7 @@ fn nlmsg_config_bind_cmd_wire_shape() {
     let nla_len = u16::from_ne_bytes(buf[20..22].try_into().unwrap()) as usize;
     let nla_type = u16::from_ne_bytes(buf[22..24].try_into().unwrap());
     assert_eq!(nla_len, NLA_HDR_LEN + 4); // 8
-    assert_eq!(nla_type, NFQA_CFG_CMD);  // 1
+    assert_eq!(nla_type, NFQA_CFG_CMD); // 1
 
     // NLA data: command byte first
     assert_eq!(buf[24], NFQNL_CFG_CMD_BIND);
@@ -88,7 +84,12 @@ fn nlmsg_config_bind_cmd_wire_shape() {
 fn nlmsg_pf_bind_af_inet_pf_field_is_big_endian() {
     const AF_INET: u16 = 2;
     const NFQNL_CFG_CMD_PF_BIND: u8 = 3;
-    let cmd_payload: [u8; 4] = [NFQNL_CFG_CMD_PF_BIND, 0, (AF_INET >> 8) as u8, AF_INET as u8];
+    let cmd_payload: [u8; 4] = [
+        NFQNL_CFG_CMD_PF_BIND,
+        0,
+        (AF_INET >> 8) as u8,
+        AF_INET as u8,
+    ];
     let buf = NlMsg::new(0x302, 0x01, 1)
         .nfgenmsg(0, 0)
         .nla_bytes(NFQA_CFG_CMD, &cmd_payload)
@@ -348,8 +349,10 @@ fn preflight_reports_socket_availability() {
             // Acceptable: sandboxed environment or missing kernel module.
             let msg = err.to_string().to_lowercase();
             assert!(
-                msg.contains("permission") || msg.contains("operation not permitted")
-                    || msg.contains("eacces") || msg.contains("eperm")
+                msg.contains("permission")
+                    || msg.contains("operation not permitted")
+                    || msg.contains("eacces")
+                    || msg.contains("eperm")
                     || msg.contains("failed"),
                 "unexpected preflight error: {err}"
             );

@@ -2,6 +2,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    platform::ports::nfqueue_runtime_port::NfqueueRuntimePort,
     models::verdict_rpc::VerdictReply, services::stats::StatsService,
     workers::runtime::verdict::dispatch as verdict_dispatch,
 };
@@ -33,7 +34,7 @@ impl VerdictSubmitFlow {
                                 if reply.count_stats {
                                     stats.on_verdict(reply.allow);
                                 }
-                                crate::platform::ffi::nfqueue::NfqueueRuntimeState::submit_verdict(
+                                NfqueueRuntimePort::submit_verdict(
                                     reply.request_id,
                                     reply.allow,
                                     reply.reject,

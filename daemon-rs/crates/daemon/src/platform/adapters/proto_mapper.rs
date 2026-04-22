@@ -91,11 +91,7 @@ impl ProtoMapperAdapter {
         {
             checksums.insert("sha1".into(), hash.clone());
         }
-        if let Some(hash) = proc_info
-            .process_hash
-            .as_ref()
-            .filter(|v| !v.is_empty())
-        {
+        if let Some(hash) = proc_info.process_hash.as_ref().filter(|v| !v.is_empty()) {
             checksums.insert("sha256".into(), hash.clone());
         }
         checksums

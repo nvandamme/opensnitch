@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 use opensnitch_ebpf_common::pinning::{
-    AYA_CONN_ROOT, AYA_CONN_TCP_MAP_PATH, AYA_DNS_EVENTS_PATH, AYA_PROC_EVENTS_PATH,
-    AYA_PROC_ROOT, LEGACY_CONN_ROOT, LEGACY_CONN_TCP_MAP_PATH, LEGACY_DNS_EVENTS_PATH,
-    LEGACY_PROC_EVENTS_PATH, LEGACY_PROC_ROOT,
+    AYA_CONN_ROOT, AYA_CONN_TCP_MAP_PATH, AYA_DNS_EVENTS_PATH, AYA_PROC_EVENTS_PATH, AYA_PROC_ROOT,
+    LEGACY_CONN_ROOT, LEGACY_CONN_TCP_MAP_PATH, LEGACY_DNS_EVENTS_PATH, LEGACY_PROC_EVENTS_PATH,
+    LEGACY_PROC_ROOT,
 };
 #[cfg(test)]
 use opensnitch_ebpf_common::pinning::{AYA_DNS_ROOT, LEGACY_DNS_ROOT};
@@ -63,7 +63,11 @@ impl EbpfPinDomain {
         }
     }
 
-    pub(crate) fn native_ringbuf_candidates(self, enable_proc: bool, enable_dns: bool) -> Vec<&'static str> {
+    pub(crate) fn native_ringbuf_candidates(
+        self,
+        enable_proc: bool,
+        enable_dns: bool,
+    ) -> Vec<&'static str> {
         match (enable_proc, enable_dns) {
             (true, true) => vec![self.proc_events_path(), self.dns_events_path()],
             (true, false) => vec![self.proc_events_path()],

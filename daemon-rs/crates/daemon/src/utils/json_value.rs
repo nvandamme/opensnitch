@@ -5,7 +5,10 @@ fn field_value<'a>(data: &'a Value, key: &str) -> Option<&'a Value> {
 }
 
 fn lowered_candidates(candidates: &[&str]) -> Vec<String> {
-    candidates.iter().map(|candidate| candidate.to_lowercase()).collect()
+    candidates
+        .iter()
+        .map(|candidate| candidate.to_lowercase())
+        .collect()
 }
 
 pub(crate) fn field_string_or_u64(data: &Value, key: &str) -> Option<String> {

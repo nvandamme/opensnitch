@@ -1,14 +1,20 @@
 use anyhow::Result;
-use opensnitch_proto::pb;
 use dashmap::DashMap;
+use opensnitch_proto::pb;
 use tokio::sync::mpsc;
 
 use crate::{
     bus::Bus,
-    models::{connection_state::ConnectionAttempt, verdict_rpc::VerdictReply},
-    platform::adapters::proto_mapper::ProtoMapperAdapter,
+    models::{
+        audit::{AuditEvent, AuditEventKind, VerdictAction, VerdictSource},
+        connection_state::ConnectionAttempt,
+        verdict_rpc::VerdictReply,
+    },
     platform::ports::connection_event_exporter_port::ConnectionEventExporterPort,
+    platform::ports::proto_mapper_port::ProtoMapperPort,
+    services::rule::rule_record_from_proto,
     services::{
+        audit::AuditService,
         client::{AlertBuffer, ClientService, GrpcChannelCache},
         config::ConfigService,
         connection::ConnectionService,
@@ -20,14 +26,11 @@ use crate::{
 use std::sync::Arc;
 use tracing::{debug, warn};
 
-use crate::models::{
-    rule_match_decision::RuleMatchDecision,
-    rule_record::RuleAction,
-};
+use crate::models::{rule_match_decision::RuleMatchDecision, rule_record::RuleRecord};
 
 #[derive(Debug)]
 pub(super) struct VerdictRulePersistRequest {
-    pub(super) rule: pb::Rule,
+    pub(super) rule: RuleRecord,
     pub(super) owner: PolicyOwner,
     pub(super) idempotency_key: String,
 }
@@ -47,6 +50,7 @@ pub struct VerdictFlow {
     pub(super) grpc_cache: GrpcChannelCache,
     /// Optional per-connection event exporter (Loki, remote syslog, JSON sink, etc.)
     pub(super) event_exporter: Option<Arc<dyn ConnectionEventExporterPort>>,
+    pub(super) audit: AuditService,
 }
 
 impl VerdictFlow {
@@ -58,12 +62,14 @@ impl VerdictFlow {
         rules: RuleService,
         connections: ConnectionService,
         stats: StatsService,
+        audit: AuditService,
     ) -> Self {
-        let (rule_persist_tx, mut rule_persist_rx) = mpsc::channel::<VerdictRulePersistRequest>(256);
+        let (rule_persist_tx, mut rule_persist_rx) =
+            mpsc::channel::<VerdictRulePersistRequest>(256);
         let rules_for_worker = rules.clone();
         tokio::spawn(async move {
             while let Some(request) = rule_persist_rx.recv().await {
-                let previous_rules = rules_for_worker.get_proto_snapshot();
+                let previous_rules = rules_for_worker.get_rule_record_snapshot();
                 let rule_for_apply = request.rule.clone();
                 let rule_name = request.rule.name.clone();
 
@@ -79,7 +85,7 @@ impl VerdictFlow {
                             let rules = rules_for_worker.clone();
                             async move {
                                 rules
-                                    .upsert_from_proto(&rule_for_apply)
+                                    .upsert_rule_record(rule_for_apply)
                                     .await
                                     .map(|_| ())
                                     .map_err(|err| err.to_string())
@@ -94,7 +100,7 @@ impl VerdictFlow {
                     .await;
 
                 if let Err(err) = tx_result {
-                    warn!(rule = %rule_name, "async verdict rule persist failed: {:?}", err);
+                    warn!(rule = %rule_name, "async verdict rule persist failed: {}", err);
                 }
             }
         });
@@ -111,6 +117,7 @@ impl VerdictFlow {
             rule_persist_tx,
             grpc_cache: GrpcChannelCache::default(),
             event_exporter: None,
+            audit,
         }
     }
 
@@ -154,6 +161,13 @@ impl VerdictFlow {
     }
 
     pub(crate) async fn send_verdict_when_full(&self, verdict: VerdictReply) {
+        self.audit
+            .emit(AuditEvent::hot(AuditEventKind::VerdictAction(
+                VerdictAction::VerdictQueueBackpressure {
+                    request_id: verdict.request_id,
+                    source: VerdictSource::from_verdict_source(verdict.source),
+                },
+            )));
         let _ = self.bus.verdict_tx.send(verdict).await;
     }
 
@@ -258,6 +272,22 @@ impl VerdictFlow {
         }
     }
 
+    fn summary_rule_to_proto(
+        summary: crate::models::rule_match_decision::RuleMatchSummary,
+    ) -> pb::Rule {
+        pb::Rule {
+            created: 0,
+            name: "runtime-match".to_owned(),
+            description: "matched existing runtime rule".to_owned(),
+            enabled: true,
+            precedence: false,
+            nolog: summary.nolog,
+            action: summary.action.to_owned(),
+            duration: "always".to_owned(),
+            operator: None,
+        }
+    }
+
     async fn process_connect_attempt(&self, attempt: ConnectionAttempt) -> Result<()> {
         if Self::is_self_connection(&attempt) {
             debug!(pid = attempt.pid, "accepting self-connection attempt");
@@ -285,13 +315,13 @@ impl VerdictFlow {
             if !allow.nolog {
                 self.stats.on_rule_hit(&rule_name);
                 let conn = pb_conn.take().unwrap_or_else(|| {
-                    ProtoMapperAdapter::to_proto_connection(
+                    ProtoMapperPort::to_proto_connection(
                         &attempt,
                         &proc_info,
                         dst_host.as_deref(),
                     )
                 });
-                let summary_rule = allow.to_summary_rule();
+                let summary_rule = Self::summary_rule_to_proto(allow.to_summary());
                 self.emit_connection_event(conn, Some(summary_rule));
             }
             if allow.allow {
@@ -331,10 +361,11 @@ impl VerdictFlow {
 
         if Self::should_apply_unknown_default(&attempt, config_snapshot.intercept_unknown) {
             let conn = pb_conn.take().unwrap_or_else(|| {
-                ProtoMapperAdapter::to_proto_connection(&attempt, &proc_info, dst_host.as_deref())
+                ProtoMapperPort::to_proto_connection(&attempt, &proc_info, dst_host.as_deref())
             });
             self.emit_connection_event(conn, None);
-            self.account_miss_and_apply_default(attempt.request_id).await;
+            self.account_miss_and_apply_default(attempt.request_id)
+                .await;
             return Ok(());
         }
 
@@ -345,7 +376,7 @@ impl VerdictFlow {
                 "ui ask for connection already in progress; applying default action"
             );
             let conn = pb_conn.take().unwrap_or_else(|| {
-                ProtoMapperAdapter::to_proto_connection(&attempt, &proc_info, dst_host.as_deref())
+                ProtoMapperPort::to_proto_connection(&attempt, &proc_info, dst_host.as_deref())
             });
             self.apply_default_action_on_ui_miss(attempt.request_id, &proc_info, conn)
                 .await;
@@ -353,13 +384,15 @@ impl VerdictFlow {
         };
 
         let client_addr = config_snapshot.client_addr.as_str();
-        let mut client = match ClientService::connect_or_reuse(&config_snapshot, &self.grpc_cache).await {
+        let mut client = match ClientService::connect_or_reuse(&config_snapshot, &self.grpc_cache)
+            .await
+        {
             Ok(client) => client,
             Err(err) => {
                 debug!(request_id = attempt.request_id, addr = %client_addr, "ui connect failed while handling miss; applying default action: {err}");
                 self.grpc_cache.invalidate();
                 let conn = pb_conn.take().unwrap_or_else(|| {
-                    ProtoMapperAdapter::to_proto_connection(
+                    ProtoMapperPort::to_proto_connection(
                         &attempt,
                         &proc_info,
                         dst_host.as_deref(),
@@ -372,7 +405,7 @@ impl VerdictFlow {
             }
         };
         let conn_for_ui = pb_conn.take().unwrap_or_else(|| {
-            ProtoMapperAdapter::to_proto_connection(&attempt, &proc_info, dst_host.as_deref())
+            ProtoMapperPort::to_proto_connection(&attempt, &proc_info, dst_host.as_deref())
         });
         let rule = match client.ask_rule(conn_for_ui).await {
             Ok(rule) => rule,
@@ -380,7 +413,7 @@ impl VerdictFlow {
                 debug!(request_id = attempt.request_id, addr = %client_addr, "ui ask_rule failed while handling miss; applying default action: {err}");
                 self.grpc_cache.invalidate();
                 let conn = pb_conn.take().unwrap_or_else(|| {
-                    ProtoMapperAdapter::to_proto_connection(
+                    ProtoMapperPort::to_proto_connection(
                         &attempt,
                         &proc_info,
                         dst_host.as_deref(),
@@ -393,33 +426,40 @@ impl VerdictFlow {
             }
         };
 
-        if !self
-            .is_decision_epoch_current(decision_key, decision_epoch)
-        {
+        if !self.is_decision_epoch_current(decision_key, decision_epoch) {
             debug!(request_id = attempt.request_id, "stale ui decision ignored");
             let conn = pb_conn.take().unwrap_or_else(|| {
-                ProtoMapperAdapter::to_proto_connection(&attempt, &proc_info, dst_host.as_deref())
+                ProtoMapperPort::to_proto_connection(&attempt, &proc_info, dst_host.as_deref())
             });
             self.apply_default_action_on_ui_miss(attempt.request_id, &proc_info, conn)
                 .await;
             return Ok(());
         }
 
-        let decision = RuleMatchDecision::from_rule(RuleAction::from_name(&rule.action), rule.nolog);
+        let rule_record = rule_record_from_proto(&rule);
+        let decision = RuleMatchDecision::from_rule(rule_record.action, rule_record.nolog);
         self.end_decision_epoch(decision_key, decision_epoch);
-        let ui_rule_name: Arc<str> = Arc::from(rule.name.as_str());
+        self.audit
+            .emit(AuditEvent::hot(AuditEventKind::VerdictAction(
+                VerdictAction::AskRuleRulePersisted {
+                    request_id: attempt.request_id,
+                    rule_name: rule_record.name.clone(),
+                    action: rule_record.action,
+                },
+            )));
+        let ui_rule_name: Arc<str> = Arc::from(rule_record.name.as_str());
         self.enqueue_rule_persist(
             attempt.request_id,
-            rule,
+            rule_record,
             format!("verdict-ui-rule:{}:{}", decision_key, decision_epoch),
         );
 
         if !decision.nolog {
             self.stats.on_rule_hit(&ui_rule_name);
             let conn = pb_conn.take().unwrap_or_else(|| {
-                ProtoMapperAdapter::to_proto_connection(&attempt, &proc_info, dst_host.as_deref())
+                ProtoMapperPort::to_proto_connection(&attempt, &proc_info, dst_host.as_deref())
             });
-            let summary_rule = decision.to_summary_rule();
+            let summary_rule = Self::summary_rule_to_proto(decision.to_summary());
             self.emit_connection_event(conn, Some(summary_rule));
         }
 

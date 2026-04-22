@@ -22,14 +22,12 @@ use crate::{
     services::dns::normalize_dns_host as normalize_dns_host_value,
     utils::{
         command_path::resolve_command_path,
-        systemd_notify::{NotifyState, notify},
         name_parsing::case_folded,
+        systemd_notify::{NotifyState, notify},
     },
     workers::{
         KernelEventDispatch,
-        runtime::control::{
-            WorkerCommandResult, impl_restartable_thread_worker_control,
-        },
+        runtime::control::{WorkerCommandResult, impl_restartable_thread_worker_control},
     },
 };
 
@@ -94,7 +92,8 @@ impl DnsWorkerControl {
         monitor_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
     ) -> Self {
         let worker_shutdown = daemon_shutdown.child_token();
-        let handle = Self::spawn_worker_thread(bus.clone(), worker_shutdown.clone(), monitor_state.clone());
+        let handle =
+            Self::spawn_worker_thread(bus.clone(), worker_shutdown.clone(), monitor_state.clone());
         Self {
             bus,
             daemon_shutdown,
@@ -155,7 +154,11 @@ impl DnsWorkerControl {
             let monitor_bus = bus.clone();
             let monitor_state_clone = monitor_state.clone();
             let monitor_handle = thread::spawn(move || {
-                Self::run_systemd_resolved_monitor(monitor_bus, monitor_shutdown, monitor_state_clone);
+                Self::run_systemd_resolved_monitor(
+                    monitor_bus,
+                    monitor_shutdown,
+                    monitor_state_clone,
+                );
             });
 
             let mut last_mtime: Option<SystemTime> = None;
@@ -192,8 +195,7 @@ impl DnsWorkerControl {
                                 let Ok(addr) = ip.parse() else {
                                     continue;
                                 };
-                                let event =
-                                    KernelEvent::DnsUpdate(DnsPayload::answer(host, addr));
+                                let event = KernelEvent::DnsUpdate(DnsPayload::answer(host, addr));
                                 if matches!(
                                     crate::workers::dispatch_kernel_event_with_backoff(
                                         &bus.kernel_tx,

@@ -1,5 +1,3 @@
-use opensnitch_proto::pb;
-
 use crate::services::subscription::SubscriptionRecord;
 use crate::services::subscription::refresh_targets::{
     has_refresh_targeting, resolve_refresh_targets,
@@ -15,14 +13,14 @@ fn record(id: &str) -> SubscriptionRecord {
 #[test]
 fn blank_request_selectors_are_ignored() {
     let all = vec![record("a"), record("b")];
-    let selected = resolve_refresh_targets(all.clone(), &[pb::Subscription::default()], &[]);
+    let selected = resolve_refresh_targets(all.clone(), &[SubscriptionRecord::default()], &[]);
     assert_eq!(selected.len(), all.len());
 }
 
 #[test]
 fn whitespace_targets_do_not_enable_explicit_targeting() {
     let explicit = has_refresh_targeting(
-        &[pb::Subscription::default()],
+        &[SubscriptionRecord::default()],
         &["   ".to_string(), "".to_string()],
     );
     assert!(!explicit);

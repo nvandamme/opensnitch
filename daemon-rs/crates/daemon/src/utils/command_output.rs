@@ -10,10 +10,7 @@ pub(crate) async fn run_command_checked(bin: &str, args: &[&str], context: &str)
         .with_context(|| format!("{context}: spawn failed"))?;
 
     if !out.status.success() {
-        bail!(
-            "{context} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        bail!("{context} failed: {}", String::from_utf8_lossy(&out.stderr));
     }
 
     Ok(())

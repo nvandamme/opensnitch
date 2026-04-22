@@ -27,7 +27,9 @@ impl NetlinkProcWorkerControl {
         let mut handles = Vec::with_capacity(PROC_EVENT_WORKERS);
 
         for _ in 0..PROC_EVENT_WORKERS {
-            let (tx, rx) = mpsc::sync_channel::<crate::models::proc_event::ProcPidEvent>(PROC_EVENT_CHANNEL_CAPACITY);
+            let (tx, rx) = mpsc::sync_channel::<crate::models::proc_event::ProcPidEvent>(
+                PROC_EVENT_CHANNEL_CAPACITY,
+            );
             let worker_bus = bus.clone();
             let worker_shutdown = shutdown.clone();
             let handle = thread::spawn(move || {
@@ -64,7 +66,9 @@ impl NetlinkProcWorkerControl {
 
     pub fn spawn(bus: Bus, shutdown: CancellationToken) -> JoinHandle<()> {
         thread::spawn(move || {
-            let Some(runtime) = build_current_thread_runtime("failed to initialize proc connector runtime") else {
+            let Some(runtime) =
+                build_current_thread_runtime("failed to initialize proc connector runtime")
+            else {
                 return;
             };
 

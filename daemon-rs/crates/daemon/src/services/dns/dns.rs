@@ -10,7 +10,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 use crate::bus::Bus;
-use crate::models::dns_worker_state::{DnsWorkerState, DnsWorkerKind};
+use crate::models::dns_worker_state::{DnsWorkerKind, DnsWorkerState};
 use crate::services::ebpf::EbpfObjectAvailability;
 use crate::services::lifecycle::{
     EventSubscription, ServiceLifecycle, ServiceMonitorStats, ServiceStatus, StatusSubscription,
@@ -25,11 +25,7 @@ use crate::workers::{
 use super::runtime_lifecycle::DnsLifecycle;
 
 const fn default_dns_cache_capacity() -> usize {
-    if cfg!(test) {
-        8_192
-    } else {
-        4_000_000
-    }
+    if cfg!(test) { 8_192 } else { 4_000_000 }
 }
 
 const DEFAULT_DNS_CACHE_CAPACITY: usize = default_dns_cache_capacity();
@@ -71,7 +67,11 @@ impl DnsRuntime {
         if let Ok(mut st) = self.state.lock() {
             st.worker_kind = DnsWorkerKind::Fallback;
         }
-        vec![Box::new(DnsWorkerControl::new(bus, daemon_shutdown, self.monitor_state.clone()))]
+        vec![Box::new(DnsWorkerControl::new(
+            bus,
+            daemon_shutdown,
+            self.monitor_state.clone(),
+        ))]
     }
 
     pub fn snapshot(&self) -> DnsWorkerState {

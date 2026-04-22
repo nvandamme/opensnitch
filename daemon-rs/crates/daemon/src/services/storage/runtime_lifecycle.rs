@@ -5,7 +5,6 @@ use tokio::sync::watch;
 use super::storage::StorageService;
 use crate::services::lifecycle::{ServiceFactory, ServiceRuntimeControl};
 
-#[derive(Debug)]
 pub(super) struct StorageRuntimeLifecycle {
     singleton: RwLock<StorageService>,
     reload_generation: RwLock<u64>,
@@ -73,7 +72,13 @@ pub(super) fn replace_global_storage_service(next: StorageService) -> StorageSer
 
 #[allow(dead_code)]
 pub(super) fn reload_global_storage_service() -> StorageService {
-    replace_global_storage_service(StorageService::new())
+    let audit = global_storage_service().audit_handle();
+    let verbose_hot_path = global_storage_service().verbose_hot_path_audit_enabled();
+    replace_global_storage_service(
+        StorageService::new()
+            .with_optional_audit(audit)
+            .with_verbose_hot_path_audit(verbose_hot_path),
+    )
 }
 
 impl ServiceFactory for StorageService {

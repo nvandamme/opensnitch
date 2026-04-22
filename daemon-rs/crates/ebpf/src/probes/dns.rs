@@ -3,16 +3,14 @@
 use core::ptr;
 
 use aya_ebpf::{
-    helpers::{
-        bpf_get_current_pid_tgid, bpf_probe_read_user_buf,
-    },
+    helpers::{bpf_get_current_pid_tgid, bpf_probe_read_user_buf},
     macros::{map, uprobe, uretprobe},
     maps::{HashMap, PerCpuArray, RingBuf},
     programs::{ProbeContext, RetProbeContext},
 };
 use opensnitch_ebpf_common::{
     dns::{
-        DnsEvent, ADDRINFO_ARGS_MAX_ENTRIES, AF_INET, AF_INET6, AF_UNRESOLVED,
+        ADDRINFO_ARGS_MAX_ENTRIES, AF_INET, AF_INET6, AF_UNRESOLVED, DnsEvent,
         GETHOSTBYNAME_ARGS_MAX_ENTRIES, HOST_LEN, MAX_IPS, NODE_LEN,
     },
     maps::EVENTS_MAP_MAX_ENTRIES,
@@ -95,16 +93,14 @@ struct GethostbynameArgsCache {
     name: [u8; NODE_LEN],
 }
 
-impl GethostbynameArgsCache {
-}
+impl GethostbynameArgsCache {}
 
 #[map]
 static ADDRINFO_ARGS_HASH: HashMap<u32, AddrInfoArgsCache> =
     HashMap::with_max_entries(ADDRINFO_ARGS_MAX_ENTRIES, 0);
 
 #[map]
-static ADDRINFO_ARGS_SCRATCH: PerCpuArray<AddrInfoArgsCache> =
-    PerCpuArray::with_max_entries(1, 0);
+static ADDRINFO_ARGS_SCRATCH: PerCpuArray<AddrInfoArgsCache> = PerCpuArray::with_max_entries(1, 0);
 
 #[map]
 static GETHOSTBYNAME_ARGS_HASH: HashMap<u32, GethostbynameArgsCache> =
@@ -324,7 +320,9 @@ pub fn uprobe__getaddrinfo(ctx: ProbeContext) -> u32 {
         (*cached).addrinfo_ptr[7] = (addr >> 56) as u8;
     }
 
-    if unsafe { aya_ebpf::helpers::bpf_probe_read_user_str_bytes(node, &mut (*cached).node) }.is_err() {
+    if unsafe { aya_ebpf::helpers::bpf_probe_read_user_str_bytes(node, &mut (*cached).node) }
+        .is_err()
+    {
         return 0;
     }
 
@@ -399,11 +397,7 @@ pub fn uretprobe__getaddrinfo(ctx: RetProbeContext) -> u32 {
             let ipv4 = ai_addr as *const SockAddrIn;
             let sin_addr_ptr = unsafe { ptr::addr_of!((*ipv4).sin_addr) };
             let ret = unsafe {
-                aya_ebpf::helpers::r#gen::bpf_probe_read_user(
-                    ip_ptr.cast(),
-                    4,
-                    sin_addr_ptr.cast(),
-                )
+                aya_ebpf::helpers::r#gen::bpf_probe_read_user(ip_ptr.cast(), 4, sin_addr_ptr.cast())
             };
             if ret != 0 {
                 break;
@@ -440,4 +434,3 @@ pub fn uretprobe__getaddrinfo(ctx: RetProbeContext) -> u32 {
     let _ = ADDRINFO_ARGS_HASH.remove(&tid);
     0
 }
-

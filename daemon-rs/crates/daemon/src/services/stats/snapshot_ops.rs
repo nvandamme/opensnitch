@@ -1,10 +1,17 @@
-use std::sync::atomic::Ordering;
 use opensnitch_proto::pb;
+use std::sync::atomic::Ordering;
 
 use crate::models::connection_state::ConnectionAttempt;
 use crate::models::metrics_snapshot::MetricsSnapshot;
+use crate::services::storage::StorageService;
 
-use super::{internal::{BreakdownCounters, EventsState}, stats::StatsService};
+use super::{
+    internal::{BreakdownCounters, EventsState},
+    stats::StatsService,
+};
+
+const DIAG_STATS_DROPPED_EVENTS_CONTENTION: &str = "diag.stats.dropped_events_contention";
+const DIAG_STORAGE_EVENT_BUS_DROPPED_INGRESS: &str = "diag.storage.event_bus.dropped_ingress";
 
 impl StatsService {
     /// Format `unix_nano` as `"yyyy-mm-dd hh:mm:ss"` without allocating an
@@ -92,6 +99,18 @@ impl StatsService {
             events,
         };
 
+        let mut by_rule = bd.by_rule.map.clone();
+        by_rule.insert(
+            DIAG_STATS_DROPPED_EVENTS_CONTENTION.to_string(),
+            self.counters
+                .dropped_events_contention
+                .load(Ordering::Relaxed),
+        );
+        by_rule.insert(
+            DIAG_STORAGE_EVENT_BUS_DROPPED_INGRESS.to_string(),
+            StorageService::global().dropped_ingress_events_count(),
+        );
+
         MetricsSnapshot {
             stats,
             subscription_stats: self
@@ -99,7 +118,7 @@ impl StatsService {
                 .lock()
                 .expect("subscription stats mutex poisoned")
                 .clone(),
-            by_rule: bd.by_rule.map.clone(),
+            by_rule,
         }
     }
 }

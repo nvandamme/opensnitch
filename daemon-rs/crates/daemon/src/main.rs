@@ -22,6 +22,28 @@ use daemon::CliOverrides;
 ///   --rules-path  <path>   Override the rules directory from config.
 ///   --config-file <path>   Override the config file path.
 ///   --ui-socket   <addr>   Override the UI gRPC socket address.
+///   --auth-mode   <mode>   Override client authorization mode.
+///   --migrate-ownerless-rules        Run one-shot legacy ownerless rule migration.
+///   --migrate-owner-uid <uid>        Target owner UID for migration mode.
+///   --migrate-write                  Persist migration changes (default is dry-run).
+///   --gen-self-signed-server-cert <path>   Generate self-signed server cert and exit.
+///   --gen-self-signed-server-key  <path>   Output private key path for server cert mode.
+///   --gen-self-signed-client-cert <path>   Generate self-signed client cert and exit.
+///   --gen-self-signed-client-key  <path>   Output private key path for client cert mode.
+///   --gen-self-signed-cn <name>            Optional subject CN override.
+///   --gen-self-signed-san <entry>          Optional SAN entry (repeatable; DNS or IP).
+///   --gen-self-signed-days <days>          Optional cert validity period (default 365).
+///
+/// Audit sink flags (additive; any combination may be used):
+///   --audit-sink-file <path>  Append NDJSON audit records to this file path.
+///   --audit-sink-syslog       Enable local syslog as an audit sink.
+///   --audit-sink-log          Enable tracing log-line audit sink (on by default).
+///
+/// Corresponding env vars (lower priority than CLI flags, higher than config file):
+///   OPENSNITCH_AUDIT_SINK_FILE=<path>
+///   OPENSNITCH_AUDIT_SINK_SYSLOG=1
+///   OPENSNITCH_AUDIT_SINK_LOG=1
+///   OPENSNITCH_AUDIT_VERBOSE_HOT_PATH=1
 ///
 /// All other argv tokens (unknown flags, positional args) are silently ignored
 /// so that `cargo run -- --rules-path ...` and direct binary invocations both
@@ -41,16 +63,27 @@ fn parse_cli_overrides() -> CliOverrides {
         };
         match flag.as_str() {
             // Core daemon flags
-            "rules-path"  => overrides.rules_path  = value.map(std::path::PathBuf::from),
+            "rules-path" => overrides.rules_path = value.map(std::path::PathBuf::from),
             "config-file" => overrides.config_file = value.map(std::path::PathBuf::from),
-            "ui-socket"   => overrides.ui_socket   = value,
+            "ui-socket" => overrides.ui_socket = value,
+            "auth-mode" => overrides.auth_mode = value,
+            "migrate-ownerless-rules" => overrides.rule_migration.ownerless_rules = true,
+            "migrate-owner-uid" => overrides.rule_migration.owner_uid = value,
+            "migrate-write" => overrides.rule_migration.write = true,
             // Metrics flags (§7: CLI overrides env vars and metrics.json baseline)
             "metrics-prometheus-addr" => overrides.metrics.prometheus_addr = value,
-            "metrics-push-url"        => overrides.metrics.push_url        = value,
-            "metrics-push-format"     => overrides.metrics.push_format     = value,
-            "metrics-push-job"        => overrides.metrics.push_job        = value,
-            "metrics-push-token"      => overrides.metrics.push_token      = value,
-            "metrics-push-gzip"       => overrides.metrics.push_gzip       = Some(true),
+            "metrics-push-url" => overrides.metrics.push_url = value,
+            "metrics-push-format" => overrides.metrics.push_format = value,
+            "metrics-push-job" => overrides.metrics.push_job = value,
+            "metrics-push-token" => overrides.metrics.push_token = value,
+            "metrics-push-gzip" => overrides.metrics.push_gzip = Some(true),
+            // Audit sink flags (§7: CLI > env > config file)
+            "audit-sink-file" => overrides.audit.sink_file = value.map(std::path::PathBuf::from),
+            "audit-sink-syslog" => overrides.audit.sink_syslog = Some(true),
+            "audit-sink-log" | "audit-sink-log-lines" => {
+                overrides.audit.sink_log_lines = Some(true)
+            }
+            "audit-verbose-hot-path" => overrides.audit.verbose_hot_path = Some(true),
             _ => {}
         }
     }
@@ -59,12 +92,25 @@ fn parse_cli_overrides() -> CliOverrides {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let argv: Vec<String> = std::env::args().collect();
+
     // --check-caps: run kernel capability diagnostic and exit.
     // Handled before logging init so output goes cleanly to stdout/stderr.
-    if std::env::args().any(|a| a == "--check-caps") {
+    if argv.iter().any(|a| a == "--check-caps") {
         let diag = crate::utils::kernel_caps::run();
         diag.print_report();
         std::process::exit(if diag.all_pass { 0 } else { 1 });
+    }
+
+    if let Some(req) = crate::utils::cert_gen::parse_self_signed_request_from_args(&argv[1..])? {
+        crate::utils::cert_gen::generate_self_signed_pair(&req)?;
+        println!(
+            "Generated self-signed {} certificate at {} and key at {}",
+            req.role.as_str(),
+            req.cert_path.display(),
+            req.key_path.display()
+        );
+        std::process::exit(0);
     }
 
     logging::LoggingState::init();

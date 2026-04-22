@@ -14,9 +14,9 @@ use crate::{
     },
     models::command_rpc::ClientCommand,
     services::{
-        client::ClientService, config::ConfigService, firewall::FirewallService,
-        lifecycle::ServiceLifecycle, process::ProcessService, rule::RuleService,
-        stats::StatsService, task,
+        audit::AuditService, client::ClientService, config::ConfigService,
+        firewall::FirewallService, lifecycle::ServiceLifecycle, process::ProcessService,
+        rule::RuleService, stats::StatsService, task,
     },
 };
 
@@ -33,6 +33,7 @@ pub struct CommandFlow {
     reconfigure_proc_workers: Arc<dyn ProcWorkerReconfigurePort>,
     control_proc_workers: Arc<dyn ProcWorkerControlPort>,
     daemon_reload: Arc<dyn DaemonReloadPort>,
+    audit: AuditService,
 }
 
 impl CommandFlow {
@@ -50,6 +51,7 @@ impl CommandFlow {
         reconfigure_proc_workers: Arc<dyn ProcWorkerReconfigurePort>,
         control_proc_workers: Arc<dyn ProcWorkerControlPort>,
         daemon_reload: Arc<dyn DaemonReloadPort>,
+        audit: AuditService,
     ) -> Self {
         Self {
             shutdown,
@@ -64,6 +66,7 @@ impl CommandFlow {
             reconfigure_proc_workers,
             control_proc_workers,
             daemon_reload,
+            audit,
         }
     }
 
@@ -84,11 +87,15 @@ impl CommandFlow {
             reconfigure_proc_workers,
             control_proc_workers,
             daemon_reload,
+            audit,
         } = self;
 
-        let command_control = CommandControlService::default();
-        let rule_command = RuleCommandService::default();
-        let task_command = TaskCommandService::default();
+        let command_control = CommandControlService::new(audit.clone());
+        let rule_command = RuleCommandService::new(
+            crate::services::policy_tx::global_policy_tx().clone(),
+            audit.clone(),
+        );
+        let task_command = TaskCommandService::new(audit.clone());
         tokio::spawn(async move {
             let mut task_runtime = task::TaskRuntime::new(
                 task_runtime.clone(),

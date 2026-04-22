@@ -1,6 +1,4 @@
-use crate::services::ebpf::{
-    EbpfPinDomain, EbpfRuntimeMode, probe_runtime_fallback_chain,
-};
+use crate::services::ebpf::{EbpfPinDomain, EbpfRuntimeMode, probe_runtime_fallback_chain};
 
 #[test]
 fn aya_pin_domain_prefers_managed_then_compat_modes() {

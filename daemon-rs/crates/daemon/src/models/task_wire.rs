@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct LegacyTaskResultPayload {
     #[serde(rename = "Type")]
     pub(crate) type_id: i32,
@@ -19,7 +19,7 @@ impl LegacyTaskResultPayload {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct TaskErrorPayload {
     #[serde(rename = "Task")]
     pub(crate) task: String,

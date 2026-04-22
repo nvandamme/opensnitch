@@ -30,12 +30,18 @@ impl DnsAnswerRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DnsPayload {
     Answers(DnsAnswerRecord),
-    Alias { alias: Arc<str>, host: Arc<str> },
+    Alias {
+        alias: Arc<str>,
+        host: Arc<str>,
+    },
     /// A DNS lookup was attempted but the resolver returned an error.
     /// `error_code` carries the EAI_* value for `getaddrinfo` failures, or
     /// `0` for `gethostbyname` failures (h_errno is not accessible from a
     /// uretprobe without an additional probe hook).
-    NxDomain { host: Arc<str>, error_code: i32 },
+    NxDomain {
+        host: Arc<str>,
+        error_code: i32,
+    },
 }
 
 impl DnsPayload {
@@ -43,7 +49,7 @@ impl DnsPayload {
         Self::Answers(DnsAnswerRecord::from_ip(host, address))
     }
 
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn answers(host: impl Into<Arc<str>>, addresses: Arc<[IpAddr]>) -> Option<Self> {
         DnsAnswerRecord::new(host, addresses).map(Self::Answers)
     }

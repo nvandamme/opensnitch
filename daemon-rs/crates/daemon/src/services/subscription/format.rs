@@ -1,6 +1,6 @@
 use anyhow::Result;
-use opensnitch_proto::pb;
 
+use super::SubscriptionRecord;
 use super::defaults::{DEFAULT_INTERVAL_SECONDS, DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT_SECONDS};
 use crate::utils::list_shape::{
     is_domain_regexps_list_like, is_domains_list_like, is_hosts_file_like, is_ip_list_like,
@@ -83,35 +83,35 @@ pub(crate) fn normalize_format(format: &str) -> String {
     }
 }
 
-pub(super) fn normalize_subscription(mut p: pb::Subscription) -> pb::Subscription {
-    if p.id.is_empty() {
-        p.id = hex_id_from_pair(&p.url, &p.name);
+pub(super) fn normalize_record(mut r: SubscriptionRecord) -> SubscriptionRecord {
+    if r.id.is_empty() {
+        r.id = hex_id_from_pair(&r.url, &r.name);
     }
-    if p.format.is_empty() {
-        p.format = "hosts".to_string();
+    if r.format.is_empty() {
+        r.format = "hosts".to_string();
     } else {
-        p.format = normalize_format(&p.format);
+        r.format = normalize_format(&r.format);
     }
-    if p.filename.is_empty() {
-        p.filename = sanitize_ascii_name(if !p.name.is_empty() { &p.name } else { &p.id });
+    if r.filename.is_empty() {
+        r.filename = sanitize_ascii_name(if !r.name.is_empty() { &r.name } else { &r.id });
     }
-    if p.name.is_empty() {
-        p.name.clone_from(&p.filename);
+    if r.name.is_empty() {
+        r.name.clone_from(&r.filename);
     }
-    if p.interval_seconds == 0 {
-        p.interval_seconds = DEFAULT_INTERVAL_SECONDS;
+    if r.interval_seconds == 0 {
+        r.interval_seconds = DEFAULT_INTERVAL_SECONDS;
     }
-    if p.timeout_seconds == 0 {
-        p.timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
+    if r.timeout_seconds == 0 {
+        r.timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
     }
-    if p.max_bytes == 0 {
-        p.max_bytes = DEFAULT_MAX_BYTES;
+    if r.max_bytes == 0 {
+        r.max_bytes = DEFAULT_MAX_BYTES;
     }
-    if p.status == pb::SubscriptionStatus::Unspecified as i32 {
-        p.status = pb::SubscriptionStatus::Pending as i32;
+    if r.status.is_empty() || r.status == "unspecified" {
+        r.status = "pending".to_string();
     }
-    if p.last_updated.is_empty() {
-        p.last_updated = now_rfc3339_utc();
+    if r.last_updated.is_empty() {
+        r.last_updated = now_rfc3339_utc();
     }
-    p
+    r
 }

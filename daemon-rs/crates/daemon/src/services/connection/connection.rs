@@ -1,11 +1,11 @@
 use crate::models::{
     connection_context::ConnectionContext,
-    connection_worker_state::{ConnectionWorkerState, ConnectionWorkerKind},
     connection_state::ConnectionAttempt,
+    connection_worker_state::{ConnectionWorkerKind, ConnectionWorkerState},
 };
+use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use arc_swap::ArcSwap;
 use tokio_util::sync::CancellationToken;
 
 use crate::bus::Bus;
@@ -53,8 +53,7 @@ impl ConnectionRuntime {
             let snapshot = Arc::clone(&self.bpf_map_snapshot);
             let ct = daemon_shutdown.clone();
             tokio::spawn(async move {
-                let mut interval =
-                    tokio::time::interval(std::time::Duration::from_secs(30));
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
                 loop {
                     tokio::select! {
                         _ = interval.tick() => {

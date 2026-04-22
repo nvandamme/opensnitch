@@ -11,8 +11,6 @@ mod layout;
 #[cfg(feature = "subscriptions")]
 mod operations;
 #[cfg(feature = "subscriptions")]
-mod reply;
-#[cfg(feature = "subscriptions")]
 mod refresh;
 #[cfg(feature = "subscriptions")]
 mod refresh_batch;
@@ -34,6 +32,8 @@ mod refresh_state;
 pub(crate) mod refresh_targets;
 #[cfg(feature = "subscriptions")]
 mod refresh_timing;
+#[cfg(feature = "subscriptions")]
+mod reply;
 mod runtime_lifecycle;
 #[cfg(feature = "subscriptions")]
 pub(crate) mod storage;

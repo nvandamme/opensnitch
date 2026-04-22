@@ -14,13 +14,11 @@ pub(crate) fn header_value(value: Option<&header::HeaderValue>) -> String {
 
 pub(crate) async fn summarize_http_error(status: StatusCode, response: Response) -> String {
     let body = match response.bytes().await {
-        Ok(bytes) => {
-            String::from_utf8_lossy(
-                &bytes[..bytes.len().min(DEFAULT_HTTP_ERROR_BODY_PREVIEW_BYTES)],
-            )
-            .trim()
-            .to_string()
-        }
+        Ok(bytes) => String::from_utf8_lossy(
+            &bytes[..bytes.len().min(DEFAULT_HTTP_ERROR_BODY_PREVIEW_BYTES)],
+        )
+        .trim()
+        .to_string(),
         Err(_) => String::new(),
     };
 

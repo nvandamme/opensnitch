@@ -1,6 +1,7 @@
-use opensnitch_proto::pb;
 use serde::Deserialize;
 use serde_json::Value;
+
+use crate::models::rule_record::RuleRecord;
 
 #[derive(Debug, Deserialize)]
 pub struct IncomingTaskNotification {
@@ -46,19 +47,6 @@ pub struct IncomingSubscription {
     pub enabled: bool,
 }
 
-#[cfg(feature = "subscriptions")]
-impl From<IncomingSubscription> for pb::Subscription {
-    fn from(s: IncomingSubscription) -> Self {
-        pb::Subscription {
-            id: s.id,
-            name: s.name,
-            url: s.url,
-            enabled: s.enabled,
-            ..Default::default()
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum ClientCommand {
     SetInterception {
@@ -71,7 +59,7 @@ pub enum ClientCommand {
     },
     ReloadFirewall {
         notification_id: u64,
-        sys_firewall: Option<pb::SysFirewall>,
+        firewall: Option<crate::models::firewall_config::FirewallConfig>,
     },
     ApplyConfig {
         notification_id: u64,
@@ -79,17 +67,17 @@ pub enum ClientCommand {
     },
     EnableRules {
         notification_id: u64,
-        rules: Vec<pb::Rule>,
+        rules: Vec<RuleRecord>,
     },
     DisableRules {
         notification_id: u64,
-        rules: Vec<pb::Rule>,
+        rules: Vec<RuleRecord>,
     },
     StartTask(TaskNotification),
     StopTask(TaskNotification),
     UpsertRules {
         notification_id: u64,
-        rules: Vec<pb::Rule>,
+        rules: Vec<RuleRecord>,
     },
     DeleteRules {
         notification_id: u64,

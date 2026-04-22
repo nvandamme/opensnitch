@@ -33,7 +33,8 @@ impl DnsService {
         // Failure event: addr_type sentinel + EAI_* code in ip[0..4].
         if addr_type == AF_UNRESOLVED {
             let ip_bytes = sample.get(4..8)?;
-            let error_code = i32::from_ne_bytes([ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]]);
+            let error_code =
+                i32::from_ne_bytes([ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]]);
             let host_bytes = sample.get(20..272)?;
             let host = nul_terminated_utf8_lossy(host_bytes);
             let host = normalize_dns_host(&host)?;
@@ -50,7 +51,12 @@ impl DnsService {
         let host = normalize_dns_host(&host)?;
 
         let ip = if addr_type == AF_INET {
-            IpAddr::V4(Ipv4Addr::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]))
+            IpAddr::V4(Ipv4Addr::new(
+                ip_bytes[0],
+                ip_bytes[1],
+                ip_bytes[2],
+                ip_bytes[3],
+            ))
         } else {
             let mut octets = [0_u8; 16];
             octets.copy_from_slice(ip_bytes);
@@ -64,17 +70,14 @@ impl DnsService {
 impl DnsEbpfEventDeduper {
     pub(crate) fn should_emit(&mut self, payload: &DnsPayload) -> bool {
         match payload {
-            DnsPayload::Answers(record) => record
-                .addresses
-                .first()
-                .is_some_and(|ip| {
-                    Self::should_emit_at(
-                        &mut self.recent_events,
-                        &ip.to_string(),
-                        record.host.as_ref(),
-                        Instant::now(),
-                    )
-                }),
+            DnsPayload::Answers(record) => record.addresses.first().is_some_and(|ip| {
+                Self::should_emit_at(
+                    &mut self.recent_events,
+                    &ip.to_string(),
+                    record.host.as_ref(),
+                    Instant::now(),
+                )
+            }),
             DnsPayload::Alias { alias, host } => Self::should_emit_at(
                 &mut self.recent_events,
                 alias.as_ref(),

@@ -39,10 +39,7 @@ const CHECKS: &[CheckSpec] = &[
     },
     CheckSpec {
         item: "uprobes",
-        patterns: &[
-            "CONFIG_UPROBES=y",
-            "CONFIG_UPROBE_EVENTS=y",
-        ],
+        patterns: &["CONFIG_UPROBES=y", "CONFIG_UPROBE_EVENTS=y"],
         reason: "UPROBES not supported — common error: cannot open uprobe_events",
     },
     CheckSpec {
@@ -142,9 +139,7 @@ impl KernelDiagnostic {
                  /proc/config.gz, or /usr/lib/modules/{ver}/config",
                 ver = self.kernel_version
             );
-            eprintln!(
-                "     See https://github.com/evilsocket/opensnitch/issues/774"
-            );
+            eprintln!("     See https://github.com/evilsocket/opensnitch/issues/774");
         }
 
         for result in &self.checks {

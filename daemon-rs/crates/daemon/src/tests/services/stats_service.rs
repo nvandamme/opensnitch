@@ -1,5 +1,5 @@
 use crate::config::StatsConfig;
-use crate::services::stats::StatsService;
+use crate::services::{stats::StatsService, storage::StorageService};
 use opensnitch_proto::pb;
 
 #[test]
@@ -171,4 +171,23 @@ fn strict_accounting_counts_miss_and_verdict_separately() {
     assert_eq!(snapshot.stats.rule_misses, 1);
     assert_eq!(snapshot.stats.accepted, 1);
     assert_eq!(snapshot.stats.dropped, 0);
+}
+
+#[test]
+fn snapshot_exports_diagnostic_drop_counters() {
+    let stats = StatsService::default();
+    let storage_dropped = StorageService::global().dropped_ingress_events_count();
+
+    let snapshot = stats.snapshot(0);
+
+    assert_eq!(
+        snapshot.by_rule.get("diag.stats.dropped_events_contention"),
+        Some(&stats.dropped_events_contention_count()),
+    );
+    assert_eq!(
+        snapshot
+            .by_rule
+            .get("diag.storage.event_bus.dropped_ingress"),
+        Some(&storage_dropped),
+    );
 }

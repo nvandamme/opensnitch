@@ -6,15 +6,24 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     bus::Bus,
     services::{
-        client::{AlertBuffer, ClientService}, config::ConfigService, connection::ConnectionService,
-        dns::DnsService, firewall::FirewallService, process::ProcessService, rule::RuleService,
-        stats::StatsService, subscription::SubscriptionService, task,
+        audit::AuditService,
+        client::{AlertBuffer, ClientService},
+        config::ConfigService,
+        connection::ConnectionService,
+        dns::DnsService,
+        firewall::FirewallService,
+        process::ProcessService,
+        rule::RuleService,
+        stats::StatsService,
+        subscription::SubscriptionService,
+        task,
     },
     tunables::RuntimeTunables,
 };
 
 mod bootstrap;
 mod kernel_pipeline;
+mod migration;
 mod probes;
 mod proc_workers;
 mod reload;
@@ -28,24 +37,62 @@ pub(crate) use kernel_pipeline::{
     KernelPipeline, KernelPipelineCounters, KernelPipelineDropStats, KernelPipelineIngressStats,
     ProcessKernelEvent,
 };
+#[allow(unused_imports)] // used by tests via crate::daemon::
+pub(crate) use migration::{
+    RuleMigrationDecision, classify_rule_for_ownerless_migration,
+    load_ownerless_rule_migration_plan,
+};
 
 /// CLI overrides parallel to the Go daemon's flag package:
 ///
 ///   --config-file              <path>       Config JSON file (highest priority).
 ///   --rules-path               <path>       Rules directory override.
 ///   --ui-socket                <addr>       UI gRPC address.
+///   --auth-mode                <mode>       Client authorization mode override (legacy|local-only|local+remote).
+///   --migrate-ownerless-rules               Run one-shot legacy ownerless rule migration.
+///   --migrate-owner-uid        <uid>        Target owner UID for migration mode.
+///   --migrate-write                         Persist migration changes (default is dry-run).
 ///   --metrics-prometheus-addr  <host:port>  Prometheus /metrics listen address.
 ///   --metrics-push-url         <url>        Push exporter endpoint.
 ///   --metrics-push-format      <fmt>        Push format (pushgateway|pushgateway-proto|influxdb).
 ///   --metrics-push-job         <name>       Push-gateway job label.
 ///   --metrics-push-token       <token>      Push auth token.
 ///   --metrics-push-gzip                     Enable gzip compression on push bodies.
+///   --audit-sink-file          <path>       Append NDJSON audit records to this file.
+///   --audit-sink-syslog                     Enable local syslog as an audit sink.
+///   --audit-sink-log                        Enable tracing log-line audit sink (default on).
 #[derive(Debug, Default)]
 pub struct CliOverrides {
     pub config_file: Option<std::path::PathBuf>,
-    pub rules_path:  Option<std::path::PathBuf>,
-    pub ui_socket:   Option<String>,
-    pub metrics:     crate::models::metrics_config::MetricsCliOverrides,
+    pub rules_path: Option<std::path::PathBuf>,
+    pub ui_socket: Option<String>,
+    pub auth_mode: Option<String>,
+    pub rule_migration: RuleMigrationCliOverrides,
+    pub metrics: crate::models::metrics_config::MetricsCliOverrides,
+    pub audit: AuditCliOverrides,
+}
+
+#[derive(Debug, Default)]
+pub struct RuleMigrationCliOverrides {
+    pub ownerless_rules: bool,
+    pub owner_uid: Option<String>,
+    pub write: bool,
+}
+
+/// CLI overrides for audit sink selection.
+///
+/// All three sinks are additive: setting any one of these enables/overrides
+/// the config-file setting for that specific sink.
+#[derive(Debug, Default)]
+pub struct AuditCliOverrides {
+    /// Append NDJSON records to this file path.
+    pub sink_file: Option<std::path::PathBuf>,
+    /// Enable syslog sink when `Some(true)`.
+    pub sink_syslog: Option<bool>,
+    /// Enable log-line (tracing) sink when `Some(true)`.
+    pub sink_log_lines: Option<bool>,
+    /// Enable verbose hot-path audit events when `Some(true)`.
+    pub verbose_hot_path: Option<bool>,
 }
 pub(crate) use proc_workers::ProcWorkersRuntime;
 
@@ -63,6 +110,10 @@ pub(crate) struct DaemonRuntime {
     pub(crate) proc_workers: Arc<std::sync::Mutex<ProcWorkersRuntime>>,
     pub(crate) bus: Bus,
     pub(crate) alert_buffer: AlertBuffer,
+    pub(crate) audit: AuditService,
+    /// Active audit event sinks (file / syslog / log-lines), built from
+    /// the resolved `AuditSinkConfig` (config file → env vars → CLI overrides).
+    pub(crate) audit_sinks: crate::services::audit::AuditSinks,
     pub(crate) kernel_pipeline_counters: Arc<KernelPipelineCounters>,
     pub(crate) rules: RuleService,
     pub(crate) connections: ConnectionService,
@@ -115,6 +166,9 @@ impl Daemon {
     const STARTUP_UI_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
     pub async fn start(cli: CliOverrides) -> Result<()> {
+        if cli.rule_migration.ownerless_rules {
+            return Self::run_ownerless_rule_migration(cli).await;
+        }
         let (daemon, rx) = Self::bootstrap(cli).await?;
         daemon.serve(rx).await
     }

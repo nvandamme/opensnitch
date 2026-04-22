@@ -5,146 +5,18 @@ use std::{
 
 use anyhow::{Context, Result};
 
-pub use crate::models::config_runtime::{
-    AskFallbackPolicy, ClientAuthConfig, ClientAuthType, ClientTlsOptions, Config, DefaultAction, DefaultDuration,
-    LoggerSinkConfig, ProcMonitorMethod, StatsConfig,
+use super::{
+    AskFallbackPolicy, AuditSinkConfig, AuthMode, ClientAuthConfig, ClientAuthType,
+    ClientTlsOptions, Config, DefaultAction, DefaultDuration, LoggerSinkConfig, ProcMonitorMethod,
+    StatsConfig,
 };
-use crate::models::{
-    config_storage::{RawConfig, RawLoggerConfig},
-    firewall_state::FirewallBackend,
+use crate::{
+    models::{
+        audit::AuditSeverity, config_storage::RawConfig, firewall_state::FirewallBackend,
+    },
+    services::firewall::parse_firewall_backend,
+    utils::name_parsing::{case_folded, normalized_name},
 };
-use crate::services::firewall::parse_firewall_backend;
-use crate::utils::json_value::object_get_case_insensitive;
-use crate::utils::name_parsing::{case_folded, normalized_name};
-
-impl Default for ClientAuthType {
-    fn default() -> Self {
-        Self::Simple
-    }
-}
-
-impl ClientAuthType {
-    fn parse_from_name(name: &str) -> Self {
-        match normalized_name(name).as_str() {
-            "tls-simple" => Self::TlsSimple,
-            "tls-mutual" => Self::TlsMutual,
-            _ => Self::Simple,
-        }
-    }
-
-    pub fn from_name(name: &str) -> Self {
-        Self::parse_from_name(name)
-    }
-
-    pub fn as_name(self) -> &'static str {
-        match self {
-            Self::Simple => "simple",
-            Self::TlsSimple => "tls-simple",
-            Self::TlsMutual => "tls-mutual",
-        }
-    }
-}
-
-impl From<RawLoggerConfig> for LoggerSinkConfig {
-    fn from(raw: RawLoggerConfig) -> Self {
-        Self {
-            name: raw.name,
-            format: raw.format,
-            protocol: raw.protocol,
-            server: raw.server,
-            write_timeout: raw.write_timeout,
-            connect_timeout: raw.connect_timeout,
-            tag: raw.tag,
-            workers: raw.workers.unwrap_or(0),
-            max_connect_attempts: raw.max_connect_attempts.unwrap_or(0),
-        }
-    }
-}
-
-impl Default for StatsConfig {
-    fn default() -> Self {
-        Self {
-            max_events: 250,
-            max_stats: 25,
-            workers: 6,
-        }
-    }
-}
-
-impl DefaultAction {
-    fn parse_from_name(name: &str) -> Self {
-        match normalized_name(name).as_str() {
-            "reject" => Self::Reject,
-            "drop" | "deny" => Self::Deny,
-            _ => Self::Allow,
-        }
-    }
-
-    pub fn from_name(name: &str) -> Self {
-        Self::parse_from_name(name)
-    }
-
-    pub fn from_raw_config_json(raw_config_json: &str) -> Option<Self> {
-        let raw = serde_json::from_str::<serde_json::Value>(raw_config_json).ok()?;
-        let action = raw
-            .as_object()
-            .and_then(|obj| object_get_case_insensitive(obj, &["DefaultAction"]))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        Some(Self::from_name(action))
-    }
-
-    pub fn allows(self) -> bool {
-        matches!(self, Self::Allow)
-    }
-
-    pub fn rejects(self) -> bool {
-        matches!(self, Self::Reject)
-    }
-}
-
-impl AskFallbackPolicy {
-    fn parse_from_name(name: &str) -> Self {
-        match normalized_name(name).as_str() {
-            "allow" => Self::Allow,
-            "deny" | "drop" => Self::Drop,
-            "default" => Self::DefaultAction,
-            _ => Self::DefaultAction,
-        }
-    }
-
-    pub fn from_name(name: &str) -> Self {
-        Self::parse_from_name(name)
-    }
-}
-
-impl DefaultDuration {
-    fn parse_from_name(name: &str) -> Self {
-        match normalized_name(name).as_str() {
-            "always" => Self::Always,
-            "untilrestart" => Self::Restart,
-            _ => Self::Once,
-        }
-    }
-
-    pub fn from_name(name: &str) -> Self {
-        Self::parse_from_name(name)
-    }
-}
-
-impl ProcMonitorMethod {
-    fn parse_from_name(name: &str) -> Self {
-        match normalized_name(name).as_str() {
-            "audit" => Self::Audit,
-            "ebpf" => Self::Ebpf,
-            _ => Self::Proc,
-        }
-    }
-
-    pub fn from_name(name: &str) -> Self {
-        Self::parse_from_name(name)
-    }
-}
 
 impl Default for Config {
     fn default() -> Self {
@@ -152,6 +24,7 @@ impl Default for Config {
         let rules_path = Self::dev_default_path("daemon/data/rules");
         let firewall_config_path = Self::dev_default_path("daemon/data/system-fw.json");
         let tasks_config_path = Self::dev_default_path("daemon/data/tasks/tasks.json");
+        let network_aliases_path = Self::dev_default_path("daemon/data/network_aliases.json");
 
         Self {
             client_addr: "http://127.0.0.1:50051".to_string(),
@@ -160,7 +33,11 @@ impl Default for Config {
             log_micro: false,
             log_file: None,
             loggers: Vec::new(),
+            auth_mode: AuthMode::Legacy,
             client_auth: ClientAuthConfig::default(),
+            local_control_allowed_principals: None,
+            local_control_allowed_group_gids: None,
+            remote_principal_bindings: None,
             rules_enable_checksums: false,
             default_action: DefaultAction::Allow,
             ask_timeout_policy: AskFallbackPolicy::DefaultAction,
@@ -174,11 +51,13 @@ impl Default for Config {
             firewall_queue_bypass: true,
             firewall_config_path,
             rules_path,
+            network_aliases_path,
             tasks_config_path,
             stats: StatsConfig::default(),
             raw_json: "{}".to_string(),
             config_path,
             audit_socket_path: PathBuf::from("/var/run/audispd_events"),
+            audit_sinks: AuditSinkConfig::default(),
             flush_conns_on_start: true,
             gc_percent: None,
         }
@@ -211,6 +90,7 @@ impl Config {
             "authentication" => Some("Authentication"),
             "logfile" => Some("LogFile"),
             "loggers" => Some("Loggers"),
+            "mode" => Some("Mode"),
             "type" => Some("Type"),
             "tlsoptions" => Some("TLSOptions"),
             "cacert" => Some("CACert"),
@@ -220,6 +100,18 @@ impl Config {
             "clientkey" => Some("ClientKey"),
             "clientauthtype" => Some("ClientAuthType"),
             "skipverify" => Some("SkipVerify"),
+            "allowedprincipals" => Some("AllowedPrincipals"),
+            "allowedusers" => Some("AllowedUsers"),
+            "remoteprincipalbindings" => Some("RemotePrincipalBindings"),
+            "certfingerprint" => Some("CertFingerprint"),
+            "certsubject" => Some("CertSubject"),
+            "certsan" => Some("CertSAN"),
+            "localprincipal" => Some("LocalPrincipal"),
+            "localuser" => Some("LocalUser"),
+            "capabilities" => Some("Capabilities"),
+            "allowedgroups" => Some("AllowedGroups"),
+            "uid" => Some("UID"),
+            "gid" => Some("GID"),
             "name" => Some("Name"),
             "format" => Some("Format"),
             "protocol" => Some("Protocol"),
@@ -234,7 +126,13 @@ impl Config {
             "queuebypass" => Some("QueueBypass"),
             "path" => Some("Path"),
             "enablechecksums" => Some("EnableChecksums"),
+            "networkaliasesfile" => Some("NetworkAliasesFile"),
             "audispsocketpath" => Some("AudispSocketPath"),
+            "sinkfile" => Some("SinkFile"),
+            "sinksyslog" => Some("SinkSyslog"),
+            "sinkloglines" => Some("SinkLogLines"),
+            "verbosehotpath" => Some("VerboseHotPath"),
+            "minseverity" => Some("MinSeverity"),
             "modulespath" => Some("ModulesPath"),
             "maxevents" => Some("MaxEvents"),
             "maxstats" => Some("MaxStats"),
@@ -293,7 +191,9 @@ impl Config {
     ///   2. `OPENSNITCH_CONFIG_FILE` env var
     ///   3. `/etc/opensnitchd/default-config.json` if it exists
     ///   4. Dev-tree fallback `daemon/data/default-config.json`
-    pub fn load_from_default_locations_with_override(cli_path: Option<&std::path::Path>) -> Result<Self> {
+    pub fn load_from_default_locations_with_override(
+        cli_path: Option<&std::path::Path>,
+    ) -> Result<Self> {
         let env_path = std::env::var_os("OPENSNITCH_CONFIG_FILE").map(PathBuf::from);
         let cli_path = cli_path.and_then(|p| p.exists().then(|| p.to_path_buf()));
         let default_path = PathBuf::from("/etc/opensnitchd/default-config.json");
@@ -323,6 +223,12 @@ impl Config {
         let normalized_value = Self::normalize_config_json_keys(parsed_value);
         let raw: RawConfig = serde_json::from_value(normalized_value)
             .with_context(|| format!("failed to parse config file {}", path.display()))?;
+        let local_control_allowed_principals =
+            Self::parse_local_control_allowed_principals(&raw.server.authentication);
+        let local_control_allowed_group_gids =
+            Self::parse_local_control_allowed_group_gids(&raw.server.authentication);
+        let remote_principal_bindings =
+            Self::parse_remote_principal_bindings(&raw.server.authentication);
 
         Ok(Self {
             stats: StatsConfig {
@@ -354,6 +260,7 @@ impl Config {
                 .into_iter()
                 .map(LoggerSinkConfig::from)
                 .collect(),
+            auth_mode: AuthMode::from_name(&raw.server.authentication.mode),
             client_auth: ClientAuthConfig {
                 auth_type: ClientAuthType::from_name(&raw.server.authentication.r#type),
                 tls_options: ClientTlsOptions {
@@ -371,6 +278,9 @@ impl Config {
                         .unwrap_or(false),
                 },
             },
+            local_control_allowed_principals,
+            local_control_allowed_group_gids,
+            remote_principal_bindings,
             rules_enable_checksums: raw.rules.enable_checksums.unwrap_or(false),
             default_action: DefaultAction::from_name(&raw.default_action),
             ask_timeout_policy: AskFallbackPolicy::from_name(
@@ -402,6 +312,10 @@ impl Config {
             flush_conns_on_start: raw.internal.flush_conns_on_start.unwrap_or(true),
             gc_percent: raw.internal.gc_percent,
             rules_path: Self::resolve_runtime_path(&raw.rules.path, "daemon/data/rules"),
+            network_aliases_path: Self::resolve_runtime_path(
+                &raw.rules.network_aliases_file,
+                "daemon/data/network_aliases.json",
+            ),
             tasks_config_path: Self::resolve_runtime_path(
                 &raw.tasks_options.config_path,
                 "daemon/data/tasks/tasks.json",
@@ -413,13 +327,65 @@ impl Config {
             } else {
                 PathBuf::from(raw.audit.audisp_socket_path.trim())
             },
+            audit_sinks: AuditSinkConfig {
+                sink_file: {
+                    let v = raw.audit.sink_file.trim();
+                    if v.is_empty() {
+                        None
+                    } else {
+                        Some(PathBuf::from(v))
+                    }
+                },
+                sink_syslog: raw.audit.sink_syslog.unwrap_or(false),
+                sink_log_lines: raw.audit.sink_log_lines.unwrap_or(true),
+                verbose_hot_path: raw.audit.verbose_hot_path.unwrap_or(false),
+                min_severity: Self::parse_audit_min_severity(raw.audit.min_severity.as_str()),
+            },
         })
+    }
+
+    fn parse_audit_min_severity(raw: &str) -> AuditSeverity {
+        match normalized_name(raw) {
+            name if name == "error" => AuditSeverity::Error,
+            name if name == "warn" || name == "warning" => AuditSeverity::Warning,
+            name if name == "info" => AuditSeverity::Info,
+            name if name == "debug" => AuditSeverity::Debug,
+            _ => AuditSeverity::Debug,
+        }
     }
 
     pub fn with_client_addr_override(mut self, client_addr: Option<&str>) -> Self {
         if let Some(client_addr) = client_addr.filter(|value| !value.is_empty()) {
             self.client_addr = client_addr.to_string();
         }
+        self
+    }
+
+    /// Override `auth_mode` with the value of `--auth-mode` from the CLI.
+    ///
+    /// Accepted values (case-insensitive):
+    /// - `legacy`
+    /// - `local-only` (`local_only`, `localonly`)
+    /// - `local+remote` (`local-remote`, `local_remote`, `localremote`)
+    pub fn with_auth_mode_override(mut self, auth_mode: Option<&str>) -> Self {
+        let Some(auth_mode) = auth_mode.filter(|value| !value.trim().is_empty()) else {
+            return self;
+        };
+
+        match normalized_name(auth_mode).as_str() {
+            "legacy" => self.auth_mode = AuthMode::Legacy,
+            "local-only" | "local_only" | "localonly" => self.auth_mode = AuthMode::LocalOnly,
+            "local+remote" | "local-remote" | "local_remote" | "localremote" => {
+                self.auth_mode = AuthMode::LocalRemoteCapabilities
+            }
+            _ => {
+                tracing::warn!(
+                    auth_mode,
+                    "ignoring unsupported --auth-mode value; keeping config-defined mode"
+                );
+            }
+        }
+
         self
     }
 

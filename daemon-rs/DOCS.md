@@ -141,9 +141,16 @@ On SIGHUP the daemon reloads:
 - `default-config.json` (rules path, firewall backend, logging, etc.)
 - Rule files from the configured rules directory
 - Firewall rules
+- Rule match caches, including network aliases loaded from `network_aliases.json`
 - `metrics.json` — Prometheus scrape server is restarted on address change (see
   [Metrics Export → Hot-reload](#metrics-export) below); push exporter config changes
   require a daemon restart.
+
+Firewall-triggered cache refresh behavior:
+
+- Explicit firewall reload commands rebuild the rule match caches after firewall application succeeds.
+- nftables `NFNLGRP_NFTABLES` netlink events rebuild the rule match caches after the firewall drift check completes.
+- Periodic drift-heal recovery rebuilds the rule match caches only when recovery actually reapplies firewall state.
 
 ### Logging
 
@@ -192,6 +199,17 @@ Common examples:
 - `OPENSNITCH_TUNE_NETLINK_RECOVERY_POLL_INTERVAL_MS`
 - `OPENSNITCH_TUNE_NFQUEUE_OVERLOAD_POLICY`
 
+Rules-path related config fields:
+
+- `Rules.Path` controls the rule directory.
+- `Rules.NetworkAliasesFile` controls the alias-definition file used to populate `dest.network` / `src.network` alias matches.
+
+`NetworkAliasesFile` resolution follows the loaded config first, then the service default fallback chain:
+
+1. explicit `Rules.NetworkAliasesFile` from config
+2. `/etc/opensnitchd/network_aliases.json`
+3. repository dev fallback under `daemon/data/network_aliases.json`
+
 ### Policy fallback fields
 
 The daemon runtime config includes these policy-related fields:
@@ -213,12 +231,60 @@ Important behavior:
 - `AskTimeoutPolicy` is a daemon safeguard for UI-miss conditions only (UI connect failure, AskRule RPC failure, stale/discarded decision).
 - If the UI returns a concrete rule, that UI rule remains authoritative.
 - In mixed Rust-daemon + Python-UI deployments, Python UI timeout behavior may still default to deny unless UI default action is explicitly changed.
+- Control-plane authorization is separate from verdict fallback: rejecting a privileged UI mutation does not by itself change packet verdict mode. `fail-open` keeps existing UI-miss/default-action fallback behavior, while `drop-fast` keeps strict miss accounting and non-blocking fail-closed packet-path behavior.
 
 ### Multi-user and mutation safety
 
 - Connected-session precedence is deterministic: control session first, otherwise principal-rank ordering.
 - Rule/firewall/control mutations run through a shared transactional coordinator with rollback and idempotency dedup.
 - Verdict flow uses per-connection decision arbitration and async rule persistence so packet verdict latency stays low while durable policy writes remain transactional.
+
+### Control-plane authorization
+
+The daemon is designed as a background system service, not as a desktop prompt authority. That matters for elevation: the daemon may validate local identity, classify commands, and require elevated authorization for host-wide mutations, but it should defer the ultimate interactive elevation decision to host authorization backends.
+
+`Server.Authentication.Mode` controls which clients may issue privileged UI notifications:
+
+- `legacy`: compatibility mode. Any connected UI can issue privileged commands. The daemon logs a startup warning because this keeps the historical unrestricted control boundary.
+- `local-only`: hardened local mode. Remote privileged notifications are denied. Local Unix peers and loopback TCP peers must satisfy the configured local principal policy; if no explicit local principal/group policy is configured, the daemon falls back to `root` only and logs a warning at startup.
+- `local+remote`: reserved rollout target for future remote capability tokens. Current builds still deny remote privileged notifications and log a startup warning that behavior currently matches `local-only`.
+
+Local principal policy semantics in hardened modes:
+
+- UID is the authenticated local identity anchor.
+- `AllowedPrincipals` entries still carry `UID` and `GID`, but the `GID` field is treated as a coarse group-membership selector for that UID, not as independent proof of owner scope.
+- `AllowedGroups` likewise narrows admission by broad primary or supplementary group membership only; owner-scoped rule and firewall mutations are still proven against the caller UID.
+- `AllowedPrincipals` / `AllowedGroups` are supplementary authorization policy gates over OS-derived identity, not an independent identity authority.
+
+Owner-scope enforcement in hardened modes is conservative:
+
+- Local `root` retains full privileged control.
+- Non-root local clients may mutate rules only when every submitted rule payload is provably scoped to that same local UID via `user.id` or `user.name` operands.
+- GID owner scope is also accepted for non-root local clients when payload owner selectors use `user.gid` and the authenticated caller UID is a member of that group, with membership resolved via syscall-backed account/group lookup (`getpwuid` + `getgrouplist`) rather than ad-hoc file parsing.
+- To preserve Python UI compatibility, the daemon transparently injects `user.id = <caller uid>` into compatible incoming local rule mutations when the UI omitted owner scope and no conflicting owner selector is present.
+- `CHANGE_RULE` payloads in hardened modes now require explicit operand semantics (non-empty operator operands); payloads without operands are rejected as invalid mutation data.
+- `ENABLE_RULE` / `DISABLE_RULE` / `DELETE_RULE` keep legacy stub compatibility (name + minimal fields). In hardened modes, authorization resolves those stubs against the currently stored rule by name; if the stored rule is provably owner-scoped to the caller UID, the operation is treated as user-scoped and does not require elevation.
+- Global controls such as daemon shutdown, config changes, interception toggles, log-level changes, and firewall enable/disable remain elevated and are rejected for non-root clients in hardened modes.
+- Firewall reload payloads are accepted for non-root clients only when the payload is an explicit per-UID rule set, for example iptables owner matches such as `--uid-owner <uid>` or nftables-style `meta skuid <uid>`. For compatible local payloads, the daemon may inject `-m owner --uid-owner <uid>` for iptables-style rules or append a `meta skuid == <uid>` expression for nft-style statement payloads when owner scope is absent; conflicting owner tokens, chain/table/policy edits, and ambiguous system firewall payloads are rejected.
+- Firewall reload owner scope also accepts group selectors (`--gid-owner <gid>` / `meta skgid <gid>`) when the authenticated caller UID is a member of that group, using the same syscall-backed membership resolution.
+- Nested `FwChain.rules` payloads remain elevated-required in hardened modes even when individual inner rules carry owner matches, because chain-bearing payloads can create or reshape chain metadata (`family`, `table`, `hook`, `priority`, `policy`, `type`) and are therefore treated as global firewall policy mutations rather than local owner-scoped rule updates.
+- Authorization audit behavior: denied privileged notifications emit warning logs with mode and reason; privileged notifications allowed under `legacy` emit explicit warning-level compatibility audit logs.
+- Existing loaded ownerless rules remain a migration concern: in hardened modes they need explicit arbitration before the daemon treats them as user-scoped, so fallback compatibility stays predictable and auditable.
+
+Elevation backend guidance:
+
+- Local interactive elevation should be UI-mediated and resolved by the host authorization stack, typically `polkit`/`pkexec` or an equivalent backend.
+- The Python UI, or a future UI client, is the place where an interactive elevation prompt may ultimately surface.
+- The daemon should not implement its own desktop password prompt or treat coarse admin-group membership alone as a completed elevation grant.
+- For remote/server-mode elevation, a dedicated authorization RPC and backend-issued short-lived grant remain the intended direction.
+
+Legacy ownerless rule migration guidance:
+
+- Existing ownerless rules are not silently reassigned during normal daemon startup.
+- If an operator wants to migrate legacy ownerless rules into explicit owner-scoped policy, that should happen through an explicit one-shot migration mode, not ordinary background-service operation.
+- The intended shape is a dedicated migration entrypoint with an explicit target owner UID plus dry-run/report support before any write is committed.
+- The daemon must not infer that the currently connected Python UI user owns every legacy ownerless rule.
+- Implemented CLI shape: `--migrate-ownerless-rules --migrate-owner-uid <uid>` runs a report-only dry-run; add `--migrate-write` to persist eligible rewrites. Write mode aborts if ambiguous or conflicting legacy rules are present.
 
 ### default-config.json field reference
 
@@ -230,6 +296,10 @@ case-insensitive on the wire.
 | `Server.Address` | string | `unix:///tmp/osui.sock` | gRPC listen address for UI connections |
 | `Server.LogFile` | string | *(stderr)* | Path for daemon log output |
 | `Server.Authentication.Type` | string | `simple` | `simple` · `tls-simple` · `tls-mutual` |
+| `Server.Authentication.Mode` | string | `legacy` | `legacy` · `local-only` · `local+remote` |
+| `Server.Authentication.AllowedPrincipals` | array | — | Local principal allowlist. Each entry is an object with `UID` and `GID`; `UID` anchors the local principal identity and `GID` narrows admission by coarse group membership for that UID in hardened modes. |
+| `Server.Authentication.AllowedUsers` | array | — | Username aliases resolved through libc/NSS into `AllowedPrincipals` at load time. |
+| `Server.Authentication.AllowedGroups` | array | — | Group-name aliases resolved through libc/NSS; matched against peer primary or supplementary group membership in hardened modes. |
 | `Server.Authentication.TLSOptions.CACert` | string | — | CA cert path (TLS modes) |
 | `Server.Authentication.TLSOptions.ServerCert` | string | — | Server cert path |
 | `Server.Authentication.TLSOptions.ServerKey` | string | — | Server key path |
@@ -295,7 +365,7 @@ The file and all its fields are optional; absent fields disable the correspondin
 `FwOptions.ConfigPath` in `default-config.json`.  The daemon monitors the file and
 reloads it on change.  The top-level structure is:
 
-```
+```json
 {
   "Enabled": bool,       // master switch — false disables all system rules
   "Version": int,        // schema version (currently 1)
@@ -521,6 +591,7 @@ any file change.
 #### Examples
 
 **Simple allow — localhost (precedence, nolog):**
+
 ```json
 {
   "name": "000-allow-localhost",
@@ -540,6 +611,7 @@ any file change.
 ```
 
 **Regexp deny — block all connections by process path pattern:**
+
 ```json
 {
   "name": "deny-telemetry-by-path",
@@ -558,6 +630,7 @@ any file change.
 ```
 
 **Network — block connections to a CIDR range:**
+
 ```json
 {
   "name": "deny-rfc1918-dst",
@@ -575,6 +648,7 @@ any file change.
 ```
 
 **Range — allow a port range:**
+
 ```json
 {
   "name": "allow-ephemeral-ports",
@@ -592,6 +666,7 @@ any file change.
 ```
 
 **List — AND multiple conditions (process + port):**
+
 ```json
 {
   "name": "allow-firefox-dns",
@@ -625,6 +700,7 @@ any file change.
 ```
 
 **Lists — block by domain blocklist directory:**
+
 ```json
 {
   "name": "deny-ads-domains",
@@ -830,7 +906,8 @@ present.  Integer fields use the `i` suffix.  Tag values are escaped per the lin
 spec (comma, space, equals, backslash).  `Authorization: Token <token>` when token is set.
 
 Example InfluxDB v2 write URL:
-```
+
+```text
 http://influxdb:8086/api/v2/write?bucket=opensnitch&org=myorg
 ```
 

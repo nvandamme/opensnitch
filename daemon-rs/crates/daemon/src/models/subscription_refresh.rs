@@ -1,7 +1,5 @@
 #![cfg_attr(not(feature = "subscriptions"), allow(dead_code))]
 
-use opensnitch_proto::pb;
-
 use crate::models::subscription_storage::SubscriptionRecord;
 
 pub(crate) struct RefreshSelection {
@@ -14,7 +12,7 @@ pub(crate) struct RefreshBatchResult {
     pub unchanged: usize,
     pub skipped: usize,
     pub errors: Vec<String>,
-    pub updated: Vec<pb::Subscription>,
+    pub updated: Vec<SubscriptionRecord>,
     pub sync_layout: bool,
 }
 

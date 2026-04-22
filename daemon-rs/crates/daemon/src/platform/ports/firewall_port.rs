@@ -1,13 +1,10 @@
-use std::{
-    future::Future,
-    pin::Pin,
-    time::Duration,
-};
+use std::{future::Future, pin::Pin, time::Duration};
 
 use anyhow::{Result, anyhow};
 use opensnitch_proto::pb;
 use tokio::time::timeout;
 
+use crate::models::firewall_config::FirewallConfig;
 use crate::platform::adapters::{
     firewall_iptables::FirewallIptablesAdapter, firewall_nft::FirewallNftAdapter,
     firewall_nft_netlink::FirewallNftNetlinkAdapter,
@@ -101,12 +98,12 @@ pub(crate) trait FirewallPlatformPort {
     ) -> Pin<Box<dyn Future<Output = Result<InterceptionHealth>> + Send>>;
 
     fn apply_system_firewall<'a>(
-        sysfw: &'a pb::SysFirewall,
+        sysfw: &'a FirewallConfig,
         queue_num: u16,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
     fn clear_system_firewall<'a>(
-        sysfw: &'a pb::SysFirewall,
+        sysfw: &'a FirewallConfig,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 }
 
@@ -168,9 +165,7 @@ impl FirewallPlatformPort for NftablesFirewallPort {
                 .await
                 {
                     Ok(valid) => return Ok(valid),
-                    Err(err) => {
-                        mark_nft_netlink_fallback("nftables netlink health check", &err)
-                    }
+                    Err(err) => mark_nft_netlink_fallback("nftables netlink health check", &err),
                 }
             }
 
@@ -197,53 +192,49 @@ impl FirewallPlatformPort for NftablesFirewallPort {
     }
 
     fn apply_system_firewall<'a>(
-        sysfw: &'a pb::SysFirewall,
+        sysfw: &'a FirewallConfig,
         queue_num: u16,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        let sysfw_pb = pb::SysFirewall::from(sysfw);
         Box::pin(async move {
             if nft_netlink_experiment_enabled() && nft_netlink_available() {
                 match with_nft_netlink_timeout(
                     "nftables system firewall apply",
-                    FirewallNftNetlinkAdapter::apply_system_firewall(sysfw, queue_num),
+                    FirewallNftNetlinkAdapter::apply_system_firewall(&sysfw_pb, queue_num),
                 )
                 .await
                 {
                     Ok(()) => return Ok(()),
                     Err(err) => {
-                        mark_nft_netlink_fallback(
-                            "nftables netlink system firewall apply",
-                            &err,
-                        )
+                        mark_nft_netlink_fallback("nftables netlink system firewall apply", &err)
                     }
                 }
             }
 
-            FirewallNftAdapter::apply_system_firewall(sysfw, queue_num).await
+            FirewallNftAdapter::apply_system_firewall(&sysfw_pb, queue_num).await
         })
     }
 
     fn clear_system_firewall<'a>(
-        sysfw: &'a pb::SysFirewall,
+        sysfw: &'a FirewallConfig,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        let sysfw_pb = pb::SysFirewall::from(sysfw);
         Box::pin(async move {
             if nft_netlink_experiment_enabled() && nft_netlink_available() {
                 match with_nft_netlink_timeout(
                     "nftables system firewall clear",
-                    FirewallNftNetlinkAdapter::clear_system_firewall(sysfw),
+                    FirewallNftNetlinkAdapter::clear_system_firewall(&sysfw_pb),
                 )
                 .await
                 {
                     Ok(()) => return Ok(()),
                     Err(err) => {
-                        mark_nft_netlink_fallback(
-                            "nftables netlink system firewall clear",
-                            &err,
-                        )
+                        mark_nft_netlink_fallback("nftables netlink system firewall clear", &err)
                     }
                 }
             }
 
-            FirewallNftAdapter::clear_system_firewall(sysfw).await
+            FirewallNftAdapter::clear_system_firewall(&sysfw_pb).await
         })
     }
 }
@@ -292,15 +283,17 @@ impl FirewallPlatformPort for IptablesFirewallPort {
     }
 
     fn apply_system_firewall<'a>(
-        sysfw: &'a pb::SysFirewall,
+        sysfw: &'a FirewallConfig,
         _queue_num: u16,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-        Box::pin(async move { FirewallIptablesAdapter::apply_system_firewall(sysfw).await })
+        let sysfw_pb = pb::SysFirewall::from(sysfw);
+        Box::pin(async move { FirewallIptablesAdapter::apply_system_firewall(&sysfw_pb).await })
     }
 
     fn clear_system_firewall<'a>(
-        sysfw: &'a pb::SysFirewall,
+        sysfw: &'a FirewallConfig,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-        Box::pin(async move { FirewallIptablesAdapter::clear_system_firewall(sysfw).await })
+        let sysfw_pb = pb::SysFirewall::from(sysfw);
+        Box::pin(async move { FirewallIptablesAdapter::clear_system_firewall(&sysfw_pb).await })
     }
 }

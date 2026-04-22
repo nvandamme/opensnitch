@@ -232,10 +232,13 @@ fn client_accepts_gzip(accept_encoding: Option<&str>) -> bool {
 /// Gzip-compress `data`.  Returns `None` on allocation / I/O failure so the
 /// caller can fall back to uncompressed output.
 pub(crate) fn gzip_compress(data: &[u8]) -> Option<Vec<u8>> {
-    use flate2::write::GzEncoder;
     use flate2::Compression;
+    use flate2::write::GzEncoder;
     use std::io::Write as _;
-    let mut enc = GzEncoder::new(Vec::with_capacity(data.len() / 2 + 20), Compression::default());
+    let mut enc = GzEncoder::new(
+        Vec::with_capacity(data.len() / 2 + 20),
+        Compression::default(),
+    );
     enc.write_all(data).ok()?;
     enc.finish().ok()
 }
@@ -403,43 +406,114 @@ fn render_prometheus_text(s: &CompactStats) -> String {
     let mut buf = String::with_capacity(4096);
 
     // Counters (cumulative, _total suffix)
-    counter(&mut buf, "opensnitch_connections_total",
-        "Total network connections intercepted", s.connections);
-    counter(&mut buf, "opensnitch_accepted_total",
-        "Total connections accepted (including DNS responses)", s.accepted);
-    counter(&mut buf, "opensnitch_dropped_total",
-        "Total connections dropped", s.dropped);
-    counter(&mut buf, "opensnitch_dns_responses_total",
-        "Total DNS responses tracked", s.dns_responses);
-    counter(&mut buf, "opensnitch_ignored_total",
-        "Total connections ignored", s.ignored);
-    counter(&mut buf, "opensnitch_rule_hits_total",
-        "Total rule matches", s.rule_hits);
-    counter(&mut buf, "opensnitch_rule_misses_total",
-        "Total rule misses (default action applied)", s.rule_misses);
+    counter(
+        &mut buf,
+        "opensnitch_connections_total",
+        "Total network connections intercepted",
+        s.connections,
+    );
+    counter(
+        &mut buf,
+        "opensnitch_accepted_total",
+        "Total connections accepted (including DNS responses)",
+        s.accepted,
+    );
+    counter(
+        &mut buf,
+        "opensnitch_dropped_total",
+        "Total connections dropped",
+        s.dropped,
+    );
+    counter(
+        &mut buf,
+        "opensnitch_dns_responses_total",
+        "Total DNS responses tracked",
+        s.dns_responses,
+    );
+    counter(
+        &mut buf,
+        "opensnitch_ignored_total",
+        "Total connections ignored",
+        s.ignored,
+    );
+    counter(
+        &mut buf,
+        "opensnitch_rule_hits_total",
+        "Total rule matches",
+        s.rule_hits,
+    );
+    counter(
+        &mut buf,
+        "opensnitch_rule_misses_total",
+        "Total rule misses (default action applied)",
+        s.rule_misses,
+    );
 
     // Gauges
-    gauge(&mut buf, "opensnitch_rules",
-        "Current number of loaded rules", s.rules);
-    gauge(&mut buf, "opensnitch_uptime_seconds",
-        "Daemon uptime in seconds", s.uptime);
+    gauge(
+        &mut buf,
+        "opensnitch_rules",
+        "Current number of loaded rules",
+        s.rules,
+    );
+    gauge(
+        &mut buf,
+        "opensnitch_uptime_seconds",
+        "Daemon uptime in seconds",
+        s.uptime,
+    );
     subscription_gauges(&mut buf, s.subscription_stats.as_ref());
 
     // Breakdown maps as gauge with label
-    labeled_gauge(&mut buf, "opensnitch_connections_by_proto",
-        "Connections by transport protocol", "proto", &s.by_proto);
-    labeled_gauge(&mut buf, "opensnitch_connections_by_address",
-        "Connections by remote address", "address", &s.by_address);
-    labeled_gauge(&mut buf, "opensnitch_connections_by_host",
-        "Connections by remote host", "host", &s.by_host);
-    labeled_gauge(&mut buf, "opensnitch_connections_by_port",
-        "Connections by remote port", "port", &s.by_port);
-    labeled_gauge(&mut buf, "opensnitch_connections_by_uid",
-        "Connections by user UID", "uid", &s.by_uid);
-    labeled_gauge(&mut buf, "opensnitch_connections_by_executable",
-        "Connections by executable", "executable", &s.by_executable);
-    labeled_gauge(&mut buf, "opensnitch_rule_hits_by_rule",
-        "Rule hits by rule name", "rule", &s.by_rule);
+    labeled_gauge(
+        &mut buf,
+        "opensnitch_connections_by_proto",
+        "Connections by transport protocol",
+        "proto",
+        &s.by_proto,
+    );
+    labeled_gauge(
+        &mut buf,
+        "opensnitch_connections_by_address",
+        "Connections by remote address",
+        "address",
+        &s.by_address,
+    );
+    labeled_gauge(
+        &mut buf,
+        "opensnitch_connections_by_host",
+        "Connections by remote host",
+        "host",
+        &s.by_host,
+    );
+    labeled_gauge(
+        &mut buf,
+        "opensnitch_connections_by_port",
+        "Connections by remote port",
+        "port",
+        &s.by_port,
+    );
+    labeled_gauge(
+        &mut buf,
+        "opensnitch_connections_by_uid",
+        "Connections by user UID",
+        "uid",
+        &s.by_uid,
+    );
+    labeled_gauge(
+        &mut buf,
+        "opensnitch_connections_by_executable",
+        "Connections by executable",
+        "executable",
+        &s.by_executable,
+    );
+    labeled_gauge(
+        &mut buf,
+        "opensnitch_rule_hits_by_rule",
+        "Rule hits by rule name",
+        "rule",
+        &s.by_rule,
+    );
 
     buf
 }
@@ -493,17 +567,60 @@ fn escape_label_value(s: &str) -> String {
 ///   opensnitch_subscription_rule_info{rule=...,subscription=...}  (one row per rule×subscription)
 fn subscription_gauges(buf: &mut String, sub: Option<&pb::SubscriptionStatistics>) {
     let Some(s) = sub else { return };
-    gauge(buf, "opensnitch_subscription_total",    "Total configured subscriptions",                     s.total);
-    gauge(buf, "opensnitch_subscription_ready",    "Subscriptions in READY state",                      s.ready);
-    gauge(buf, "opensnitch_subscription_error",    "Subscriptions in ERROR state",                      s.error);
-    gauge(buf, "opensnitch_subscription_refresh_count",  "Cumulative successful refresh downloads",     s.refresh_count);
-    gauge(buf, "opensnitch_subscription_refresh_errors", "Cumulative refresh errors",                   s.refresh_errors);
+    gauge(
+        buf,
+        "opensnitch_subscription_total",
+        "Total configured subscriptions",
+        s.total,
+    );
+    gauge(
+        buf,
+        "opensnitch_subscription_ready",
+        "Subscriptions in READY state",
+        s.ready,
+    );
+    gauge(
+        buf,
+        "opensnitch_subscription_error",
+        "Subscriptions in ERROR state",
+        s.error,
+    );
+    gauge(
+        buf,
+        "opensnitch_subscription_refresh_count",
+        "Cumulative successful refresh downloads",
+        s.refresh_count,
+    );
+    gauge(
+        buf,
+        "opensnitch_subscription_refresh_errors",
+        "Cumulative refresh errors",
+        s.refresh_errors,
+    );
     let by_status: Vec<_> = s.by_status.iter().map(|(k, v)| (k.clone(), *v)).collect();
-    let by_group:  Vec<_> = s.by_group.iter().map(|(k, v)| (k.clone(), *v)).collect();
-    let by_node:   Vec<_> = s.by_node.iter().map(|(k, v)| (k.clone(), *v)).collect();
-    labeled_gauge(buf, "opensnitch_subscription_by_status", "Subscription count by status",   "status", &by_status);
-    labeled_gauge(buf, "opensnitch_subscription_by_group",  "Subscription count by group",    "group",  &by_group);
-    labeled_gauge(buf, "opensnitch_subscription_by_node",   "Subscription count by node",     "node",   &by_node);
+    let by_group: Vec<_> = s.by_group.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    let by_node: Vec<_> = s.by_node.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    labeled_gauge(
+        buf,
+        "opensnitch_subscription_by_status",
+        "Subscription count by status",
+        "status",
+        &by_status,
+    );
+    labeled_gauge(
+        buf,
+        "opensnitch_subscription_by_group",
+        "Subscription count by group",
+        "group",
+        &by_group,
+    );
+    labeled_gauge(
+        buf,
+        "opensnitch_subscription_by_node",
+        "Subscription count by node",
+        "node",
+        &by_node,
+    );
     if !s.rule_subscriptions.is_empty() {
         writeln!(buf, "# HELP opensnitch_subscription_rule_info Rules backed by a subscription list operator (static N:N mapping)").ok();
         writeln!(buf, "# TYPE opensnitch_subscription_rule_info gauge").ok();
@@ -518,7 +635,10 @@ fn subscription_gauges(buf: &mut String, sub: Option<&pb::SubscriptionStatistics
 }
 
 /// Build Prometheus protobuf MetricFamily entries for subscription statistics.
-fn subscription_proto_families(fams: &mut Vec<prom_proto::MetricFamily>, sub: Option<&pb::SubscriptionStatistics>) {
+fn subscription_proto_families(
+    fams: &mut Vec<prom_proto::MetricFamily>,
+    sub: Option<&pb::SubscriptionStatistics>,
+) {
     use prom_proto::*;
     let Some(s) = sub else { return };
     macro_rules! sub_gauge {
@@ -527,47 +647,94 @@ fn subscription_proto_families(fams: &mut Vec<prom_proto::MetricFamily>, sub: Op
                 name: Some($name.to_string()),
                 help: Some($help.to_string()),
                 r#type: Some(MetricType::Gauge as i32),
-                metric: vec![Metric { gauge: Some(Gauge { value: Some($val as f64) }), ..Default::default() }],
+                metric: vec![Metric {
+                    gauge: Some(Gauge {
+                        value: Some($val as f64),
+                    }),
+                    ..Default::default()
+                }],
             });
         };
     }
-    sub_gauge!("opensnitch_subscription_total",           "Total configured subscriptions",                 s.total);
-    sub_gauge!("opensnitch_subscription_ready",           "Subscriptions in READY state",                   s.ready);
-    sub_gauge!("opensnitch_subscription_error",           "Subscriptions in ERROR state",                   s.error);
-    sub_gauge!("opensnitch_subscription_refresh_count",   "Cumulative successful refresh downloads",        s.refresh_count);
-    sub_gauge!("opensnitch_subscription_refresh_errors",  "Cumulative refresh errors",                      s.refresh_errors);
+    sub_gauge!(
+        "opensnitch_subscription_total",
+        "Total configured subscriptions",
+        s.total
+    );
+    sub_gauge!(
+        "opensnitch_subscription_ready",
+        "Subscriptions in READY state",
+        s.ready
+    );
+    sub_gauge!(
+        "opensnitch_subscription_error",
+        "Subscriptions in ERROR state",
+        s.error
+    );
+    sub_gauge!(
+        "opensnitch_subscription_refresh_count",
+        "Cumulative successful refresh downloads",
+        s.refresh_count
+    );
+    sub_gauge!(
+        "opensnitch_subscription_refresh_errors",
+        "Cumulative refresh errors",
+        s.refresh_errors
+    );
     for (map_name, label_key, map) in [
         ("opensnitch_subscription_by_status", "status", &s.by_status),
-        ("opensnitch_subscription_by_group",  "group",  &s.by_group),
-        ("opensnitch_subscription_by_node",   "node",   &s.by_node),
+        ("opensnitch_subscription_by_group", "group", &s.by_group),
+        ("opensnitch_subscription_by_node", "node", &s.by_node),
     ] {
-        if map.is_empty() { continue; }
+        if map.is_empty() {
+            continue;
+        }
         fams.push(MetricFamily {
             name: Some(map_name.to_string()),
             help: Some(format!("Subscription count by {label_key}")),
             r#type: Some(MetricType::Gauge as i32),
-            metric: map.iter().map(|(k, v)| Metric {
-                label: vec![LabelPair { name: Some(label_key.to_string()), value: Some(k.clone()) }],
-                gauge: Some(Gauge { value: Some(*v as f64) }),
-                ..Default::default()
-            }).collect(),
+            metric: map
+                .iter()
+                .map(|(k, v)| Metric {
+                    label: vec![LabelPair {
+                        name: Some(label_key.to_string()),
+                        value: Some(k.clone()),
+                    }],
+                    gauge: Some(Gauge {
+                        value: Some(*v as f64),
+                    }),
+                    ..Default::default()
+                })
+                .collect(),
         });
     }
     if !s.rule_subscriptions.is_empty() {
         fams.push(MetricFamily {
             name: Some("opensnitch_subscription_rule_info".to_string()),
-            help: Some("Rules backed by a subscription list operator (static N:N mapping)".to_string()),
+            help: Some(
+                "Rules backed by a subscription list operator (static N:N mapping)".to_string(),
+            ),
             r#type: Some(MetricType::Gauge as i32),
-            metric: s.rule_subscriptions.iter().flat_map(|entry| {
-                entry.subscriptions.iter().map(|sub_name| Metric {
-                    label: vec![
-                        LabelPair { name: Some("rule".to_string()), value: Some(entry.rule.clone()) },
-                        LabelPair { name: Some("subscription".to_string()), value: Some(sub_name.clone()) },
-                    ],
-                    gauge: Some(Gauge { value: Some(1.0) }),
-                    ..Default::default()
+            metric: s
+                .rule_subscriptions
+                .iter()
+                .flat_map(|entry| {
+                    entry.subscriptions.iter().map(|sub_name| Metric {
+                        label: vec![
+                            LabelPair {
+                                name: Some("rule".to_string()),
+                                value: Some(entry.rule.clone()),
+                            },
+                            LabelPair {
+                                name: Some("subscription".to_string()),
+                                value: Some(sub_name.clone()),
+                            },
+                        ],
+                        gauge: Some(Gauge { value: Some(1.0) }),
+                        ..Default::default()
+                    })
                 })
-            }).collect(),
+                .collect(),
         });
     }
 }
@@ -592,43 +759,123 @@ fn render_openmetrics_text(s: &CompactStats) -> String {
     let mut buf = String::with_capacity(4096);
 
     // Counters (OpenMetrics: base name for HELP/TYPE, _total + _created samples)
-    om_counter(&mut buf, "opensnitch_connections",
-        "Total network connections intercepted", s.connections, created);
-    om_counter(&mut buf, "opensnitch_accepted",
-        "Total connections accepted (including DNS responses)", s.accepted, created);
-    om_counter(&mut buf, "opensnitch_dropped",
-        "Total connections dropped", s.dropped, created);
-    om_counter(&mut buf, "opensnitch_dns_responses",
-        "Total DNS responses tracked", s.dns_responses, created);
-    om_counter(&mut buf, "opensnitch_ignored",
-        "Total connections ignored", s.ignored, created);
-    om_counter(&mut buf, "opensnitch_rule_hits",
-        "Total rule matches", s.rule_hits, created);
-    om_counter(&mut buf, "opensnitch_rule_misses",
-        "Total rule misses (default action applied)", s.rule_misses, created);
+    om_counter(
+        &mut buf,
+        "opensnitch_connections",
+        "Total network connections intercepted",
+        s.connections,
+        created,
+    );
+    om_counter(
+        &mut buf,
+        "opensnitch_accepted",
+        "Total connections accepted (including DNS responses)",
+        s.accepted,
+        created,
+    );
+    om_counter(
+        &mut buf,
+        "opensnitch_dropped",
+        "Total connections dropped",
+        s.dropped,
+        created,
+    );
+    om_counter(
+        &mut buf,
+        "opensnitch_dns_responses",
+        "Total DNS responses tracked",
+        s.dns_responses,
+        created,
+    );
+    om_counter(
+        &mut buf,
+        "opensnitch_ignored",
+        "Total connections ignored",
+        s.ignored,
+        created,
+    );
+    om_counter(
+        &mut buf,
+        "opensnitch_rule_hits",
+        "Total rule matches",
+        s.rule_hits,
+        created,
+    );
+    om_counter(
+        &mut buf,
+        "opensnitch_rule_misses",
+        "Total rule misses (default action applied)",
+        s.rule_misses,
+        created,
+    );
 
     // Gauges (dimensionless — no UNIT line except for uptime)
-    om_gauge(&mut buf, "opensnitch_rules",
-        "Current number of loaded rules", "", s.rules);
-    om_gauge(&mut buf, "opensnitch_uptime_seconds",
-        "Daemon uptime in seconds", "seconds", s.uptime);
+    om_gauge(
+        &mut buf,
+        "opensnitch_rules",
+        "Current number of loaded rules",
+        "",
+        s.rules,
+    );
+    om_gauge(
+        &mut buf,
+        "opensnitch_uptime_seconds",
+        "Daemon uptime in seconds",
+        "seconds",
+        s.uptime,
+    );
     subscription_gauges(&mut buf, s.subscription_stats.as_ref());
 
     // Breakdown maps as labeled gauges
-    om_labeled_gauge(&mut buf, "opensnitch_connections_by_proto",
-        "Connections by transport protocol", "proto", &s.by_proto);
-    om_labeled_gauge(&mut buf, "opensnitch_connections_by_address",
-        "Connections by remote address", "address", &s.by_address);
-    om_labeled_gauge(&mut buf, "opensnitch_connections_by_host",
-        "Connections by remote host", "host", &s.by_host);
-    om_labeled_gauge(&mut buf, "opensnitch_connections_by_port",
-        "Connections by remote port", "port", &s.by_port);
-    om_labeled_gauge(&mut buf, "opensnitch_connections_by_uid",
-        "Connections by user UID", "uid", &s.by_uid);
-    om_labeled_gauge(&mut buf, "opensnitch_connections_by_executable",
-        "Connections by executable", "executable", &s.by_executable);
-    om_labeled_gauge(&mut buf, "opensnitch_rule_hits_by_rule",
-        "Rule hits by rule name", "rule", &s.by_rule);
+    om_labeled_gauge(
+        &mut buf,
+        "opensnitch_connections_by_proto",
+        "Connections by transport protocol",
+        "proto",
+        &s.by_proto,
+    );
+    om_labeled_gauge(
+        &mut buf,
+        "opensnitch_connections_by_address",
+        "Connections by remote address",
+        "address",
+        &s.by_address,
+    );
+    om_labeled_gauge(
+        &mut buf,
+        "opensnitch_connections_by_host",
+        "Connections by remote host",
+        "host",
+        &s.by_host,
+    );
+    om_labeled_gauge(
+        &mut buf,
+        "opensnitch_connections_by_port",
+        "Connections by remote port",
+        "port",
+        &s.by_port,
+    );
+    om_labeled_gauge(
+        &mut buf,
+        "opensnitch_connections_by_uid",
+        "Connections by user UID",
+        "uid",
+        &s.by_uid,
+    );
+    om_labeled_gauge(
+        &mut buf,
+        "opensnitch_connections_by_executable",
+        "Connections by executable",
+        "executable",
+        &s.by_executable,
+    );
+    om_labeled_gauge(
+        &mut buf,
+        "opensnitch_rule_hits_by_rule",
+        "Rule hits by rule name",
+        "rule",
+        &s.by_rule,
+    );
 
     buf.push_str("# EOF\n");
     buf
@@ -696,7 +943,9 @@ fn build_proto_families(s: &CompactStats) -> Vec<prom_proto::MetricFamily> {
                 help: Some($help.to_string()),
                 r#type: Some(MetricType::Counter as i32),
                 metric: vec![Metric {
-                    counter: Some(Counter { value: Some($val as f64) }),
+                    counter: Some(Counter {
+                        value: Some($val as f64),
+                    }),
                     ..Default::default()
                 }],
             }
@@ -710,43 +959,80 @@ fn build_proto_families(s: &CompactStats) -> Vec<prom_proto::MetricFamily> {
                 help: Some($help.to_string()),
                 r#type: Some(MetricType::Gauge as i32),
                 metric: vec![Metric {
-                    gauge: Some(Gauge { value: Some($val as f64) }),
+                    gauge: Some(Gauge {
+                        value: Some($val as f64),
+                    }),
                     ..Default::default()
                 }],
             }
         }};
     }
 
-    fams.push(counter_fam!("opensnitch_connections_total",
-        "Total network connections intercepted", s.connections));
-    fams.push(counter_fam!("opensnitch_accepted_total",
-        "Total connections accepted (including DNS responses)", s.accepted));
-    fams.push(counter_fam!("opensnitch_dropped_total",
-        "Total connections dropped", s.dropped));
-    fams.push(counter_fam!("opensnitch_dns_responses_total",
-        "Total DNS responses tracked", s.dns_responses));
-    fams.push(counter_fam!("opensnitch_ignored_total",
-        "Total connections ignored", s.ignored));
-    fams.push(counter_fam!("opensnitch_rule_hits_total",
-        "Total rule matches", s.rule_hits));
-    fams.push(counter_fam!("opensnitch_rule_misses_total",
-        "Total rule misses (default action applied)", s.rule_misses));
+    fams.push(counter_fam!(
+        "opensnitch_connections_total",
+        "Total network connections intercepted",
+        s.connections
+    ));
+    fams.push(counter_fam!(
+        "opensnitch_accepted_total",
+        "Total connections accepted (including DNS responses)",
+        s.accepted
+    ));
+    fams.push(counter_fam!(
+        "opensnitch_dropped_total",
+        "Total connections dropped",
+        s.dropped
+    ));
+    fams.push(counter_fam!(
+        "opensnitch_dns_responses_total",
+        "Total DNS responses tracked",
+        s.dns_responses
+    ));
+    fams.push(counter_fam!(
+        "opensnitch_ignored_total",
+        "Total connections ignored",
+        s.ignored
+    ));
+    fams.push(counter_fam!(
+        "opensnitch_rule_hits_total",
+        "Total rule matches",
+        s.rule_hits
+    ));
+    fams.push(counter_fam!(
+        "opensnitch_rule_misses_total",
+        "Total rule misses (default action applied)",
+        s.rule_misses
+    ));
 
-    fams.push(gauge_fam!("opensnitch_rules",
-        "Current number of loaded rules", s.rules));
-    fams.push(gauge_fam!("opensnitch_uptime_seconds",
-        "Daemon uptime in seconds", s.uptime));
+    fams.push(gauge_fam!(
+        "opensnitch_rules",
+        "Current number of loaded rules",
+        s.rules
+    ));
+    fams.push(gauge_fam!(
+        "opensnitch_uptime_seconds",
+        "Daemon uptime in seconds",
+        s.uptime
+    ));
     subscription_proto_families(&mut fams, s.subscription_stats.as_ref());
 
     // Breakdown gauges with a single label.
     for (metric_name, label_name, pairs) in [
-        ("opensnitch_connections_by_proto",      "proto",       &s.by_proto),
-        ("opensnitch_connections_by_address",    "address",     &s.by_address),
-        ("opensnitch_connections_by_host",       "host",        &s.by_host),
-        ("opensnitch_connections_by_port",       "port",        &s.by_port),
-        ("opensnitch_connections_by_uid",        "uid",         &s.by_uid),
-        ("opensnitch_connections_by_executable", "executable",  &s.by_executable),
-        ("opensnitch_rule_hits_by_rule",          "rule",        &s.by_rule),
+        ("opensnitch_connections_by_proto", "proto", &s.by_proto),
+        (
+            "opensnitch_connections_by_address",
+            "address",
+            &s.by_address,
+        ),
+        ("opensnitch_connections_by_host", "host", &s.by_host),
+        ("opensnitch_connections_by_port", "port", &s.by_port),
+        ("opensnitch_connections_by_uid", "uid", &s.by_uid),
+        (
+            "opensnitch_connections_by_executable",
+            "executable",
+            &s.by_executable,
+        ),
+        ("opensnitch_rule_hits_by_rule", "rule", &s.by_rule),
     ] {
         if pairs.is_empty() {
             continue;
@@ -762,7 +1048,9 @@ fn build_proto_families(s: &CompactStats) -> Vec<prom_proto::MetricFamily> {
                         name: Some(label_name.to_string()),
                         value: Some(k.clone()),
                     }],
-                    gauge: Some(Gauge { value: Some(*v as f64) }),
+                    gauge: Some(Gauge {
+                        value: Some(*v as f64),
+                    }),
                     ..Default::default()
                 })
                 .collect(),
@@ -790,5 +1078,3 @@ pub const PROMETHEUS_ADDR_ENV: &str = "OPENSNITCH_PROMETHEUS_ADDR";
 #[cfg(test)]
 #[path = "../../tests/metrics/stats_exporter_prometheus.rs"]
 mod prometheus_exporter_tests;
-
-

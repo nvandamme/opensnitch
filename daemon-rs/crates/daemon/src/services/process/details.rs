@@ -166,7 +166,9 @@ impl ProcessService {
         let mut buf = [0_u8; 8192];
         loop {
             let n = file.read(&mut buf).ok()?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             hasher_md5.update(&buf[..n]);
             hasher_sha1.update(&buf[..n]);
         }

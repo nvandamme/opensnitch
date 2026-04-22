@@ -1,6 +1,9 @@
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use dashmap::DashMap;
@@ -10,7 +13,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, warn};
 
 use super::defaults::{DEFAULT_ROOT_DIR, DEFAULT_STORE_FILE};
-use super::reply::base_reply;
+use super::proto_to_record;
+use crate::models::subscription_rpc::{SubscriptionCommand, SubscriptionOperation};
+use crate::models::subscription_storage::SubscriptionRecord;
 use crate::services::subscription::storage::SubscriptionStorage;
 use crate::utils::time_nonce::unix_epoch_nanos;
 
@@ -41,6 +46,26 @@ pub struct SubscriptionService {
 }
 
 impl SubscriptionService {
+    fn command_from_request(req: pb::SubscriptionRequest) -> SubscriptionCommand {
+        let operation = match pb::SubscriptionAction::try_from(req.operation)
+            .unwrap_or(pb::SubscriptionAction::Unspecified)
+        {
+            pb::SubscriptionAction::List => SubscriptionOperation::List,
+            pb::SubscriptionAction::Apply => SubscriptionOperation::Apply,
+            pb::SubscriptionAction::Delete => SubscriptionOperation::Delete,
+            pb::SubscriptionAction::Refresh => SubscriptionOperation::Refresh,
+            pb::SubscriptionAction::Deploy => SubscriptionOperation::Deploy,
+            pb::SubscriptionAction::Unspecified => SubscriptionOperation::Unspecified,
+        };
+
+        SubscriptionCommand {
+            operation,
+            subscriptions: req.subscriptions.iter().map(proto_to_record).collect(),
+            targets: req.targets,
+            force: req.force,
+        }
+    }
+
     pub fn new(storage: Arc<SubscriptionStorage>, root_dir: impl Into<PathBuf>) -> Self {
         let http = reqwest::Client::builder()
             .http1_only()
@@ -75,21 +100,7 @@ impl SubscriptionService {
 
     /// Dispatch a proto `SubscriptionRequest` and return the appropriate reply.
     pub async fn handle_request(&self, req: pb::SubscriptionRequest) -> pb::SubscriptionReply {
-        let op = pb::SubscriptionAction::try_from(req.operation)
-            .unwrap_or(pb::SubscriptionAction::Unspecified);
-        match op {
-            pb::SubscriptionAction::List => self.handle_list(),
-            pb::SubscriptionAction::Apply => self.handle_apply(req.subscriptions).await,
-            pb::SubscriptionAction::Delete => self.handle_delete(req.subscriptions).await,
-            pb::SubscriptionAction::Refresh => {
-                self.handle_refresh(req.subscriptions, req.targets, req.force)
-                    .await
-            }
-            pb::SubscriptionAction::Deploy => self.handle_deploy().await,
-            pb::SubscriptionAction::Unspecified => {
-                base_reply(pb::SubscriptionAction::Unspecified, "unspecified operation", false)
-            }
-        }
+        self.handle_command(Self::command_from_request(req)).await
     }
 
     pub(super) async fn sync_layout_error(&self) -> Option<String> {
@@ -109,7 +120,10 @@ impl SubscriptionService {
             action: action as i32,
             unixnano,
         };
-        let mut ring = self.events.lock().expect("subscription events lock poisoned");
+        let mut ring = self
+            .events
+            .lock()
+            .expect("subscription events lock poisoned");
         if ring.len() >= SUB_EVENT_RING_CAPACITY {
             let last = ring.len() - 1;
             ring.remove(last);
@@ -119,7 +133,11 @@ impl SubscriptionService {
 
     /// Returns a `pb::SubscriptionStatistics` snapshot for metrics export.
     pub fn subscription_stats(&self) -> pb::SubscriptionStatistics {
-        let events = self.events.lock().expect("subscription events lock poisoned").clone();
+        let events = self
+            .events
+            .lock()
+            .expect("subscription events lock poisoned")
+            .clone();
         self.storage.subscription_stats(
             self.refresh_count.load(Ordering::Relaxed),
             self.refresh_errors.load(Ordering::Relaxed),
@@ -214,7 +232,10 @@ impl SubscriptionService {
             .map(|(rule, subs)| {
                 let mut subscriptions: Vec<String> = subs.into_iter().collect();
                 subscriptions.sort();
-                pb::RuleSubscriptionEntry { rule, subscriptions }
+                pb::RuleSubscriptionEntry {
+                    rule,
+                    subscriptions,
+                }
             })
             .collect();
         entries.sort_by(|a, b| a.rule.cmp(&b.rule));
@@ -225,6 +246,9 @@ impl SubscriptionService {
     pub fn list(&self) -> Vec<pb::Subscription> {
         self.storage.list()
     }
+
+    /// Returns the current subscription records as canonical domain models.
+    pub fn list_records(&self) -> Vec<SubscriptionRecord> {
+        self.storage.list_records()
+    }
 }
-
-

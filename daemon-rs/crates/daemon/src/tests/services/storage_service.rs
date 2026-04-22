@@ -1,8 +1,14 @@
 use crate::services::storage::{StorageOperation, StorageService};
+use crate::{
+    models::audit::{AuditEventKind, StorageAction},
+    services::audit::AuditService,
+};
 use crate::tests::support::{
-    TestDir, assert_storage_event, assert_storage_event_empty, ensure_dir, read_text, write_text,
+    TestDir, assert_storage_event, assert_storage_event_async, assert_storage_event_empty,
+    ensure_dir, read_text, write_text,
 };
 use serde::Deserialize;
+use tokio::time::{Duration, timeout};
 
 fn test_dir(label: &str) -> TestDir {
     TestDir::new(&format!("opensnitch-storage-{label}"))
@@ -43,26 +49,28 @@ async fn async_io_helpers_emit_completed_events() {
         .await
         .expect("read file");
     assert_eq!(contents, "hello");
-    assert_storage_event(
+    assert_storage_event_async(
         &mut subscription,
         "read event",
         "config",
         StorageOperation::Read,
         &path,
-    );
+    )
+    .await;
 
     let deleted = service
         .remove_file_if_exists_and_notify("config", &path)
         .await
         .expect("delete file");
     assert!(deleted);
-    assert_storage_event(
+    assert_storage_event_async(
         &mut subscription,
         "delete event",
         "config",
         StorageOperation::Delete,
         &path,
-    );
+    )
+    .await;
 }
 
 #[test]
@@ -132,17 +140,18 @@ async fn json_helpers_parse_and_emit_read_event() {
         .await
         .expect("read json");
     assert_eq!(parsed, DemoJson { ok: true });
-    assert_storage_event(
+    assert_storage_event_async(
         &mut subscription,
         "read event",
         "rule",
         StorageOperation::Read,
         &path,
-    );
+    )
+    .await;
 }
 
-#[tokio::test]
-async fn path_subscription_receives_only_exact_path_events() {
+#[test]
+fn path_subscription_receives_only_exact_path_events() {
     let service = StorageService::new();
     let dir = test_dir("path-filter");
     let observed = dir.path.join("observed.json");
@@ -153,14 +162,12 @@ async fn path_subscription_receives_only_exact_path_events() {
     let mut filtered = service.subscribe_events_for_path(&observed);
 
     service
-        .write_bytes_atomic_and_notify("rule", &other_tmp, &other, br#"{"ok":false}"#)
-        .await
+        .write_bytes_atomic_sync_and_notify("rule", &other_tmp, &other, br#"{"ok":false}"#)
         .expect("write other path");
     assert_storage_event_empty(&mut filtered);
 
     service
-        .write_bytes_atomic_and_notify("rule", &observed_tmp, &observed, br#"{"ok":true}"#)
-        .await
+        .write_bytes_atomic_sync_and_notify("rule", &observed_tmp, &observed, br#"{"ok":true}"#)
         .expect("write observed path");
 
     assert_storage_event(
@@ -172,8 +179,8 @@ async fn path_subscription_receives_only_exact_path_events() {
     );
 }
 
-#[tokio::test]
-async fn prefix_subscription_receives_events_under_observed_path() {
+#[test]
+fn prefix_subscription_receives_events_under_observed_path() {
     let service = StorageService::new();
     let dir = test_dir("prefix-filter");
     let observed_dir = dir.path.join("lists");
@@ -190,14 +197,17 @@ async fn prefix_subscription_receives_events_under_observed_path() {
     let mut filtered = service.subscribe_events_for_prefix(&observed_dir);
 
     service
-        .write_bytes_atomic_and_notify("rule", &outside_tmp, &outside_path, br#"{"ok":false}"#)
-        .await
+        .write_bytes_atomic_sync_and_notify("rule", &outside_tmp, &outside_path, br#"{"ok":false}"#)
         .expect("write outside path");
     assert_storage_event_empty(&mut filtered);
 
     service
-        .write_bytes_atomic_and_notify("rule", &observed_tmp, &observed_path, br#"{"ok":true}"#)
-        .await
+        .write_bytes_atomic_sync_and_notify(
+            "rule",
+            &observed_tmp,
+            &observed_path,
+            br#"{"ok":true}"#,
+        )
         .expect("write observed prefix path");
 
     assert_storage_event(
@@ -266,13 +276,14 @@ async fn list_dir_with_metadata_and_notify_emits_scan_and_reports_file_state() {
             .iter()
             .any(|entry| entry.path == nested_dir && !entry.is_file)
     );
-    assert_storage_event(
+    assert_storage_event_async(
         &mut subscription,
         "scan event",
         "rule",
         StorageOperation::Scan,
         &dir.path,
-    );
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -317,11 +328,68 @@ async fn path_exists_and_notify_have_explicit_event_semantics() {
         .await
         .expect("path exists emit");
     assert!(exists);
-    assert_storage_event(
+    assert_storage_event_async(
         &mut subscription,
         "read event",
         "rule",
         StorageOperation::Read,
         &file_path,
-    );
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn read_failure_emits_storage_audit_event_when_audit_is_injected() {
+    let audit = AuditService::new(32);
+    let service = StorageService::new().with_audit(audit.clone());
+    let mut audit_rx = audit.subscribe();
+    let dir = test_dir("audit-read-failure");
+    let missing_path = dir.path.join("missing.json");
+
+    let read_result = service
+        .read_to_string_and_notify("config", &missing_path)
+        .await;
+    assert!(read_result.is_err());
+
+    let event = timeout(Duration::from_secs(1), audit_rx.recv())
+        .await
+        .expect("audit recv timeout")
+        .expect("audit event");
+
+    match &event.kind {
+        AuditEventKind::StorageAction(StorageAction::FileReadFailed { path, reason }) => {
+            assert_eq!(path.as_ref(), missing_path.display().to_string());
+            assert_eq!(*reason, "not-found");
+        }
+        other => panic!("unexpected audit kind: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn write_failure_emits_storage_audit_event_when_audit_is_injected() {
+    let audit = AuditService::new(32);
+    let service = StorageService::new().with_audit(audit.clone());
+    let mut audit_rx = audit.subscribe();
+    let dir = test_dir("audit-write-failure");
+    let missing_parent = dir.path.join("missing-parent");
+    let path = missing_parent.join("payload.json");
+    let temp_path = missing_parent.join("payload.json.tmp");
+
+    let write_result = service
+        .write_bytes_atomic_and_notify("config", &temp_path, &path, br#"{"ok":true}"#)
+        .await;
+    assert!(write_result.is_err());
+
+    let event = timeout(Duration::from_secs(1), audit_rx.recv())
+        .await
+        .expect("audit recv timeout")
+        .expect("audit event");
+
+    match &event.kind {
+        AuditEventKind::StorageAction(StorageAction::FileWriteFailed { path: got, reason }) => {
+            assert_eq!(got.as_ref(), path.display().to_string());
+            assert_eq!(*reason, "not-found");
+        }
+        other => panic!("unexpected audit kind: {other:?}"),
+    }
 }

@@ -59,7 +59,7 @@ fn select_opensnitch_ringbuf_map_id(
         .into_iter()
         .filter(|candidate| {
             candidate.is_ringbuf
-            && candidate.name_matches
+                && candidate.name_matches
                 && candidate.max_entries == EVENTS_MAP_MAX_ENTRIES
         })
         .map(|candidate| candidate.id)
@@ -127,7 +127,9 @@ impl EbpfRingbufConsumer {
         legacy_map_paths: &[&str],
     ) -> Result<(Self, Vec<String>), String> {
         let mut errors: Vec<String> = Vec::new();
-        let managed_paths_present = managed_map_paths.iter().any(|path| std::path::Path::new(path).exists());
+        let managed_paths_present = managed_map_paths
+            .iter()
+            .any(|path| std::path::Path::new(path).exists());
         #[cfg(feature = "aya-ebpf")]
         let mut managed_aya_ringbuf = managed_aya_ringbuf;
 
@@ -240,7 +242,10 @@ struct LibbpfRingbuf {
 
 #[cfg(feature = "libbpf-ebpf")]
 impl LibbpfRingbuf {
-    fn try_open_legacy_compat(map_paths: &[&str], managed_paths_present: bool) -> Result<Self, String> {
+    fn try_open_legacy_compat(
+        map_paths: &[&str],
+        managed_paths_present: bool,
+    ) -> Result<Self, String> {
         let map = if let Some(map_path) = map_paths.iter().find(|path| Path::new(path).exists()) {
             libbpf_rs::MapHandle::from_pinned_path(map_path)
                 .map_err(|err| format!("open pinned ringbuf map failed ({map_path}): {err}"))?
@@ -250,8 +255,9 @@ impl LibbpfRingbuf {
                     .to_string(),
             );
         } else if let Some(map_id) = Self::discover_loaded_ringbuf_map_id() {
-            libbpf_rs::MapHandle::from_map_id(map_id)
-                .map_err(|err| format!("open loaded ringbuf map by id failed (id={map_id}): {err}"))?
+            libbpf_rs::MapHandle::from_map_id(map_id).map_err(|err| {
+                format!("open loaded ringbuf map by id failed (id={map_id}): {err}")
+            })?
         } else {
             return Err(format!(
                 "no opensnitch ringbuf map found (checked pinned: {}; loaded map scan: none)",
@@ -330,17 +336,17 @@ impl AyaRingbuf {
         let ringbuf = aya::maps::RingBuf::try_from(map)
             .map_err(|err| format!("attach aya ringbuf reader failed ({source}): {err}"))?;
 
-        Ok(Self {
-            source,
-            ringbuf,
-        })
+        Ok(Self { source, ringbuf })
     }
 
     fn try_open_legacy_compat(
         map_paths: &[&str],
         managed_paths_present: bool,
     ) -> Result<Self, String> {
-        if let Some(map_path) = map_paths.iter().find(|path| std::path::Path::new(path).exists()) {
+        if let Some(map_path) = map_paths
+            .iter()
+            .find(|path| std::path::Path::new(path).exists())
+        {
             let map_data = aya::maps::MapData::from_pin(map_path)
                 .map_err(|err| format!("open pinned ringbuf map failed ({map_path}): {err}"))?;
 
@@ -382,17 +388,15 @@ impl AyaRingbuf {
     }
 
     fn discover_loaded_ringbuf_map_id() -> Option<u32> {
-        select_opensnitch_ringbuf_map_id(
-            aya::maps::loaded_maps().flatten().filter_map(|info| {
-                let map_type = info.map_type().ok()?;
-                Some(RingbufMapCandidate {
-                    id: info.id(),
-                    is_ringbuf: map_type == aya::maps::MapType::RingBuf,
-                    name_matches: info.name_as_str() == Some(EVENTS_MAP_NAME),
-                    max_entries: info.max_entries(),
-                })
-            }),
-        )
+        select_opensnitch_ringbuf_map_id(aya::maps::loaded_maps().flatten().filter_map(|info| {
+            let map_type = info.map_type().ok()?;
+            Some(RingbufMapCandidate {
+                id: info.id(),
+                is_ringbuf: map_type == aya::maps::MapType::RingBuf,
+                name_matches: info.name_as_str() == Some(EVENTS_MAP_NAME),
+                max_entries: info.max_entries(),
+            })
+        }))
     }
 
     fn poll_samples(&mut self, timeout: Duration) -> Result<Vec<Vec<u8>>, String> {

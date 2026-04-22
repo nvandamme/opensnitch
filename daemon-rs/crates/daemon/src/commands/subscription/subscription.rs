@@ -83,7 +83,10 @@ impl SubscriptionCommandService {
                 pb::SubscriptionAction::Unspecified => Ok(pb::SubscriptionReply::default()),
             };
             if let Err(err) = sync_result {
-                tracing::debug!(cmd_id = cmd.id, "subscription command: UI sync failed: {err}");
+                tracing::debug!(
+                    cmd_id = cmd.id,
+                    "subscription command: UI sync failed: {err}"
+                );
             }
         }
 
@@ -103,13 +106,19 @@ struct ParsedData {
 }
 
 fn parse_command_data(raw_data: &str) -> ParsedData {
-    let data = serde_json::from_str::<IncomingSubscriptionNotification>(raw_data)
-        .unwrap_or_default();
+    let data =
+        serde_json::from_str::<IncomingSubscriptionNotification>(raw_data).unwrap_or_default();
     ParsedData {
         subscriptions: data
             .subscriptions
             .into_iter()
-            .map(pb::Subscription::from)
+            .map(|item| pb::Subscription {
+                id: item.id,
+                name: item.name,
+                url: item.url,
+                enabled: item.enabled,
+                ..Default::default()
+            })
             .collect(),
         targets: data.targets,
         force: data.force,

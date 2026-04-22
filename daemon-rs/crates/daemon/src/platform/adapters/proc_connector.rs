@@ -1,12 +1,10 @@
 use std::{os::fd::AsFd, time::Duration};
 
 use anyhow::{Result, anyhow};
-use nix::libc;
 use netlink_bindings::traits::{NetlinkRequest, Protocol};
 use netlink_socket2::{MulticastSocketRaw, NetlinkSocket};
-use rustix::{
-    thread::{LinkNameSpaceType, move_into_link_name_space},
-};
+use nix::libc;
+use rustix::thread::{LinkNameSpaceType, move_into_link_name_space};
 
 use crate::{
     models::proc_event::{ProcEventKind, ProcPidEvent},
@@ -67,7 +65,10 @@ impl ProcEventSocket {
         Self::run_netlink_future(self.recv_pid_event_async(timeout))
     }
 
-    pub async fn recv_pid_event_async(&mut self, timeout: Duration) -> Result<Option<ProcPidEvent>> {
+    pub async fn recv_pid_event_async(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<ProcPidEvent>> {
         let recv = match tokio::time::timeout(timeout, self.event_sock.recv()).await {
             Ok(Ok(recv)) => recv,
             Ok(Err(err)) => return Err(anyhow::Error::new(err)),
@@ -86,7 +87,8 @@ impl ProcEventSocket {
         }
 
         let payload = &frame[payload_offset..];
-        let cn_msg_data_len = read_ne_value_at(frame, NLMSG_HDR_LEN + 16, u16::from_ne_bytes)? as usize;
+        let cn_msg_data_len =
+            read_ne_value_at(frame, NLMSG_HDR_LEN + 16, u16::from_ne_bytes)? as usize;
         if cn_msg_data_len == 0 {
             return None;
         }
@@ -196,15 +198,19 @@ impl ProcEventSocket {
         let request = ProcListenRequest {
             payload: Self::build_listen_payload(),
         };
-        let mut iter = tokio::time::timeout(PROC_CONNECTOR_OPEN_TIMEOUT, request_sock.request(&request))
-            .await
-            .map_err(|_| anyhow!("proc connector request timed out"))??;
+        let mut iter =
+            tokio::time::timeout(PROC_CONNECTOR_OPEN_TIMEOUT, request_sock.request(&request))
+                .await
+                .map_err(|_| anyhow!("proc connector request timed out"))??;
         tokio::time::timeout(PROC_CONNECTOR_OPEN_TIMEOUT, iter.recv_ack())
             .await
             .map_err(|_| anyhow!("proc connector ack timed out"))?
             .map_err(anyhow::Error::new)?;
 
-        Ok(Self { request_sock, event_sock })
+        Ok(Self {
+            request_sock,
+            event_sock,
+        })
     }
 
     #[cfg_attr(not(test), allow(dead_code))]

@@ -24,9 +24,7 @@ use rustix::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::platform::ffi::nfqueue::{
-    NfqueueMetricsState, NfqueueVerdictEngine, PacketVerdict,
-};
+use crate::platform::ffi::nfqueue::{NfqueueMetricsState, NfqueueVerdictEngine, PacketVerdict};
 
 // ─── Env gate ─────────────────────────────────────────────────────────────────
 
@@ -174,7 +172,6 @@ impl NlMsg {
         self.0[0..4].copy_from_slice(&len.to_ne_bytes());
         self.0
     }
-
 }
 
 // ─── Incoming packet parser ───────────────────────────────────────────────────
@@ -211,16 +208,14 @@ pub(crate) fn parse_nfq_packet(body: &[u8]) -> Option<NfqPacket<'_>> {
         if nla_len < NLA_HDR_LEN || offset + nla_len > body.len() {
             break;
         }
-        let nla_type =
-            u16::from_ne_bytes([body[offset + 2], body[offset + 3]]) & NLA_TYPE_MASK;
+        let nla_type = u16::from_ne_bytes([body[offset + 2], body[offset + 3]]) & NLA_TYPE_MASK;
         let data = &body[offset + NLA_HDR_LEN..offset + nla_len];
 
         match nla_type {
             NFQA_PACKET_HDR => {
                 // nfqnl_msg_packet_hdr: packet_id (u32 BE), hw_protocol (u16 BE), hook (u8)
                 if data.len() >= 4 {
-                    packet_id =
-                        Some(u32::from_be_bytes([data[0], data[1], data[2], data[3]]));
+                    packet_id = Some(u32::from_be_bytes([data[0], data[1], data[2], data[3]]));
                 }
             }
             NFQA_MARK => {
@@ -235,8 +230,7 @@ pub(crate) fn parse_nfq_packet(body: &[u8]) -> Option<NfqPacket<'_>> {
             }
             NFQA_IFINDEX_OUTDEV => {
                 if data.len() >= 4 {
-                    iface_out_idx =
-                        u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                    iface_out_idx = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
                 }
             }
             NFQA_PAYLOAD => {
@@ -313,7 +307,10 @@ impl NfqueueNetlinkSocket {
             )
         };
         if rc < 0 {
-            bail!("bind(AF_NETLINK) failed: {}", std::io::Error::last_os_error());
+            bail!(
+                "bind(AF_NETLINK) failed: {}",
+                std::io::Error::last_os_error()
+            );
         }
 
         Self::tune_socket(fd.as_raw_fd());
@@ -373,9 +370,7 @@ impl NfqueueNetlinkSocket {
 
         // BIND: attach to the specific queue number; request ACK to surface EBUSY early.
         self.send_config_cmd(self.queue_num, NFQNL_CFG_CMD_BIND, 0, true)
-            .with_context(|| {
-                format!("BIND to queue {} rejected by kernel", self.queue_num)
-            })?;
+            .with_context(|| format!("BIND to queue {} rejected by kernel", self.queue_num))?;
 
         // COPY_PACKET mode with copy range = DEFAULT_PACKET_SIZE.
         self.send_config_params(self.queue_num, DEFAULT_PACKET_SIZE, NFQNL_COPY_PACKET)?;
@@ -398,13 +393,7 @@ impl NfqueueNetlinkSocket {
 
     // ── Config message senders ──────────────────────────────────────────────
 
-    fn send_config_cmd(
-        &self,
-        queue_num: u16,
-        cmd: u8,
-        pf: u16,
-        request_ack: bool,
-    ) -> Result<()> {
+    fn send_config_cmd(&self, queue_num: u16, cmd: u8, pf: u16, request_ack: bool) -> Result<()> {
         let flags = if request_ack {
             NLM_F_REQUEST | NLM_F_ACK
         } else {
@@ -485,9 +474,7 @@ impl NfqueueNetlinkSocket {
 
     fn send_raw(&self, buf: &[u8]) -> Result<()> {
         // SAFETY: buf is a valid slice; fd is a valid NETLINK_NETFILTER socket.
-        let rc = unsafe {
-            libc::send(self.fd.as_raw_fd(), buf.as_ptr().cast(), buf.len(), 0)
-        };
+        let rc = unsafe { libc::send(self.fd.as_raw_fd(), buf.as_ptr().cast(), buf.len(), 0) };
         if rc < 0 {
             bail!("netlink send failed: {}", std::io::Error::last_os_error());
         }
@@ -506,10 +493,7 @@ impl NfqueueNetlinkSocket {
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                bail!(
-                    "nfqueue netlink ack timeout (seq={})",
-                    expected_seq
-                );
+                bail!("nfqueue netlink ack timeout (seq={})", expected_seq);
             }
             // SAFETY: self.fd is valid for the duration of recv_ack.
             let borrowed_fd = unsafe { BorrowedFd::borrow_raw(self.fd.as_raw_fd()) };
@@ -530,8 +514,7 @@ impl NfqueueNetlinkSocket {
             if msg_type == NLMSG_ERROR {
                 // nlmsgerr.error is a negative errno (i32 LE) at offset 16.
                 if recv_rc >= NLMSG_HDR_LEN + 4 {
-                    let errno =
-                        i32::from_ne_bytes([buf[16], buf[17], buf[18], buf[19]]);
+                    let errno = i32::from_ne_bytes([buf[16], buf[17], buf[18], buf[19]]);
                     if errno == 0 {
                         return Ok(()); // ACK = success
                     }
@@ -566,10 +549,7 @@ impl NfqueueNetlinkSocket {
             Self::maybe_log_metrics(self.queue_num, &mut last_metrics_log);
 
             let mut pfd = [PollFd::new(&borrowed_fd, PollFlags::IN)];
-            if poll(&mut pfd, timeout.as_ref())
-                .context("poll nfqueue netlink fd")?
-                == 0
-            {
+            if poll(&mut pfd, timeout.as_ref()).context("poll nfqueue netlink fd")? == 0 {
                 continue;
             }
             if !pfd[0].revents().contains(PollFlags::IN) {
@@ -599,18 +579,16 @@ impl NfqueueNetlinkSocket {
             let mut offset = 0;
 
             while offset + NLMSG_HDR_LEN <= received.len() {
-                let nlmsg_len = u32::from_ne_bytes(
-                    received[offset..offset + 4].try_into().unwrap(),
-                ) as usize;
+                let nlmsg_len =
+                    u32::from_ne_bytes(received[offset..offset + 4].try_into().unwrap()) as usize;
 
                 if nlmsg_len < NLMSG_HDR_LEN {
                     break;
                 }
 
                 let msg_end = (offset + nlmsg_len).min(received.len());
-                let msg_type = u16::from_ne_bytes(
-                    received[offset + 4..offset + 6].try_into().unwrap(),
-                );
+                let msg_type =
+                    u16::from_ne_bytes(received[offset + 4..offset + 6].try_into().unwrap());
                 let body = &received[offset + NLMSG_HDR_LEN..msg_end];
 
                 match msg_type {
@@ -625,22 +603,20 @@ impl NfqueueNetlinkSocket {
                                 pkt.iface_in_idx,
                                 pkt.iface_out_idx,
                             );
-                            NfqueueMetricsState::record_packet_verdict(
-                                self.queue_num,
-                                &verdict,
-                            );
+                            NfqueueMetricsState::record_packet_verdict(self.queue_num, &verdict);
                             if let Err(err) = self.send_verdict(pkt.packet_id, &verdict) {
                                 warn!(detail = %err, "nfqueue netlink: verdict send failed");
                             }
                         } else {
                             NfqueueMetricsState::record_recv_error(self.queue_num);
-                            debug!("nfqueue netlink: malformed NFQNL_MSG_PACKET (missing packet_id)");
+                            debug!(
+                                "nfqueue netlink: malformed NFQNL_MSG_PACKET (missing packet_id)"
+                            );
                         }
                     }
                     NLMSG_ERROR => {
                         if body.len() >= 4 {
-                            let errno =
-                                i32::from_ne_bytes(body[0..4].try_into().unwrap());
+                            let errno = i32::from_ne_bytes(body[0..4].try_into().unwrap());
                             if errno != 0 {
                                 debug!(errno, "nfqueue netlink error message in recv loop");
                             }
@@ -658,7 +634,10 @@ impl NfqueueNetlinkSocket {
             }
         }
 
-        debug!(queue_num = self.queue_num, "nfqueue netlink backend stopped");
+        debug!(
+            queue_num = self.queue_num,
+            "nfqueue netlink backend stopped"
+        );
         Ok(())
     }
 
@@ -719,7 +698,11 @@ impl NfqueueNetlinkAdapter {
     ///
     /// `NfqueueRuntimeState::init` must be called before this method.
     pub(crate) fn run(queue_num: u16, shutdown: CancellationToken) -> Result<()> {
-        debug!(queue_num, backend = "netlink", "starting nfqueue netlink backend");
+        debug!(
+            queue_num,
+            backend = "netlink",
+            "starting nfqueue netlink backend"
+        );
         let socket = NfqueueNetlinkSocket::open(queue_num)?;
         socket.run(shutdown)
     }

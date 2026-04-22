@@ -174,49 +174,21 @@ impl RuleService {
             .collect()
     }
 
-    pub(crate) async fn load_network_aliases_map() -> HashMap<String, Vec<String>> {
-        let Some(path) = Self::resolve_network_aliases_path().await else {
+    pub(crate) async fn load_network_aliases_map(path: &Path) -> HashMap<String, Vec<String>> {
+        if !path.exists() {
             return HashMap::new();
-        };
-
+        }
         let Ok(Some(map)) = StorageService::global()
-            .read_json_if_exists_and_notify::<HashMap<String, Vec<String>>>("rule", path.as_path())
+            .read_json_if_exists_and_notify::<HashMap<String, Vec<String>>>("rule", path)
             .await
         else {
             return HashMap::new();
         };
-
         map
     }
 
-    pub(crate) async fn resolve_network_aliases_path() -> Option<PathBuf> {
-        let storage = StorageService::global();
-        if let Some(path) = std::env::var_os("OPENSNITCH_NETWORK_ALIASES_FILE").map(PathBuf::from)
-            && storage.path_exists("rule", path.as_path()).await.ok()?
-        {
-            return Some(path);
-        }
-
-        let system_path = PathBuf::from("/etc/opensnitchd/network_aliases.json");
-        if storage
-            .path_exists("rule", system_path.as_path())
-            .await
-            .ok()?
-        {
-            return Some(system_path);
-        }
-
-        let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../..")
-            .join("daemon/data/network_aliases.json");
-        storage
-            .path_exists("rule", dev_path.as_path())
-            .await
-            .ok()?
-            .then_some(dev_path)
-    }
-
-    #[allow(dead_code)]
+    /// Called only from `read_rules_dir_file_state_async` (which is itself test-only).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn collect_rule_list_dirs(
         operator: &RuleFileOperator,
         list_dirs: &mut BTreeSet<PathBuf>,
@@ -290,8 +262,7 @@ impl RuleService {
             };
             for list_entry in list_entries {
                 let list_path = list_entry.path;
-                let Some(file_name) = list_path.file_name().and_then(|value| value.to_str())
-                else {
+                let Some(file_name) = list_path.file_name().and_then(|value| value.to_str()) else {
                     continue;
                 };
                 if is_transient_artifact_name(file_name) {
@@ -308,7 +279,10 @@ impl RuleService {
         Some(state)
     }
 
-    #[allow(dead_code)]
+    /// Fallback when no in-memory snapshot is available.
+    /// Production code uses [`read_rules_dir_file_state_with_hint`] on the hot path;
+    /// this variant is used by tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn read_rules_dir_file_state_async(
         path: &Path,
     ) -> Option<BTreeMap<String, Option<SystemTime>>> {
@@ -404,8 +378,11 @@ impl WatchWorkerControl for RuleWatchControl {
             if forced {
                 // inotify told us something changed — skip the readdir+stat
                 // state-comparison and reload directly (single directory pass).
+                // Uses reload_inline to avoid the spawn_blocking scheduling
+                // overhead (~3-5 ms) — the rules directory holds a handful of
+                // tiny JSON files whose sync I/O completes in microseconds.
                 let previous_rules = rules.get_proto_snapshot();
-                if let Err(err) = rules.reload_sync().await {
+                if let Err(err) = rules.reload_inline().await {
                     tracing::error!(path = %path.display(), "failed to reload rules after inotify event: {err}");
                 } else {
                     tracing::info!(path = %path.display(), "rules reloaded after inotify event");

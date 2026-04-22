@@ -17,7 +17,9 @@ use dashmap::DashMap;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::models::hash_cache::{HashCacheEntry, HashCacheFile, HashCacheKey, HashCacheRecord};
+use crate::models::hash_cache_storage::{
+    HashCacheEntry, HashCacheFile, HashCacheKey, HashCacheRecord,
+};
 
 // ---------------------------------------------------------------------------
 // PersistentHashCache
@@ -70,23 +72,13 @@ impl PersistentHashCache {
     /// and size match a cached entry. Returns `None` on mismatch or absence.
     pub(crate) fn get(&self, exe_path: &Path) -> Option<(String, String, String)> {
         let key = stat_to_key(exe_path)?;
-        self.map.get(&key).map(|entry| {
-            (
-                entry.md5.clone(),
-                entry.sha1.clone(),
-                entry.sha256.clone(),
-            )
-        })
+        self.map
+            .get(&key)
+            .map(|entry| (entry.md5.clone(), entry.sha1.clone(), entry.sha256.clone()))
     }
 
     /// Insert (or update) cached hashes for the binary at `exe_path`.
-    pub(crate) fn insert(
-        &self,
-        exe_path: &Path,
-        md5: &str,
-        sha1: &str,
-        sha256: &str,
-    ) {
+    pub(crate) fn insert(&self, exe_path: &Path, md5: &str, sha1: &str, sha256: &str) {
         if let Some(key) = stat_to_key(exe_path) {
             self.map.insert(
                 key,

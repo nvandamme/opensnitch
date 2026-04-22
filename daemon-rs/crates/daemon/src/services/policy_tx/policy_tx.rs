@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::Mutex;
 
-pub use crate::models::policy_tx::{PolicyChangeSet, PolicyOwner, TxPhase};
+pub use crate::models::policy_tx_storage::{PolicyChangeSet, PolicyOwner, TxPhase};
 
 #[derive(Clone, Debug)]
 pub struct PolicyTxRequest {
@@ -18,12 +18,58 @@ pub struct PolicyTxRequest {
 
 #[derive(Debug)]
 pub enum PolicyTxError {
-    Conflict { expected: u64, actual: u64 },
-    DuplicateInFlight { tx_id: String },
-    DuplicateCommitted { tx_id: String, revision: u64 },
-    ApplyFailed { error: String },
-    RollbackFailed { apply_error: String, rollback_error: String },
+    Conflict {
+        expected: u64,
+        actual: u64,
+    },
+    DuplicateInFlight {
+        tx_id: String,
+    },
+    DuplicateCommitted {
+        tx_id: String,
+        revision: u64,
+    },
+    ApplyFailed {
+        error: String,
+    },
+    RollbackFailed {
+        apply_error: String,
+        rollback_error: String,
+    },
     PersistFailed(String),
+}
+
+impl std::fmt::Display for PolicyTxError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict { expected, actual } => {
+                write!(
+                    f,
+                    "transaction conflict: expected revision {expected}, got {actual}"
+                )
+            }
+            Self::DuplicateInFlight { tx_id } => {
+                write!(f, "duplicate in-flight transaction: {tx_id}")
+            }
+            Self::DuplicateCommitted { tx_id, revision } => {
+                write!(
+                    f,
+                    "duplicate committed transaction: {tx_id} at revision {revision}"
+                )
+            }
+            Self::ApplyFailed { error } => write!(f, "apply failed: {error}"),
+            Self::RollbackFailed {
+                apply_error,
+                rollback_error,
+            } => {
+                write!(
+                    f,
+                    "rollback failed (apply: {apply_error}; rollback: {rollback_error})"
+                )
+            }
+            Self::PersistFailed(msg) => write!(f, "persist failed: {msg}"),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -230,7 +276,10 @@ impl PolicyTxCoordinator {
             .map_err(|err| PolicyTxError::PersistFailed(err.to_string()))
     }
 
-    async fn persist_audit_record(&self, change_set: &PolicyChangeSet) -> Result<(), PolicyTxError> {
+    async fn persist_audit_record(
+        &self,
+        change_set: &PolicyChangeSet,
+    ) -> Result<(), PolicyTxError> {
         self.ensure_base_dirs().await?;
         let path = self.base_dir.join("audit").join("policy_tx.jsonl");
         let line = serde_json::to_string(change_set)
@@ -249,7 +298,6 @@ impl PolicyTxCoordinator {
             .map_err(|err| PolicyTxError::PersistFailed(err.to_string()))
     }
 }
-
 
 #[cfg(test)]
 #[path = "../../tests/services/policy_tx.rs"]

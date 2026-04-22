@@ -1,31 +1,31 @@
 use std::{fs, path::PathBuf};
 
-use opensnitch_proto::pb;
-
 use crate::config::Config;
+use crate::models::firewall_config::{
+    FirewallChain, FirewallConfig, FirewallExpression, FirewallRule, FirewallStatement,
+    FirewallStatementValue,
+};
 use crate::models::firewall_state::FirewallBackend;
 use crate::services::firewall::FirewallService;
 use crate::tests::support::TestDir;
 
-fn make_sysfw(version: u32, uuid: &str, table: &str, target: &str) -> pb::SysFirewall {
-    pb::SysFirewall {
+fn make_sysfw(version: u32, uuid: &str, table: &str, target: &str) -> FirewallConfig {
+    FirewallConfig {
         enabled: true,
         version,
-        system_rules: vec![pb::FwChains {
-            rule: Some(pb::FwRule {
-                table: table.to_string(),
-                chain: "OUTPUT".to_string(),
-                uuid: uuid.to_string(),
-                enabled: true,
-                position: 1,
-                description: format!("{uuid} rule"),
-                parameters: "".to_string(),
-                expressions: Vec::new(),
-                target: target.to_string(),
-                target_parameters: "".to_string(),
-            }),
-            chains: Vec::new(),
+        rules: vec![FirewallRule {
+            table: table.to_string(),
+            chain: "OUTPUT".to_string(),
+            uuid: uuid.to_string(),
+            enabled: true,
+            position: 1,
+            description: format!("{uuid} rule"),
+            parameters: "".to_string(),
+            expressions: Vec::new(),
+            target: target.to_string(),
+            target_parameters: "".to_string(),
         }],
+        chains: Vec::new(),
     }
 }
 
@@ -99,10 +99,7 @@ async fn reload_from_config_updates_runtime_backend_and_system_firewall() {
         .expect("reloaded system firewall must exist");
     assert_eq!(reloaded_sysfw.version, 2);
     assert_eq!(
-        reloaded_sysfw.system_rules[0]
-            .rule
-            .as_ref()
-            .map(|r| r.uuid.as_str()),
+        reloaded_sysfw.rules.first().map(|r| r.uuid.as_str()),
         Some("ipt-uuid")
     );
 }
@@ -214,10 +211,7 @@ async fn new_loads_existing_system_firewall_from_disk() {
     let loaded = loaded.as_ref().as_ref().expect("system firewall loaded");
     assert_eq!(loaded.version, 8);
     assert_eq!(
-        loaded.system_rules[0]
-            .rule
-            .as_ref()
-            .map(|r| r.uuid.as_str()),
+        loaded.rules.first().map(|r| r.uuid.as_str()),
         Some("existing-uuid")
     );
 }
@@ -256,14 +250,14 @@ async fn reload_from_config_error_keeps_previous_runtime_state() {
     let state = service.snapshot();
     assert!(matches!(state.state.backend, FirewallBackend::Nftables));
 
-    let sysfw = service.system_firewall();
-    let sysfw = sysfw
+    let fw = service.system_firewall();
+    let fw = fw
         .as_ref()
         .as_ref()
         .expect("previous system firewall should be retained");
-    assert_eq!(sysfw.version, 11);
+    assert_eq!(fw.version, 11);
     assert_eq!(
-        sysfw.system_rules[0].rule.as_ref().map(|r| r.uuid.as_str()),
+        fw.rules.first().map(|r| r.uuid.as_str()),
         Some("stable-uuid")
     );
 }
@@ -273,39 +267,34 @@ fn save_and_load_system_firewall_round_trip() {
     let dir = TestDir::new("opensnitch-firewall-service-test");
     let path = dir.path.join("system-fw.json");
 
-    let sysfw = pb::SysFirewall {
+    let fw = FirewallConfig {
         enabled: true,
         version: 1,
-        system_rules: vec![pb::FwChains {
-            rule: Some(pb::FwRule {
-                table: "filter".to_string(),
-                chain: "OUTPUT".to_string(),
-                uuid: "uuid-1".to_string(),
-                enabled: true,
-                position: 1,
-                description: "allow-dns".to_string(),
-                parameters: "-p udp --dport 53".to_string(),
-                expressions: Vec::new(),
-                target: "ACCEPT".to_string(),
-                target_parameters: "".to_string(),
-            }),
-            chains: Vec::new(),
+        rules: vec![FirewallRule {
+            table: "filter".to_string(),
+            chain: "OUTPUT".to_string(),
+            uuid: "uuid-1".to_string(),
+            enabled: true,
+            position: 1,
+            description: "allow-dns".to_string(),
+            parameters: "-p udp --dport 53".to_string(),
+            expressions: Vec::new(),
+            target: "ACCEPT".to_string(),
+            target_parameters: "".to_string(),
         }],
+        chains: Vec::new(),
     };
 
-    FirewallService::probe_save_system_firewall(&path, &sysfw).expect("save sysfw");
+    FirewallService::probe_save_system_firewall(&path, &fw).expect("save fw");
     let loaded = FirewallService::probe_load_system_firewall(&path)
-        .expect("load sysfw")
-        .expect("present sysfw");
+        .expect("load fw")
+        .expect("present fw");
 
     assert!(loaded.enabled);
     assert_eq!(loaded.version, 1);
-    assert_eq!(loaded.system_rules.len(), 1);
+    assert_eq!(loaded.rules.len(), 1);
     assert_eq!(
-        loaded.system_rules[0]
-            .rule
-            .as_ref()
-            .map(|r| r.uuid.as_str()),
+        loaded.rules.first().map(|r| r.uuid.as_str()),
         Some("uuid-1")
     );
 }
@@ -336,51 +325,49 @@ fn save_and_load_preserves_nested_chain_expressions() {
     let dir = TestDir::new("opensnitch-firewall-service-nested-roundtrip");
     let path = dir.path.join("nested-system-fw.json");
 
-    let sysfw = pb::SysFirewall {
+    let fw = FirewallConfig {
         enabled: true,
         version: 7,
-        system_rules: vec![pb::FwChains {
-            rule: None,
-            chains: vec![pb::FwChain {
-                name: "mangle_output".to_string(),
+        rules: Vec::new(),
+        chains: vec![FirewallChain {
+            name: "mangle_output".to_string(),
+            table: "opensnitch".to_string(),
+            family: "inet".to_string(),
+            priority: "mangle".to_string(),
+            r#type: "filter".to_string(),
+            hook: "output".to_string(),
+            policy: "accept".to_string(),
+            rules: vec![FirewallRule {
                 table: "opensnitch".to_string(),
-                family: "inet".to_string(),
-                priority: "mangle".to_string(),
-                r#type: "filter".to_string(),
-                hook: "output".to_string(),
-                policy: "accept".to_string(),
-                rules: vec![pb::FwRule {
-                    table: "opensnitch".to_string(),
-                    chain: "mangle_output".to_string(),
-                    uuid: "uuid-nested-1".to_string(),
-                    enabled: true,
-                    position: 11,
-                    description: "nested expression".to_string(),
-                    parameters: "".to_string(),
-                    expressions: vec![pb::Expressions {
-                        statement: Some(pb::Statement {
-                            op: "==".to_string(),
-                            name: "meta".to_string(),
-                            values: vec![pb::StatementValues {
-                                key: "l4proto".to_string(),
-                                value: "tcp".to_string(),
-                            }],
-                        }),
-                    }],
-                    target: "queue".to_string(),
-                    target_parameters: "num 0 bypass".to_string(),
+                chain: "mangle_output".to_string(),
+                uuid: "uuid-nested-1".to_string(),
+                enabled: true,
+                position: 11,
+                description: "nested expression".to_string(),
+                parameters: "".to_string(),
+                expressions: vec![FirewallExpression {
+                    statement: Some(FirewallStatement {
+                        op: "==".to_string(),
+                        name: "meta".to_string(),
+                        values: vec![FirewallStatementValue {
+                            key: "l4proto".to_string(),
+                            value: "tcp".to_string(),
+                        }],
+                    }),
                 }],
+                target: "queue".to_string(),
+                target_parameters: "num 0 bypass".to_string(),
             }],
         }],
     };
 
-    FirewallService::probe_save_system_firewall(&path, &sysfw).expect("save nested sysfw");
+    FirewallService::probe_save_system_firewall(&path, &fw).expect("save nested fw");
     let loaded = FirewallService::probe_load_system_firewall(&path)
-        .expect("load nested sysfw")
-        .expect("nested sysfw should exist");
+        .expect("load nested fw")
+        .expect("nested fw should exist");
 
     assert_eq!(loaded.version, 7);
-    let chain = &loaded.system_rules[0].chains[0];
+    let chain = &loaded.chains[0];
     assert_eq!(chain.name, "mangle_output");
     assert_eq!(chain.rules.len(), 1);
     let expr = &chain.rules[0].expressions[0];
@@ -397,12 +384,13 @@ fn load_system_firewall_minimal_json_uses_defaults() {
     fs::write(&path, "{}").expect("write minimal json");
 
     let loaded = FirewallService::probe_load_system_firewall(&path)
-        .expect("load minimal sysfw")
-        .expect("minimal sysfw should deserialize");
+        .expect("load minimal fw")
+        .expect("minimal fw should deserialize");
 
     assert!(!loaded.enabled);
     assert_eq!(loaded.version, 0);
-    assert!(loaded.system_rules.is_empty());
+    assert!(loaded.rules.is_empty());
+    assert!(loaded.chains.is_empty());
 }
 
 #[test]
@@ -436,16 +424,13 @@ fn load_system_firewall_supports_top_level_rule_only() {
     .expect("write top-level rule json");
 
     let loaded = FirewallService::probe_load_system_firewall(&path)
-        .expect("load top-level rule sysfw")
-        .expect("top-level rule sysfw should deserialize");
+        .expect("load top-level rule fw")
+        .expect("top-level rule fw should deserialize");
 
     assert!(loaded.enabled);
     assert_eq!(loaded.version, 2);
-    assert_eq!(loaded.system_rules.len(), 1);
-    let rule = loaded.system_rules[0]
-        .rule
-        .as_ref()
-        .expect("rule entry should be present");
+    assert_eq!(loaded.rules.len(), 1);
+    let rule = &loaded.rules[0];
     assert_eq!(rule.uuid, "rule-only-uuid");
     assert_eq!(rule.position, 9);
     assert_eq!(rule.target, "ACCEPT");
@@ -485,12 +470,71 @@ fn load_system_firewall_parses_position_from_string_or_invalid_to_zero() {
     .expect("write position parsing json");
 
     let loaded = FirewallService::probe_load_system_firewall(&path)
-        .expect("load position parsing sysfw")
-        .expect("position parsing sysfw should deserialize");
+        .expect("load position parsing fw")
+        .expect("position parsing fw should deserialize");
 
-    let first = loaded.system_rules[0].rule.as_ref().expect("first rule");
-    let second = loaded.system_rules[1].rule.as_ref().expect("second rule");
+    let first = &loaded.rules[0];
+    let second = &loaded.rules[1];
 
     assert_eq!(first.position, 13);
     assert_eq!(second.position, 0);
+}
+
+#[test]
+fn load_system_firewall_inherits_table_and_chain_from_parent_chain() {
+    // Mirrors the Go daemon's legacy file format (daemon/data/system-fw.json):
+    // nested Rules inside a FwChain don't carry Table/Chain; they inherit from
+    // the parent chain's Table and Name fields.
+    let dir = TestDir::new("opensnitch-firewall-chain-inheritance");
+    let path = dir.path.join("chain-inherit-system-fw.json");
+    fs::write(
+        &path,
+        r#"{
+    "Enabled": true,
+    "Version": 1,
+    "SystemRules": [
+        {
+            "Chains": [
+                {
+                    "Name": "mangle_output",
+                    "Table": "opensnitch",
+                    "Family": "inet",
+                    "Priority": "",
+                    "Type": "mangle",
+                    "Hook": "output",
+                    "Policy": "accept",
+                    "Rules": [
+                        {
+                            "UUID": "inherit-uuid",
+                            "Enabled": true,
+                            "Position": "0",
+                            "Description": "no table/chain in source",
+                            "Expressions": [],
+                            "Target": "accept",
+                            "TargetParameters": ""
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}"#,
+    )
+    .expect("write chain-inheritance json");
+
+    let loaded = FirewallService::probe_load_system_firewall(&path)
+        .expect("load chain-inheritance fw")
+        .expect("should deserialize");
+
+    assert_eq!(loaded.chains.len(), 1);
+    let chain = &loaded.chains[0];
+    assert_eq!(chain.name, "mangle_output");
+    assert_eq!(chain.table, "opensnitch");
+    assert_eq!(chain.rules.len(), 1);
+
+    let rule = &chain.rules[0];
+    assert_eq!(rule.uuid, "inherit-uuid");
+    // Table and Chain must be inherited from the parent chain, not left empty.
+    assert_eq!(rule.table, "opensnitch");
+    assert_eq!(rule.chain, "mangle_output");
 }
