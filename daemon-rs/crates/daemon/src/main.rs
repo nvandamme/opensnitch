@@ -1,13 +1,11 @@
-mod adapters;
 mod bus;
-mod client;
 mod commands;
 mod config;
 mod daemon;
-mod ffi;
 mod flows;
 mod logging;
 mod models;
+mod platform;
 mod services;
 #[cfg(test)]
 mod tests;

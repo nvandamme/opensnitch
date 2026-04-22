@@ -1,4 +1,5 @@
-use crate::models::rule_record::{RuleAction, RuleDuration, RuleRecord};
+use crate::models::rule_record::{RuleAction, RuleDuration};
+use crate::services::rule::rule_record_from_proto;
 use opensnitch_proto::pb;
 
 #[test]
@@ -21,7 +22,7 @@ fn from_proto_maps_core_fields_like_create_invariants() {
         }),
     };
 
-    let record = RuleRecord::from_proto(&proto);
+    let record = rule_record_from_proto(&proto);
     assert_eq!(record.name, "000-test-name");
     assert_eq!(record.description, "rule description 000");
     assert!(record.enabled);
@@ -64,7 +65,7 @@ fn from_proto_list_operator_clears_data_and_keeps_expanded_list() {
         ..Default::default()
     };
 
-    let record = RuleRecord::from_proto(&proto);
+    let record = rule_record_from_proto(&proto);
     assert_eq!(record.operator.type_name, "list");
     assert_eq!(record.operator.operand, "list");
     assert_eq!(record.operator.data, "");
@@ -75,4 +76,18 @@ fn from_proto_list_operator_clears_data_and_keeps_expanded_list() {
     assert_eq!(record.operator.list[1].type_name, "simple");
     assert_eq!(record.operator.list[1].operand, "dest.port");
     assert_eq!(record.operator.list[1].data, "23");
+}
+
+#[test]
+fn from_proto_accepts_drop_alias_for_rule_action() {
+    let proto = pb::Rule {
+        name: "000-test-drop-alias".to_string(),
+        action: "drop".to_string(),
+        duration: "once".to_string(),
+        enabled: true,
+        ..Default::default()
+    };
+
+    let record = rule_record_from_proto(&proto);
+    assert_eq!(record.action, RuleAction::Deny);
 }

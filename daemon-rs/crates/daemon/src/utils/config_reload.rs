@@ -1,4 +1,129 @@
-use tokio::process::Command;
+pub(crate) use crate::models::config_reload::{
+    RuntimeApplyMessageContext, RuntimeApplyPolicy, RuntimeApplyReport, RuntimeApplyStage,
+    RuntimeApplyStageMessages,
+};
+use crate::utils::conntrack::{flush_conntrack_expect, flush_conntrack_table};
+
+pub(crate) fn apply_runtime_core(
+    updated: &crate::config::Config,
+    stats: &crate::services::stats::StatsService,
+) {
+    crate::platform::ffi::nfqueue::NfqueueRuntimeState::set_default_action(updated.default_action);
+    stats.apply_config(updated.stats);
+    apply_gc_percent(updated.gc_percent);
+}
+
+pub(crate) fn runtime_apply_stage_messages(
+    context: RuntimeApplyMessageContext,
+    stage: RuntimeApplyStage,
+) -> RuntimeApplyStageMessages {
+    match context {
+        RuntimeApplyMessageContext::ConfigCommand => match stage {
+            RuntimeApplyStage::Logging => RuntimeApplyStageMessages {
+                log: "failed to apply runtime logging config after config change",
+                external: "failed to apply runtime log level after config change",
+            },
+            RuntimeApplyStage::Rules => RuntimeApplyStageMessages {
+                log: "failed to reload rules after config change",
+                external: "failed to reload rules after config change",
+            },
+            RuntimeApplyStage::Firewall => RuntimeApplyStageMessages {
+                log: "failed to reconcile firewall after config change",
+                external: "failed to reconcile firewall after config change",
+            },
+        },
+        RuntimeApplyMessageContext::ConfigWatch => match stage {
+            RuntimeApplyStage::Logging => RuntimeApplyStageMessages {
+                log: "failed to apply runtime logging config after config file change",
+                external: "failed to apply runtime logging config after config file change",
+            },
+            RuntimeApplyStage::Rules => RuntimeApplyStageMessages {
+                log: "failed to reload rules after config file change",
+                external: "failed to reload rules after config file change",
+            },
+            RuntimeApplyStage::Firewall => RuntimeApplyStageMessages {
+                log: "failed to reconcile firewall after config file change",
+                external: "failed to reconcile firewall after config file change",
+            },
+        },
+        RuntimeApplyMessageContext::Sighup => match stage {
+            RuntimeApplyStage::Logging => RuntimeApplyStageMessages {
+                log: "failed to apply logging config after SIGHUP reload",
+                external: "SIGHUP reload failed while applying logging config",
+            },
+            RuntimeApplyStage::Rules => RuntimeApplyStageMessages {
+                log: "failed to reload rules after SIGHUP",
+                external: "SIGHUP reload failed while reloading rules",
+            },
+            RuntimeApplyStage::Firewall => RuntimeApplyStageMessages {
+                log: "failed to reconcile firewall after SIGHUP",
+                external: "SIGHUP reload failed while reconciling firewall",
+            },
+        },
+    }
+}
+
+impl RuntimeApplyReport {
+    pub(crate) fn into_stage_errors(self) -> Vec<(RuntimeApplyStage, anyhow::Error)> {
+        let mut out = Vec::new();
+        if let Some(err) = self.logging_error {
+            out.push((RuntimeApplyStage::Logging, err));
+        }
+        if let Some(err) = self.rules_error {
+            out.push((RuntimeApplyStage::Rules, err));
+        }
+        if let Some(err) = self.firewall_error {
+            out.push((RuntimeApplyStage::Firewall, err));
+        }
+        out
+    }
+}
+
+pub(crate) async fn apply_runtime_config_services(
+    updated: &crate::config::Config,
+    rules: &crate::services::rule::RuleService,
+    firewall: &crate::services::firewall::FirewallService,
+    policy: RuntimeApplyPolicy,
+) -> RuntimeApplyReport {
+    let logging_error = crate::logging::LoggingState::apply_config(updated).err();
+
+    let rules_error = rules.load_path(&updated.rules_path).await.err();
+
+    let firewall_error =
+        if matches!(policy, RuntimeApplyPolicy::StopAfterRulesError) && rules_error.is_some() {
+            None
+        } else {
+            firewall.reconcile_from_config(updated).await.err()
+        };
+
+    RuntimeApplyReport {
+        logging_error,
+        rules_error,
+        firewall_error,
+    }
+}
+
+pub(crate) fn has_proc_runtime_change(
+    previous: &crate::config::Config,
+    updated: &crate::config::Config,
+) -> bool {
+    previous.proc_monitor_method != updated.proc_monitor_method
+        || previous.audit_socket_path != updated.audit_socket_path
+}
+
+pub(crate) fn has_firewall_runtime_change(
+    previous: &crate::config::Config,
+    updated: &crate::config::Config,
+    include_monitor_interval: bool,
+) -> bool {
+    crate::services::firewall::firewall_backend_name(previous.firewall_backend)
+        != crate::services::firewall::firewall_backend_name(updated.firewall_backend)
+        || previous.firewall_config_path != updated.firewall_config_path
+        || previous.firewall_queue_num != updated.firewall_queue_num
+        || previous.firewall_queue_bypass != updated.firewall_queue_bypass
+        || (include_monitor_interval
+            && previous.firewall_monitor_interval != updated.firewall_monitor_interval)
+}
 
 pub(crate) fn log_config_delta(
     previous: &crate::config::Config,
@@ -147,12 +272,8 @@ pub(crate) fn log_config_delta(
         tracing::debug!("[config] config.procmon not changed");
     }
 
-    let firewall_changed = previous.firewall_backend.as_str() != updated.firewall_backend.as_str()
-        || previous.firewall_config_path != updated.firewall_config_path
-        || previous.firewall_queue_num != updated.firewall_queue_num
-        || previous.firewall_queue_bypass != updated.firewall_queue_bypass
-        || (include_firewall_monitor_interval
-            && previous.firewall_monitor_interval != updated.firewall_monitor_interval);
+    let firewall_changed =
+        has_firewall_runtime_change(previous, updated, include_firewall_monitor_interval);
 
     if firewall_changed {
         tracing::debug!("[config] reloading config.firewall");
@@ -182,40 +303,11 @@ pub(crate) fn apply_gc_percent(gc_percent: Option<i32>) {
 pub(crate) async fn flush_established_connections() {
     tracing::debug!("[config] flushing established connections");
 
-    let table = Command::new("conntrack").args(["-F"]).output().await;
-    match table {
-        Ok(out) if out.status.success() => {}
-        Ok(out) => {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            tracing::error!(
-                "error flushing ConntrackTable {}",
-                if err.is_empty() {
-                    "failed"
-                } else {
-                    err.as_str()
-                }
-            );
-        }
-        Err(err) => tracing::error!("error flushing ConntrackTable {err}"),
+    if let Err(err) = flush_conntrack_table().await {
+        tracing::error!("error flushing ConntrackTable {err}");
     }
 
-    let expect = Command::new("conntrack")
-        .args(["-F", "expect"])
-        .output()
-        .await;
-    match expect {
-        Ok(out) if out.status.success() => {}
-        Ok(out) => {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            tracing::error!(
-                "error flusing ConntrackExpectTable {}",
-                if err.is_empty() {
-                    "failed"
-                } else {
-                    err.as_str()
-                }
-            );
-        }
-        Err(err) => tracing::error!("error flusing ConntrackExpectTable {err}"),
+    if let Err(err) = flush_conntrack_expect().await {
+        tracing::error!("error flusing ConntrackExpectTable {err}");
     }
 }

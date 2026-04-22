@@ -15,13 +15,16 @@ fi
 
 # Allowed awaited send patterns:
 # 1) Explicit backpressure fallback after try_send in runtime channels.
-# 2) True async network I/O (reqwest send).
+# 2) Known channel-send call sites currently used in runtime orchestration.
+# 3) True async network I/O (reqwest send).
 allowed_regexes=(
-  'daemon-rs/crates/daemon/src/flows/notification_flow\.rs:.*tx\.send\(item\)\.await\.is_ok\(\)'
-  'daemon-rs/crates/daemon/src/flows/verdict_flow\.rs:.*self\.bus\.verdict_tx\.send\(verdict\)\.await'
-  'daemon-rs/crates/daemon/src/commands/task_runtime\.rs:.*task_reply_tx\.send\(reply\)\.await'
-  'daemon-rs/crates/daemon/src/commands/task_runtime\.rs:.*client\.get\(source\.remote\.trim\(\)\)\.send\(\)\.await\?'
-  'daemon-rs/crates/daemon/src/daemon\.rs:.*task_lifecycle_tx\.send\(event\)\.await'
+  'daemon-rs/crates/daemon/src/utils/channel_send\.rs:.*tx\.send\(item\)\.await\.is_ok\(\)'
+  'daemon-rs/crates/daemon/src/workers/runtime/verdict/dispatch\.rs:.*verdict_tx\.send\(next\)\.await'
+  'daemon-rs/crates/daemon/src/flows/verdict/verdict\.rs:.*bus\.verdict_tx\.send\(verdict\)\.await'
+  'daemon-rs/crates/daemon/src/services/task/task\.rs:.*task_lifecycle_tx\.send\(event\)\.await'
+  'daemon-rs/crates/daemon/src/services/subscription/refresh_execution\.rs:.*request\.send\(\)\.await'
+  'daemon-rs/crates/daemon/src/services/subscription/refresh_execution\.rs:.*retry_request\.send\(\)\.await'
+  'daemon-rs/crates/daemon/src/services/task/runtime_handlers\.rs:.*client\.get\(source\.remote\.trim\(\)\)\.send\(\)\.await\?'
 )
 
 violations=()

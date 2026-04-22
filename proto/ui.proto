@@ -1,5 +1,6 @@
 syntax = "proto3";
 
+
 package protocol;
 
 option go_package = "github.com/evilsocket/opensnitch/daemon/ui/protocol";
@@ -94,6 +95,9 @@ message Statistics {
 	map<string, uint64> by_uid = 15;
 	map<string, uint64> by_executable = 16;
     repeated Event events = 17;
+    uint64 subscription_total = 18;
+    uint64 subscription_ready = 19;
+    uint64 subscription_error = 20;
 }
 
 message PingRequest {
@@ -192,6 +196,11 @@ enum Action {
      */
     TASK_START = 13;
     TASK_STOP = 14;
+
+    /* Typed subscription management routed through the same persistent
+     * Notifications stream.
+     */
+    SUBSCRIPTIONS = 15;
 }
 
 message StatementValues {
@@ -279,6 +288,7 @@ message Notification {
     string data = 5;   
     repeated Rule rules = 6;
     SysFirewall sysFirewall = 7;
+    reserved 8;
 }
 
 // notification reply sent to the server (GUI)
@@ -286,6 +296,7 @@ message NotificationReply {
     uint64 id = 1;
     NotificationReplyCode code = 2;
     string data = 3;
+    reserved 4;
 }
 
 enum NotificationReplyCode {

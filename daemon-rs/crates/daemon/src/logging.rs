@@ -22,6 +22,8 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
+use crate::utils::name_parsing::case_folded;
+
 pub(crate) static LOG_FILTER_HANDLE: OnceLock<reload::Handle<EnvFilter, Registry>> =
     OnceLock::new();
 static LOG_SINK_OPTIONS: OnceLock<RwLock<LogSinkOptions>> = OnceLock::new();
@@ -178,7 +180,7 @@ impl LoggingState {
             .loggers
             .iter()
             .find(|logger| {
-                logger.protocol.eq_ignore_ascii_case("udp") && !logger.server.trim().is_empty()
+                case_folded(&logger.protocol) == "udp" && !logger.server.trim().is_empty()
             })
             .and_then(|logger| Self::parse_udp_target(&logger.server));
 
@@ -199,7 +201,7 @@ impl LoggingState {
                 continue;
             }
             let supported =
-                logger.protocol.eq_ignore_ascii_case("udp") && !logger.server.is_empty();
+                case_folded(&logger.protocol) == "udp" && !logger.server.is_empty();
             warn!(
                 logger_name = %logger.name,
                 logger_format = %logger.format,

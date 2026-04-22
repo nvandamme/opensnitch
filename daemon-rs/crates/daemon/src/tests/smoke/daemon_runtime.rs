@@ -10,30 +10,30 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::daemon::{
-    Daemon, DaemonInner, KERNEL_PIPELINE_SEND_BACKOFF, KernelPipeline, ProcWorkersRuntime,
-    ProcessKernelEvent,
-};
+use crate::daemon::{Daemon, DaemonInner, KernelPipeline, ProcWorkersRuntime, ProcessKernelEvent};
 use crate::{
     bus::{Bus, BusCaps, BusState},
     config::Config,
-    flows::verdict_flow::VerdictFlow,
+    flows::verdict::VerdictFlow,
     models::{
         command_rpc::{ClientCommand, TaskNotification},
         connection_state::{ConnectionAttempt, TransportProtocol},
+        dns_payload::DnsPayload,
         firewall_state::{FirewallBackend, FirewallState},
-        kernel_event::{KernelEvent, ProcEventKind},
+        kernel_event::KernelEvent,
+        proc_event::ProcEventKind,
     },
     services::{
-        config_service::ConfigService, connection_service::ConnectionService,
-        dns_service::DnsService, firewall_service::FirewallService,
-        process_service::ProcessService, rule_service::RuleService, stats_service::StatsService,
-        ui_session_service::UiSessionService,
+        client::UiSessionService, config::ConfigService, connection::ConnectionService,
+        dns::DnsService, firewall::FirewallService,
+        process::ProcessService, rule::RuleService,
+        stats::StatsService,
     },
     tunables::RuntimeTunables,
 };
 
 const LOCALHOST_IP: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+const KERNEL_PIPELINE_SEND_BACKOFF: Duration = Duration::from_millis(10);
 
 fn build_test_daemon_with_tunables(bus: Bus, tunables: RuntimeTunables) -> Daemon {
     let config = Config::default();
@@ -62,7 +62,9 @@ fn build_test_daemon_with_tunables(bus: Bus, tunables: RuntimeTunables) -> Daemo
             dns,
             stats: StatsService::default(),
             firewall,
-            task_runtime: crate::commands::task_runtime::TaskRuntimeService,
+            subscriptions: crate::services::subscription::SubscriptionService::with_system_defaults(
+            ),
+            task_runtime: crate::services::task::TaskRuntimeService,
             tunables,
             shutdown: CancellationToken::new(),
         }),
@@ -94,7 +96,7 @@ async fn dispatch_kernel_pipeline_event_drops_after_bounded_backoff_when_full() 
     let (tx, mut rx) = mpsc::channel::<u8>(1);
     assert!(tx.try_send(1_u8).is_ok());
 
-    let before = Daemon::probe_kernel_pipeline_drop_stats_snapshot();
+    let before = Daemon::probe_kernel_pipeline_drop_stats();
     let started = Instant::now();
     let keep_running = Daemon::probe_dispatch_kernel_pipeline_event(
         &tx,
@@ -103,7 +105,7 @@ async fn dispatch_kernel_pipeline_event_drops_after_bounded_backoff_when_full() 
         KernelPipeline::Dns,
     )
     .await;
-    let after = Daemon::probe_kernel_pipeline_drop_stats_snapshot();
+    let after = Daemon::probe_kernel_pipeline_drop_stats();
 
     assert!(keep_running);
     assert!(started.elapsed() >= KERNEL_PIPELINE_SEND_BACKOFF);
@@ -114,15 +116,15 @@ async fn dispatch_kernel_pipeline_event_drops_after_bounded_backoff_when_full() 
 
 #[test]
 fn fanout_kernel_ingress_event_routes_dns_event() {
-    let (dns_tx, mut dns_rx) = mpsc::unbounded_channel::<(String, String)>();
+    let (dns_tx, mut dns_rx) = mpsc::unbounded_channel::<DnsPayload>();
     let (process_tx, mut process_rx) = mpsc::unbounded_channel::<ProcessKernelEvent>();
     let (firewall_tx, mut firewall_rx) = mpsc::unbounded_channel::<FirewallState>();
 
     let routed = Daemon::probe_fanout_kernel_ingress_event(
-        KernelEvent::DnsResolved {
-            ip: "203.0.113.10".to_string(),
-            host: "dns.example.test".to_string(),
-        },
+        KernelEvent::DnsUpdate(DnsPayload::answer(
+            "dns.example.test",
+            "203.0.113.10".parse().expect("test ip should parse"),
+        )),
         &dns_tx,
         &process_tx,
         &firewall_tx,
@@ -131,7 +133,10 @@ fn fanout_kernel_ingress_event_routes_dns_event() {
     assert!(routed);
     assert_eq!(
         dns_rx.try_recv().ok(),
-        Some(("203.0.113.10".to_string(), "dns.example.test".to_string()))
+        Some(DnsPayload::answer(
+            "dns.example.test",
+            "203.0.113.10".parse().expect("test ip should parse"),
+        ))
     );
     assert!(process_rx.try_recv().is_err());
     assert!(firewall_rx.try_recv().is_err());
@@ -139,16 +144,16 @@ fn fanout_kernel_ingress_event_routes_dns_event() {
 
 #[test]
 fn fanout_kernel_ingress_event_returns_false_when_target_receiver_is_closed() {
-    let (dns_tx, dns_rx) = mpsc::unbounded_channel::<(String, String)>();
+    let (dns_tx, dns_rx) = mpsc::unbounded_channel::<DnsPayload>();
     let (process_tx, _process_rx) = mpsc::unbounded_channel::<ProcessKernelEvent>();
     let (firewall_tx, _firewall_rx) = mpsc::unbounded_channel::<FirewallState>();
     drop(dns_rx);
 
     let routed = Daemon::probe_fanout_kernel_ingress_event(
-        KernelEvent::DnsResolved {
-            ip: "198.51.100.20".to_string(),
-            host: "closed.example.test".to_string(),
-        },
+        KernelEvent::DnsUpdate(DnsPayload::answer(
+            "closed.example.test",
+            "198.51.100.20".parse().expect("test ip should parse"),
+        )),
         &dns_tx,
         &process_tx,
         &firewall_tx,
@@ -474,7 +479,7 @@ async fn connect_attempt_progresses_under_mixed_non_connect_saturation() {
                 _ = router_shutdown.cancelled() => break,
                 msg = kernel_rx.recv() => {
                     match msg {
-                        Some(KernelEvent::DnsResolved { .. }) => {
+                        Some(KernelEvent::DnsUpdate(_)) => {
                             if !Daemon::probe_dispatch_kernel_pipeline_event(
                                 &dns_tx,
                                 (),
@@ -486,7 +491,11 @@ async fn connect_attempt_progresses_under_mixed_non_connect_saturation() {
                                 break;
                             }
                         }
-                        Some(KernelEvent::ProcStateChanged { .. } | KernelEvent::EbpfProcessMapHit { .. }) => {
+                        Some(
+                            KernelEvent::ProcStateChanged { .. }
+                            | KernelEvent::EbpfProcStateChanged(_)
+                            | KernelEvent::EbpfProcessMapHit { .. }
+                        ) => {
                             if !Daemon::probe_dispatch_kernel_pipeline_event(
                                 &process_tx,
                                 (),
@@ -527,10 +536,12 @@ async fn connect_attempt_progresses_under_mixed_non_connect_saturation() {
     let flood = tokio::spawn(async move {
         for i in 0..10_000_u32 {
             let event = match i % 3 {
-                0 => KernelEvent::DnsResolved {
-                    ip: format!("198.51.100.{}", i % 255),
-                    host: format!("load-{}.example.test", i),
-                },
+                0 => KernelEvent::DnsUpdate(DnsPayload::answer(
+                    format!("load-{}.example.test", i),
+                    format!("198.51.100.{}", i % 255)
+                        .parse()
+                        .expect("generated test ip should parse"),
+                )),
                 1 => KernelEvent::ProcStateChanged {
                     pid: 10_000 + (i % 64),
                     kind: ProcEventKind::Exec,
@@ -603,14 +614,14 @@ fn enforce_low_noise_harness_log_level(harness_name: &str) {
     crate::tests::support::init_test_logging();
 
     let raw = std::env::var("RUST_LOG").unwrap_or_default();
-    let normalized = raw.to_ascii_lowercase();
+    let normalized = raw.to_lowercase();
     let has_warn_or_error = normalized.contains("warn") || normalized.contains("error");
     let has_debug_or_trace = normalized.contains("debug") || normalized.contains("trace");
 
     let allow_verbose = std::env::var("OPENSNITCH_VERBOSE")
         .ok()
         .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
+            let value = value.trim().to_lowercase();
             value == "1" || value == "true" || value == "yes" || value == "on"
         })
         .unwrap_or(false);
@@ -827,7 +838,7 @@ async fn run_kernel_pressure_profile(
     let enqueue_timeouts = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let enqueue_closed = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-    let drop_before = Daemon::probe_kernel_pipeline_drop_stats_snapshot();
+    let drop_before = Daemon::probe_kernel_pipeline_drop_stats();
     let flood_shutdown = CancellationToken::new();
     let started = Instant::now();
 
@@ -864,10 +875,12 @@ async fn run_kernel_pressure_profile(
                     let event = match lane {
                         0 => {
                             let idx = (i as usize) & 0xFF;
-                            KernelEvent::DnsResolved {
-                                ip: dns_ips[idx].clone(),
-                                host: dns_hosts[idx].clone(),
-                            }
+                            KernelEvent::DnsUpdate(DnsPayload::answer(
+                                dns_hosts[idx].clone(),
+                                dns_ips[idx]
+                                    .parse()
+                                    .expect("generated test ip should parse"),
+                            ))
                         }
                         1 => KernelEvent::ProcStateChanged {
                             pid: 50_000 + ((i as u32) % 8192),
@@ -965,7 +978,7 @@ async fn run_kernel_pressure_profile(
     let enqueue_timeouts_total = enqueue_timeouts.load(std::sync::atomic::Ordering::Relaxed);
     let enqueue_closed_total = enqueue_closed.load(std::sync::atomic::Ordering::Relaxed);
 
-    let drop_after = Daemon::probe_kernel_pipeline_drop_stats_snapshot();
+    let drop_after = Daemon::probe_kernel_pipeline_drop_stats();
     let drop_delta = drop_after.saturating_delta(drop_before);
 
     daemon.shutdown().await;
@@ -1023,7 +1036,7 @@ async fn stress_profile_reports_connect_latency_and_pipeline_drops() {
     let stress_profile_enabled = std::env::var("OPENSNITCH_STRESS_PROFILE")
         .ok()
         .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
+            let value = value.trim().to_lowercase();
             !(value.is_empty() || value == "0" || value == "false")
         })
         .unwrap_or(true);
@@ -1133,7 +1146,7 @@ async fn stress_profile_reports_connect_latency_and_pipeline_drops() {
                 _ = router_shutdown.cancelled() => break,
                 msg = kernel_rx.recv() => {
                     match msg {
-                        Some(KernelEvent::DnsResolved { .. }) => {
+                        Some(KernelEvent::DnsUpdate(_)) => {
                             if !Daemon::probe_dispatch_kernel_pipeline_event(
                                 &dns_tx,
                                 (),
@@ -1145,7 +1158,11 @@ async fn stress_profile_reports_connect_latency_and_pipeline_drops() {
                                 break;
                             }
                         }
-                        Some(KernelEvent::ProcStateChanged { .. } | KernelEvent::EbpfProcessMapHit { .. }) => {
+                        Some(
+                            KernelEvent::ProcStateChanged { .. }
+                            | KernelEvent::EbpfProcStateChanged(_)
+                            | KernelEvent::EbpfProcessMapHit { .. }
+                        ) => {
                             if !Daemon::probe_dispatch_kernel_pipeline_event(
                                 &process_tx,
                                 (),
@@ -1189,10 +1206,12 @@ async fn stress_profile_reports_connect_latency_and_pipeline_drops() {
         let mut i = 0_u32;
         while !flood_token.is_cancelled() {
             let event = match i % 3 {
-                0 => KernelEvent::DnsResolved {
-                    ip: format!("203.0.113.{}", i % 255),
-                    host: format!("profile-{}.example.test", i),
-                },
+                0 => KernelEvent::DnsUpdate(DnsPayload::answer(
+                    format!("profile-{}.example.test", i),
+                    format!("203.0.113.{}", i % 255)
+                        .parse()
+                        .expect("generated test ip should parse"),
+                )),
                 1 => KernelEvent::ProcStateChanged {
                     pid: 40_000 + (i % 64),
                     kind: ProcEventKind::Exec,
@@ -1213,7 +1232,7 @@ async fn stress_profile_reports_connect_latency_and_pipeline_drops() {
         }
     });
 
-    let drop_before = Daemon::probe_kernel_pipeline_drop_stats_snapshot();
+    let drop_before = Daemon::probe_kernel_pipeline_drop_stats();
     let mut latencies = Vec::with_capacity(rounds);
     let base_request_id = 0xD00D_0000_u64;
     let daemon_pid = std::process::id();
@@ -1269,7 +1288,7 @@ async fn stress_profile_reports_connect_latency_and_pipeline_drops() {
         latencies.push(started.elapsed());
     }
 
-    let drop_after = Daemon::probe_kernel_pipeline_drop_stats_snapshot();
+    let drop_after = Daemon::probe_kernel_pipeline_drop_stats();
     let drop_delta = drop_after.saturating_delta(drop_before);
 
     flood_shutdown.cancel();

@@ -1,7 +1,7 @@
 use opensnitch_proto::pb;
 
-use crate::commands::rule_command::RuleCommandService;
-use crate::services::rule_service::RuleService;
+use crate::commands::rule::RuleCommandService;
+use crate::services::rule::RuleService;
 use crate::tests::support::TestDir;
 
 #[tokio::test]

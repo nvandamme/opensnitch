@@ -133,7 +133,12 @@ pub(crate) fn stop_daemon_live_logs() -> Result<(), DynError> {
 
     run_command(repo_root, "sudo", ["-n", "true"], &[])?;
 
-    match run_command(repo_root, "sudo", ["-n", "kill", "-0", pid_str.as_str()], &[]) {
+    match run_command(
+        repo_root,
+        "sudo",
+        ["-n", "kill", "-0", pid_str.as_str()],
+        &[],
+    ) {
         Ok(_) => {
             let root_pid: u32 = pid_str
                 .parse()

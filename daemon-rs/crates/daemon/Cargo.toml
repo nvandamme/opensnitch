@@ -1,11 +1,13 @@
 [package]
 name = "opensnitchd-rs"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 
 [features]
-default = ["native-ebpf-ringbuf"]
+default = ["native-ebpf-ringbuf", "aya-ebpf", "libbpf-ebpf"]
 native-ebpf-ringbuf = []
+libbpf-ebpf = ["dep:libbpf-rs"]
+aya-ebpf = ["dep:aya"]
 
 [dependencies]
 tokio = { version = "1.50.0", features = ["full"] }
@@ -21,15 +23,15 @@ nix = { version = "0.31.2", features = ["user", "socket"] }
 regex = "1.12.2"
 aho-corasick = "1.1.3"
 globset = "0.4.15"
-lru = "0.12.5"
+lru = "0.16.2"
 sha2 = "0.10.9"
 sha1 = "0.10.6"
 md-5 = "0.10.6"
 time = { version = "0.3.47", features = ["formatting", "parsing", "macros", "local-offset"] }
 
 opensnitch-proto = { path = "../proto" }
-libbpf-rs = "0.26.1"
-rtnetlink = "0.20.0"
+libbpf-rs = { version = "0.26.1", optional = true }
+aya = { version = "0.13.1", optional = true }
 audit = "0.7.3"
 netlink-packet-sock-diag = "0.4.2"
 netlink-packet-core = "0.7.0"

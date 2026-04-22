@@ -2,17 +2,17 @@ use globset::Glob;
 use nix::libc;
 use nix::unistd::{Uid, User};
 use regex::Regex;
-use std::path::PathBuf;
 
 use crate::models::{
     connection_state::{ConnectionAttempt, TransportProtocol},
     process_state::{ProcessInfo, ProcessNode},
     rule_record::RuleOperator,
 };
-use crate::services::rule_service::{
+use crate::services::rule::{
     CidrTrieIndex, DomainWildcardTrie, ListRegexCache, ListRegexCacheKey, RegexCacheKey,
     RuleMatchCaches, RuleService,
 };
+use crate::tests::support::{TestDir, path_string};
 
 fn probe_process() -> ProcessInfo {
     ProcessInfo {
@@ -222,7 +222,8 @@ fn user_name_operand_matches_current_uid() {
 
 #[test]
 fn lists_domain_and_domain_regexp_match_expected_host_values() {
-    let list_path = PathBuf::from("/tmp/test-domains");
+    let dir = TestDir::new("rule-match-domains-list");
+    let list_path = dir.path.join("domains.txt");
     let mut caches = RuleMatchCaches::default();
     caches.list_domains.insert(
         list_path.clone(),
@@ -243,7 +244,7 @@ fn lists_domain_and_domain_regexp_match_expected_host_values() {
     let domain_op = RuleOperator {
         type_name: "lists".to_string(),
         operand: "lists.domains".to_string(),
-        data: list_path.display().to_string(),
+        data: path_string(&list_path),
         sensitive: false,
         scope: None,
         list: Vec::new(),
@@ -281,8 +282,9 @@ fn lists_domain_and_domain_regexp_match_expected_host_values() {
 
 #[test]
 fn lists_ips_and_nets_match_expected_destination() {
-    let ips_path = PathBuf::from("/tmp/test-ips");
-    let nets_path = PathBuf::from("/tmp/test-nets");
+    let dir = TestDir::new("rule-match-ips-nets-list");
+    let ips_path = dir.path.join("ips.txt");
+    let nets_path = dir.path.join("nets.txt");
 
     let mut caches = RuleMatchCaches::default();
     caches.list_trimmed_values.insert(
@@ -298,14 +300,14 @@ fn lists_ips_and_nets_match_expected_destination() {
     let ips_op = RuleOperator {
         type_name: "lists".to_string(),
         operand: "lists.ips".to_string(),
-        data: ips_path.display().to_string(),
+        data: path_string(&ips_path),
         sensitive: false,
         scope: None,
         list: Vec::new(),
     };
     let nets_op = RuleOperator {
         operand: "lists.nets".to_string(),
-        data: nets_path.display().to_string(),
+        data: path_string(&nets_path),
         ..ips_op.clone()
     };
 
@@ -322,7 +324,8 @@ fn lists_ips_and_nets_match_expected_destination() {
 
 #[test]
 fn lists_ips_scope_src_matches_source_address() {
-    let ips_path = PathBuf::from("/tmp/test-ips-src-scope");
+    let dir = TestDir::new("rule-match-ips-src-scope-list");
+    let ips_path = dir.path.join("ips.txt");
     let mut caches = RuleMatchCaches::default();
     caches.list_trimmed_values.insert(
         ips_path.clone(),
@@ -332,7 +335,7 @@ fn lists_ips_scope_src_matches_source_address() {
     let src_scope_op = RuleOperator {
         type_name: "lists".to_string(),
         operand: "lists.ips".to_string(),
-        data: ips_path.display().to_string(),
+        data: path_string(&ips_path),
         sensitive: false,
         scope: Some("src".to_string()),
         list: Vec::new(),
@@ -363,7 +366,8 @@ fn lists_ips_scope_src_matches_source_address() {
 
 #[test]
 fn lists_nets_matches_ipv6_prefixes() {
-    let nets_path = PathBuf::from("/tmp/test-nets-v6");
+    let dir = TestDir::new("rule-match-nets-v6-list");
+    let nets_path = dir.path.join("nets.txt");
     let mut caches = RuleMatchCaches::default();
     caches.list_networks.insert(nets_path.clone(), {
         let mut index = CidrTrieIndex::default();
@@ -374,7 +378,7 @@ fn lists_nets_matches_ipv6_prefixes() {
     let nets_op = RuleOperator {
         type_name: "lists".to_string(),
         operand: "lists.nets".to_string(),
-        data: nets_path.display().to_string(),
+        data: path_string(&nets_path),
         sensitive: false,
         scope: None,
         list: Vec::new(),
@@ -398,7 +402,8 @@ fn lists_nets_matches_ipv6_prefixes() {
 
 #[test]
 fn lists_domains_wildcard_fallback_matches_subdomains_only() {
-    let list_path = PathBuf::from("/tmp/test-domains-wildcard");
+    let dir = TestDir::new("rule-match-domains-wildcard-list");
+    let list_path = dir.path.join("domains.txt");
     let mut caches = RuleMatchCaches::default();
     let mut trie = DomainWildcardTrie::default();
     trie.insert_suffix("example.org");
@@ -407,7 +412,7 @@ fn lists_domains_wildcard_fallback_matches_subdomains_only() {
     let wildcard_op = RuleOperator {
         type_name: "lists".to_string(),
         operand: "lists.domains".to_string(),
-        data: list_path.display().to_string(),
+        data: path_string(&list_path),
         sensitive: false,
         scope: None,
         list: Vec::new(),
@@ -431,7 +436,8 @@ fn lists_domains_wildcard_fallback_matches_subdomains_only() {
 
 #[test]
 fn lists_domains_glob_fallback_matches_extended_patterns() {
-    let list_path = PathBuf::from("/tmp/test-domains-glob");
+    let dir = TestDir::new("rule-match-domains-glob-list");
+    let list_path = dir.path.join("domains.txt");
     let mut caches = RuleMatchCaches::default();
     let glob = Glob::new("api-??.example.org")
         .expect("compile domain glob")
@@ -443,7 +449,7 @@ fn lists_domains_glob_fallback_matches_extended_patterns() {
     let glob_op = RuleOperator {
         type_name: "lists".to_string(),
         operand: "lists.domains".to_string(),
-        data: list_path.display().to_string(),
+        data: path_string(&list_path),
         sensitive: false,
         scope: None,
         list: Vec::new(),

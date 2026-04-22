@@ -3,7 +3,12 @@
   "max_concurrent_connect_attempts": 64,
   "connect_worker_queue_capacity": 128,
   "connect_dispatch_batch_size": 16,
+  "kernel_ingress_dispatch_batch_size": 32,
+  "kernel_dns_dispatch_batch_size": 32,
+  "kernel_process_dispatch_batch_size": 32,
+  "kernel_firewall_dispatch_batch_size": 32,
   "kernel_dns_queue_capacity": 2048,
   "kernel_process_queue_capacity": 2048,
-  "kernel_firewall_queue_capacity": 512
+  "kernel_firewall_queue_capacity": 512,
+  "nfqueue_overload_policy": "fail-open"
 }

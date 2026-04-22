@@ -1,5 +1,7 @@
-use crate::tests::gates::{skip_if_not_root, strict_mode, strict_mode_requires_iptables};
-use crate::utils::command_path::command_exists;
+use crate::tests::gates::{
+    skip_if_not_opted_in, skip_if_not_root, strict_mode, strict_mode_requires_iptables,
+};
+use crate::utils::command_path::resolve_command_path;
 use opensnitch_proto::pb;
 use std::sync::{Mutex, OnceLock};
 use tokio::process::Command;
@@ -68,12 +70,15 @@ fn make_privileged_sysfw_rule() -> pb::SysFirewall {
 async fn iptables_nfqueue_rules_privileged_smoke() {
     let _guard = lock_privileged_test_guard();
 
+    if skip_if_not_opted_in() {
+        return;
+    }
     if skip_if_not_root() {
         panic!(
             "iptables privileged test requires elevated privileges; rerun using sudo or an elevated shell"
         );
     }
-    if !command_exists("iptables") {
+    if resolve_command_path("iptables").is_none() {
         if strict_mode() {
             panic!("iptables not found in strict kernel integration mode");
         }
@@ -81,7 +86,8 @@ async fn iptables_nfqueue_rules_privileged_smoke() {
     }
 
     let ensure_res =
-        crate::adapters::firewall_iptables::FirewallIptablesAdapter::ensure(0, true).await;
+        crate::platform::adapters::firewall_iptables::FirewallIptablesAdapter::ensure(0, true)
+            .await;
     if let Err(err) = &ensure_res {
         if strict_mode() {
             if strict_mode_requires_iptables() {
@@ -97,7 +103,8 @@ async fn iptables_nfqueue_rules_privileged_smoke() {
     // Always attempt cleanup if ensure succeeded.
     if ensure_res.is_ok() {
         let disable_res =
-            crate::adapters::firewall_iptables::FirewallIptablesAdapter::disable(0, true).await;
+            crate::platform::adapters::firewall_iptables::FirewallIptablesAdapter::disable(0, true)
+                .await;
         if let Err(err) = disable_res
             && strict_mode()
         {
@@ -115,19 +122,23 @@ async fn iptables_nfqueue_rules_privileged_smoke() {
 async fn nftables_nfqueue_rules_privileged_smoke() {
     let _guard = lock_privileged_test_guard();
 
+    if skip_if_not_opted_in() {
+        return;
+    }
     if skip_if_not_root() {
         panic!(
             "nft privileged test requires elevated privileges; rerun using sudo or an elevated shell"
         );
     }
-    if !command_exists("nft") {
+    if resolve_command_path("nft").is_none() {
         if strict_mode() {
             panic!("nft not found in strict kernel integration mode");
         }
         return;
     }
 
-    let ensure_res = crate::adapters::firewall_nft::FirewallNftAdapter::ensure(0, true).await;
+    let ensure_res =
+        crate::platform::adapters::firewall_nft::FirewallNftAdapter::ensure(0, true).await;
     if let Err(err) = &ensure_res {
         if strict_mode() {
             panic!("nft ensure failed in strict mode: {err}");
@@ -135,7 +146,8 @@ async fn nftables_nfqueue_rules_privileged_smoke() {
     }
 
     if ensure_res.is_ok() {
-        let disable_res = crate::adapters::firewall_nft::FirewallNftAdapter::disable().await;
+        let disable_res =
+            crate::platform::adapters::firewall_nft::FirewallNftAdapter::disable().await;
         if let Err(err) = disable_res
             && strict_mode()
         {
@@ -148,19 +160,23 @@ async fn nftables_nfqueue_rules_privileged_smoke() {
 async fn nftables_interception_rules_present_then_removed() {
     let _guard = lock_privileged_test_guard();
 
+    if skip_if_not_opted_in() {
+        return;
+    }
     if skip_if_not_root() {
         panic!(
             "nft interception privileged test requires elevated privileges; rerun using sudo or an elevated shell"
         );
     }
-    if !command_exists("nft") {
+    if resolve_command_path("nft").is_none() {
         if strict_mode() {
             panic!("nft not found in strict kernel integration mode");
         }
         return;
     }
 
-    let ensure_res = crate::adapters::firewall_nft::FirewallNftAdapter::ensure(0, true).await;
+    let ensure_res =
+        crate::platform::adapters::firewall_nft::FirewallNftAdapter::ensure(0, true).await;
     if let Err(err) = &ensure_res {
         if strict_mode() {
             panic!("nft ensure failed in strict mode: {err}");
@@ -179,7 +195,7 @@ async fn nftables_interception_rules_present_then_removed() {
     assert!(output.contains("opensnitch-queue-connections-non-tcp"));
     assert!(output.contains("opensnitch-queue-connections-tcp-syn"));
 
-    let disable_res = crate::adapters::firewall_nft::FirewallNftAdapter::disable().await;
+    let disable_res = crate::platform::adapters::firewall_nft::FirewallNftAdapter::disable().await;
     if let Err(err) = disable_res {
         if strict_mode() {
             panic!("nft disable failed in strict mode: {err}");
@@ -197,20 +213,24 @@ async fn nftables_interception_rules_present_then_removed() {
 async fn nftables_apply_and_clear_system_firewall_rules() {
     let _guard = lock_privileged_test_guard();
 
+    if skip_if_not_opted_in() {
+        return;
+    }
     if skip_if_not_root() {
         panic!(
             "nft system firewall privileged test requires elevated privileges; rerun using sudo or an elevated shell"
         );
     }
-    if !command_exists("nft") {
+    if resolve_command_path("nft").is_none() {
         if strict_mode() {
             panic!("nft not found in strict kernel integration mode");
         }
         return;
     }
 
-    let _ = crate::adapters::firewall_nft::FirewallNftAdapter::disable().await;
-    let ensure_res = crate::adapters::firewall_nft::FirewallNftAdapter::ensure(0, true).await;
+    let _ = crate::platform::adapters::firewall_nft::FirewallNftAdapter::disable().await;
+    let ensure_res =
+        crate::platform::adapters::firewall_nft::FirewallNftAdapter::ensure(0, true).await;
     if let Err(err) = &ensure_res {
         if strict_mode() {
             panic!("nft ensure failed in strict mode: {err}");
@@ -220,9 +240,12 @@ async fn nftables_apply_and_clear_system_firewall_rules() {
 
     let sysfw = make_privileged_sysfw_rule();
     let apply_res =
-        crate::adapters::firewall_nft::FirewallNftAdapter::apply_system_firewall(&sysfw, 0).await;
+        crate::platform::adapters::firewall_nft::FirewallNftAdapter::apply_system_firewall(
+            &sysfw, 0,
+        )
+        .await;
     if let Err(err) = &apply_res {
-        let _ = crate::adapters::firewall_nft::FirewallNftAdapter::disable().await;
+        let _ = crate::platform::adapters::firewall_nft::FirewallNftAdapter::disable().await;
         if strict_mode() {
             panic!("nft apply system firewall failed in strict mode: {err}");
         }
@@ -235,9 +258,10 @@ async fn nftables_apply_and_clear_system_firewall_rules() {
     assert!(output.contains("opensnitch-sysfw:it-sysfw-uuid-1"));
 
     let clear_res =
-        crate::adapters::firewall_nft::FirewallNftAdapter::clear_system_firewall(&sysfw).await;
+        crate::platform::adapters::firewall_nft::FirewallNftAdapter::clear_system_firewall(&sysfw)
+            .await;
     if let Err(err) = &clear_res {
-        let _ = crate::adapters::firewall_nft::FirewallNftAdapter::disable().await;
+        let _ = crate::platform::adapters::firewall_nft::FirewallNftAdapter::disable().await;
         if strict_mode() {
             panic!("nft clear system firewall failed in strict mode: {err}");
         }
@@ -249,5 +273,5 @@ async fn nftables_apply_and_clear_system_firewall_rules() {
         .unwrap_or_default();
     assert!(!output_after_clear.contains("opensnitch-sysfw:it-sysfw-uuid-1"));
 
-    let _ = crate::adapters::firewall_nft::FirewallNftAdapter::disable().await;
+    let _ = crate::platform::adapters::firewall_nft::FirewallNftAdapter::disable().await;
 }

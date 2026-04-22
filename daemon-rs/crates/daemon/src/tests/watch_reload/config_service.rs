@@ -1,14 +1,17 @@
 use std::fs;
 
 use crate::config::Config;
-use crate::services::config_service::ConfigService;
+use crate::services::config::ConfigService;
 use crate::tests::support::TestDir;
 
 async fn apply_raw_json_via_disk(
     service: &ConfigService,
     raw_json: &str,
 ) -> anyhow::Result<Config> {
-    service.apply_raw_json(raw_json).await
+    let updated = service.parse_raw_json(raw_json).await?;
+    service.persist_raw_json(raw_json).await?;
+    service.set_snapshot(updated.clone()).await;
+    Ok(updated)
 }
 
 #[tokio::test]
@@ -31,7 +34,7 @@ async fn apply_raw_json_updates_runtime_snapshot() {
     assert_eq!(updated.log_level, 7);
     assert_eq!(updated.client_addr, "http://127.0.0.1:50052");
 
-    let snapshot = service.snapshot_arc();
+    let snapshot = service.get_snapshot();
     assert_eq!(snapshot.log_level, 7);
     assert_eq!(snapshot.client_addr, "http://127.0.0.1:50052");
 }
@@ -57,7 +60,7 @@ async fn apply_raw_json_invalid_proc_monitor_falls_back_to_proc() {
         updated.proc_monitor_method,
         crate::config::ProcMonitorMethod::Proc
     ));
-    let snapshot = service.snapshot_arc();
+    let snapshot = service.get_snapshot();
     assert!(matches!(
         snapshot.proc_monitor_method,
         crate::config::ProcMonitorMethod::Proc
@@ -82,7 +85,7 @@ async fn apply_raw_json_invalid_payload_does_not_mutate_snapshot() {
         .expect_err("invalid payload should fail");
     assert!(!err.to_string().is_empty());
 
-    let snapshot = service.snapshot_arc();
+    let snapshot = service.get_snapshot();
     assert_eq!(snapshot.client_addr, base_addr);
 }
 
@@ -105,7 +108,7 @@ async fn apply_raw_json_preserves_log_level_when_payload_omits_log_level() {
     .expect("apply raw json");
 
     assert_eq!(updated.log_level, 4);
-    let snapshot = service.snapshot_arc();
+    let snapshot = service.get_snapshot();
     assert_eq!(snapshot.log_level, 4);
 }
 
@@ -129,6 +132,6 @@ async fn apply_raw_json_accepts_case_insensitive_log_level_key() {
 
     assert_eq!(updated.log_level, 8);
     assert_eq!(updated.client_addr, "http://127.0.0.1:50101");
-    let snapshot = service.snapshot_arc();
+    let snapshot = service.get_snapshot();
     assert_eq!(snapshot.log_level, 8);
 }

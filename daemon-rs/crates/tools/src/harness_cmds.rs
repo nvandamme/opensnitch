@@ -494,7 +494,7 @@ fn run_cold_path_harness_internal(repo_root: &Path) -> Result<String, DynError> 
 
         out.push_str(&run_prebuilt_daemon_rs_test(
             repo_root,
-            "tests::watch_service::rules_watch_task_matches_go_live_reload_add_then_delete_flow",
+            "tests::watch_workers::rules_watch_task_matches_go_live_reload_add_then_delete_flow",
             &["--nocapture"],
             &[("RUST_LOG", rust_log.as_str())],
         )?);
@@ -502,7 +502,7 @@ fn run_cold_path_harness_internal(repo_root: &Path) -> Result<String, DynError> 
 
         out.push_str(&run_prebuilt_daemon_rs_test(
             repo_root,
-            "tests::watch_service::config_watch_task_reloads_runtime_snapshot_after_file_change",
+            "tests::watch_workers::config_watch_task_reloads_runtime_snapshot_after_file_change",
             &["--nocapture"],
             &[("RUST_LOG", rust_log.as_str())],
         )?);

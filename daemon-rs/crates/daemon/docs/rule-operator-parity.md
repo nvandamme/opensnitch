@@ -3,7 +3,7 @@
 Scope:
 - Go source of truth: daemon/rule/operator.go, daemon/rule/operator_lists.go, daemon/rule/operator_aliases.go, daemon/rule/rule.go
 - Rust matcher path: crates/daemon/src/services/rule_service.rs
-- Rust live reload path for list-backed operators: crates/daemon/src/services/watch_service.rs
+- Rust live reload path for list-backed operators: crates/daemon/src/workers/rule_watch_worker.rs + crates/daemon/src/workers/watch_worker_control.rs
 
 Status legend:
 - PARITY: behavior replicated in Rust verdict flow
@@ -41,7 +41,7 @@ Status legend:
 | simple | exact compare with sensitivity rules | PARITY | services/rule_service.rs + tests/rule_service.rs |
 | regexp | sensitive: raw regex; insensitive: lowercase pattern + lowercase candidate | PARITY | services/rule_service.rs regexp parity tests |
 | list | AND semantics across children | PARITY | services/rule_service.rs list child test |
-| lists | domains/domains_regexp/ips/nets/hash.md5 list-backed matching | PARITY | tests/rule_service.rs + tests/watch_service.rs |
+| lists | domains/domains_regexp/ips/nets/hash.md5 list-backed matching | PARITY | tests/rule_service.rs + tests/watch_workers.rs |
 | network | allowed with dest.network type; alias-aware | PARITY | tests/rule_service.rs + services/rule_service.rs |
 | range | min-max numeric parsing and comparison | PARITY | tests/rule_service.rs |
 | complex | placeholder in Go, not active | N/A | Go comment/TODO |
@@ -60,9 +60,9 @@ Status legend:
 
 | Feature | Go behavior summary | Rust status | Evidence |
 |---|---|---|---|
-| rule file add/remove/modify reload | live watch and reload rules | PARITY | tests/watch_service.rs rules_watch_task_* |
-| list file content updates affect verdict | monitored list sources trigger re-evaluation via reload | PARITY | tests/watch_service.rs domains/regexp/nested list tests |
-| nested list sub-rule list change propagation | list(type=list) children with lists.* update verdict | PARITY | tests/watch_service.rs nested subrule test |
+| rule file add/remove/modify reload | live watch and reload rules | PARITY | tests/watch_workers.rs rules_watch_task_* |
+| list file content updates affect verdict | monitored list sources trigger re-evaluation via reload | PARITY | tests/watch_workers.rs domains/regexp/nested list tests |
+| nested list sub-rule list change propagation | list(type=list) children with lists.* update verdict | PARITY | tests/watch_workers.rs nested subrule test |
 
 ## Out-of-scope / not active
 

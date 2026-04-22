@@ -1,12 +1,9 @@
-use std::{
-    fs,
-    path::Path,
-    process::Command,
-};
+use std::{fs, path::Path, process::Command};
 
 use anyhow::{Result, anyhow};
 
-use crate::utils::command_path::command_exists;
+use crate::utils::command_path::resolve_command_path;
+use crate::utils::path_text::file_name_lossy;
 
 const SYSTEMD_SERVICES: [&str; 2] = ["opensnitchd.service", "opensnitchd-rd.service"];
 const DAEMON_SOCKET_PATTERNS: [&str; 2] = ["/var/run/opensnitchd.sock", "/run/opensnitchd.sock"];
@@ -25,7 +22,10 @@ pub(crate) fn ensure_no_competing_daemon_instances() -> Result<()> {
     let mut details = Vec::new();
 
     if !service_conflicts.is_empty() {
-        details.push(format!("active systemd services: {}", service_conflicts.join(", ")));
+        details.push(format!(
+            "active systemd services: {}",
+            service_conflicts.join(", ")
+        ));
     }
 
     if !pid_conflicts.is_empty() {
@@ -46,7 +46,7 @@ pub(crate) fn ensure_no_competing_daemon_instances() -> Result<()> {
 }
 
 fn detect_service_conflicts(current_pid: u32) -> Vec<String> {
-    if !command_exists("systemctl") {
+    if resolve_command_path("systemctl").is_none() {
         return Vec::new();
     }
 
@@ -74,7 +74,7 @@ fn detect_service_conflicts(current_pid: u32) -> Vec<String> {
                     return None;
                 }
 
-                let text = String::from_utf8_lossy(&out.stdout);
+                let text = String::from_utf8_lossy(&out.stdout).to_string();
                 text.trim().parse::<u32>().ok()
             });
 
@@ -131,24 +131,17 @@ fn detect_pid_conflicts(current_pid: u32) -> Vec<String> {
             })
             .unwrap_or_default();
 
-        let exe_name = fs::read_link(proc_path.join("exe"))
+        let is_real_daemon_exe = fs::read_link(proc_path.join("exe"))
             .ok()
-            .and_then(|path| path.file_name().map(|name| name.to_string_lossy().to_string()))
-            .map(|name| name.to_ascii_lowercase());
+            .and_then(|path| file_name_lossy(&path))
+            .map(|name| name.to_lowercase())
+            .is_some_and(|name| name == "opensnitchd" || name == "opensnitchd-rs");
 
-        let is_real_daemon_exe = matches!(
-            exe_name.as_deref(),
-            Some("opensnitchd") | Some("opensnitchd-rs")
-        );
-
-        let cmd_first = cmdline
+        let is_daemon_cmd = cmdline
             .split_whitespace()
             .next()
-            .map(|token| token.rsplit('/').next().unwrap_or(token).to_ascii_lowercase());
-        let is_daemon_cmd = matches!(
-            cmd_first.as_deref(),
-            Some("opensnitchd") | Some("opensnitchd-rs")
-        );
+            .map(|token| token.rsplit('/').next().unwrap_or(token).to_lowercase())
+            .is_some_and(|name| name == "opensnitchd" || name == "opensnitchd-rs");
 
         if !is_real_daemon_exe && !is_daemon_cmd {
             continue;
@@ -179,8 +172,7 @@ fn detect_unix_socket_conflicts() -> Vec<String> {
 
     if let Ok(contents) = fs::read_to_string("/proc/net/unix") {
         for line in contents.lines() {
-            let lower = line.to_ascii_lowercase();
-            if lower.contains("opensnitchd.sock") {
+            if line.to_lowercase().contains("opensnitchd.sock") {
                 if let Some(path) = line.split_whitespace().last() {
                     conflicts.push(path.to_string());
                 }

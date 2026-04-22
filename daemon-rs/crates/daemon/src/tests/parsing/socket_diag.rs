@@ -1,5 +1,5 @@
-use crate::adapters::socket_diag::SocketDiagAdapter;
 use crate::models::socket_state::SocketInfo;
+use crate::platform::adapters::socket_diag::SocketDiagAdapter;
 use netlink_packet_core::{NLM_F_ACK, NLM_F_REQUEST, NetlinkPayload};
 use netlink_packet_sock_diag::{
     SockDiagMessage,

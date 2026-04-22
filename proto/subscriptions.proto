@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+package protocol;
+
+option go_package = "github.com/evilsocket/opensnitch/daemon/ui/protocol";
+
+// Dedicated subscription management RPC surface.
+//
+// Command semantics are selected by SubscriptionRequest.operation, which maps
+// to SubscriptionOperation values (LIST/APPLY/DELETE/REFRESH/DEPLOY).
+service Subscriptions {
+    // Compatibility command endpoint (enum-driven dispatch).
+    rpc Command(SubscriptionRequest) returns (SubscriptionReply) {}
+
+    // Explicit operation endpoints mirroring SubscriptionOperation semantics.
+    rpc List(SubscriptionRequest) returns (SubscriptionReply) {}
+    rpc Apply(SubscriptionRequest) returns (SubscriptionReply) {}
+    rpc Delete(SubscriptionRequest) returns (SubscriptionReply) {}
+    rpc Refresh(SubscriptionRequest) returns (SubscriptionReply) {}
+    rpc Deploy(SubscriptionRequest) returns (SubscriptionReply) {}
+}
+
+enum SubscriptionOperation {
+    SUBSCRIPTION_OPERATION_UNSPECIFIED = 0;
+    SUBSCRIPTION_OPERATION_LIST = 1;
+    SUBSCRIPTION_OPERATION_APPLY = 2;
+    SUBSCRIPTION_OPERATION_DELETE = 3;
+    SUBSCRIPTION_OPERATION_REFRESH = 4;
+    SUBSCRIPTION_OPERATION_DEPLOY = 5;
+}
+
+enum SubscriptionStatus {
+    SUBSCRIPTION_STATUS_UNSPECIFIED = 0;
+    SUBSCRIPTION_STATUS_PENDING = 1;
+    SUBSCRIPTION_STATUS_READY = 2;
+    SUBSCRIPTION_STATUS_SYNCING = 3;
+    SUBSCRIPTION_STATUS_ERROR = 4;
+}
+
+message SubscriptionRefreshMetadata {
+    // Unix timestamp (UTC seconds) for next eligible automatic refresh.
+    int64 next_refresh_after = 1;
+    // Number of consecutive failed refresh attempts.
+    uint32 consecutive_failures = 2;
+    // Last observed HTTP ETag validator.
+    string etag = 3;
+    // Last observed HTTP Last-Modified validator.
+    string last_modified = 4;
+}
+
+message Subscription {
+    string id = 1;
+    string name = 2;
+    string url = 3;
+    string filename = 4;
+    repeated string groups = 5;
+    bool enabled = 6;
+    string format = 7;
+    uint32 interval_seconds = 8;
+    uint32 timeout_seconds = 9;
+    uint64 max_bytes = 10;
+    string node = 11;
+    SubscriptionStatus status = 12;
+    string last_updated = 13;
+    string last_error = 14;
+    SubscriptionRefreshMetadata refresh_meta = 15;
+}
+
+message SubscriptionRequest {
+    SubscriptionOperation operation = 1;
+    repeated Subscription subscriptions = 2;
+    repeated string targets = 3;
+    bool force = 4;
+}
+
+message SubscriptionReply {
+    SubscriptionOperation operation = 1;
+    repeated Subscription subscriptions = 2;
+    repeated string errors = 3;
+    string message = 4;
+    bool accepted = 5;
+}

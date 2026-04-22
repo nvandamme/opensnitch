@@ -8,8 +8,9 @@ use crate::{
         process_state::{ProcessInfo, ProcessNode},
         rule_storage::{RuleFile, RuleFileOperator},
     },
-    services::rule_service::{ListsDomainsRegexpCacheMode, RuleMatchDecision, RuleService},
-    tests::support::TestDir,
+    services::rule::{RuleMatchDecision, RuleService},
+    services::rule::rule_probe_support::ListsDomainsRegexpCacheMode,
+    tests::support::{TestDir, path_string},
 };
 
 fn probe_process() -> ProcessInfo {
@@ -219,7 +220,7 @@ async fn match_attempt_uses_cached_list_entries_after_source_removal() -> Result
         RuleFileOperator {
             r#type: "lists".to_string(),
             operand: "lists.domains".to_string(),
-            data: list_dir.path.display().to_string(),
+            data: path_string(&list_dir.path),
             sensitive: false,
             scope: None,
             list: Vec::new(),
@@ -253,6 +254,45 @@ async fn match_attempt_uses_cached_list_entries_after_source_removal() -> Result
 }
 
 #[tokio::test]
+async fn read_rules_dir_state_ignores_transient_list_temp_files() -> Result<()> {
+    let rules_dir = TestDir::new("rule-service-watch-state-rules");
+    let list_dir = TestDir::new("rule-service-watch-state-lists");
+
+    tokio::fs::write(list_dir.path.join("domains.txt"), "example.org\n").await?;
+    write_rule_file(
+        &rules_dir.path,
+        "watch-state-rule",
+        "deny",
+        true,
+        false,
+        RuleFileOperator {
+            r#type: "lists".to_string(),
+            operand: "lists.domains".to_string(),
+            data: path_string(&list_dir.path),
+            sensitive: false,
+            scope: None,
+            list: Vec::new(),
+        },
+    )
+    .await?;
+
+    let before = RuleService::read_rules_dir_file_state_async(&rules_dir.path)
+        .await
+        .expect("state before temp files");
+
+    tokio::fs::write(list_dir.path.join("domains.txt.download"), "tmp\n").await?;
+    tokio::fs::write(list_dir.path.join("domains.txt.tmp"), "tmp\n").await?;
+    tokio::fs::write(list_dir.path.join(".domains.txt.swp"), "tmp\n").await?;
+
+    let after = RuleService::read_rules_dir_file_state_async(&rules_dir.path)
+        .await
+        .expect("state after temp files");
+
+    assert_eq!(before, after);
+    Ok(())
+}
+
+#[tokio::test]
 async fn match_attempt_domain_lists_with_prefixed_space_comment_behaves_like_go() -> Result<()> {
     let rules_dir = TestDir::new("rule-service-domain-list-prefixed-space-comment");
     let list_dir = TestDir::new("rule-service-domain-list-prefixed-space-comment-lists");
@@ -271,7 +311,7 @@ async fn match_attempt_domain_lists_with_prefixed_space_comment_behaves_like_go(
         RuleFileOperator {
             r#type: "lists".to_string(),
             operand: "lists.domains".to_string(),
-            data: list_dir.path.display().to_string(),
+            data: path_string(&list_dir.path),
             sensitive: false,
             scope: None,
             list: Vec::new(),
@@ -295,7 +335,10 @@ async fn match_attempt_domain_lists_with_prefixed_space_comment_behaves_like_go(
 }
 
 #[tokio::test]
-async fn match_attempt_domain_lists_ignore_non_hosts_entries() -> Result<()> {
+async fn match_attempt_domain_lists_accepts_plain_domain_entries() -> Result<()> {
+    // Plain domain lines (no 0.0.0.0/127.0.0.1 prefix) are now accepted by
+    // lists.domains — the trie/glob index handles them, which is more efficient
+    // than routing plain domain lists through lists.domains_regexp (AhoCorasick).
     let rules_dir = TestDir::new("rule-service-domain-list-filter");
     let list_dir = TestDir::new("rule-service-domain-list-filter-lists");
     tokio::fs::write(list_dir.path.join("domains.txt"), "example.org\n").await?;
@@ -309,7 +352,7 @@ async fn match_attempt_domain_lists_ignore_non_hosts_entries() -> Result<()> {
         RuleFileOperator {
             r#type: "lists".to_string(),
             operand: "lists.domains".to_string(),
-            data: list_dir.path.display().to_string(),
+            data: path_string(&list_dir.path),
             sensitive: false,
             scope: None,
             list: Vec::new(),
@@ -328,12 +371,23 @@ async fn match_attempt_domain_lists_ignore_non_hosts_entries() -> Result<()> {
         )
         .await?;
 
-    assert_eq!(decision, None);
+    assert_eq!(
+        decision,
+        Some(RuleMatchDecision {
+            allow: false,
+            reject: false,
+            nolog: false,
+        })
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn match_attempt_domain_lists_insensitive_only_lowercases_candidate_like_go() -> Result<()> {
+// Previously this asserted None (no match), mirroring Go's behaviour where only the
+// incoming candidate was lowercased while the list entry was stored verbatim.
+// The list entry is now normalised to lower-case in normalize_domain_list_entry, so a
+// mixed-case entry ("0.0.0.0 Example.org") must match a lower-case candidate.
+async fn match_attempt_domain_lists_normalizes_list_entry_case() -> Result<()> {
     let rules_dir = TestDir::new("rule-service-domain-list-candidate-lower-only");
     let list_dir = TestDir::new("rule-service-domain-list-candidate-lower-only-lists");
     tokio::fs::write(list_dir.path.join("domains.txt"), "0.0.0.0 Example.org\n").await?;
@@ -347,7 +401,7 @@ async fn match_attempt_domain_lists_insensitive_only_lowercases_candidate_like_g
         RuleFileOperator {
             r#type: "lists".to_string(),
             operand: "lists.domains".to_string(),
-            data: list_dir.path.display().to_string(),
+            data: path_string(&list_dir.path),
             sensitive: false,
             scope: None,
             list: Vec::new(),
@@ -366,7 +420,8 @@ async fn match_attempt_domain_lists_insensitive_only_lowercases_candidate_like_g
         )
         .await?;
 
-    assert_eq!(decision, None);
+    // The mixed-case list entry is stored as "example.org"; it must match.
+    assert!(decision.is_some());
     Ok(())
 }
 
@@ -385,7 +440,7 @@ async fn match_attempt_hash_list_requires_md5_value() -> Result<()> {
         RuleFileOperator {
             r#type: "lists".to_string(),
             operand: "lists.hash.md5".to_string(),
-            data: list_dir.path.display().to_string(),
+            data: path_string(&list_dir.path),
             sensitive: false,
             scope: None,
             list: Vec::new(),
@@ -427,7 +482,7 @@ async fn match_attempt_domains_regexp_insensitive_only_lowercases_candidate_like
         RuleFileOperator {
             r#type: "lists".to_string(),
             operand: "lists.domains_regexp".to_string(),
-            data: list_dir.path.display().to_string(),
+            data: path_string(&list_dir.path),
             sensitive: false,
             scope: None,
             list: Vec::new(),
@@ -1812,10 +1867,8 @@ async fn load_path_keeps_disabled_invalid_regexp_rule() -> Result<()> {
 #[tokio::test]
 async fn load_path_returns_error_for_missing_directory() -> Result<()> {
     let service = RuleService::default();
-    let missing = std::path::PathBuf::from("/tmp/opensnitch-rule-service-missing-dir");
-    if missing.exists() {
-        tokio::fs::remove_dir_all(&missing).await?;
-    }
+    let dir = TestDir::new("rule-service-missing-dir");
+    let missing = dir.path.join("missing");
 
     let result = service.load_path(&missing).await;
     assert!(result.is_err());

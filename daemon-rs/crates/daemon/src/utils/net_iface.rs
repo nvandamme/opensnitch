@@ -3,6 +3,8 @@ use std::{
     sync::{OnceLock, RwLock},
 };
 
+use crate::utils::path_text::lossy_os;
+
 fn fallback_interface_name_cache() -> &'static RwLock<HashMap<u32, String>> {
     static CACHE: OnceLock<RwLock<HashMap<u32, String>>> = OnceLock::new();
     CACHE.get_or_init(|| RwLock::new(interface_name_map()))
@@ -31,7 +33,7 @@ pub(crate) fn interface_name_map() -> HashMap<u32, String> {
     };
 
     for entry in entries.flatten() {
-        let iface_name = entry.file_name().to_string_lossy().to_string();
+        let iface_name = lossy_os(entry.file_name());
         let ifindex_path = entry.path().join("ifindex");
         let Ok(value) = std::fs::read_to_string(ifindex_path) else {
             continue;

@@ -121,6 +121,21 @@ fn from_raw_json_invalid_proc_monitor_falls_back_to_proc() {
 }
 
 #[test]
+fn from_raw_json_accepts_drop_alias_for_default_action() {
+    let dir = TestDir::new("opensnitch-config-default-action-drop-alias");
+    let config_path = dir.path.join("default-config.json");
+
+    let raw = r#"{
+"Server": {"Address": "http://127.0.0.1:50051"},
+"DefaultAction": "drop"
+}"#
+    .to_string();
+
+    let cfg = Config::from_raw_json(&config_path, raw).expect("parse config");
+    assert!(matches!(cfg.default_action, DefaultAction::Deny));
+}
+
+#[test]
 fn from_raw_json_ignores_unknown_fields_including_legacy_gc_percent() {
     let dir = TestDir::new("opensnitch-config-unknown-fields");
     let config_path = dir.path.join("default-config.json");

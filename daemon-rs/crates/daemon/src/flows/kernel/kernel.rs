@@ -1,0 +1,282 @@
+use std::future::Future;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+
+use crate::{
+    daemon::{Daemon, KernelPipeline, ProcessKernelEvent},
+    models::{dns_payload::DnsPayload, kernel_event::KernelEvent},
+    services::{dns::DnsService, process::ProcessService, stats::StatsService},
+    tunables::RuntimeTunables,
+    workers::runtime::{
+        kernel::{
+            dispatch as kernel_dispatch, firewall as kernel_firewall, process as kernel_process,
+        },
+        support,
+    },
+};
+
+#[derive(Clone)]
+pub struct KernelFlow {
+    shutdown: CancellationToken,
+    tunables: RuntimeTunables,
+}
+
+impl KernelFlow {
+    pub(crate) fn new(shutdown: CancellationToken, tunables: RuntimeTunables) -> Self {
+        Self { shutdown, tunables }
+    }
+
+    fn spawn_pipeline_dispatch_task<T: Send + 'static>(
+        mut ingress_rx: tokio::sync::mpsc::UnboundedReceiver<T>,
+        dispatch_tx: tokio::sync::mpsc::Sender<T>,
+        shutdown: CancellationToken,
+        pipeline: KernelPipeline,
+        batch_size: usize,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                let first = tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    msg = ingress_rx.recv() => {
+                        match msg {
+                            Some(event) => event,
+                            None => break,
+                        }
+                    }
+                };
+
+                if !kernel_dispatch::dispatch_kernel_pipeline_event(
+                    &dispatch_tx,
+                    first,
+                    &shutdown,
+                    pipeline.as_str(),
+                    move || Daemon::increment_kernel_pipeline_drop(pipeline),
+                )
+                .await
+                {
+                    break;
+                }
+
+                let burst = support::drain_try_recv_burst_unbounded(
+                    &mut ingress_rx,
+                    batch_size.saturating_sub(1),
+                    || !shutdown.is_cancelled(),
+                );
+                for next in burst.items {
+                    if !kernel_dispatch::dispatch_kernel_pipeline_event(
+                        &dispatch_tx,
+                        next,
+                        &shutdown,
+                        pipeline.as_str(),
+                        move || Daemon::increment_kernel_pipeline_drop(pipeline),
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                }
+                if burst.disconnected {
+                    break;
+                }
+            }
+        })
+    }
+
+    fn spawn_consumer_task<T, H, Fut>(
+        mut rx: tokio::sync::mpsc::Receiver<T>,
+        shutdown: CancellationToken,
+        mut handle_event: H,
+    ) -> JoinHandle<()>
+    where
+        T: Send + 'static,
+        H: FnMut(T) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    msg = rx.recv() => {
+                        match msg {
+                            Some(event) => handle_event(event).await,
+                            None => break,
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    fn classify_kernel_pipeline(event: &KernelEvent) -> KernelPipeline {
+        match event {
+            KernelEvent::DnsUpdate(_) => KernelPipeline::Dns,
+            KernelEvent::ProcStateChanged { .. }
+            | KernelEvent::EbpfProcStateChanged(_)
+            | KernelEvent::EbpfProcessMapHit { .. } => KernelPipeline::Process,
+            KernelEvent::FirewallState(_) => KernelPipeline::Firewall,
+        }
+    }
+
+    pub(crate) fn spawn(
+        self,
+        process: ProcessService,
+        dns: DnsService,
+        stats: StatsService,
+        mut kernel_rx: tokio::sync::mpsc::Receiver<KernelEvent>,
+    ) -> JoinHandle<()> {
+        let shutdown = self.shutdown.clone();
+        let tunables = self.tunables;
+
+        tokio::spawn(async move {
+            let kernel_fanout_batch = tunables.kernel_ingress_dispatch_batch_size;
+            let kernel_dns_dispatch_batch = tunables.kernel_dns_dispatch_batch_size;
+            let kernel_process_dispatch_batch = tunables.kernel_process_dispatch_batch_size;
+            let kernel_firewall_dispatch_batch = tunables.kernel_firewall_dispatch_batch_size;
+
+            let (dns_tx, dns_rx) =
+                tokio::sync::mpsc::channel::<DnsPayload>(tunables.kernel_dns_queue_capacity);
+            let (process_tx, process_rx) = tokio::sync::mpsc::channel::<ProcessKernelEvent>(
+                tunables.kernel_process_queue_capacity,
+            );
+            let (firewall_tx, firewall_rx) = tokio::sync::mpsc::channel::<
+                crate::models::firewall_state::FirewallState,
+            >(tunables.kernel_firewall_queue_capacity);
+
+            let (dns_ingress_tx, dns_ingress_rx) =
+                tokio::sync::mpsc::unbounded_channel::<DnsPayload>();
+            let (process_ingress_tx, process_ingress_rx) =
+                tokio::sync::mpsc::unbounded_channel::<ProcessKernelEvent>();
+            let (firewall_ingress_tx, firewall_ingress_rx) = tokio::sync::mpsc::unbounded_channel::<
+                crate::models::firewall_state::FirewallState,
+            >();
+
+            let dns_service = dns.clone();
+            let dns_stats = stats.clone();
+            let dns_handle =
+                Self::spawn_consumer_task(dns_rx, shutdown.clone(), move |update| {
+                    let dns_service = dns_service.clone();
+                    let dns_stats = dns_stats.clone();
+                    async move {
+                        dns_stats.on_dns_resolved();
+                        match update {
+                            DnsPayload::Answers(record) => dns_service.track_answers(record).await,
+                            DnsPayload::Alias { alias, host } => {
+                                dns_service.track_alias(alias, host).await;
+                            }
+                        }
+                    }
+                });
+
+            let process_service = process.clone();
+            let process_handle =
+                Self::spawn_consumer_task(process_rx, shutdown.clone(), move |event| {
+                    let process_service = process_service.clone();
+                    async move {
+                        kernel_process::handle_process_kernel_event(&process_service, event).await;
+                    }
+                });
+
+            let firewall_handle =
+                Self::spawn_consumer_task(firewall_rx, shutdown.clone(), move |state| async move {
+                    kernel_firewall::handle_firewall_state_event(state).await;
+                });
+
+            let dns_dispatch_handle = Self::spawn_pipeline_dispatch_task(
+                dns_ingress_rx,
+                dns_tx.clone(),
+                shutdown.clone(),
+                KernelPipeline::Dns,
+                kernel_dns_dispatch_batch,
+            );
+
+            let process_dispatch_handle = Self::spawn_pipeline_dispatch_task(
+                process_ingress_rx,
+                process_tx.clone(),
+                shutdown.clone(),
+                KernelPipeline::Process,
+                kernel_process_dispatch_batch,
+            );
+
+            let firewall_dispatch_handle = Self::spawn_pipeline_dispatch_task(
+                firewall_ingress_rx,
+                firewall_tx.clone(),
+                shutdown.clone(),
+                KernelPipeline::Firewall,
+                kernel_firewall_dispatch_batch,
+            );
+
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    msg = kernel_rx.recv() => {
+                        match msg {
+                            Some(event) => {
+                                Daemon::increment_kernel_pipeline_ingress(
+                                    Self::classify_kernel_pipeline(&event),
+                                );
+
+                                if !kernel_dispatch::fanout_kernel_ingress_event(
+                                    event,
+                                    &dns_ingress_tx,
+                                    &process_ingress_tx,
+                                    &firewall_ingress_tx,
+                                ) {
+                                    break;
+                                }
+
+                                let burst = support::drain_try_recv_burst(
+                                    &mut kernel_rx,
+                                    kernel_fanout_batch.saturating_sub(1),
+                                    || !shutdown.is_cancelled(),
+                                );
+                                let mut drained = 1usize;
+                                for next in burst.items {
+                                    Daemon::increment_kernel_pipeline_ingress(
+                                        Self::classify_kernel_pipeline(&next),
+                                    );
+
+                                    if !kernel_dispatch::fanout_kernel_ingress_event(
+                                        next,
+                                        &dns_ingress_tx,
+                                        &process_ingress_tx,
+                                        &firewall_ingress_tx,
+                                    ) {
+                                        break;
+                                    }
+
+                                    drained += 1;
+                                }
+                                if burst.disconnected {
+                                    break;
+                                }
+
+                                // Keep burst processing, but yield after full drains to avoid
+                                // starving connect-attempt handling under sustained kernel load.
+                                if drained >= kernel_fanout_batch {
+                                    tokio::task::yield_now().await;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+
+            drop(dns_ingress_tx);
+            drop(process_ingress_tx);
+            drop(firewall_ingress_tx);
+
+            let _ = tokio::join!(
+                dns_dispatch_handle,
+                process_dispatch_handle,
+                firewall_dispatch_handle
+            );
+
+            drop(dns_tx);
+            drop(process_tx);
+            drop(firewall_tx);
+
+            let _ = tokio::join!(dns_handle, process_handle, firewall_handle);
+        })
+    }
+}

@@ -5,31 +5,17 @@ use std::{
 
 use anyhow::{Context, Result};
 
+pub use crate::models::config_runtime::{
+    ClientAuthConfig, ClientAuthType, ClientTlsOptions, Config, DefaultAction, DefaultDuration,
+    LoggerSinkConfig, ProcMonitorMethod, StatsConfig,
+};
 use crate::models::{
     config_storage::{RawConfig, RawLoggerConfig},
     firewall_state::FirewallBackend,
 };
-use crate::utils::name_parsing::normalized_name;
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LoggerSinkConfig {
-    pub name: String,
-    pub format: String,
-    pub protocol: String,
-    pub server: String,
-    pub write_timeout: String,
-    pub connect_timeout: String,
-    pub tag: String,
-    pub workers: usize,
-    pub max_connect_attempts: u16,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClientAuthType {
-    Simple,
-    TlsSimple,
-    TlsMutual,
-}
+use crate::services::firewall::parse_firewall_backend;
+use crate::utils::json_value::object_get_case_insensitive;
+use crate::utils::name_parsing::{case_folded, normalized_name};
 
 impl Default for ClientAuthType {
     fn default() -> Self {
@@ -59,23 +45,6 @@ impl ClientAuthType {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct ClientTlsOptions {
-    pub ca_cert: String,
-    pub server_cert: String,
-    pub server_key: String,
-    pub client_cert: String,
-    pub client_key: String,
-    pub client_auth_type: String,
-    pub skip_verify: bool,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ClientAuthConfig {
-    pub auth_type: ClientAuthType,
-    pub tls_options: ClientTlsOptions,
-}
-
 impl From<RawLoggerConfig> for LoggerSinkConfig {
     fn from(raw: RawLoggerConfig) -> Self {
         Self {
@@ -92,13 +61,6 @@ impl From<RawLoggerConfig> for LoggerSinkConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct StatsConfig {
-    pub max_events: usize,
-    pub max_stats: usize,
-    pub workers: usize,
-}
-
 impl Default for StatsConfig {
     fn default() -> Self {
         Self {
@@ -109,24 +71,27 @@ impl Default for StatsConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DefaultAction {
-    Allow,
-    Deny,
-    Reject,
-}
-
 impl DefaultAction {
     fn parse_from_name(name: &str) -> Self {
         match normalized_name(name).as_str() {
             "reject" => Self::Reject,
-            "deny" => Self::Deny,
+            "drop" | "deny" => Self::Deny,
             _ => Self::Allow,
         }
     }
 
     pub fn from_name(name: &str) -> Self {
         Self::parse_from_name(name)
+    }
+
+    pub fn from_raw_config_json(raw_config_json: &str) -> Option<Self> {
+        let raw = serde_json::from_str::<serde_json::Value>(raw_config_json).ok()?;
+        let action = raw
+            .as_object()
+            .and_then(|obj| object_get_case_insensitive(obj, &["DefaultAction"]))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        Some(Self::from_name(action))
     }
 
     pub fn allows(self) -> bool {
@@ -136,13 +101,6 @@ impl DefaultAction {
     pub fn rejects(self) -> bool {
         matches!(self, Self::Reject)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DefaultDuration {
-    Once,
-    Restart,
-    Always,
 }
 
 impl DefaultDuration {
@@ -159,13 +117,6 @@ impl DefaultDuration {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProcMonitorMethod {
-    Proc,
-    Ebpf,
-    Audit,
-}
-
 impl ProcMonitorMethod {
     fn parse_from_name(name: &str) -> Self {
         match normalized_name(name).as_str() {
@@ -178,36 +129,6 @@ impl ProcMonitorMethod {
     pub fn from_name(name: &str) -> Self {
         Self::parse_from_name(name)
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct Config {
-    pub client_addr: String,
-    pub log_level: u32,
-    pub log_utc: bool,
-    pub log_micro: bool,
-    pub log_file: Option<PathBuf>,
-    pub loggers: Vec<LoggerSinkConfig>,
-    pub client_auth: ClientAuthConfig,
-    pub rules_enable_checksums: bool,
-    pub default_action: DefaultAction,
-    pub default_duration: DefaultDuration,
-    pub intercept_unknown: bool,
-    pub proc_monitor_method: ProcMonitorMethod,
-    pub ebpf_modules_path: PathBuf,
-    pub firewall_backend: FirewallBackend,
-    pub firewall_monitor_interval: String,
-    pub firewall_queue_num: u16,
-    pub firewall_queue_bypass: bool,
-    pub firewall_config_path: PathBuf,
-    pub rules_path: PathBuf,
-    pub tasks_config_path: PathBuf,
-    pub stats: StatsConfig,
-    pub raw_json: String,
-    pub config_path: PathBuf,
-    pub audit_socket_path: PathBuf,
-    pub flush_conns_on_start: bool,
-    pub gc_percent: Option<i32>,
 }
 
 impl Default for Config {
@@ -250,7 +171,7 @@ impl Default for Config {
 
 impl Config {
     fn canonical_config_json_key(key: &str) -> Option<&'static str> {
-        let lowered = key.to_ascii_lowercase();
+        let lowered = case_folded(key);
         match lowered.as_str() {
             "server" => Some("Server"),
             "loglevel" => Some("LogLevel"),
@@ -429,7 +350,7 @@ impl Config {
             } else {
                 PathBuf::from(raw.ebpf.modules_path.trim())
             },
-            firewall_backend: FirewallBackend::from_name(&raw.firewall),
+            firewall_backend: parse_firewall_backend(&raw.firewall),
             firewall_monitor_interval: {
                 let value = raw.fw_options.monitor_interval.trim();
                 if value.is_empty() {

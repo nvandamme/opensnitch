@@ -1,6 +1,4 @@
-use netlink_sys::Socket;
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcEventKind {
     Fork,
     Exec,
@@ -11,8 +9,4 @@ pub enum ProcEventKind {
 pub struct ProcPidEvent {
     pub pid: u32,
     pub kind: ProcEventKind,
-}
-
-pub struct ProcEventSocket {
-    pub(crate) sock: Socket,
 }

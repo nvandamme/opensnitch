@@ -1,4 +1,4 @@
-use crate::{config::DefaultAction, services::ui_session_service::UiSessionService};
+use crate::{config::DefaultAction, services::client::UiSessionService};
 
 #[test]
 fn effective_default_action_switches_with_connectivity() {

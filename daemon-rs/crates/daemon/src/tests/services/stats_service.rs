@@ -1,5 +1,5 @@
 use crate::config::StatsConfig;
-use crate::services::stats_service::StatsService;
+use crate::services::stats::StatsService;
 use opensnitch_proto::pb;
 
 #[test]

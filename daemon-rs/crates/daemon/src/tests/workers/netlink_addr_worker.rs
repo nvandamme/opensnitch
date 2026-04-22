@@ -9,7 +9,7 @@ async fn snapshot_local_addrs_returns_sorted_values() {
     values.sort();
 
     let snap =
-        crate::workers::netlink_addr_worker::NetlinkAddrWorkerControl::snapshot_local_addrs().await;
+        crate::workers::network::netlink_addr_worker::NetlinkAddrWorkerControl::snapshot_local_addrs();
     // The worker may not be running in this unit test; this just validates API behavior.
     assert!(snap.is_empty() || snap.windows(2).all(|w| w[0] <= w[1]));
     let _ = values;

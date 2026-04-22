@@ -1,4 +1,4 @@
-use crate::commands::command_control::CommandControlService;
+use crate::commands::control::CommandControlService;
 use crate::config::ProcMonitorMethod;
 
 #[test]

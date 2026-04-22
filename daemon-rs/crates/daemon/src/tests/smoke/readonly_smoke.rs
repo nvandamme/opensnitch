@@ -1,9 +1,9 @@
 use std::time::Duration;
 
-use crate::adapters::socket_diag::SocketDiagAdapter;
-use crate::models::proc_event::ProcEventSocket;
+use crate::platform::adapters::proc_connector::ProcEventSocket;
+use crate::platform::adapters::socket_diag::SocketDiagAdapter;
+use crate::services::connection::ConnectionService;
 use crate::tests::gates::{skip_if_not_opted_in, strict_mode};
-use crate::utils::pid_resolver;
 
 #[test]
 fn socket_diag_readonly_smoke() {
@@ -49,5 +49,5 @@ fn pid_resolver_non_panicking_smoke() {
         return;
     }
 
-    let _ = pid_resolver::PidResolverState::resolve_pid_by_inode(0);
+    let _ = ConnectionService::resolve_pid_by_inode(0);
 }

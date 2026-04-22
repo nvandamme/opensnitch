@@ -6,7 +6,7 @@ It supersedes:
 - `daemon-rs/FEATURE_PARITY.md`
 - `daemon-rs/SERVICE_ASYNC_AND_MODEL_SCAN_2026-03-15.md`
 
-Last update: 2026-03-16
+Last update: 2026-03-22 (entry 432)
 
 ## Scope
 
@@ -19,8 +19,99 @@ Out of scope for now:
 - Replacing `libbpf-rs` usage with a full Aya runtime path as default.
 - Replacing proc connector path with a high-level netlink crate.
 
+## Design Rule: Domain Boundary + Trait-First Architecture (Tracking)
+
+This is the architectural rule for ongoing refactors in `daemon-rs/crates/daemon/`.
+This section is the single source of truth for design rules; other sections may only reference these rules and must not redefine them.
+
+1. Domain boundaries own behavior and runtime state
+- Runtime orchestration/state should live in the owning domain/service boundary (connection/process/dns/firewall/tasks/commands), not in root wiring.
+- Daemon root should orchestrate wiring and lifecycle, not encode domain behavior.
+- `intent` is an architectural term for ownership/responsibility, not a symbol naming convention: do not encode it into type names, method names, or module names unless it adds concrete semantic value beyond the domain/service role itself.
+- Domain behavior should stay where it is clearest (often in `services/<service>/<service>.rs`), and should not force a dedicated `intent.rs` file or `*Intent*` symbols.
+- Boundaries should be `trait-first` where polymorphism is needed: stateful runtime/domain structs implement explicit traits/ports instead of relying on closure aliases.
+- Long-lived service runtime control must use a trait-based lifecycle surface (`init/start/pause/resume/stop/reload/quiesce/drain/health_check/status/reset`) instead of global mutable singleton functions.
+- Service observability should use lifecycle-provided subscriptions (`subscribe_status` via watch channel + `subscribe_events` via broadcast channel), not dedicated per-service monitor threads hidden inside trait internals.
+- Subscription lifecycle should support explicit subscribe/unsubscribe hooks through scoped subscription handles (drop-based unsubscribe) and expose active subscriber counters via lifecycle monitor stats.
+- Avoid top-level module free functions for stateful boundary behavior; prefer methods on domain/runtime structs.
+- Enforce generics-first helper design for shared cross-domain logic when it improves reuse without hiding domain semantics or reducing readability.
+- Shared functions that do not have clear domain ownership must be migrated to `utils/`; these helpers should be generic by default when type-safe and maintainable, rather than service-specific duplicates.
+- Arc read cloning is evil at runtime: snapshot reads in runtime/hot paths must be pure Arc memreads over immutable snapshots, with no mutex/lock path, no async getter wrappers, and no clone-at-read call sites.
+- Extend this philosophy to all immutable state access (state/cache/snapshot): when read-only data can be held as immutable shared state, prefer lock-free sync memread access and avoid async getter wrappers in runtime paths.
+- API naming must express domain semantics, not ownership/copy mechanics: avoid implementation-leaking suffixes like `_cloned`, `_copy`, `_arc`; use semantic names (`get`, `peek`, `snapshot`, etc.) and let callers clone only where ownership requires it.
+- Helper design rule (utils/helpers):
+  - avoid one-line passthrough wrappers that only rename or forward a single call without adding domain semantics, invariants, or error-context value,
+  - avoid compatibility shims/aliases; when call sites are migrated, remove legacy helper wrappers in the same slice.
+
+2. Trait-first integration boundaries
+- Infra integrations must be consumed through `platform::ports::*` traits.
+- `platform::adapters::*` and `platform::ffi::*` are implementation details behind those traits.
+- Application/services/flows/workers should depend on ports, not concrete adapters/ffi modules.
+
+3. Module structure follows architecture
+- Domain code: services/flows/models and other domain-owned boundary modules when they add concrete semantic value.
+- Infra code: `platform/{ports,adapters,ffi}`.
+- Helpers only in `utils/`; integrations are not `utils`.
+- Data contract ownership rule:
+	- Shared data contracts must live under `models/` (or `models/<domain>/` when present), including:
+		- DTO-like structs/enums passed across service/flow/worker boundaries,
+		- serde-backed payload/config/transport structs,
+		- reusable runtime memory/state snapshot structs consumed by more than one domain.
+	- Data contracts may implement shape-consistency helpers (for example parsing/validation/normalization) when these functions only enforce or preserve contract invariants.
+	- Keep data-contract helpers side-effect free: no cross-domain orchestration, IO, or runtime ownership inside `models/` contract impls.
+	- Keep file-local/private execution helpers near usage only when they are not cross-boundary contracts.
+	- When touching a module with contract drift, prefer migrating contract types to `models/` in the same slice or add an explicit follow-up entry.
+- Worker layout decision: keep `src/workers/` as the runtime execution layer (shared worker contracts, lifecycle helpers, daemon wiring touchpoints), but organize worker implementations by domain/service subfolders for clarity.
+- Avoid splitting worker ownership across both `services/*` and `workers/*` for the same concern at the same time; pick one location per worker family and keep imports stable per refactor slice.
+- Worker ownership rule:
+	- `workers/` owns reusable execution primitives (long-running loops, queue consumers/producers, watcher engines, OS/FFI adapters, backpressure/retry mechanics),
+	- workers should be policy-agnostic where possible and expose small control/port surfaces.
+- `services/` layout rules:
+  - one folder per service (`services/<service>/`), no `*_service` suffix in folder names,
+  - `services/<service>/mod.rs` stays thin (module wiring/re-exports only),
+  - concrete implementation lives in `services/<service>/<service>.rs`,
+  - avoid feature-split file churn: if a service is understandable as one unit, prefer co-locating runtime orchestration in `<service>.rs` instead of forcing `intent.rs` or `*Intent*` naming,
+  - service-internal split parts live in service submodules/files (not as root-level service files),
+  - UI-facing gRPC client/session concerns live under `services/client` (`Client`, notification stream, UI session state).
+- `mod.rs` linker-only rule:
+	- `mod.rs` files are module wiring surfaces only (module declarations + re-exports),
+	- functional code (`struct`/`enum`/`impl`/runtime logic) belongs in dedicated sibling files,
+	- apply this consistently to `services/*`, `commands/*`, `flows/*`, and `workers/*` as those areas are touched.
+- `commands/` contains mapping only:
+  - gRPC command mappings,
+  - daemon terminal/CLI command mappings,
+  - high-level IPC command mappings.
+- `commands/` should not contain long-lived runtime state or service orchestration.
+- `flows/` is the hot-path caller-orchestration layer:
+	- flow modules coordinate service and worker callers for latency-sensitive runtime paths,
+	- daemon root should prefer wiring/spawn only and delegate per-path orchestration loops to flows,
+	- flow boundaries must consume services/workers through explicit ports/traits where polymorphism is needed,
+	- flows own decision/policy orchestration (routing, fallback choice, sequencing, cross-service composition),
+	- when flow internals become generic/reusable execution machinery, extract those internals into `workers/` and keep only orchestration policy in `flows/`,
+	- `flows/<domain>/mod.rs` stays linker-only; functional code lives in dedicated sibling files.
+
+Flow-vs-worker extraction heuristic:
+- Keep in `flows/` when logic answers "what should happen" (policy/decision path, domain orchestration, cross-service sequencing).
+- Move to `workers/` when logic answers "how to run repeatedly" (generic loop engine, batching/drain mechanics, retry/backoff, channel pump, OS event polling).
+- If a flow loop is specific to one domain but has reusable sub-mechanics, split the mechanics into `workers/runtime/*` helper(s) and keep the domain policy path in `flows/<domain>/*`.
+- Runtime control stance for connect/kernel:
+	- keep `connect` and `kernel` as flow-owned task orchestration (no dedicated `WorkerControl` implementations yet),
+	- reconsider `WorkerControl` adapters only if explicit start/stop/probe lifecycle commands are required for those domains.
+- `commands/<domain>/mod.rs` must remain linker-only; implementations live in `commands/<domain>/<domain>.rs`.
+- API-surface file rule (services/flows/commands):
+	- Main domain file (`services/<name>/<name>.rs`, `flows/<name>/<name>.rs`, `commands/<name>/<name>.rs`) should expose public API and orchestration entrypoints only.
+	- Non-API implementation details (helpers, worker control structs, parsing/state utilities, internal execution logic) must live in domain-specific sibling files (`storage.rs`, `runtime.rs`, `parsing.rs`, `internal.rs`, etc.).
+	- Keep exported signatures stable in main files; move implementation by delegation to sibling modules.
+	- Exception: keep tiny modules in one file when extraction would create trivial indirection (document rationale in review/entry notes).
+
+4. Refactor safety rule
+- Prefer extraction via stable wrappers first, then collapse wrappers in a second pass.
+- Do not keep compatibility shims once call sites are migrated in the same refactor slice (including one-line helper aliases kept only for transitional naming).
+- Keep behavior parity first; run `cargo check`/tests each slice.
+
 ## Current Status Snapshot
 
+- Baseline parity reference: commit tag "release: prepare v0.1.0" is treated as the basic functional parity-aligned release baseline (without full functional eBPF module parity).
 - Latest parity scan status: no open backend parity gaps in the scanned slice.
 - Async/runtime hardening status: all high-priority 2026-03-15 verdict-path items are implemented.
 - Test baseline after latest runtime changes: `cargo test -p opensnitchd-rs` passes (66/66 + 1 ignored profiling harness).
@@ -60,345 +151,518 @@ Override at runtime when needed:
 
 ## Active Backlog
 
-1. Evidence-driven non-verdict event tuning
-- [ ] If pressure is measurable, tune per-pipeline capacities and/or add bounded fan-out per event class.
-
-2. Future enhancements
-- [ ] Add optional `aya-ebpf` implementation path as a high-level replacement candidate for current `libbpf-rs` integration.
-- [ ] Keep `native-ebpf-ringbuf` as default until Aya path reaches parity and passes runtime validation.
-- [x] Define migration acceptance criteria before switching defaults (probe coverage, perf impact, packaging/CI changes).
-	Criteria:
-	- For software-forwarding targets (prosumer/x86 path), sustain >= 6M PPS offered load in dedicated kernel-pipeline pressure runs with bounded enqueue drop ratio and no daemon instability.
-	- Keep hot-path connection latency contained under load (track p95/p99/max in stress harness against Go reference and TODO baselines).
-	- Preserve drop parity semantics (`drop_total` guardrails) and parity test matrix PASS status.
-	- For hardware-offload paths (tens to hundreds of Mpps), treat this daemon path as control-plane/exception-path and require validation on hardware-assisted lab profiles.
-
-3. Go parity follow-up (2026-03-16 rescan)
-- [x] Add Rust parity path for disk-task outputs with `notification_id == 0` so task status/errors are surfaced to UI, not only daemon logs.
-- [x] Pin NFQUEUE overload fallback policy to Go parity: `fail-open` with explicit warning telemetry on timeout/saturation fallback events.
-- [ ] Policy review: should Rust move to a stricter `deny-fast + warn` overload stance in the future (security-first mode), and if so under which rollout/compatibility conditions?
-- [x] Replace task/rule/config poll-only watch with hybrid event-driven + polling fallback file-watch path for closer Go responsiveness parity.
-
-4. Go test parity follow-up (2026-03-16 thorough scan)
-- [x] Add dedicated Rust coverage for nftables expression/table/chain conversion parity (Go has broad unit coverage in `daemon/firewall/nftables/**`).
-- [x] Expand Rust rule-matching parity tests to cover list/domain/regexp/range edge cases mirroring Go `daemon/rule/operator_test.go`.
-- [x] Add deeper proc monitor parity tests for eBPF/process event decoding and integration behavior currently covered in Go `daemon/procmon/ebpf/ebpf_test.go`.
-
-5. Full Go backend rescan follow-up (2026-03-16 files + tests)
-- [x] Extend Rust config/logging parity for Go-managed logging fields and outputs (`LogUTC`, `LogMicro`, `Server.LogFile`, `Server.Loggers`, logger-manager style sinks) by parsing/applying these fields and enabling active file/UDP sink routing.
-- [x] Port the Go `dns/systemd.ResolvedMonitor` compatibility path by adding direct systemd-resolved varlink socket monitoring in Rust with `resolvectl` fallback.
-
-6. Rule operator scope parity follow-up
+1. Future enhancements
+- [~] Add optional `aya-ebpf` implementation path as a high-level replacement candidate for current `libbpf-rs` integration. (Scaffold landed: feature flag + backend abstraction wiring; polling implementation still pending)
+- [~] Provisional policy: prefer Aya backend by default, keep libbpf as automatic fallback until Aya path reaches runtime parity.
 - [ ] Add optional `scope` field to gRPC/proto `Operator` in a dedicated compatibility PR (default dst semantics, backward-compatible wire evolution, Go/Rust/Python client alignment).
+  - Note: deferred for now to stay aligned with base opensnitch implementation; revisit in a future dedicated compatibility PR.
+- [ ] Support AdBlock/AdGuard list format in rule list operators and subscriptions.
+	- AdBlock/AdGuard `||domain^` syntax is by far the most common format in community blocklists (e.g. EasyList, AdGuard DNS Filter, OISD).
+	- Requires a parser that strips `||`/`@@||` prefixes and `^` suffix anchors into plain domain/wildcard entries, feeding them into the existing `lists.domains` trie+glob index.
+	- Exception entries (`@@||...^`) should map to allow-list rule operators.
+	- Subscription `format` field: add `"adblock"` canonical value → `normalize_format` + `is_adblock_list_like` validator.
+	- Rule operator side: extend `normalize_domain_list_entry` to strip AdBlock/AdGuard decorators before trie insertion (backward-compatible: plain entries already parse).
+	- References: AdGuard DNS filter syntax — `||example.com^`, `||*.example.com^$important`.
+	- Note: deferred for now to stay aligned with base opensnitch implementation; revisit in a future dedicated compatibility PR.
 
-## Netlink Parity Matrix
+2. Design-rule backlog (active)
+- [x] Continue trait-first boundary rollout: remove remaining stateful top-level functions as services/domains are touched.
+  - Migrated from stale `Tracking checklist`.
+  - Assumption check (2026-03-22): `make -C .. daemon-rs-policy-audit` passes, and naming/layout scan still reports no `RuntimeIntent` symbols or `intent.rs` files under `crates/daemon/src`.
+- [x] Audit service-level shared free functions and migrate non-domain helpers to `utils/`, enforcing generics-first helper extraction where sensible while keeping domain-specific policy in service modules.
+  - Migrated from stale `Tracking checklist`.
+  - Assumption check (2026-03-22): helper/contract policy gate passes; spot scan of `services/*` free functions remains consistent with domain-policy/lifecycle helpers rather than cross-domain utility leakage.
+- [x] Migrate shared data-contract types into `models/` as slices are touched (serde payloads, cross-domain state structs, transport DTOs) and reduce contract drift in services/flows/workers.
+  - Migrated from stale `Tracking checklist`.
+  - Assumption check (2026-03-22): serde-derive scan outside `models/*` remains limited to expected generic helper internals (`utils/serde_helpers.rs`).
+- [x] Design-rule enforcement pass: migrate shared, non-domain service helpers into `utils/` and enforce generics-first deduplication where it improves reuse/readability.
+  - Completed in entries 422–424: extracted shared task/subscription helper surfaces into `utils/*` (including shared HTTP response helpers), removed shim helpers, and applied no-one-liner/no-compat-shim helper policy in touched areas.
+  - Rescan note: remaining `services/*` free functions are domain-policy/lifecycle conversions or orchestration APIs, not cross-domain generic helper leakage.
+- [x] Design-rule enforcement pass: migrate shared data contracts into `models/`.
+  - Completed in entries 422–424: migrated task runtime JSON payload contracts to `models/task_payload.rs` and rewired service call sites.
+  - Rescan note: serde-backed contract types are now owned by `models/*` (with only generic serde utility internals in `utils/serde_helpers.rs` by design).
+- [x] Crate-wide immutable state access rollout (beyond snapshot-specific rule).
+  - Target: move read-mostly state/cache runtime reads to immutable Arc snapshot-style memread surfaces where feasible; avoid lock-based read paths in hot/runtime flows.
+  - Assumption check (2026-03-22): `workers/runtime/watch/control.rs` remains a coordination lock (`spec.scan().await`) rather than immutable-read state drift.
+  - Progress: `workers/network/netlink_addr_worker.rs` migrated to immutable snapshot storage (`Arc<Vec<String>>`) with sync snapshot reads (no async lock-based read path).
+  - Progress: DNS dual-layer access now uses reusable utility abstraction (`utils/lru_cache.rs::DualLayerLruMap`) instead of domain-specific dual-layer plumbing.
+  - Progress: utility dual-layer now supports async touch reconciliation so hot-path snapshot reads can keep effective LRU recency without lock-bound read paths.
+  - Completed (entry 432): process cache no longer uses outer async read/write lock for runtime reads; immutable dual-layer entries remain lock-free read path and deadline bookkeeping moved to dedicated async mutex.
+- [x] Service API surface audit for async getter-style immutable reads.
+  - Target: keep immutable read access sync and lock-free where possible; reserve async methods for IO/mutation/coordination paths.
+  - Assumption check (2026-03-22): scan remains clean for non-test async getter surfaces (`async fn ...snapshot|state|cache|status`) except expected mutators (`set_snapshot`, `build_and_publish_snapshot`).
+  - Keep this as an ongoing guard in policy audits/new slices.
 
-| Protocol Family | Current Use In Daemon | Current Rust Crates | Recommended Stack | Recommendation |
-|---|---|---|---|---|
-| `NETLINK_ROUTE` | Interface lookup for sockets monitor | `rtnetlink` | `rtnetlink` (+ packet-route internally) | Keep as-is |
-| `NETLINK_AUDIT` | Audit event stream worker | `audit`, `netlink-packet-core` | `audit` | Keep as-is |
-| `NETLINK_CONNECTOR` | Process fork/exec/exit monitoring | `netlink-sys` | `netlink-sys` (+ typed packet crate if available) | Keep as-is |
-| `NETLINK_SOCK_DIAG` | Socket dump/destroy path | `netlink-sys`, `netlink-packet-sock-diag` | same | Keep as-is |
-| `NETLINK_NETFILTER` | Packet verdict path | libc + FFI boundary | keep current path | Keep as-is |
+## Parity Matrix and Compatibility
 
-## Kernel 6.19 / libbpf Compatibility Notes (4b)
+| Area | Scope / Signal | Current Rust Path | Status | Tracking / Evidence | Guidance / Next Step |
+|---|---|---|---|---|---|
+| Netlink parity | `NETLINK_ROUTE` (iface lookup) | `rtnetlink` | Stable | daemon runtime + parity harness | Keep current stack (`rtnetlink` + typed route packets) |
+| Netlink parity | `NETLINK_AUDIT` (audit event stream) | `audit`, `netlink-packet-core` | Stable | daemon runtime + parity harness | Keep current stack |
+| Netlink parity | `NETLINK_CONNECTOR` (proc fork/exec/exit) | `netlink-sys` | Stable | daemon runtime + parity harness | Keep current stack; add typed packet crate only if required |
+| Netlink parity | `NETLINK_SOCK_DIAG` (socket dump/destroy) | `netlink-sys`, `netlink-packet-sock-diag` | Stable | daemon runtime + parity harness | Keep current stack |
+| Netlink parity | `NETLINK_NETFILTER` (verdict path) | libc + FFI boundary | Stable | daemon runtime + parity harness | Keep current path for now |
+| Kernel/libbpf compatibility | Kernel 6.19 DNS eBPF hook downgrade | libbpf auto-attach probe path | Degraded with fallback | live log evidence: `logs/daemon-rs-live-20260319-161248-stdout.log` | Treat `kernel + bpftool + libbpf + compiled BPF object` as one compatibility unit |
+| Runtime fallback behavior | DNS monitoring under eBPF hook failure | DNS service worker path | Resilient | daemon behavior checks | Keep systemd-resolved varlink (`/run/systemd/resolve/io.systemd.Resolve.Monitor`) + `resolvectl monitor` fallback |
+| OpenSnitch eBPF quirk tracking | Upstream issue thread and repro notes | eBPF module/runtime compatibility | Open external signal | issue: https://github.com/evilsocket/opensnitch/issues/1537#issuecomment-3905087273 | Track upstream outcome and mirror actionable mitigations in this tracker |
+| Packaging / ecosystem compatibility | AUR eBPF module package behavior | out-of-tree package integration | External signal | package: https://aur.archlinux.org/packages/opensnitch-ebpf-module-git | Track packaging deltas against upstream expectations before enabling stricter defaults |
 
-- Latest live run evidence (`logs/daemon-rs-live-20260319-161248-stdout.log`) shows DNS hook downgrade, not netlink breakage:
-	- `dns eBPF hook disabled: kernel/libbpf does not support this probe format; using non-eBPF DNS monitors`
-- Current daemon behavior is resilient here:
-	- DNS monitor continues via systemd-resolved varlink (`/run/systemd/resolve/io.systemd.Resolve.Monitor`) and `resolvectl monitor` fallback.
-	- Netlink-based workers (`NETLINK_CONNECTOR`, `NETLINK_SOCK_DIAG`, `NETLINK_ROUTE`) are separate from libbpf and keep operating when DNS eBPF hook is disabled.
-- Compatibility interpretation for 6.19:
-	- This symptom is typically probe auto-attach / userspace tooling format mismatch (bpftool/libbpf + object probe metadata), not a generic kernel netlink incompatibility.
-	- Treat `kernel + bpftool + libbpf + compiled BPF object` as a compatibility unit.
+- Compatibility interpretation:
+  - DNS eBPF-hook downgrade is typically probe auto-attach / userspace tooling format mismatch, not a generic netlink breakage.
+  - Netlink workers (`NETLINK_CONNECTOR`, `NETLINK_SOCK_DIAG`, `NETLINK_ROUTE`) are independent from libbpf hook viability and should be evaluated separately.
 - Implementation guidance:
-	- Keep current netlink stack (`netlink-sys` + typed packet crates + `rtnetlink`) for protocol correctness and parity with Go behavior.
-	- Do not replace netlink parsing with ad-hoc raw-byte mappings unless required for a verified parser bug.
-	- `rustix` remains appropriate for fd/poll/syscall helpers (already used in proc-connector and nfqueue tuning), not as a direct replacement for typed netlink protocol decoding.
+  - Keep netlink protocol handling on typed netlink crates; avoid ad-hoc raw-byte replacements unless a verified parser bug requires it.
+  - Keep `rustix` usage scoped to syscall/fd helpers, not as a replacement for typed netlink protocol decoding.
+  - Keep external quirk tracking (upstream issue + AUR package) visible here until compatibility behavior is stable across target kernels/distributions.
 
-## Completed Milestones
+## Tracker Retention
 
-### Parity hardening
-
-- Typed sock-diag request construction for socket destroy path.
-- Protocol-focused proc connector and sock-diag tests.
-- Runtime task-control parity hardening for start/stop/reload semantics.
-- Subscribe identity parity updates (runtime hostname/kernel with safe fallback).
-- Downloader and IOC scanner disk-task runtime execution parity.
-- Stats event backlog buffering and snapshot draining.
-- Notification hello frame parity (`Id: 0` reply on stream open).
-- Notification close-sentinel parity (`Action::NONE` now breaks stream and triggers temporary-task teardown flow).
-- StartTask duplicate rejection parity.
-- Default reject fallback parity with socket teardown when context exists.
-- DNS response fast-path parity (track + accept before rule/UI verdict path).
-- Self-connection fast-allow parity for internal daemon flows.
-- UI-decided connection stats parity (rule-hit/event emission after ask-rule decision).
-- Tasks watcher reconciliation every poll tick for referenced task changes.
-
-### Async/runtime hardening
-
-- Firewall adapter command execution migrated to async process paths.
-- RuleService, ConfigService, Task runtime loader, and watcher polling moved off sync hot paths.
-- Process inspect and PID owner resolution heavy work isolated behind blocking boundaries.
-- Dedicated connect-attempt queue split from shared kernel-event queue.
-- Bounded verdict concurrency with semaphore limits.
-- Rule match cache pass (prebuilt lists/aliases/regex, no hot-path disk reads).
-- Owner enrichment moved off NFQUEUE callback thread to async worker path.
-- Worker shutdown latency hardening (cancellation-aware sleeps, bounded joins, blocking join context).
-- Non-connect kernel event handler split into dedicated DNS/process/firewall pipelines to reduce single-loop serialization pressure.
-- Non-connect worker event dispatch now uses bounded `try_send` retries with short backoff and drop-on-sustained-saturation behavior (replacing unbounded `blocking_send`).
-- Kernel dispatcher fan-out to DNS/process/firewall pipelines now also uses bounded retry/backoff to avoid stalling the non-connect router loop on one saturated pipeline.
-- Runtime now tracks cumulative dropped non-connect events per pipeline (dns/process/firewall) to support evidence-driven queue-pressure tuning.
-- Added Go-side comparability stress harness under `daemon/runtimeprofile/` to report connect-latency percentiles and per-pipeline drop deltas in the same output shape as Rust baseline profiling.
-- Verdict flow now short-circuits self-connect attempts before async owner enrichment, removing unnecessary hot-path work for self-connections.
-
-## Change Log (2026-03-15)
-
-1. Follow-up implementation pass
-- Queue-aware timeout policy, requeue aliasing, late-verdict stale-entry guard.
-- Non-blocking connect enqueue fallback under saturation.
-
-2. Parity follow-up closure pass
-- Reject fallback socket teardown parity.
-- Duplicate task start rejection parity.
-- Notification hello handshake parity.
-- Pending-stats ping gating parity.
-
-3. Connect queue isolation pass
-- Dedicated bus channel for `ConnectionAttempt`.
-- Separate daemon task for connect attempt handling.
-- Bounded concurrent connect handling.
-
-4. Rule match cache pass
-- In-memory list and alias cache for verdict matching.
-- Regex precompile cache for rule operators.
-
-5. Owner enrichment offload pass
-- Expensive owner enrichment moved off callback path.
-
-6. Shutdown latency hardening pass
-- Bounded worker joins in runtime.
-- Cancellation-aware worker sleeps.
-
-7. Non-connect kernel event pipeline split pass
-- Shared non-connect queue now dispatches into dedicated DNS/process/firewall worker pipelines in daemon runtime.
-
-8. Post-merge parity/runtime rescan pass
-- DNS response packets now fast-path to accept while still publishing DNS mappings.
-- Notification stream now treats `Action::NONE` (and lower sentinel values) as server-ordered close.
-- Verdict path now records stats hit/event for UI-decided first-seen connections.
-
-9. Post-merge parity/runtime follow-up pass
-- Verdict flow now fast-allows self connection attempts before rule/UI evaluation.
-- Worker non-connect event emission now uses bounded retry/backoff dispatch to avoid unbounded producer thread blocking when kernel event queues are saturated.
-
-10. Non-connect dispatcher hardening pass
-- Daemon kernel-event router now uses bounded retry/backoff when dispatching to DNS/process/firewall sub-pipelines so one saturated sub-queue cannot indefinitely stall routing.
-- Added focused daemon dispatcher tests for closed-channel stop and bounded drop-on-full behavior.
-
-11. Saturation observability and isolation regression pass
-- Added mixed non-connect saturation regression test proving connect-attempt handling remains responsive under heavy dns/proc/firewall event bursts.
-- Added per-pipeline dropped-event runtime counters for non-connect dispatcher backpressure events.
-
-12. Profiling baseline harness pass
-- Added ignored stress-profile harness that reports connect-attempt latency percentiles and per-pipeline drop deltas.
-- Captured baseline run (rounds=2000): p50=13.518ms, p95=16.290ms, p99=17.626ms, max=38.052ms, drop_total=0.
-
-13. Go backend apples-to-apples stress-profile pass
-- Added `daemon/runtimeprofile/runtime_profile_test.go` with:
-	- mixed non-connect saturation responsiveness regression,
-	- opt-in stress profile reporting `p50/p95/p99/max` and `drop_dns/drop_process/drop_firewall/drop_total`.
-- Verified aligned 2000-round harness runs for apples-to-apples comparison:
-	- Rust release (`OPENSNITCH_STRESS_ROUNDS=2000 cargo test --release -p opensnitchd-rs stress_profile_reports_connect_latency_and_pipeline_drops -- --ignored --nocapture`): p50=0.009ms, p95=0.013ms, p99=0.019ms, max=0.127ms, drop_total=0.
-	- Go (`OPENSNITCH_STRESS_PROFILE=1 OPENSNITCH_STRESS_ROUNDS=2000 go test ./runtimeprofile -run TestStressProfileReportsConnectLatencyAndPipelineDrops -count=1 -v`): p50=0.004ms, p95=0.009ms, p99=0.015ms, max=0.209ms, drop_total=0.
-
-14. Cross-backend one-command profile target
-- Added root `Makefile` target `profile-backends` with shared `STRESS_ROUNDS` to run both Rust and Go harnesses in one command.
-
-15. Connect hot-path optimization pass
-- Moved self-connection fast-allow check ahead of async owner enrichment in `verdict_flow`.
-- Result: Rust release stress profile moved from multi-millisecond latency to sub-millisecond latency at 2000 rounds while retaining `drop_total=0`.
-
-16. Perf tracker and regression guard pass
-- Added `daemon-rs/PERF.md` as a persistent stress-profile history tracker for Rust and Go backend harness runs.
-- Added machine-readable perf baseline keys in `daemon-rs/TODO.md`.
-- Rust ignored stress-profile harness now enforces clear-regression checks against TODO baselines.
-- Go runtimeprofile stress harness now enforces clear-regression checks against TODO baselines.
-- Added explicit tooling command `cargo run --manifest-path daemon-rs/Cargo.toml -p tools -- update-run-perf` (and `make update-run-perf`) to auto-refresh PERF run rows with Rust-vs-Go and Rust-vs-previous-commit deltas.
-
-17. Parity rescan and drop observability follow-up
-- Performed Go-vs-Rust parity rescan focused on non-connect pipelines, task notifications, overload fallback behavior, and watcher responsiveness.
-- Added global warning/debug observability for worker kernel-event dispatch backpressure drops and closed-channel outcomes.
-
-18. NFQUEUE overload fallback mode parity pass
-- Added configurable overload fallback mode via `OPENSNITCH_NFQUEUE_OVERLOAD_FALLBACK` (`default-action` or `fail-open`).
-- Added explicit fallback telemetry for timeout/saturation decisions and mode-aware verdict behavior.
-- Added focused tests covering fail-open repeat-queue allow and primary-queue requeue invariants.
-
-19. Go UI config parity test port pass (Rust)
-- Added `config.rs` tests for full config parsing expectations and invalid `ProcMonitorMethod` fallback to `Proc`.
-- Added `firewall_service.rs` test ensuring `reload_from_config` updates backend/system-firewall state without requiring privileged firewall rule application.
-
-20. Go UI subscribe-payload parity test port pass (Rust)
-- Added `client.rs` tests validating runtime identity fields are non-empty.
-- Added `client.rs` test validating `build_subscribe_config` payload fields (id/name/version/log-level/raw-config/rules/system-firewall) match expected values.
-
-21. Kernel/reconfigure parity hardening pass (Rust)
-- Added feature-gated, opt-in root smoke tests for iptables/nftables NFQUEUE wiring under `integration_kernel_tests`.
-- Added `config_service.rs` tests covering invalid `ProcMonitorMethod` fallback-to-`Proc` and invalid-json snapshot immutability.
-- Added root `Makefile` orchestration targets: `rust-parity-tests`, `rust-kernel-it`, and `go-rust-parity-full` (single-line pass summary on success).
-
-22. Go test parity thorough rescan (analysis pass)
-- Re-ran package-level parity inventory against Go tests (`daemon/**/*_test.go`) and Rust tests (`daemon-rs/crates/daemon/src/**/*.rs`).
-- Confirmed recent parity ports are green in combined root flow (`go-rust-parity-full` PASS).
-- Identified largest remaining parity density deltas by domain: `firewall/nftables`, `rule`, and `procmon/ebpf`.
-
-23. Hybrid file-watch parity pass
-- Replaced poll-only config/rules/tasks watchers in Rust `WatchService` with a hybrid model: lightweight inotify-based filesystem triggers plus existing periodic polling as fallback.
-- Added event filtering tests for filesystem trigger forwarding behavior and retained poll safety on watcher setup/channel failures.
-
-24. Cross-backend hot/cold parity harness matrix pass
-- Added root `Makefile` targets to run paired Go/Rust hot-path harnesses (`parity-hot-path-harness`) and cold-path watch/reload harnesses (`parity-cold-path-harness`).
-- Added aggregate `parity-hot-cold-matrix` target with a single PASS summary for combined parity-gate runs.
-
-25. Config reload parity test port pass
-- Added Rust watch-service test covering config file mutation and watcher-driven runtime reload semantics, mirroring Go `ui.TestClientReloadingConfig` behavior at service/runtime level.
-
-26. Go parity rescan hygiene pass
-- Re-ran `sudo make go-test-full` and `make parity-hot-cold-matrix STRESS_ROUNDS=500`; both completed successfully and the latest static Go-vs-Rust inventory pass found no new parity/test consistency drift.
-- Wired automatic restore of `daemon/ui/testdata/default-config.json` into the root Makefile targets that execute the Go UI config reload test path, eliminating the recurring dirty-worktree side effect.
-
-27. Full Go backend rescan and Rust test-log parity pass
-- Completed a full-file Go backend rescan covering runtime features and tests; the main remaining Go-only gaps are logging/config sink parity and the `dns/systemd.ResolvedMonitor` event-source path.
-- Added `utils::test_support::init_test_logging()` plus `logging::init_for_tests()` so Rust reload-path tests use the daemon logging subsystem and can emit inspectable logs during parity debugging.
-
-28. Logging sink + systemd-resolved compatibility port pass
-- Extended Rust config parsing/runtime wiring for Go logging fields (`LogUTC`, `LogMicro`, `Server.LogFile`, `Server.Loggers`) and integrated active file/UDP sink routing into `logging.rs` with reload-path application.
-- Added a direct systemd-resolved varlink socket monitor in DNS worker (`io.systemd.Resolve.Monitor.SubscribeQueryResults`) with robust parsing for A/AAAA and CNAME answers plus existing `resolvectl monitor` fallback.
-- Added unit coverage for varlink DNS event extraction and verified reload/config parity tests remain green after logging integration.
-
-29. Cold-path harness log parity rescan and gap-fill pass
-- Rescanned full cold-path harness output (Go + Rust interleaved) against the Go-backend transcript attached in the session; identified four log-line gaps.
-- Fixed `reqwest` version regression (`0.13.2` had renamed `rustls-tls` feature; reverted to stable `0.12` series with working `rustls-tls` feature).
-- Fixed second `Delete() rule` + `Rule deleted` pair: `rules_watch_task_emits_live_reload_delete_sequence` now deletes both `test-live-reload-delete.json` and `test-live-reload-remove.json` and polls until `rules.is_empty()`, mirroring Go `TestLiveReload` removing both files.
-- Added `uiClient exit` log to both `Ok(())` return paths of `NotificationFlow::run()`, matching Go `uiClient.StartPolling()` exit label.
-- Restructured `notification_flow_runs_ui_poller_path_against_live_server` test to keep `task_reply_tx` alive through stream-close, so `client.disconnect()` is emitted before `uiClient exit`; test validates hello handshake, `client.disconnect()`, and clean `uiClient exit` in sequence.
-- Moved `[tasks] Adding task: {name}` log from `daemon.rs` dispatch loop into `spawn_task_monitor()` in `task_runtime.rs`, aligning it with the Go `Manager.AddTask()` log site.
-- Added `spawn_task_monitor_emits_adding_task_log` test exercising `spawn_task_monitor("basic-task", ...)` with immediate cancel; `[tasks] Adding task: basic-task` now visible in cold-path harness alongside Go's `TestTaskManager/AddTask` section.
-- Added `spawn_task_monitor_emits_adding_task_log` test exercising `spawn_task_monitor("basic-task", ...)` with immediate cancel; `[tasks] Adding task: basic-task` now visible in cold-path harness alongside Go's `TestTaskManager/AddTask` section.
-- `make parity-cold-path-harness` → PARITY COLD-PATH STATUS: PASS, 15/15 Rust tests.
-- Post-session regression investigation: `parity-hot-cold-delta` was missing `RUST_LOG=error` on the Rust hot-path bench; with `init_for_tests()` defaulting to `opensnitchd_rs=debug`, every hot-path `debug!()` in `verdict_flow.rs` was being emitted and each call acquired the `OpensnitchMakeWriter` and `OpensnitchTimer` `RwLock` twice per event, causing ~3x p50 regression.
-- Fixed `parity-hot-cold-delta` Makefile to add `RUST_LOG=error` on the Rust hot bench (matching `parity-hot-path-harness`).
-- Fixed `logging.rs`: added `LOG_SINK_HAS_FILE`, `LOG_SINK_HAS_UDP`, `LOG_SINK_UTC`, `LOG_SINK_MICRO` `AtomicBool` statics kept in sync by `apply_config()`; `MakeWriter::make_writer()` and `FormatTime::format_time()` use atomic loads as fast-path to bypass `RwLock` entirely in the common stdout-only case.
-- Post-fix `parity-hot-cold-delta` result: vs-Go Δ p50=0.000, p95=+0.003, p99=+0.003, max=+0.020 — all well under baseline thresholds.
-
-30. Hot/cold parity optimization pass (feature-parity preserved)
-- Hot path: removed non-parity debug logs from `flows/verdict_flow.rs` connection handling and replaced full-config snapshot reads with focused `ConfigService::{default_action, client_addr}` accessors to avoid cloning whole `Config` when only one field is needed.
-- Hot path: split self fast-allow into `fast_allow_try()` + async fallback send (`send_verdict`) so the common queue-not-full case does not pay an `await`/state-machine hop in `spawn_connect_attempt_task`.
-- Cold path: event-driven config-watch wait experiment was validated but then reverted to fixed `tokio::time::sleep(Duration::from_secs(10))` for strict apples-to-apples parity with Go `ui.TestClientReloadingConfig` timing policy.
-- Validation: `RUST_LOG=error cargo test --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs` remains green (97 passed, 1 ignored).
-- Benchmark (`make parity-hot-cold-delta STRESS_ROUNDS=500`, commit `e23c2f7a` + working-tree optimization patch):
-	- Hot: Go `p50=0.001 p95=0.003 p99=0.005 max=0.054`, Rust `p50=0.001 p95=0.004 p99=0.006 max=0.046`, Δ `p50=+0.000 p95=+0.001 p99=+0.001 max=-0.008 drop_total=0`.
-	- Cold totals: Go `13.986s`, Rust `4.368s`, Δ `-9.618s`.
-	- Result: `PARITY DELTA STATUS: PASS`.
-
-31. Additional hot-path optimization pass (feature-parity preserved)
-- Implemented optimization #1 (queue topology): added lane-specific bus capacities via `BusCaps` and `build_bus_with_caps()`, with runtime defaults tuned to reduce cross-lane contention (`connect=1024`, `verdict=1024`, `kernel=512`, `client_cmd=256`, `task_reply=256`).
-- Implemented optimization #2 (connect pipeline): replaced non-daemon connect handling from per-attempt semaphore+spawn to a bounded fixed worker pool with per-worker queues and round-robin dispatch; added bounded batch drain (`CONNECT_DISPATCH_BATCH_SIZE=64`) from `connect_rx` to reduce dispatcher wakeups.
-- Implemented additional stats contention reduction: moved high-frequency scalar counters (`connections`, `dns_responses`, `accepted`, `dropped`, `ignored`, `rule_hits`, `rule_misses`) to atomic counters and kept mutex-protected maps/events for rich snapshots.
-- Restored fixed 10s watcher delay for parity comparability as requested; cold-path delta remains apples-to-apples against Go tests.
-- Validation: `RUST_LOG=error cargo test --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs` remains green (97 passed, 1 ignored).
-- Benchmark (`make parity-hot-cold-delta STRESS_ROUNDS=500`, commit `d1830792` + working-tree optimization patch):
-	- Hot: Go `p50=0.001 p95=0.002 p99=0.005 max=0.107`, Rust `p50=0.001 p95=0.004 p99=0.009 max=0.056`, Δ `p50=+0.000 p95=+0.002 p99=+0.004 max=-0.051 drop_total=0`.
-	- Cold totals: Go `13.975s`, Rust `13.965s`, Δ `-0.010s`.
-	- Result: `PARITY DELTA STATUS: PASS`.
-
-32. Process cache lookup lock-contention reduction (sweet-spot trial)
-- [x] Keep feature parity and fixed 10s watcher delay while reducing hot lookup lock pressure.
-- [x] Updated `ProcessService::inspect()` to use a read-lock hit path and only take write-lock cleanup when entry is missing or expired.
-- [x] Reverted interim connect dispatcher tuning experiments (queue-capacity and dispatch strategy variants) after noisy variance; retained the process-cache fast path as the cleaner candidate.
-
-Validation:
-
-- Full suite: `RUST_LOG=error cargo test --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs` => `97 passed; 0 failed; 1 ignored`.
-- `make parity-hot-cold-delta STRESS_ROUNDS=500` => `PARITY DELTA STATUS: PASS`.
-- Candidate run snapshot:
-	- Hot: Go `p50=0.001 p95=0.002 p99=0.008 max=0.033`, Rust `p50=0.001 p95=0.003 p99=0.006 max=0.040`, Δ `p50=+0.000 p95=+0.001 p99=-0.002 max=+0.007 drop_total=0`.
-	- Cold totals: Go `13.990s`, Rust `13.971s`, Δ `-0.019s`.
-	- Result: `PARITY DELTA STATUS: PASS`.
-- 2000-round stability validation (pre-commit):
-	- Run #1 hot: Go `p50=0.001 p95=0.002 p99=0.004 max=0.228`, Rust `p50=0.001 p95=0.004 p99=0.005 max=0.050`, Δ `p50=+0.000 p95=+0.002 p99=+0.001 max=-0.178 drop_total=0`; cold Δ `+0.014s`.
-	- Run #2 hot: Go `p50=0.001 p95=0.002 p99=0.004 max=0.135`, Rust `p50=0.001 p95=0.004 p99=0.006 max=0.067`, Δ `p50=+0.000 p95=+0.002 p99=+0.002 max=-0.068 drop_total=0`; cold Δ `+0.005s`.
-	- Both runs: `PARITY DELTA STATUS: PASS`; full suite remained `97 passed; 0 failed; 1 ignored`.
-
-33. Stress harness comparability alignment (Go-vs-Rust hot tails)
-- [x] Kept runtime feature parity; aligned Rust stress-profile test load model to Go runtimeprofile harness so measurements compare equivalent pipeline work.
-- [x] In Rust stress-profile test, replaced full daemon kernel-service handling with lightweight per-pipeline workers (2ms delay) and bounded router dispatch, matching Go harness behavior.
-- [x] Adjusted Rust stress-profile timing window to exclude per-iteration `ConnectionAttempt` object construction and focus on dispatch/verdict latency, consistent with Go harness timing intent.
-
-Validation:
-
-- Full suite: `RUST_LOG=error cargo test --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs` => `97 passed; 0 failed; 1 ignored`.
-- 2000-round parity run #1: Go `p50=0.001 p95=0.003 p99=0.004 max=0.139`, Rust `p50=0.001 p95=0.002 p99=0.003 max=0.051`, Δ `p50=+0.000 p95=-0.001 p99=-0.001 max=-0.088 drop_total=0`; cold Δ `-0.005s`.
-- 2000-round parity run #2: Go `p50=0.001 p95=0.003 p99=0.005 max=0.179`, Rust `p50=0.001 p95=0.002 p99=0.003 max=0.046`, Δ `p50=+0.000 p95=-0.001 p99=-0.002 max=-0.133 drop_total=0`; cold Δ `-0.019s`.
-- Result: both runs `PARITY DELTA STATUS: PASS`; Rust now matches/exceeds Go on hot p95/p99 in this aligned harness.
-
-34. Throughput-focused default tuning for high-PPS edge targets
-- [x] Updated runtime defaults in `daemon.rs` toward higher burst tolerance and contained latency:
-	- `MAX_CONCURRENT_CONNECT_ATTEMPTS=64`
-	- `CONNECT_WORKER_QUEUE_CAPACITY=128`
-	- `CONNECT_DISPATCH_BATCH_SIZE=16`
-	- `KERNEL_DNS_QUEUE_CAPACITY=2048`
-	- `KERNEL_PROCESS_QUEUE_CAPACITY=2048`
-	- `KERNEL_FIREWALL_QUEUE_CAPACITY=512`
-- [x] Added ignored benchmark `stress_profile_reports_kernel_pipeline_pressure` to exercise the real `spawn_kernel_task` pipeline with configurable flood duration/task count and report attempted/enqueued PPS plus enqueue/pipeline drops.
-- [x] Full suite re-validated after tuning: `97 passed; 0 failed; 2 ignored`.
-- [x] Hot-path stress re-validated: `OPENSNITCH_STRESS_ROUNDS=2000` => `p50=0.001 p95=0.002 p99=0.004 max=0.054 drop_total=0`.
-
-35. Kernel-pressure benchmark robustness and timeout-sweep profiling
-- [x] Refactored pressure benchmark internals into reusable helper `run_kernel_pressure_profile(...)` to avoid duplicated benchmark logic and keep mode handling consistent.
-- [x] Added ignored benchmark `stress_profile_reports_kernel_pipeline_timeout_sweep` that runs timeout-mode pressure tests over configurable timeout points (`OPENSNITCH_KERNEL_PRESSURE_SWEEP_US`, default `50,100,200,500,1000`).
-- [x] Added machine-friendly sweep CSV output lines (`kernel-pressure-sweep-csv-header` + `kernel-pressure-sweep-csv,...`) to simplify PERF ingestion and post-run plotting.
-- [x] Added auto-selected timeout recommendation summary (`kernel-pressure-sweep-recommend ...`) based on delivered throughput and enqueue-drop ratio, preferring non-abort candidates.
-- [x] Kept benchmark shutdown bounded and non-hanging under heavy load with cancellation-friendly flood workers and timeout-bounded join/abort behavior.
-- [x] Validation: `cargo test -p opensnitchd-rs stress_profile_reports_kernel_pipeline_timeout_sweep -- --ignored --nocapture` passed.
-
-36. Opt-in runtime tunables file and quick sweep generation
-- [x] Added Rust-only runtime tunables loader (`tunables.rs`) with conservative defaults and opt-in overrides from `/etc/opensnitchd/tunables.json`, `daemon-rs/data/tunables.json` (dev), or `OPENSNITCH_TUNABLES_FILE`.
-- [x] Added per-field env overrides for runtime tuning (`OPENSNITCH_TUNE_*`) with safe clamping.
-- [x] Replaced hardcoded connect/kernel queue and worker constants in daemon runtime with effective tunable values logged at bootstrap.
-- [x] Added tools command `cargo run -p tools -- quick-pressure-sweep-tunables` that runs the timeout sweep benchmark and writes `daemon-rs/data/tunables.json` (or `OPENSNITCH_TUNABLES_OUTPUT`) using conservative/high-throughput profile selection thresholds.
-- [x] Added `daemon-rs/data/tunables.example.json` and ignored generated `daemon-rs/data/tunables.json` in repo `.gitignore`.
-
-37. Auto-tune kernel-pressure tunables with stability guardrails
-- [x] Added tools command `cargo run -p tools -- auto-tune-kernel-pressure-tunables` implementing step-up tuning from conservative defaults with `x2` scale factors.
-- [x] Each step runs repeated pressure profiles (`OPENSNITCH_AUTOTUNE_RUNS_PER_STEP`, clamped to 2-3) and uses median `enqueued_pps` and median `enqueue_drop_ratio` for robust decisioning.
-- [x] Added hysteresis (`OPENSNITCH_AUTOTUNE_HYSTERESIS_GAIN`) so tiny gains do not trigger continued doubling.
-- [x] Added hard caps for all tuned dimensions (workers, connect queue, dispatch batch, kernel pipeline queues) to avoid pathological sizes.
-- [x] Stability guardrails stop escalation when forced abort occurs or median drop ratio exceeds `OPENSNITCH_AUTOTUNE_MAX_DROP_RATIO`.
-- [x] Final profile applies configurable safety backoff (`OPENSNITCH_AUTOTUNE_SAFETY_FACTOR`, default 0.5) with floor at conservative defaults, then writes `tunables.json`.
-- [x] Added post-selection no-regression validation (median repeated runs for conservative baseline vs selected profile) with automatic conservative fallback on regressions (`OPENSNITCH_AUTOTUNE_REGRESSION_TOLERANCE`, `OPENSNITCH_AUTOTUNE_REGRESSION_DROP_DELTA_MAX`, `OPENSNITCH_AUTOTUNE_VALIDATION_RUNS`).
-- [x] Refined regression handling with a sweet-spot rerun pass using lower scale factors from defaults (`OPENSNITCH_AUTOTUNE_SWEETSPOT_FACTORS`) and relaxed uplift/drop constraints (`OPENSNITCH_AUTOTUNE_SWEETSPOT_MIN_UPLIFT`, `OPENSNITCH_AUTOTUNE_SWEETSPOT_DROP_DELTA_MAX`) before final fallback.
-- [x] Added CPU-core-aware autotune caps (`available_parallelism`) so worker/queue max bounds adapt to host core count while preserving hard upper limits.
-- [x] Added release microbench helper command `cargo run --release -p tools -- microbench-connect-dispatch` for fast dispatch-path trend checks.
-- [x] Added explicit parity gate command `cargo run --release -p tools -- parity-gate` (optional strict exceed-Go check via `OPENSNITCH_PARITY_REQUIRE_EXCEED_GO=1`) and optional auto-run from autotune via `OPENSNITCH_AUTOTUNE_RUN_PARITY_GATE=1`.
-- [x] Refined CPU-cap logic to always reserve one logical core for kernel/system operations before computing autotune max bounds.
-- [x] Reduced kernel-pressure enqueue contention in stress harness flood path via adaptive batch sizing and short saturation-aware backoff, with extra focus on DNS/process lane saturation.
-- [x] Reduced per-event overhead in pressure harness by replacing per-iteration DNS string formatting with precomputed host/IP pools reused across dispatch loops.
-- [x] Optimized connect-attempt dispatch hot path to probe alternate worker queues before blocking, reducing head-of-line stalls when one worker lane is saturated.
-- [x] Added regression tests for connect dispatch rerouting under primary-queue saturation and closed-worker behavior.
-
-38. Startup autotune orchestration with safety preflight (default-on)
-- [x] Added default-on startup autotune-once attempt before tunables load: runs only when tunables file/marker are absent and autotune is not disabled.
-- [x] Added load/memory/CPU-idle preflight checks (`/proc/loadavg`, `/proc/meminfo`, `/proc/stat`) with configurable thresholds to skip autotune under host pressure.
-- [x] Added timeout-bounded autotune subprocess execution (`cargo run --release -p tools -- auto-tune-kernel-pressure-tunables`) with inherited logging and conservative fallback on failure.
-- [x] Added one-shot completion marker file to avoid repeated startup autotune on subsequent restarts.
-- [x] Added explicit opt-out switch `OPENSNITCH_AUTOTUNE_DISABLE=1` and marker path override `OPENSNITCH_AUTOTUNE_MARKER_FILE`.
-- [x] Added systemd notify status signaling during startup autotune (`STATUS=...`, periodic `EXTEND_TIMEOUT_USEC=...`) and only emit readiness (`READY=1`) once daemon workers/tasks are running.
+- Resolved milestone details and historical slice-by-slice changelog entries are pruned from this tracker to keep it focused on active backlog, current parity state, and open milestone blockers.
+- Use `git log` for completed implementation history when detailed slice provenance is needed.
+- [x] Recorded the architectural constraint that subscription schema should be extracted from `proto/ui.proto` into a dedicated external proto surface.
 
 ## Update Rules
 
 1. Update this file directly after each parity or async/runtime change.
-2. Move closed items from Active Backlog into Completed Milestones.
+2. Prune closed items and resolved audit slices so this tracker stays focused on active work.
 3. Keep behavior references concrete (file + behavior), not generic.
 4. Keep this as the only active tracker file.
+5. Separate-PR items are excluded from milestone gating.
+
+## 421 — Post-squash governance rescan/remap (design rules + parity + milestone)
+
+- Trigger/context:
+  - after history squash to `release: v0.1.1`, reran governance and parity
+    checks to confirm design-rule compliance and tracker completeness.
+
+- Tracker/remap findings:
+  - resolved historical slice entries were pruned from this tracker to keep it
+    lightweight; numbering is intentionally non-contiguous.
+  - corrected top metadata to `Last update: 2026-03-22 (entry 421)` so header
+    tracks the latest retained audit entry.
+  - merged compatibility coverage into unified section
+    `Parity Matrix and Compatibility` (netlink parity + kernel/libbpf notes)
+    and added explicit external eBPF quirk trackers:
+    - `https://github.com/evilsocket/opensnitch/issues/1537#issuecomment-3905087273`
+    - `https://aur.archlinux.org/packages/opensnitch-ebpf-module-git`
+
+- Design-rule rescan results:
+  - data-contract ownership guard test passes:
+    - `cargo test -p opensnitchd-rs data_contract_ownership -- --nocapture`
+  - `mod.rs` linker-only rule scan across
+    `services/*`, `commands/*`, `flows/*`, `workers/*` reports no direct
+    functional declarations outside explicit allowlisted macro/test surfaces.
+  - remaining serde/prost markers outside `models` are in expected helper/
+    generic storage utility surfaces (`services/storage/storage.rs` generic
+    `DeserializeOwned` bounds and `utils/serde_helpers.rs`).
+
+- Parity/diagnostics rescan results:
+  - build baseline passes:
+    - `cargo check -p opensnitchd-rs`
+  - latest full rerun after compatibility-matrix update:
+    - `cargo test -p opensnitchd-rs data_contract_ownership -- --nocapture`
+      passes (`1 passed`).
+    - `make parity-hot-cold-delta-once STRESS_ROUNDS=50` passes end-to-end:
+      - `PARITY HOT-PATH STATUS: PASS`
+      - `PARITY COLD-PATH STATUS: PASS`
+      - `PARITY DELTA STATUS: PASS`
+      - delta snapshot:
+        `PARITY DELTA HOT MIXED: go_verdict_ms=0.008 rust_verdict_ms=0.023 delta_ms=+0.015`
+        `PARITY DELTA COLD: go_total_s=4.100 rust_total_s=4.163 delta_s=+0.063`
+  - remapped focused parity-adjacent Rust tests pass:
+    - `cargo test -p opensnitchd-rs config_service -- --nocapture`
+      (`5 passed`)
+    - `cargo test -p opensnitchd-rs firewall_service -- --nocapture`
+      (`13 passed`)
+    - `cargo test -p opensnitchd-rs tests::client -- --nocapture`
+      (`2 passed`)
+  - parity runner mapping now fixed:
+    - `make rust-parity-tests` selectors were updated to
+      `tests::config_service::`, `tests::firewall_service::`, and
+      `tests::client::`.
+    - post-fix rerun executes real tests and passes:
+      - config selector: `5 passed`
+      - firewall selector: `13 passed`
+      - client selector: `2 passed`
+  - amended rerun after Go proto bootstrap correction:
+    - root build/test flow now bootstraps Go proto tools via
+      `scripts/bootstrap_go_proto_tools.sh`, which reads `daemon/go.mod` and
+      installs generator versions compatible with the daemon baseline
+      (`google.golang.org/grpc v1.32.0`,
+      `google.golang.org/protobuf v1.26.0`).
+    - reruns continue to confirm end-to-end parity pass status on this branch.
+    - generated Go gRPC stubs are now baseline-compatible again:
+      `daemon/ui/protocol/ui_grpc.pb.go` is generated by
+      `protoc-gen-go-grpc v1.3.0` and asserts
+      `grpc.SupportPackageIsVersion7` instead of the previous incompatible
+      `SupportPackageIsVersion9` marker.
+  - diagnostics policy audit now passes:
+    - `make daemon-rs-policy-audit` now reports:
+      - `async-send policy check: pass`
+      - `snapshot-clone policy check: pass`
+      - `daemon-rs policy audit: pass`
+    - audit scripts were remapped to current source layout and include
+      explicit allowlisted startup/control-path snapshot clone call sites
+      that are intentionally retained.
+
+- Milestone verdict:
+  - **At milestone gate for current branch scope**.
+  - milestone gating excludes items explicitly deferred to a separate PR or
+    marked as future implementation work in Active Backlog; those remain tracked
+    but are not counted as blockers for this branch milestone.
+  - blockers for milestone declaration:
+    - none currently open in this retained tracker scope.
+
+- Next actions queued:
+  1. keep the Go proto bootstrap flow in place for local parity/build/test
+     paths; defer any full `google.golang.org/grpc` dependency upgrade to a
+     dedicated upstream PR against main opensnitch repo.
+  2. keep policy-audit allowlists synchronized with source-file moves so
+    governance checks stay signal-rich instead of path-stale.
+  3. rerun parity + policy gates on each substantive runtime/parity slice.
+
+## 422 — Design-rule backlog execution (task payload contracts + helper cleanup)
+
+- Trigger/context:
+  - started active design-rule backlog execution for data-contract ownership and
+    non-domain helper cleanup in task runtime surfaces.
+
+- Changes in this slice:
+  - migrated task JSON contract payloads out of service internals into
+    `models/task_payload.rs`:
+    - `LegacyTaskResultPayload` (`Type`/`Data` payload used for Go-compatible
+      task results logging shape)
+    - `TaskErrorPayload` (`Task`/`Error` payload used by task runtime error
+      notifications)
+  - rewired task runtime call sites to consume model-owned contracts:
+    - `services/task/reply.rs` now builds legacy downloader payload through
+      `LegacyTaskResultPayload`.
+    - `services/task/runtime_handlers.rs` now emits task-error payloads through
+      `TaskErrorPayload`.
+  - removed now-unused non-domain JSON helper
+    `utils/json_value.rs::object_field_str` after the refactor.
+
+- Validation:
+  - focused runtime tests pass:
+    - `cargo test --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs task_runtime -- --nocapture`
+      (`24 passed`, `0 failed`).
+
+- Backlog impact:
+  - advances active design-rule backlog item
+    "migrate shared data contracts into `models/`" with concrete task-runtime
+    payload contract migration in this slice.
+  - advances active design-rule backlog item
+    "migrate shared, non-domain service helpers into `utils/`" by extracting
+    subscription HTTP response helpers into shared utility surface.
+
+- Continuation slice (same entry):
+  - extracted non-domain HTTP response helpers from
+    `services/subscription/http_helpers.rs` into
+    `utils/http_response.rs` (`header_value`, `summarize_http_error`).
+  - rewired `services/subscription/refresh_execution.rs` to consume
+    `crate::utils::http_response` and removed the service-local helper module.
+
+- Additional validation:
+  - focused subscription tests pass:
+    - `cargo test --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs subscription -- --test-threads=1 -q`
+      (`52 passed`, `0 failed`).
+
+## 423 — Design-rule wording update (utils/helpers strictness)
+
+- Trigger/context:
+  - governance wording update requested for helper policy clarity.
+
+- Rule amendments:
+  - explicitly forbids one-line passthrough helper wrappers in `utils/` unless
+    they add concrete semantic value (intent/invariants/error context).
+  - explicitly forbids keeping compatibility shims/aliases after call-site
+    migration; transitional helper wrappers must be removed within the same
+    refactor slice.
+
+- Enforcement slice (codebase pass):
+  - removed compatibility shim helper `utils::notification_reply::status_ok_payload`
+    and rewired command call sites to explicit `status_payload("ok")` usage.
+  - refactored helper one-liners in `utils/` touched by this slice into explicit
+    logic (`utils/time_nonce.rs`, `utils/list_shape.rs`,
+    `utils/nul_terminated.rs`) to align with the updated helper rule.
+  - scan/audit note: rule scan no longer reports shim-style wrappers in
+    `utils/` for this migrated set; remaining scan hit is
+    `utils/config_reload::has_firewall_runtime_change`, which is retained as a
+    real policy predicate (not a passthrough compatibility alias).
+
+- Validation:
+  - `cargo test --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs subscription -- --test-threads=1 -q` (`52 passed`, `0 failed`).
+  - `cargo test --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs task_runtime -- --nocapture` (`24 passed`, `0 failed`).
+
+## 424 — Non-future backlog closure (design-rule items)
+
+- Trigger/context:
+  - requested closure of remaining non-future backlog entries.
+
+- Closure status:
+  - closed `Design-rule backlog (active)` helper-migration item as complete for
+    current branch scope (entries 422–424).
+  - closed `Design-rule backlog (active)` data-contract migration item as
+    complete for current branch scope (entries 422–424).
+
+- Scope note:
+  - future-enhancement backlog items remain intentionally open and unchanged.
+
+## 425 — Full design-rule policy rescan (post-closure verification)
+
+- Trigger/context:
+  - one more full governance/policy rescan requested after non-future backlog
+    closure.
+
+- Full rescan results:
+  - policy gates:
+    - `make daemon-rs-policy-audit` passes (`async-send` pass,
+      `snapshot-clone` pass).
+  - boundary naming/layout:
+    - no `RuntimeIntent` symbol matches.
+    - no `intent.rs` usage under daemon runtime sources.
+    - `intent` is treated as design vocabulary, not default symbol naming.
+    - no `services/*_service` directory names.
+  - linker-only module surfaces:
+    - no functional declarations found in
+      `services/*/mod.rs`, `flows/*/mod.rs`, `commands/*/mod.rs`,
+      `workers/*/mod.rs`.
+  - helper strictness (`utils/` one-line passthrough wrappers):
+    - no shim-style compatibility aliases found in current migrated set.
+    - remaining regex hit in `utils/config_reload.rs::has_firewall_runtime_change`
+      is retained as a domain policy predicate (not a compatibility shim).
+  - data-contract ownership:
+    - no serde-backed contract drift found outside `models/*` except expected
+      generic serde utility internals in `utils/serde_helpers.rs`.
+
+- Alignment verdict:
+  - current branch is aligned with the tracked design-rule policies for
+    non-future backlog scope.
+
+## 426 — Crate-wide immutable-state audit (state/cache/snapshot philosophy extension)
+
+- Trigger/context:
+  - extended immutable-state philosophy beyond snapshot-only access and audited
+    daemon crate runtime state/cache read patterns.
+
+- Audit scope and commands:
+  - lock/read-write scan:
+    - `rg -n --no-heading '\\.lock\\(\\)\\.await|\\.read\\(\\)\\.await|\\.write\\(\\)\\.await' daemon-rs/crates/daemon/src -g '!**/tests/**'`
+  - async state/cache getter signature scan:
+    - `rg -n --no-heading '\\basync fn [A-Za-z0-9_]*(snapshot|state|cache|status)\\b' daemon-rs/crates/daemon/src -g '!**/tests/**'`
+
+- Findings:
+  - snapshot-specific policy remains clean after prior refactors and checker
+    tightening.
+  - broader crate scan identified remaining lock/read-write state/cache access
+    patterns that should be evaluated for immutable-snapshot migration in
+    read-mostly runtime paths, notably:
+    - `services/process/cache.rs`, `services/process/inspection.rs`
+    - `services/dns/cache_ops.rs`
+    - `workers/network/netlink_addr_worker.rs`
+    - `workers/runtime/watch/control.rs`
+    - mutation/control locks retained by design in rule/task/config paths are
+      tracked as coordination locks, not immutable-read surfaces.
+  - non-test async getter-style state/cache signatures are currently minimal
+    (`set_snapshot` mutator and snapshot publish/build internals), with no
+    broad async read-getter surface drift found.
+
+- Backlog impact:
+  - reopened active design-rule backlog for crate-wide immutable-state rollout
+    beyond the snapshot-only slice, with concrete candidate modules listed above.
+
+- Validation:
+  - `make daemon-rs-policy-audit` passes, including:
+    - `async-send policy check: pass`
+    - `snapshot-clone policy check: pass`
+    - `design-rule policy check: pass`
+    - `design-rule helper/contract check: pass`
+    - `immutable-state policy check: pass`
+
+## 427 — Immutable-state rollout slice 1 (netlink local address store)
+
+- Trigger/context:
+  - started implementing concrete fixes from entry 426 findings, prioritizing
+    read-mostly state where lock-free immutable snapshot reads are feasible
+    without changing behavior.
+
+- Changes in this slice:
+  - migrated netlink local-address state storage from async `RwLock<HashSet<_>>`
+    to immutable snapshot storage `RwLock<Arc<Vec<String>>>` in
+    `workers/network/netlink_addr_worker.rs`.
+  - runtime reads now use sync snapshot memread API:
+    - `snapshot_local_addrs()` is sync (no async lock/await read path).
+  - writer path keeps periodic refresh semantics and logs add/remove deltas, but
+    publishes sorted immutable snapshots for readers.
+
+- Findings reassessment (post-slice):
+  - resolved from active candidate set:
+    - `workers/network/netlink_addr_worker.rs`
+  - remaining likely mutable-by-design areas:
+    - `services/process/*` and `services/dns/cache_ops.rs` use LRU/cache update
+      patterns where reads may mutate recency or alias traversal state.
+  - remaining coordination locks (not immutable-read surfaces):
+    - watcher/control and mutation guards in rule/task/config runtime paths.
+
+- Validation:
+  - `make daemon-rs-policy-audit` passes.
+  - `cargo check --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs` passes.
+  - focused test:
+    - `cargo test --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs netlink_addr_worker -- --nocapture`
+      (`1 passed`, `0 failed`).
+
+## 428 — Immutable-state rollout slice 2 (DNS dual-layer + process reassessment)
+
+- Trigger/context:
+  - execute next immutable-state slice using dual-layer strategy for DNS cache,
+    then reassess process cache feasibility under same philosophy.
+
+- Changes in this slice:
+  - DNS cache dual-layer implementation:
+    - writer layer remains mutable LRU caches for insertion/eviction mechanics,
+    - read layer now publishes immutable Arc snapshots for runtime lookups.
+  - DNS runtime lookup path now uses sync immutable snapshot memreads:
+    - `lookup`/`lookup_ip` no longer await lock-based cache getters.
+  - runtime caller updates:
+    - connection destination-host resolution now uses sync DNS lookup reads.
+  - tests updated for sync DNS lookup API.
+
+- Process cache reassessment:
+  - `services/process/*` cache paths remain likely mutable-by-design in current
+    shape because read operations participate in recency/expiry and PID-starttime
+    coherence checks.
+  - feasible next step is a dual-layer process cache read view (immutable probe
+    snapshot) while preserving mutable LRU bookkeeping on write/update paths.
+  - keep current process cache items in active backlog pending dedicated slice.
+
+- Validation:
+  - `make daemon-rs-policy-audit` passes.
+  - `cargo check --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs` passes.
+  - focused tests pass:
+    - `cargo test --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs dns_service -- --nocapture`
+    - `cargo test --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs kernel_flow -- --nocapture`
+
+## 429 — Utility-first dual-layer LRU rollout (DNS migration + process reassessment)
+
+- Trigger/context:
+  - requested to generalize dual-layer approach at utility level rather than
+    keep domain-specific snapshot plumbing in DNS.
+
+- Changes in this slice:
+  - added reusable utility abstraction in `utils/lru_cache.rs`:
+    - `DualLayerLruMap<K, V>` (mutable async LRU writer + immutable Arc snapshot
+      read layer).
+  - migrated DNS service to utility-backed dual-layer caches:
+    - replaced domain-local dual-layer fields with
+      `Arc<DualLayerLruMap<IpAddr, String>>` and
+      `Arc<DualLayerLruMap<String, String>>`.
+    - retained sync immutable DNS runtime lookup reads (`lookup`/`lookup_ip`).
+  - updated DNS probe/test helper to use utility-backed cache length methods.
+
+- Process cache reassessment (after utility generalization):
+  - utility abstraction now exists and is reusable for read-mostly key/value
+    cache slices.
+  - process cache remains pending because current semantics combine:
+    - LRU recency behavior,
+    - expiry/deadline mutation,
+    - PID starttime coherence validation.
+  - next process slice should introduce a derived immutable read-view snapshot
+    while preserving mutable bookkeeping for expiry/recency paths.
+
+- Validation:
+  - `make daemon-rs-policy-audit` passes.
+  - `cargo check --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs` passes.
+  - focused tests pass:
+    - `cargo test --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs dns_service -- --nocapture`
+    - `cargo test --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs kernel_flow -- --nocapture`
+
+## 430 — Utility touch-reconciler rollout (effective LRU on snapshot reads)
+
+- Trigger/context:
+  - hot-path concern: pure snapshot reads bypass LRU recency updates, which can
+    degrade eviction quality under sustained lookup-heavy traffic.
+
+- Changes in this slice:
+  - extended `utils/lru_cache.rs::DualLayerLruMap` with async touch
+    reconciliation:
+    - hot-path snapshot read API now supports touch submission
+      (`get` on immutable snapshot read path),
+    - touches are queued and reconciled in a background async worker,
+    - reconciliation updates mutable LRU recency in batches off hot path.
+  - DNS lookup path now uses touch-aware snapshot reads so frequent lookups can
+    refresh effective recency without lock-bound read awaits.
+
+- Process cache reassessment:
+  - this utility capability now directly supports a process-cache next slice
+    where read probes can publish touches asynchronously while keeping mutable
+    expiry/starttime coherence logic intact.
+  - process cache remains open because expiry and PID coherence still require
+    dedicated design for dual-layer publish boundaries.
+
+- Validation:
+  - `make daemon-rs-policy-audit` passes.
+  - `cargo check --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs` passes.
+  - focused tests pass:
+    - `cargo test --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs dns_service -- --nocapture`
+    - `cargo test --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs kernel_flow -- --nocapture`
+    - `cargo test --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs lru_cache -- --nocapture`
+
+## 431 — Backlog assumption verification + active backlog reduction
+
+- Trigger/context:
+  - requested to commit and continue non-future backlog handling with explicit
+    assumption validation before keeping/closing items.
+
+- Verification executed in this slice:
+  - policy gate:
+    - `make -C .. daemon-rs-policy-audit` passes (`async-send`,
+      `snapshot-clone`, `design-rule`, `helper/contract`, and
+      `immutable-state` checks).
+  - immutable-state candidate refresh:
+    - lock/read-write scan rerun on non-test sources;
+      `workers/runtime/watch/control.rs` classified as coordination-lock usage,
+      not immutable-read state drift.
+    - active immutable-state backlog scope narrowed to remaining process-cache
+      surfaces (`services/process/*`).
+  - async getter surface refresh:
+    - non-test `async fn ...snapshot|state|cache|status` scan rerun;
+      no read-getter drift found.
+    - only expected mutation/publish methods remain (`set_snapshot`,
+      `build_and_publish_snapshot`).
+
+- Backlog impact:
+  - closed active item:
+    - `Service API surface audit for async getter-style immutable reads`.
+  - refined active item scope:
+    - `Crate-wide immutable state access rollout` now targets process-cache
+      paths as the principal remaining non-future slice.
+
+- Validation:
+  - `cargo check --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs` passes.
+
+## 432 — Process cache immutable-read rollout completion
+
+- Trigger/context:
+  - execute the remaining non-future immutable-state backlog slice for
+    `services/process/*` after entry 431 narrowed scope.
+
+- Changes in this slice:
+  - removed outer `RwLock<ProcessCache>` gating in `ProcessService`.
+  - refactored process cache storage to split responsibilities:
+    - immutable/read-mostly process entries remain in
+      `Arc<DualLayerLruMap<u32, CachedProcessEntry>>`,
+    - mutable exit-deadline bookkeeping moved to a dedicated
+      `tokio::sync::Mutex<HashMap<u32, Instant>>`.
+  - updated process inspection/event-sync paths to avoid lock-based read access
+    around cache entries and use narrow deadline mutex operations.
+  - updated process probe-support tests to match the refactored cache surface.
+
+- Backlog impact:
+  - closes active item `Crate-wide immutable state access rollout
+    (beyond snapshot-specific rule)` for the currently tracked non-future
+    candidate set.
+
+- Validation:
+  - `cargo check --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs` passes.
+  - focused process tests pass:
+    - `cargo test --manifest-path daemon-rs/Cargo.toml -p opensnitchd-rs process_service -- --nocapture`

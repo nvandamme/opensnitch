@@ -34,7 +34,7 @@ All Rust harness/perf test commands must run with WARN/ERROR-only logging (`RUST
 `stress_profile_reports_connect_latency_and_pipeline_drops` and `stress_profile_reports_kernel*` enforce this policy at test runtime.
 All Go harness/perf test commands must run with `OPENSNITCH_HARNESS_GO_LOG_LEVEL=error` (or `err`) for apples-to-apples low-noise comparisons.
 `make parity-hot-cold-delta` now parses `cold-profile ... elapsed_s=` lines emitted by each Go/Rust cold-path subtest (`rule`, `ui`, `tasks`) instead of shell timing wrappers.
-Rust cold-path commands in parity harness targets should use current concrete test paths (`tests::watch_service::...`, `daemon::tests::...`) to avoid false zero-test timings.
+Rust cold-path commands in parity harness targets should use current concrete test paths (`tests::watch_workers::...`, `daemon::tests::...`) to avoid false zero-test timings.
 Tools-based perf commands (`update-run-perf`, `parity-gate`, `microbench-connect-dispatch`) enforce low-noise Rust logs via `OPENSNITCH_PERF_RUST_LOG_LEVEL` (default `error`) and fail fast on noisy values.
 Tools-based perf/parity commands also enforce low-noise Go harness logging via `OPENSNITCH_PERF_GO_LOG_LEVEL` (default `error`) and fail fast on non-ERR/ERROR values.
 Compare only like-for-like profiles for retained history entries.
@@ -132,7 +132,7 @@ Track cross-backend harness results that validate both hot-path and cold-path be
 
 | Date | Matrix Target | Rounds | Commit | Hot-Path Go | Hot-Path Rust | Cold-Path Go | Cold-Path Rust | Result | Notes |
 |---|---|---:|---|---|---|---|---|---|---|
-| 2026-03-16 | `make parity-hot-cold-matrix` | 500 | `7b0f3508` | pass (`p50=0.001`, `p95=0.003`, `p99=0.010`, `max=0.127`, `drop_total=0`) | pass (`p50=0.001`, `p95=0.005`, `p99=0.009`, `max=0.035`, `drop_total=0`) | pass (`rule.TestLiveReload`, `ui.TestClientReloadingConfig`, `tasks.TestTaskManager`) | pass (`services::watch_service::tests::`, `services::config_service::tests::`, `commands::task_runtime::tests::`) | PASS | First unified hot+cold parity matrix run after adding dedicated harness targets. |
+| 2026-03-16 | `make parity-hot-cold-matrix` | 500 | `7b0f3508` | pass (`p50=0.001`, `p95=0.003`, `p99=0.010`, `max=0.127`, `drop_total=0`) | pass (`p50=0.001`, `p95=0.005`, `p99=0.009`, `max=0.035`, `drop_total=0`) | pass (`rule.TestLiveReload`, `ui.TestClientReloadingConfig`, `tasks.TestTaskManager`) | pass (`tests::watch_workers::`, `services::config_service::tests::`, `commands::task_runtime::tests::`) | PASS | First unified hot+cold parity matrix run after adding dedicated harness targets. |
 
 ## Hot/Cold Delta History
 

@@ -1,6 +1,7 @@
-use crate::client::client::Client;
 use crate::config::Config;
+use crate::services::client::Client;
 use opensnitch_proto::pb;
+use std::sync::Arc;
 
 #[test]
 fn runtime_identity_returns_non_empty_fields() {
@@ -29,7 +30,12 @@ async fn build_subscribe_config_keeps_expected_payload_fields() {
         system_rules: Vec::new(),
     });
 
-    let subscribe = Client::build_subscribe_config(&cfg, rules.clone(), true, system_firewall);
+    let subscribe = Client::build_subscribe_config_from_snapshots(
+        &cfg,
+        &Arc::new(rules.clone()),
+        true,
+        &Arc::new(system_firewall),
+    );
     let (expected_name, expected_version) = Client::runtime_identity();
 
     assert_eq!(subscribe.id, 1);

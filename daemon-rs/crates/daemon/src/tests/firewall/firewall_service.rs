@@ -4,7 +4,7 @@ use opensnitch_proto::pb;
 
 use crate::config::Config;
 use crate::models::firewall_state::FirewallBackend;
-use crate::services::firewall_service::FirewallService;
+use crate::services::firewall::FirewallService;
 use crate::tests::support::TestDir;
 
 fn make_sysfw(version: u32, uuid: &str, table: &str, target: &str) -> pb::SysFirewall {

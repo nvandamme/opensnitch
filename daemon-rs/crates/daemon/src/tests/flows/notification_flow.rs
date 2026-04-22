@@ -5,19 +5,28 @@ use std::{
 };
 
 use opensnitch_proto::pb;
+use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::{
     bus::{BusCaps, BusState},
-    client::{client::Client, notifications::NotificationStream},
+    commands::{
+        client::client::{parse_log_level_data, parse_task_notification_data},
+        subscription::SubscriptionCommandService,
+    },
     config::{ClientAuthType, Config},
-    flows::notification_flow::NotificationFlow,
-    services::config_service::ConfigService,
-    services::firewall_service::FirewallService,
-    services::rule_service::RuleService,
-    services::ui_session_service::UiSessionService,
+    flows::notification::NotificationFlow,
+    models::subscription_wire::SubscriptionReplyWire,
+    services::client::{Client, NotificationStream, UiSessionService},
+    services::config::ConfigService,
+    services::firewall::FirewallService,
+    services::rule::RuleService,
+    services::stats::StatsService,
+    services::subscription::storage::SubscriptionStorage,
+    services::subscription::SubscriptionService,
+    tests::support::TestDir,
 };
 
 #[derive(Default)]
@@ -67,6 +76,24 @@ async fn yield_for(duration: StdDuration) {
     let start = Instant::now();
     while start.elapsed() < duration {
         tokio::task::yield_now().await;
+    }
+}
+
+async fn wait_for_server_ready(addr: std::net::SocketAddr, max_wait: StdDuration) {
+    let start = Instant::now();
+    loop {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => {
+                drop(stream);
+                return;
+            }
+            Err(_) if start.elapsed() < max_wait => {
+                tokio::time::sleep(StdDuration::from_millis(25)).await;
+            }
+            Err(err) => {
+                panic!("test ui server did not become ready at {addr}: {err}");
+            }
+        }
     }
 }
 
@@ -150,6 +177,132 @@ fn stream_close_notification_recognizes_action_none_and_lower_values() {
     ));
 }
 
+async fn handle_subscription_notification(
+    subscriptions: &SubscriptionService,
+    stats: &StatsService,
+    id: u64,
+    request_json: &str,
+) -> pb::NotificationReply {
+    SubscriptionCommandService::default()
+        .handle_notification(id, request_json, subscriptions, stats)
+        .await
+}
+
+fn sample_subscription_request(url: &str) -> pb::SubscriptionRequest {
+    pb::SubscriptionRequest {
+        operation: pb::SubscriptionOperation::Apply as i32,
+        subscriptions: vec![pb::Subscription {
+            name: "fixture".to_string(),
+            url: url.to_string(),
+            enabled: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+fn encode_subscription_request(request: pb::SubscriptionRequest) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "operation": request.operation,
+        "subscriptions": request
+            .subscriptions
+            .into_iter()
+            .map(|s| serde_json::json!({
+                "id": s.id,
+                "name": s.name,
+                "url": s.url,
+                "filename": s.filename,
+                "groups": s.groups,
+                "enabled": s.enabled,
+                "format": s.format,
+                "interval_seconds": s.interval_seconds,
+                "timeout_seconds": s.timeout_seconds,
+                "max_bytes": s.max_bytes,
+                "node": s.node,
+                "status": s.status,
+                "last_updated": s.last_updated,
+                "last_error": s.last_error,
+            }))
+            .collect::<Vec<_>>(),
+        "targets": request.targets,
+        "force": request.force,
+    }))
+    .expect("serialize subscription request payload")
+}
+
+fn decode_subscription_reply(raw_data: &str) -> pb::SubscriptionReply {
+    serde_json::from_str::<SubscriptionReplyWire>(raw_data)
+        .expect("invalid subscription reply payload")
+        .into_proto()
+}
+
+#[tokio::test]
+async fn subscription_notification_requires_typed_request() {
+    let dir = TestDir::new("notification-flow-subscription-missing");
+    let stats = StatsService::default();
+    let subscriptions = SubscriptionService::new(
+        SubscriptionStorage::new(dir.path.join("subscriptions.json"))
+            .expect("create test subscription store"),
+        dir.path.join("lists"),
+    );
+    let reply = handle_subscription_notification(&subscriptions, &stats, 41, "").await;
+    assert_eq!(reply.code, pb::NotificationReplyCode::Error as i32);
+    assert!(reply.data.contains("invalid subscription request payload"));
+
+    let snapshot = stats.snapshot(0);
+    assert_eq!(snapshot.subscription_total, 0);
+    assert_eq!(snapshot.subscription_ready, 0);
+    assert_eq!(snapshot.subscription_error, 0);
+}
+
+#[tokio::test]
+async fn subscription_notification_updates_stats_after_apply_and_list() {
+    let dir = TestDir::new("notification-flow-subscription-refresh");
+    let stats = StatsService::default();
+    let subscriptions = SubscriptionService::new(
+        SubscriptionStorage::new(dir.path.join("subscriptions.json"))
+            .expect("create test subscription store"),
+        dir.path.join("lists"),
+    );
+    let apply_reply = handle_subscription_notification(
+        &subscriptions,
+        &stats,
+        7,
+        &encode_subscription_request(sample_subscription_request(
+            "https://example.test/list.txt",
+        )),
+    )
+    .await;
+    assert_eq!(apply_reply.code, pb::NotificationReplyCode::Ok as i32);
+    let apply = decode_subscription_reply(&apply_reply.data);
+    assert!(apply.accepted);
+    assert_eq!(apply.subscriptions.len(), 1);
+    let apply_snapshot = stats.snapshot(0);
+    assert_eq!(apply_snapshot.subscription_total, 1);
+    assert_eq!(apply_snapshot.subscription_ready, 0);
+    assert_eq!(apply_snapshot.subscription_error, 0);
+
+    let list_reply = handle_subscription_notification(
+        &subscriptions,
+        &stats,
+        8,
+        &encode_subscription_request(pb::SubscriptionRequest {
+            operation: pb::SubscriptionOperation::List as i32,
+            ..Default::default()
+        }),
+    )
+    .await;
+    assert_eq!(list_reply.code, pb::NotificationReplyCode::Ok as i32);
+    let listed = decode_subscription_reply(&list_reply.data);
+    assert!(listed.accepted);
+    assert_eq!(listed.subscriptions.len(), 1);
+
+    let list_snapshot = stats.snapshot(0);
+    assert_eq!(list_snapshot.subscription_total, 1);
+    assert_eq!(list_snapshot.subscription_ready, 0);
+    assert_eq!(list_snapshot.subscription_error, 0);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn notification_flow_runs_ui_poller_path_against_live_server() {
     crate::tests::support::init_test_logging();
@@ -178,7 +331,7 @@ async fn notification_flow_runs_ui_poller_path_against_live_server() {
             .expect("serve test ui server");
     });
 
-    yield_for(StdDuration::from_millis(150)).await;
+    wait_for_server_ready(addr, StdDuration::from_secs(2)).await;
     eprintln!("[notification_flow_test] stage=server-ready");
 
     let (bus, _bus_rx) = BusState::build_with_caps(BusCaps::uniform(8));
@@ -186,7 +339,10 @@ async fn notification_flow_runs_ui_poller_path_against_live_server() {
     config.client_addr = format!("http://{addr}");
     config.client_auth.auth_type = ClientAuthType::Simple;
     let rules = RuleService::default();
-    rules.load_path(&config.rules_path).await.expect("load rules");
+    rules
+        .load_path(&config.rules_path)
+        .await
+        .expect("load rules");
     eprintln!("[notification_flow_test] stage=rules-loaded");
     let firewall = FirewallService::new(&config).expect("build firewall service");
     let _flow = NotificationFlow::new(
@@ -195,6 +351,8 @@ async fn notification_flow_runs_ui_poller_path_against_live_server() {
         UiSessionService::default(),
         rules.clone(),
         firewall.clone(),
+        crate::services::stats::StatsService::default(),
+        crate::services::subscription::SubscriptionService::with_system_defaults(),
     );
 
     eprintln!("[notification_flow_test] stage=client-connect");
@@ -202,8 +360,8 @@ async fn notification_flow_runs_ui_poller_path_against_live_server() {
         .await
         .expect("client connect should succeed");
 
-    let rules_snapshot = rules.list_proto_arc().await;
-    let firewall_state = firewall.snapshot_arc();
+    let rules_snapshot = rules.get_proto_snapshot();
+    let firewall_state = firewall.get_snapshot();
     let subscribe_cfg = Client::build_subscribe_config_from_snapshots(
         &config,
         &rules_snapshot,
@@ -243,7 +401,10 @@ async fn notification_flow_runs_ui_poller_path_against_live_server() {
     {
         failure = Some("notifications rpc open timeout".to_string());
     }
-    eprintln!("[notification_flow_test] stage=open-wait-finished failure={:?}", failure);
+    eprintln!(
+        "[notification_flow_test] stage=open-wait-finished failure={:?}",
+        failure
+    );
 
     // Wait for the hello handshake to be captured by the test server.
     if failure.is_none() {
@@ -287,7 +448,7 @@ async fn notification_flow_runs_ui_poller_path_against_live_server() {
 
 #[test]
 fn parse_task_notification_accepts_valid_payload() {
-    let parsed = NotificationFlow::parse_task_notification_data(
+    let parsed = parse_task_notification_data(
         10,
         r#"{"Name":"pid-monitor","Data":{"pid":1234}}"#,
     )
@@ -298,7 +459,7 @@ fn parse_task_notification_accepts_valid_payload() {
 
 #[test]
 fn parse_task_notification_accepts_lowercase_payload_fields() {
-    let parsed = NotificationFlow::parse_task_notification_data(
+    let parsed = parse_task_notification_data(
         12,
         r#"{"name":"sockets-monitor","data":{}}"#,
     )
@@ -309,7 +470,7 @@ fn parse_task_notification_accepts_lowercase_payload_fields() {
 
 #[test]
 fn parse_task_notification_accepts_uppercase_payload_fields() {
-    let parsed = NotificationFlow::parse_task_notification_data(
+    let parsed = parse_task_notification_data(
         13,
         r#"{"NAME":"pid-monitor","DATA":{"pid":4321}}"#,
     )
@@ -320,22 +481,22 @@ fn parse_task_notification_accepts_uppercase_payload_fields() {
 
 #[test]
 fn parse_task_notification_rejects_invalid_payload() {
-    assert!(NotificationFlow::parse_task_notification_data(11, "not-json").is_err());
+    assert!(parse_task_notification_data(11, "not-json").is_err());
 }
 
 #[test]
 fn parse_log_level_notification_supports_number_and_object() {
-    assert_eq!(NotificationFlow::parse_log_level_data("3"), Some(3));
+    assert_eq!(parse_log_level_data("3"), Some(3));
     assert_eq!(
-        NotificationFlow::parse_log_level_data(r#"{"log_level":7}"#),
+        parse_log_level_data(r#"{"log_level":7}"#),
         Some(7)
     );
     assert_eq!(
-        NotificationFlow::parse_log_level_data(r#"{"Log_Level":"9"}"#),
+        parse_log_level_data(r#"{"Log_Level":"9"}"#),
         Some(9)
     );
     assert_eq!(
-        NotificationFlow::parse_log_level_data(r#"{"LEVEL":5}"#),
+        parse_log_level_data(r#"{"LEVEL":5}"#),
         Some(5)
     );
 }

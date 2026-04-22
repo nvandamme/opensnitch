@@ -6,8 +6,12 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use serde::Deserialize;
 use tracing::warn;
+
+pub use crate::models::effective_tunables::{NfqueueOverloadPolicy, RuntimeTunables};
+use crate::models::runtime_tunables::RawRuntimeTunables;
+use crate::utils::name_parsing::normalized_name;
+use crate::utils::systemd_notify::{NotifyState, notify};
 
 const MIN_CONNECT_WORKERS: usize = 1;
 const MAX_CONNECT_WORKERS: usize = 256;
@@ -15,6 +19,8 @@ const MIN_CONNECT_QUEUE_CAPACITY: usize = 16;
 const MAX_CONNECT_QUEUE_CAPACITY: usize = 8192;
 const MIN_CONNECT_DISPATCH_BATCH: usize = 1;
 const MAX_CONNECT_DISPATCH_BATCH: usize = 256;
+const MIN_KERNEL_INGRESS_DISPATCH_BATCH: usize = 8;
+const MAX_KERNEL_INGRESS_DISPATCH_BATCH: usize = 256;
 const MIN_KERNEL_QUEUE_CAPACITY: usize = 64;
 const MAX_KERNEL_QUEUE_CAPACITY: usize = 16384;
 const MIN_EBPF_PRUNE_THRESHOLD_PERCENT: usize = 50;
@@ -24,38 +30,21 @@ const MAX_EBPF_PRUNE_TARGET_PERCENT: usize = 90;
 const MIN_LRU_CACHE_CAPACITY: usize = 1_024;
 const MAX_LRU_CACHE_CAPACITY: usize = 16_000_000;
 
-#[derive(Debug, Clone, Copy)]
-pub struct RuntimeTunables {
-    pub max_concurrent_connect_attempts: usize,
-    pub connect_worker_queue_capacity: usize,
-    pub connect_dispatch_batch_size: usize,
-    pub kernel_dns_queue_capacity: usize,
-    pub kernel_process_queue_capacity: usize,
-    pub kernel_firewall_queue_capacity: usize,
-    pub ebpf_map_prune_enabled: bool,
-    pub ebpf_map_prune_threshold_percent: usize,
-    pub ebpf_map_prune_target_percent: usize,
-    pub dns_lru_cache_capacity: usize,
-    pub process_info_cache_capacity: usize,
-    pub pid_inode_cache_capacity: usize,
-    pub pid_inode_key_cache_capacity: usize,
-}
+impl NfqueueOverloadPolicy {
+    fn parse(raw: &str) -> Option<Self> {
+        match normalized_name(raw).as_str() {
+            "fail-open" | "fail_open" | "default-action" => Some(Self::FailOpen),
+            "drop-fast" | "drop_fast" | "deny-fast" | "deny_fast" => Some(Self::DropFast),
+            _ => None,
+        }
+    }
 
-#[derive(Debug, Default, Deserialize)]
-struct RawRuntimeTunables {
-    max_concurrent_connect_attempts: Option<usize>,
-    connect_worker_queue_capacity: Option<usize>,
-    connect_dispatch_batch_size: Option<usize>,
-    kernel_dns_queue_capacity: Option<usize>,
-    kernel_process_queue_capacity: Option<usize>,
-    kernel_firewall_queue_capacity: Option<usize>,
-    ebpf_map_prune_enabled: Option<bool>,
-    ebpf_map_prune_threshold_percent: Option<usize>,
-    ebpf_map_prune_target_percent: Option<usize>,
-    dns_lru_cache_capacity: Option<usize>,
-    process_info_cache_capacity: Option<usize>,
-    pid_inode_cache_capacity: Option<usize>,
-    pid_inode_key_cache_capacity: Option<usize>,
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FailOpen => "fail-open",
+            Self::DropFast => "drop-fast",
+        }
+    }
 }
 
 impl Default for RuntimeTunables {
@@ -64,9 +53,14 @@ impl Default for RuntimeTunables {
             max_concurrent_connect_attempts: 32,
             connect_worker_queue_capacity: 64,
             connect_dispatch_batch_size: 64,
+            kernel_ingress_dispatch_batch_size: 32,
+            kernel_dns_dispatch_batch_size: 32,
+            kernel_process_dispatch_batch_size: 32,
+            kernel_firewall_dispatch_batch_size: 32,
             kernel_dns_queue_capacity: 512,
             kernel_process_queue_capacity: 512,
             kernel_firewall_queue_capacity: 128,
+            nfqueue_overload_policy: NfqueueOverloadPolicy::FailOpen,
             ebpf_map_prune_enabled: true,
             ebpf_map_prune_threshold_percent: 80,
             ebpf_map_prune_target_percent: 50,
@@ -123,6 +117,34 @@ impl RuntimeTunables {
                 MAX_CONNECT_DISPATCH_BATCH,
             );
         }
+        if let Some(value) = raw.kernel_ingress_dispatch_batch_size {
+            self.kernel_ingress_dispatch_batch_size = Self::clamp(
+                value,
+                MIN_KERNEL_INGRESS_DISPATCH_BATCH,
+                MAX_KERNEL_INGRESS_DISPATCH_BATCH,
+            );
+        }
+        if let Some(value) = raw.kernel_dns_dispatch_batch_size {
+            self.kernel_dns_dispatch_batch_size = Self::clamp(
+                value,
+                MIN_KERNEL_INGRESS_DISPATCH_BATCH,
+                MAX_KERNEL_INGRESS_DISPATCH_BATCH,
+            );
+        }
+        if let Some(value) = raw.kernel_process_dispatch_batch_size {
+            self.kernel_process_dispatch_batch_size = Self::clamp(
+                value,
+                MIN_KERNEL_INGRESS_DISPATCH_BATCH,
+                MAX_KERNEL_INGRESS_DISPATCH_BATCH,
+            );
+        }
+        if let Some(value) = raw.kernel_firewall_dispatch_batch_size {
+            self.kernel_firewall_dispatch_batch_size = Self::clamp(
+                value,
+                MIN_KERNEL_INGRESS_DISPATCH_BATCH,
+                MAX_KERNEL_INGRESS_DISPATCH_BATCH,
+            );
+        }
         if let Some(value) = raw.kernel_dns_queue_capacity {
             self.kernel_dns_queue_capacity =
                 Self::clamp(value, MIN_KERNEL_QUEUE_CAPACITY, MAX_KERNEL_QUEUE_CAPACITY);
@@ -134,6 +156,16 @@ impl RuntimeTunables {
         if let Some(value) = raw.kernel_firewall_queue_capacity {
             self.kernel_firewall_queue_capacity =
                 Self::clamp(value, MIN_KERNEL_QUEUE_CAPACITY, MAX_KERNEL_QUEUE_CAPACITY);
+        }
+        if let Some(value) = raw.nfqueue_overload_policy {
+            if let Some(policy) = NfqueueOverloadPolicy::parse(&value) {
+                self.nfqueue_overload_policy = policy;
+            } else {
+                warn!(
+                    value = %value,
+                    "invalid nfqueue_overload_policy in tunables file ignored"
+                );
+            }
         }
         if let Some(value) = raw.ebpf_map_prune_enabled {
             self.ebpf_map_prune_enabled = value;
@@ -198,6 +230,45 @@ impl RuntimeTunables {
             );
             count += 1;
         }
+        if let Some(value) =
+            Self::parse_env_usize("OPENSNITCH_TUNE_KERNEL_INGRESS_DISPATCH_BATCH_SIZE")
+        {
+            self.kernel_ingress_dispatch_batch_size = Self::clamp(
+                value,
+                MIN_KERNEL_INGRESS_DISPATCH_BATCH,
+                MAX_KERNEL_INGRESS_DISPATCH_BATCH,
+            );
+            count += 1;
+        }
+        if let Some(value) = Self::parse_env_usize("OPENSNITCH_TUNE_KERNEL_DNS_DISPATCH_BATCH_SIZE")
+        {
+            self.kernel_dns_dispatch_batch_size = Self::clamp(
+                value,
+                MIN_KERNEL_INGRESS_DISPATCH_BATCH,
+                MAX_KERNEL_INGRESS_DISPATCH_BATCH,
+            );
+            count += 1;
+        }
+        if let Some(value) =
+            Self::parse_env_usize("OPENSNITCH_TUNE_KERNEL_PROCESS_DISPATCH_BATCH_SIZE")
+        {
+            self.kernel_process_dispatch_batch_size = Self::clamp(
+                value,
+                MIN_KERNEL_INGRESS_DISPATCH_BATCH,
+                MAX_KERNEL_INGRESS_DISPATCH_BATCH,
+            );
+            count += 1;
+        }
+        if let Some(value) =
+            Self::parse_env_usize("OPENSNITCH_TUNE_KERNEL_FIREWALL_DISPATCH_BATCH_SIZE")
+        {
+            self.kernel_firewall_dispatch_batch_size = Self::clamp(
+                value,
+                MIN_KERNEL_INGRESS_DISPATCH_BATCH,
+                MAX_KERNEL_INGRESS_DISPATCH_BATCH,
+            );
+            count += 1;
+        }
         if let Some(value) = Self::parse_env_usize("OPENSNITCH_TUNE_KERNEL_DNS_QUEUE_CAPACITY") {
             self.kernel_dns_queue_capacity =
                 Self::clamp(value, MIN_KERNEL_QUEUE_CAPACITY, MAX_KERNEL_QUEUE_CAPACITY);
@@ -214,6 +285,18 @@ impl RuntimeTunables {
             self.kernel_firewall_queue_capacity =
                 Self::clamp(value, MIN_KERNEL_QUEUE_CAPACITY, MAX_KERNEL_QUEUE_CAPACITY);
             count += 1;
+        }
+        if let Some(raw) = std::env::var("OPENSNITCH_TUNE_NFQUEUE_OVERLOAD_POLICY").ok() {
+            if let Some(policy) = NfqueueOverloadPolicy::parse(&raw) {
+                self.nfqueue_overload_policy = policy;
+                count += 1;
+            } else {
+                warn!(
+                    name = "OPENSNITCH_TUNE_NFQUEUE_OVERLOAD_POLICY",
+                    value = %raw,
+                    "invalid tunable env override ignored"
+                );
+            }
         }
         if let Some(value) = Self::parse_env_bool("OPENSNITCH_TUNE_EBPF_MAP_PRUNE_ENABLED") {
             self.ebpf_map_prune_enabled = value;
@@ -296,15 +379,15 @@ impl RuntimeTunables {
             .unwrap_or(240)
             .clamp(30, 1800);
 
-        crate::utils::systemd_notify::status(
+        notify(NotifyState::Status(
             "Autotuning runtime tunables before daemon readiness...",
-        );
+        ));
 
         match Self::run_autotune_command(&output_path, Duration::from_secs(timeout_secs)) {
             Ok(()) => {
-                crate::utils::systemd_notify::status(
+                notify(NotifyState::Status(
                     "Autotune complete; continuing daemon startup...",
-                );
+                ));
                 if let Err(err) = Self::write_autotune_marker(&marker_path) {
                     warn!(path = %marker_path.display(), "autotune succeeded but marker write failed: {err}");
                 }
@@ -327,7 +410,7 @@ impl RuntimeTunables {
 
     fn parse_env_bool(name: &str) -> Option<bool> {
         let raw = std::env::var(name).ok()?;
-        match raw.trim().to_ascii_lowercase().as_str() {
+        match normalized_name(&raw).as_str() {
             "1" | "true" | "yes" | "on" => Some(true),
             "0" | "false" | "no" | "off" => Some(false),
             _ => {
@@ -489,7 +572,7 @@ impl RuntimeTunables {
             }
 
             if last_extend.elapsed() >= Duration::from_secs(2) {
-                crate::utils::systemd_notify::extend_timeout(Duration::from_secs(15));
+                notify(NotifyState::ExtendTimeout(Duration::from_secs(15)));
                 last_extend = Instant::now();
             }
 

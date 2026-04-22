@@ -1,4 +1,4 @@
-use crate::workers::dns_worker::DnsWorkerControl;
+use crate::{models::dns_payload::DnsPayload, workers::dns::dns_worker::DnsWorkerControl};
 use serde_json::json;
 
 #[test]
@@ -6,7 +6,7 @@ fn decode_varlink_ip_supports_ipv4_and_ipv6() {
     let v4 = vec![json!(127), json!(0), json!(0), json!(1)];
     assert_eq!(
         DnsWorkerControl::probe_decode_varlink_ip(&v4),
-        Some("127.0.0.1".to_string())
+        Some("127.0.0.1".parse().expect("test ip should parse"))
     );
 
     let v6 = vec![
@@ -29,7 +29,7 @@ fn decode_varlink_ip_supports_ipv4_and_ipv6() {
     ];
     assert_eq!(
         DnsWorkerControl::probe_decode_varlink_ip(&v6),
-        Some("::1".to_string())
+        Some("::1".parse().expect("test ip should parse"))
     );
 }
 
@@ -59,12 +59,12 @@ fn extract_dns_events_from_varlink_reads_address_and_cname_answers() {
     assert_eq!(events.len(), 2);
     assert_eq!(
         events[0],
-        ("1.1.1.1".to_string(), "example.com".to_string())
+        DnsPayload::answer(
+            "example.com",
+            "1.1.1.1".parse().expect("test ip should parse"),
+        )
     );
-    assert_eq!(
-        events[1],
-        ("example.com".to_string(), "www.example.com".to_string())
-    );
+    assert_eq!(events[1], DnsPayload::alias("www.example.com", "example.com"));
 }
 
 #[test]
@@ -144,14 +144,17 @@ fn extract_dns_events_from_varlink_filters_non_a_aaaa_cname_records() {
     assert_eq!(events.len(), 3);
     assert_eq!(
         events[0],
-        ("8.8.8.8".to_string(), "example.com".to_string())
+        DnsPayload::answer(
+            "example.com",
+            "8.8.8.8".parse().expect("test ip should parse"),
+        )
     );
     assert_eq!(
         events[1],
-        ("::1".to_string(), "ipv6.example.com".to_string())
+        DnsPayload::answer(
+            "ipv6.example.com",
+            "::1".parse().expect("test ip should parse"),
+        )
     );
-    assert_eq!(
-        events[2],
-        ("example.com".to_string(), "www.example.com".to_string())
-    );
+    assert_eq!(events[2], DnsPayload::alias("www.example.com", "example.com"));
 }

@@ -22,13 +22,36 @@ func init() {
 	nftb.InitMapsStore()
 }
 
+func kernelITEnabled() bool {
+	// Elevated runs should automatically enable privileged test paths.
+	if os.Geteuid() == 0 {
+		return true
+	}
+	// New canonical shared gate name.
+	if os.Getenv("OPENSNITCH_RUN_PRIVILEGED_TESTS") == "1" {
+		return true
+	}
+	// Compatibility aliases.
+	if os.Getenv("OPENSNITCH_RUN_PRIVILEDGED_TESTS") == "1" {
+		return true
+	}
+	// Backward-compatible gate used by existing Go nftables tests.
+	if os.Getenv("PRIVILEGED_TESTS") == "1" {
+		return true
+	}
+	return false
+}
+
 // SkipIfNotPrivileged will skip the test from where it's invoked,
 // to skip the test if we don't have root privileges.
 // This may occur when executing the tests on restricted environments,
 // such as containers, chroots, etc.
 func SkipIfNotPrivileged(t *testing.T) {
-	if os.Getenv("PRIVILEGED_TESTS") == "" {
-		t.Skip("Set PRIVILEGED_TESTS to 1 to launch these tests, and launch them as root, or as a user allowed to create new namespaces.")
+	if !kernelITEnabled() {
+		t.Skip("Set OPENSNITCH_RUN_PRIVILEGED_TESTS=1 (or PRIVILEGED_TESTS=1) to launch privileged nftables tests, or run as root.")
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("privileged nftables tests require root/elevated execution")
 	}
 }
 

@@ -66,6 +66,7 @@ func TestMain(m *testing.M) {
 	if testutil.IsSubprocess() {
 		os.Exit(m.Run())
 	}
+	testutil.StopConflictingServices()
 	if os.Getenv("TEST_NATIVE") == "1" {
 		os.Exit(m.Run())
 	}

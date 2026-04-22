@@ -1,46 +1,53 @@
 use anyhow::Result;
 use std::{
     net::TcpListener,
-    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
 use tonic::{Request, Response, Status};
 
 use crate::{
     bus::{BusCaps, BusState},
     config::Config,
-    flows::verdict_flow::VerdictFlow,
+    flows::verdict::VerdictFlow,
     models::connection_state::{ConnectionAttempt, TransportProtocol},
     models::{
         firewall_state::{FirewallBackend, FirewallState},
         kernel_event::KernelEvent,
     },
     services::{
-        config_service::ConfigService,
-        connection_service::ConnectionService,
-        dns_service::DnsService,
-        process_service::ProcessService,
-        rule_service::{RuleMatchDecision, RuleService},
-        stats_service::StatsService,
-        ui_session_service::UiSessionService,
+        client::UiSessionService,
+        config::ConfigService,
+        connection::ConnectionService,
+        dns::DnsService,
+        process::ProcessService,
+        rule::{RuleMatchDecision, RuleService},
+        stats::StatsService,
     },
+    tests::support::TestDir,
 };
 use opensnitch_proto::pb;
 
-fn probe_rules_dir(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|value| value.as_nanos())
-        .unwrap_or(0);
-    std::env::temp_dir().join(format!(
-        "opensnitchd-rs-{name}-{}-{nanos}",
-        std::process::id()
-    ))
+async fn wait_for_server_ready(addr: std::net::SocketAddr, max_wait: Duration) {
+    let start = tokio::time::Instant::now();
+    loop {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => {
+                drop(stream);
+                return;
+            }
+            Err(_) if start.elapsed() < max_wait => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(err) => {
+                panic!("test ui server did not become ready at {addr}: {err}");
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -211,6 +218,8 @@ async fn concurrent_ui_ask_uses_single_inflight_gate() -> Result<()> {
             .expect("serve test ui server");
     });
 
+    wait_for_server_ready(addr, Duration::from_secs(2)).await;
+
     let (bus, mut rx) = BusState::build_with_caps(BusCaps::uniform(16));
     let mut config = Config::default();
     config.client_addr = format!("http://{addr}");
@@ -219,9 +228,8 @@ async fn concurrent_ui_ask_uses_single_inflight_gate() -> Result<()> {
     let dns = DnsService::default();
     let stats = StatsService::default();
     let rules = RuleService::default();
-    let rules_dir = probe_rules_dir("verdict-flow-ui-ask");
-    tokio::fs::create_dir_all(&rules_dir).await?;
-    rules.load_path(&rules_dir).await?;
+    let rules_dir = TestDir::new("verdict-flow-ui-ask");
+    rules.load_path(&rules_dir.path).await?;
     let flow = VerdictFlow::new(
         bus,
         ConfigService::new(config),
@@ -277,6 +285,5 @@ async fn concurrent_ui_ask_uses_single_inflight_gate() -> Result<()> {
 
     let _ = shutdown_tx.send(());
     let _ = timeout(Duration::from_secs(1), server_handle).await;
-    let _ = tokio::fs::remove_dir_all(&rules_dir).await;
     Ok(())
 }

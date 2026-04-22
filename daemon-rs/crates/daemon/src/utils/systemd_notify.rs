@@ -10,6 +10,14 @@ use tracing::{debug, info, warn};
 
 static FALLBACK_NOTICE_EMITTED: AtomicBool = AtomicBool::new(false);
 
+pub enum NotifyState<'a> {
+    Status(&'a str),
+    ExtendTimeout(Duration),
+    Ready(Option<&'a str>),
+    Stopping(Option<&'a str>),
+    Reloading(Option<&'a str>),
+}
+
 fn notify_socket_path() -> Option<String> {
     env::var("NOTIFY_SOCKET")
         .ok()
@@ -84,35 +92,22 @@ fn send_payload(payload: &str) {
     }
 }
 
-pub fn status(message: &str) {
-    send_payload(&format!("STATUS={message}"));
-}
-
-pub fn extend_timeout(duration: Duration) {
-    let micros = duration.as_micros();
-    send_payload(&format!("EXTEND_TIMEOUT_USEC={micros}"));
-}
-
-pub fn ready(message: Option<&str>) {
-    if let Some(message) = message {
-        send_payload(&format!("READY=1\nSTATUS={message}"));
-    } else {
-        send_payload("READY=1");
-    }
-}
-
-pub fn stopping(message: Option<&str>) {
-    if let Some(message) = message {
-        send_payload(&format!("STOPPING=1\nSTATUS={message}"));
-    } else {
-        send_payload("STOPPING=1");
-    }
-}
-
-pub fn reloading(message: Option<&str>) {
-    if let Some(message) = message {
-        send_payload(&format!("RELOADING=1\nSTATUS={message}"));
-    } else {
-        send_payload("RELOADING=1");
+pub fn notify(state: NotifyState<'_>) {
+    match state {
+        NotifyState::Status(message) => send_payload(&format!("STATUS={message}")),
+        NotifyState::ExtendTimeout(duration) => {
+            let micros = duration.as_micros();
+            send_payload(&format!("EXTEND_TIMEOUT_USEC={micros}"));
+        }
+        NotifyState::Ready(Some(message)) => send_payload(&format!("READY=1\nSTATUS={message}")),
+        NotifyState::Ready(None) => send_payload("READY=1"),
+        NotifyState::Stopping(Some(message)) => {
+            send_payload(&format!("STOPPING=1\nSTATUS={message}"));
+        }
+        NotifyState::Stopping(None) => send_payload("STOPPING=1"),
+        NotifyState::Reloading(Some(message)) => {
+            send_payload(&format!("RELOADING=1\nSTATUS={message}"));
+        }
+        NotifyState::Reloading(None) => send_payload("RELOADING=1"),
     }
 }

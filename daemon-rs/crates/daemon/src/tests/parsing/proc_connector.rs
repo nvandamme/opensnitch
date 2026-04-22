@@ -1,9 +1,8 @@
-use crate::adapters::proc_connector::{
-    CN_MSG_LEN, NLMSG_HDR_LEN, PROC_EVENT_EXEC, PROC_EVENT_EXEC_PID_OFFSET, PROC_EVENT_EXIT,
-    PROC_EVENT_FORK, PROC_EVENT_FORK_CHILD_PID_OFFSET, PROC_EVENT_HEADER_LEN,
-};
 use crate::models::proc_event::ProcEventKind;
-use crate::models::proc_event::ProcEventSocket;
+use crate::platform::adapters::proc_connector::{
+    CN_MSG_LEN, NLMSG_HDR_LEN, PROC_EVENT_EXEC, PROC_EVENT_EXEC_PID_OFFSET, PROC_EVENT_EXIT,
+    PROC_EVENT_FORK, PROC_EVENT_FORK_CHILD_PID_OFFSET, PROC_EVENT_HEADER_LEN, ProcEventSocket,
+};
 
 fn build_frame(what: u32, pid: u32, is_fork: bool) -> Vec<u8> {
     let total = NLMSG_HDR_LEN + CN_MSG_LEN + 32;

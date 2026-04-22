@@ -1,4 +1,4 @@
-use crate::adapters::firewall_iptables::FirewallIptablesAdapter;
+use crate::platform::adapters::firewall_iptables::FirewallIptablesAdapter;
 use opensnitch_proto::pb;
 
 #[test]

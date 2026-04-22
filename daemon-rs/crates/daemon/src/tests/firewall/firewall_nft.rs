@@ -1,4 +1,4 @@
-use crate::adapters::firewall_nft::FirewallNftAdapter;
+use crate::platform::adapters::firewall_nft::FirewallNftAdapter;
 use opensnitch_proto::pb;
 
 #[test]

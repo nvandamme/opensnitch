@@ -8,14 +8,16 @@ use crate::{
     bus::{BusCaps, BusState},
     config::DefaultAction,
     models::connection_state::{ConnectionAttempt, TransportProtocol},
+    models::dns_payload::DnsPayload,
     models::kernel_event::KernelEvent,
 };
 
-use crate::ffi::nfqueue::{
+use crate::platform::ffi::nfqueue::{
     Decision, NF_ACCEPT, NF_DROP, NF_QUEUE, NfqueueDecisionState, NfqueueMetricsState,
     NfqueueRuntimeState, NfqueueVerdictEngine, PRIMARY_DECISION_TIMEOUT, PacketVerdict,
     QueueMetricsSnapshot, REPEAT_DECISION_TIMEOUT, RUNTIME, RequeueAlias,
 };
+use crate::tunables::NfqueueOverloadPolicy;
 
 fn reset_queue_metrics() {
     if let Ok(mut metrics_map) = NfqueueMetricsState::queue_metrics_map().lock() {
@@ -135,10 +137,12 @@ fn prune_requeue_aliases_removes_expired_entries() {
 #[test]
 fn enqueue_connect_attempt_non_blocking_uses_dedicated_connect_queue() {
     let (bus, mut rx) = BusState::build_with_caps(BusCaps::uniform(1));
-    let _ = bus.kernel_tx.try_send(KernelEvent::DnsResolved {
-        ip: "127.0.0.1".to_string(),
-        host: "localhost".to_string(),
-    });
+    let _ = bus
+        .kernel_tx
+        .try_send(KernelEvent::DnsUpdate(DnsPayload::answer(
+            "localhost",
+            "127.0.0.1".parse().expect("test ip should parse"),
+        )));
 
     let attempt = ConnectionAttempt {
         request_id: 1,
@@ -246,7 +250,12 @@ fn dns_response_packet_fast_paths_to_accept_even_when_default_action_is_deny() {
 
     if RUNTIME.get().is_none() {
         let (bus, _rx) = BusState::build_with_caps(BusCaps::uniform(16));
-        NfqueueRuntimeState::init(bus, 6000, DefaultAction::Deny);
+        NfqueueRuntimeState::init(
+            bus,
+            6000,
+            DefaultAction::Deny,
+            NfqueueOverloadPolicy::FailOpen,
+        );
     }
     NfqueueRuntimeState::set_default_action(DefaultAction::Deny);
 
@@ -262,12 +271,14 @@ fn dns_response_packet_fast_paths_to_accept_even_when_default_action_is_deny() {
 fn simulate_timeout_flow(
     primary_queue_num: u16,
     repeat_queue_num: u16,
+    overload_policy: NfqueueOverloadPolicy,
     default_action: DefaultAction,
     mark: u32,
 ) -> (PacketVerdict, PacketVerdict) {
     let first = NfqueueVerdictEngine::timeout_fallback_verdict(
         primary_queue_num,
         Some(repeat_queue_num),
+        overload_policy,
         default_action,
         mark,
         None,
@@ -278,6 +289,7 @@ fn simulate_timeout_flow(
             NfqueueVerdictEngine::timeout_fallback_verdict(
                 queue_num,
                 Some(repeat_queue_num),
+                overload_policy,
                 default_action,
                 mark,
                 None,
@@ -294,6 +306,7 @@ fn timeout_requeues_on_primary_queue_and_preserves_mark() {
     let verdict = NfqueueVerdictEngine::timeout_fallback_verdict(
         10,
         Some(11),
+        NfqueueOverloadPolicy::FailOpen,
         DefaultAction::Allow,
         0x2a,
         None,
@@ -312,6 +325,7 @@ fn timeout_applies_default_action_on_repeat_queue() {
     let allow_verdict = NfqueueVerdictEngine::timeout_fallback_verdict(
         11,
         Some(11),
+        NfqueueOverloadPolicy::FailOpen,
         DefaultAction::Allow,
         0x99,
         None,
@@ -324,6 +338,7 @@ fn timeout_applies_default_action_on_repeat_queue() {
     let deny_verdict = NfqueueVerdictEngine::timeout_fallback_verdict(
         11,
         Some(11),
+        NfqueueOverloadPolicy::FailOpen,
         DefaultAction::Deny,
         0x99,
         None,
@@ -333,6 +348,7 @@ fn timeout_applies_default_action_on_repeat_queue() {
     let reject_verdict = NfqueueVerdictEngine::timeout_fallback_verdict(
         11,
         Some(11),
+        NfqueueOverloadPolicy::FailOpen,
         DefaultAction::Reject,
         0x99,
         None,
@@ -345,6 +361,7 @@ fn timeout_still_requeues_on_primary_queue() {
     let verdict = NfqueueVerdictEngine::timeout_fallback_verdict(
         10,
         Some(11),
+        NfqueueOverloadPolicy::FailOpen,
         DefaultAction::Deny,
         0x44,
         None,
@@ -356,6 +373,20 @@ fn timeout_still_requeues_on_primary_queue() {
             mark: 0x44
         }
     ));
+}
+
+#[test]
+fn drop_fast_policy_drops_without_requeue() {
+    let (first, second) = simulate_timeout_flow(
+        10,
+        11,
+        NfqueueOverloadPolicy::DropFast,
+        DefaultAction::Allow,
+        0x33,
+    );
+
+    assert!(matches!(first, PacketVerdict::Drop));
+    assert!(matches!(second, PacketVerdict::Drop));
 }
 
 #[test]
@@ -396,7 +427,13 @@ fn verdict_with_packet_exposes_payload_for_nfq_set_verdict2() {
 
 #[test]
 fn timeout_flow_requeue_then_allow_on_repeat_queue() {
-    let (first, second) = simulate_timeout_flow(20, 21, DefaultAction::Allow, 0x42);
+    let (first, second) = simulate_timeout_flow(
+        20,
+        21,
+        NfqueueOverloadPolicy::FailOpen,
+        DefaultAction::Allow,
+        0x42,
+    );
 
     assert!(matches!(
         first,
@@ -410,7 +447,13 @@ fn timeout_flow_requeue_then_allow_on_repeat_queue() {
 
 #[test]
 fn timeout_flow_requeue_then_drop_on_repeat_queue() {
-    let (first, second) = simulate_timeout_flow(30, 31, DefaultAction::Deny, 0xbeef);
+    let (first, second) = simulate_timeout_flow(
+        30,
+        31,
+        NfqueueOverloadPolicy::FailOpen,
+        DefaultAction::Deny,
+        0xbeef,
+    );
 
     assert!(matches!(
         first,

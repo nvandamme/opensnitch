@@ -7,11 +7,14 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/evilsocket/opensnitch/daemon/internal/testutil"
 )
 
 var tmpDir string
 
 func TestMain(m *testing.M) {
+	testutil.StopConflictingServices()
 	tmpDir = "/tmp/ostest_" + randString()
 	os.Mkdir(tmpDir, 0777)
 	defer os.RemoveAll(tmpDir)
