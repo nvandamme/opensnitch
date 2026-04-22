@@ -1,6 +1,6 @@
 [package]
 name = "opensnitchd-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [features]
@@ -21,6 +21,7 @@ nix = { version = "0.31.2", features = ["user", "socket"] }
 regex = "1.12.2"
 aho-corasick = "1.1.3"
 globset = "0.4.15"
+lru = "0.12.5"
 sha2 = "0.10.9"
 sha1 = "0.10.6"
 md-5 = "0.10.6"

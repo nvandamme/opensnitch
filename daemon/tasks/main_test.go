@@ -2,7 +2,9 @@ package tasks
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/evilsocket/opensnitch/daemon/tasks/base"
 )
@@ -50,6 +52,14 @@ func taskEvents(tm *TaskManager, t *testing.T) {
 }
 
 func TestTaskManager(t *testing.T) {
+	started := time.Now()
+	defer func() {
+		fmt.Printf(
+			"cold-profile backend=go component=tasks elapsed_s=%.6f\n",
+			time.Since(started).Seconds(),
+		)
+	}()
+
 	tkMgr := NewTaskManager()
 	go taskEvents(tkMgr, t)
 

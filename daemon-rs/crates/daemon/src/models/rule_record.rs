@@ -1,7 +1,7 @@
 use opensnitch_proto::pb;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use crate::utils::name_parsing::{ParseFromName, normalized_name};
+use crate::utils::name_parsing::normalized_name;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleAction {
@@ -11,8 +11,16 @@ pub enum RuleAction {
 }
 
 impl RuleAction {
+    fn parse_from_name(name: &str) -> Self {
+        match normalized_name(name).as_str() {
+            "reject" => Self::Reject,
+            "deny" => Self::Deny,
+            _ => Self::Allow,
+        }
+    }
+
     pub fn from_name(name: &str) -> Self {
-        <Self as ParseFromName>::parse_from_name(name)
+        Self::parse_from_name(name)
     }
 
     pub fn as_str(self) -> &'static str {
@@ -32,16 +40,6 @@ impl RuleAction {
     }
 }
 
-impl ParseFromName for RuleAction {
-    fn parse_from_name(name: &str) -> Self {
-        match normalized_name(name).as_str() {
-            "reject" => Self::Reject,
-            "deny" => Self::Deny,
-            _ => Self::Allow,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleDuration {
     Once,
@@ -51,8 +49,19 @@ pub enum RuleDuration {
 }
 
 impl RuleDuration {
+    fn parse_from_name(name: &str) -> Self {
+        let normalized = name.trim();
+        match normalized_name(normalized).as_str() {
+            "always" | "permanent" => Self::Permanent,
+            "until restart" | "restart" => Self::UntilRestart,
+            "once" => Self::Once,
+            _ if normalized.is_empty() => Self::Once,
+            _ => Self::Temporary(normalized.to_string()),
+        }
+    }
+
     pub fn from_name(name: &str) -> Self {
-        <Self as ParseFromName>::parse_from_name(name)
+        Self::parse_from_name(name)
     }
 
     pub fn as_str(&self) -> &str {
@@ -76,25 +85,13 @@ impl RuleDuration {
     }
 }
 
-impl ParseFromName for RuleDuration {
-    fn parse_from_name(name: &str) -> Self {
-        let normalized = name.trim();
-        match normalized_name(normalized).as_str() {
-            "always" | "permanent" => Self::Permanent,
-            "until restart" | "restart" => Self::UntilRestart,
-            "once" => Self::Once,
-            _ if normalized.is_empty() => Self::Once,
-            _ => Self::Temporary(normalized.to_string()),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct RuleOperator {
     pub type_name: String,
     pub operand: String,
     pub data: String,
     pub sensitive: bool,
+    pub scope: Option<String>,
     pub list: Vec<RuleOperator>,
 }
 
@@ -109,6 +106,7 @@ impl RuleOperator {
             operand: operator.operand.clone(),
             data: operator.data.clone(),
             sensitive: operator.sensitive,
+            scope: None,
             list: operator
                 .list
                 .iter()
@@ -193,87 +191,5 @@ impl RuleRecord {
         value
             .format(&Rfc3339)
             .unwrap_or_else(|_| value.unix_timestamp().to_string())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{RuleAction, RuleDuration, RuleRecord};
-    use opensnitch_proto::pb;
-
-    #[test]
-    fn from_proto_maps_core_fields_like_create_invariants() {
-        let proto = pb::Rule {
-            created: 1_700_000_000,
-            name: "000-test-name".to_string(),
-            description: "rule description 000".to_string(),
-            enabled: true,
-            precedence: false,
-            nolog: false,
-            action: "allow".to_string(),
-            duration: "once".to_string(),
-            operator: Some(pb::Operator {
-                r#type: "simple".to_string(),
-                operand: "true".to_string(),
-                data: String::new(),
-                sensitive: false,
-                list: Vec::new(),
-            }),
-        };
-
-        let record = RuleRecord::from_proto(&proto);
-        assert_eq!(record.name, "000-test-name");
-        assert_eq!(record.description, "rule description 000");
-        assert!(record.enabled);
-        assert!(!record.precedence);
-        assert!(!record.nolog);
-        assert_eq!(record.action, RuleAction::Allow);
-        assert_eq!(record.duration, RuleDuration::Once);
-        assert!(record.created_at.is_some());
-    }
-
-    #[test]
-    fn from_proto_list_operator_clears_data_and_keeps_expanded_list() {
-        let proto = pb::Rule {
-            name: "000-test-serializer-list".to_string(),
-            action: "allow".to_string(),
-            duration: "once".to_string(),
-            enabled: true,
-            operator: Some(pb::Operator {
-                r#type: "list".to_string(),
-                operand: "list".to_string(),
-                data: "[\"test\":true]".to_string(),
-                sensitive: false,
-                list: vec![
-                    pb::Operator {
-                        r#type: "simple".to_string(),
-                        operand: "process.path".to_string(),
-                        data: "/path/x".to_string(),
-                        sensitive: false,
-                        list: Vec::new(),
-                    },
-                    pb::Operator {
-                        r#type: "simple".to_string(),
-                        operand: "dest.port".to_string(),
-                        data: "23".to_string(),
-                        sensitive: false,
-                        list: Vec::new(),
-                    },
-                ],
-            }),
-            ..Default::default()
-        };
-
-        let record = RuleRecord::from_proto(&proto);
-        assert_eq!(record.operator.type_name, "list");
-        assert_eq!(record.operator.operand, "list");
-        assert_eq!(record.operator.data, "");
-        assert_eq!(record.operator.list.len(), 2);
-        assert_eq!(record.operator.list[0].type_name, "simple");
-        assert_eq!(record.operator.list[0].operand, "process.path");
-        assert_eq!(record.operator.list[0].data, "/path/x");
-        assert_eq!(record.operator.list[1].type_name, "simple");
-        assert_eq!(record.operator.list[1].operand, "dest.port");
-        assert_eq!(record.operator.list[1].data, "23");
     }
 }

@@ -9,87 +9,7 @@ use crate::models::{
     config_storage::{RawConfig, RawLoggerConfig},
     firewall_state::FirewallBackend,
 };
-use crate::utils::name_parsing::{ParseFromName, normalized_name};
-
-fn canonical_config_json_key(key: &str) -> Option<&'static str> {
-    let lowered = key.to_ascii_lowercase();
-    match lowered.as_str() {
-        "server" => Some("Server"),
-        "loglevel" => Some("LogLevel"),
-        "logutc" => Some("LogUTC"),
-        "logmicro" => Some("LogMicro"),
-        "defaultaction" => Some("DefaultAction"),
-        "defaultduration" => Some("DefaultDuration"),
-        "interceptunknown" => Some("InterceptUnknown"),
-        "procmonitormethod" => Some("ProcMonitorMethod"),
-        "firewall" => Some("Firewall"),
-        "fwoptions" => Some("FwOptions"),
-        "rules" => Some("Rules"),
-        "tasksoptions" => Some("TasksOptions"),
-        "tasks" => Some("Tasks"),
-        "audit" => Some("Audit"),
-        "ebpf" => Some("Ebpf"),
-        "stats" => Some("Stats"),
-        "internal" => Some("Internal"),
-        "address" => Some("Address"),
-        "authentication" => Some("Authentication"),
-        "logfile" => Some("LogFile"),
-        "loggers" => Some("Loggers"),
-        "type" => Some("Type"),
-        "tlsoptions" => Some("TLSOptions"),
-        "cacert" => Some("CACert"),
-        "servercert" => Some("ServerCert"),
-        "serverkey" => Some("ServerKey"),
-        "clientcert" => Some("ClientCert"),
-        "clientkey" => Some("ClientKey"),
-        "clientauthtype" => Some("ClientAuthType"),
-        "skipverify" => Some("SkipVerify"),
-        "name" => Some("Name"),
-        "format" => Some("Format"),
-        "protocol" => Some("Protocol"),
-        "writetimeout" => Some("WriteTimeout"),
-        "connecttimeout" => Some("ConnectTimeout"),
-        "tag" => Some("Tag"),
-        "workers" => Some("Workers"),
-        "maxconnectattempts" => Some("MaxConnectAttempts"),
-        "monitorinterval" => Some("MonitorInterval"),
-        "configpath" => Some("ConfigPath"),
-        "queuenum" => Some("QueueNum"),
-        "queuebypass" => Some("QueueBypass"),
-        "path" => Some("Path"),
-        "enablechecksums" => Some("EnableChecksums"),
-        "audispsocketpath" => Some("AudispSocketPath"),
-        "modulespath" => Some("ModulesPath"),
-        "maxevents" => Some("MaxEvents"),
-        "maxstats" => Some("MaxStats"),
-        "gcpercent" => Some("GCPercent"),
-        "flushconnsonstart" => Some("FlushConnsOnStart"),
-        _ => None,
-    }
-}
-
-fn normalize_config_json_keys(value: serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Object(obj) => {
-            let mut normalized = serde_json::Map::with_capacity(obj.len());
-            for (key, value) in obj {
-                let normalized_key = canonical_config_json_key(&key).unwrap_or(key.as_str());
-                normalized.insert(
-                    normalized_key.to_string(),
-                    normalize_config_json_keys(value),
-                );
-            }
-            serde_json::Value::Object(normalized)
-        }
-        serde_json::Value::Array(values) => serde_json::Value::Array(
-            values
-                .into_iter()
-                .map(normalize_config_json_keys)
-                .collect::<Vec<_>>(),
-        ),
-        _ => value,
-    }
-}
+use crate::utils::name_parsing::normalized_name;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LoggerSinkConfig {
@@ -117,7 +37,7 @@ impl Default for ClientAuthType {
     }
 }
 
-impl ParseFromName for ClientAuthType {
+impl ClientAuthType {
     fn parse_from_name(name: &str) -> Self {
         match normalized_name(name).as_str() {
             "tls-simple" => Self::TlsSimple,
@@ -125,11 +45,9 @@ impl ParseFromName for ClientAuthType {
             _ => Self::Simple,
         }
     }
-}
 
-impl ClientAuthType {
     pub fn from_name(name: &str) -> Self {
-        <Self as ParseFromName>::parse_from_name(name)
+        Self::parse_from_name(name)
     }
 
     pub fn as_name(self) -> &'static str {
@@ -199,8 +117,16 @@ pub enum DefaultAction {
 }
 
 impl DefaultAction {
+    fn parse_from_name(name: &str) -> Self {
+        match normalized_name(name).as_str() {
+            "reject" => Self::Reject,
+            "deny" => Self::Deny,
+            _ => Self::Allow,
+        }
+    }
+
     pub fn from_name(name: &str) -> Self {
-        <Self as ParseFromName>::parse_from_name(name)
+        Self::parse_from_name(name)
     }
 
     pub fn allows(self) -> bool {
@@ -212,16 +138,6 @@ impl DefaultAction {
     }
 }
 
-impl ParseFromName for DefaultAction {
-    fn parse_from_name(name: &str) -> Self {
-        match normalized_name(name).as_str() {
-            "reject" => Self::Reject,
-            "deny" => Self::Deny,
-            _ => Self::Allow,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefaultDuration {
     Once,
@@ -230,18 +146,16 @@ pub enum DefaultDuration {
 }
 
 impl DefaultDuration {
-    pub fn from_name(name: &str) -> Self {
-        <Self as ParseFromName>::parse_from_name(name)
-    }
-}
-
-impl ParseFromName for DefaultDuration {
     fn parse_from_name(name: &str) -> Self {
         match normalized_name(name).as_str() {
             "always" => Self::Always,
             "untilrestart" => Self::Restart,
             _ => Self::Once,
         }
+    }
+
+    pub fn from_name(name: &str) -> Self {
+        Self::parse_from_name(name)
     }
 }
 
@@ -253,18 +167,16 @@ pub enum ProcMonitorMethod {
 }
 
 impl ProcMonitorMethod {
-    pub fn from_name(name: &str) -> Self {
-        <Self as ParseFromName>::parse_from_name(name)
-    }
-}
-
-impl ParseFromName for ProcMonitorMethod {
     fn parse_from_name(name: &str) -> Self {
         match normalized_name(name).as_str() {
             "audit" => Self::Audit,
             "ebpf" => Self::Ebpf,
             _ => Self::Proc,
         }
+    }
+
+    pub fn from_name(name: &str) -> Self {
+        Self::parse_from_name(name)
     }
 }
 
@@ -300,10 +212,10 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let config_path = dev_default_path("daemon/data/default-config.json");
-        let rules_path = dev_default_path("daemon/data/rules");
-        let firewall_config_path = dev_default_path("daemon/data/system-fw.json");
-        let tasks_config_path = dev_default_path("daemon/data/tasks/tasks.json");
+        let config_path = Self::dev_default_path("daemon/data/default-config.json");
+        let rules_path = Self::dev_default_path("daemon/data/rules");
+        let firewall_config_path = Self::dev_default_path("daemon/data/system-fw.json");
+        let tasks_config_path = Self::dev_default_path("daemon/data/tasks/tasks.json");
 
         Self {
             client_addr: "http://127.0.0.1:50051".to_string(),
@@ -337,13 +249,112 @@ impl Default for Config {
 }
 
 impl Config {
+    fn canonical_config_json_key(key: &str) -> Option<&'static str> {
+        let lowered = key.to_ascii_lowercase();
+        match lowered.as_str() {
+            "server" => Some("Server"),
+            "loglevel" => Some("LogLevel"),
+            "logutc" => Some("LogUTC"),
+            "logmicro" => Some("LogMicro"),
+            "defaultaction" => Some("DefaultAction"),
+            "defaultduration" => Some("DefaultDuration"),
+            "interceptunknown" => Some("InterceptUnknown"),
+            "procmonitormethod" => Some("ProcMonitorMethod"),
+            "firewall" => Some("Firewall"),
+            "fwoptions" => Some("FwOptions"),
+            "rules" => Some("Rules"),
+            "tasksoptions" => Some("TasksOptions"),
+            "tasks" => Some("Tasks"),
+            "audit" => Some("Audit"),
+            "ebpf" => Some("Ebpf"),
+            "stats" => Some("Stats"),
+            "internal" => Some("Internal"),
+            "address" => Some("Address"),
+            "authentication" => Some("Authentication"),
+            "logfile" => Some("LogFile"),
+            "loggers" => Some("Loggers"),
+            "type" => Some("Type"),
+            "tlsoptions" => Some("TLSOptions"),
+            "cacert" => Some("CACert"),
+            "servercert" => Some("ServerCert"),
+            "serverkey" => Some("ServerKey"),
+            "clientcert" => Some("ClientCert"),
+            "clientkey" => Some("ClientKey"),
+            "clientauthtype" => Some("ClientAuthType"),
+            "skipverify" => Some("SkipVerify"),
+            "name" => Some("Name"),
+            "format" => Some("Format"),
+            "protocol" => Some("Protocol"),
+            "writetimeout" => Some("WriteTimeout"),
+            "connecttimeout" => Some("ConnectTimeout"),
+            "tag" => Some("Tag"),
+            "workers" => Some("Workers"),
+            "maxconnectattempts" => Some("MaxConnectAttempts"),
+            "monitorinterval" => Some("MonitorInterval"),
+            "configpath" => Some("ConfigPath"),
+            "queuenum" => Some("QueueNum"),
+            "queuebypass" => Some("QueueBypass"),
+            "path" => Some("Path"),
+            "enablechecksums" => Some("EnableChecksums"),
+            "audispsocketpath" => Some("AudispSocketPath"),
+            "modulespath" => Some("ModulesPath"),
+            "maxevents" => Some("MaxEvents"),
+            "maxstats" => Some("MaxStats"),
+            "gcpercent" => Some("GCPercent"),
+            "flushconnsonstart" => Some("FlushConnsOnStart"),
+            _ => None,
+        }
+    }
+
+    fn normalize_config_json_keys(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(obj) => {
+                let mut normalized = serde_json::Map::with_capacity(obj.len());
+                for (key, value) in obj {
+                    let normalized_key =
+                        Self::canonical_config_json_key(&key).unwrap_or(key.as_str());
+                    normalized.insert(
+                        normalized_key.to_string(),
+                        Self::normalize_config_json_keys(value),
+                    );
+                }
+                serde_json::Value::Object(normalized)
+            }
+            serde_json::Value::Array(values) => serde_json::Value::Array(
+                values
+                    .into_iter()
+                    .map(Self::normalize_config_json_keys)
+                    .collect::<Vec<_>>(),
+            ),
+            _ => value,
+        }
+    }
+
+    fn resolve_runtime_path(configured: &str, dev_fallback_rel: &str) -> PathBuf {
+        let configured = configured.trim();
+        if !configured.is_empty() {
+            let configured_path = PathBuf::from(configured);
+            if configured_path.exists() {
+                return configured_path;
+            }
+        }
+
+        Self::dev_default_path(dev_fallback_rel)
+    }
+
+    fn dev_default_path(rel_path: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join(rel_path)
+    }
+
     pub fn load_from_default_locations() -> Result<Self> {
         let env_path = std::env::var_os("OPENSNITCH_CONFIG_FILE").map(PathBuf::from);
         let default_path = PathBuf::from("/etc/opensnitchd/default-config.json");
         let config_path = env_path
             .filter(|path| path.exists())
             .or_else(|| default_path.exists().then_some(default_path))
-            .unwrap_or_else(|| dev_default_path("daemon/data/default-config.json"));
+            .unwrap_or_else(|| Self::dev_default_path("daemon/data/default-config.json"));
 
         Self::load_from_path(&config_path)
     }
@@ -357,7 +368,7 @@ impl Config {
     pub fn from_raw_json(path: &Path, raw_json: String) -> Result<Self> {
         let parsed_value = serde_json::from_str::<serde_json::Value>(&raw_json)
             .with_context(|| format!("failed to parse config file {}", path.display()))?;
-        let normalized_value = normalize_config_json_keys(parsed_value);
+        let normalized_value = Self::normalize_config_json_keys(parsed_value);
         let raw: RawConfig = serde_json::from_value(normalized_value)
             .with_context(|| format!("failed to parse config file {}", path.display()))?;
 
@@ -429,14 +440,14 @@ impl Config {
             },
             firewall_queue_num: raw.fw_options.queue_num.unwrap_or(0),
             firewall_queue_bypass: raw.fw_options.queue_bypass.unwrap_or(true),
-            firewall_config_path: resolve_runtime_path(
+            firewall_config_path: Self::resolve_runtime_path(
                 &raw.fw_options.config_path,
                 "daemon/data/system-fw.json",
             ),
             flush_conns_on_start: raw.internal.flush_conns_on_start.unwrap_or(true),
             gc_percent: raw.internal.gc_percent,
-            rules_path: resolve_runtime_path(&raw.rules.path, "daemon/data/rules"),
-            tasks_config_path: resolve_runtime_path(
+            rules_path: Self::resolve_runtime_path(&raw.rules.path, "daemon/data/rules"),
+            tasks_config_path: Self::resolve_runtime_path(
                 &raw.tasks_options.config_path,
                 "daemon/data/tasks/tasks.json",
             ),
@@ -456,22 +467,4 @@ impl Config {
         }
         self
     }
-}
-
-fn resolve_runtime_path(configured: &str, dev_fallback_rel: &str) -> PathBuf {
-    let configured = configured.trim();
-    if !configured.is_empty() {
-        let configured_path = PathBuf::from(configured);
-        if configured_path.exists() {
-            return configured_path;
-        }
-    }
-
-    dev_default_path(dev_fallback_rel)
-}
-
-fn dev_default_path(rel_path: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .join(rel_path)
 }

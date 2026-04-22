@@ -1,10 +1,3 @@
-use std::{thread, time::Duration};
-
-use tokio::sync::mpsc;
-use tracing::{debug, warn};
-
-use crate::models::kernel_event::KernelEvent;
-
 pub mod audit_worker;
 pub mod control;
 pub mod dns_worker;
@@ -13,40 +6,9 @@ pub mod firewall_worker;
 pub mod netlink_addr_worker;
 pub mod netlink_proc_worker;
 pub mod nfqueue_worker;
+mod runtime_support;
 
-const KERNEL_EVENT_SEND_RETRIES: usize = 8;
-const KERNEL_EVENT_SEND_BACKOFF: Duration = Duration::from_millis(10);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum KernelEventDispatch {
-    Sent,
-    ChannelClosed,
-    DroppedBackpressure,
-}
-
-pub(crate) fn dispatch_kernel_event_with_backoff(
-    tx: &mpsc::Sender<KernelEvent>,
-    event: KernelEvent,
-) -> KernelEventDispatch {
-    let mut pending = event;
-
-    for _ in 0..KERNEL_EVENT_SEND_RETRIES {
-        match tx.try_send(pending) {
-            Ok(()) => return KernelEventDispatch::Sent,
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                debug!("kernel event channel closed during dispatch");
-                return KernelEventDispatch::ChannelClosed;
-            }
-            Err(mpsc::error::TrySendError::Full(event)) => {
-                pending = event;
-                thread::sleep(KERNEL_EVENT_SEND_BACKOFF);
-            }
-        }
-    }
-
-    warn!(
-        retries = KERNEL_EVENT_SEND_RETRIES,
-        "kernel event dispatch dropped due to sustained backpressure"
-    );
-    KernelEventDispatch::DroppedBackpressure
-}
+pub(crate) use runtime_support::{
+    KernelEventDispatch, dispatch_kernel_event_with_backoff, join_thread_with_timeout,
+    sleep_with_shutdown,
+};

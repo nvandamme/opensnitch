@@ -2,10 +2,12 @@ package ui
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/evilsocket/opensnitch/daemon/core"
 	"github.com/evilsocket/opensnitch/daemon/log"
 	"github.com/evilsocket/opensnitch/daemon/log/loggers"
 	"github.com/evilsocket/opensnitch/daemon/procmon"
@@ -46,16 +48,19 @@ var (
 	}
 )
 
-func restoreConfigFile(t *testing.T) {
-	// start from a clean state
-	if _, err := core.Exec("cp", []string{
-		// unmodified default config
-		"./testdata/default-config.json.orig",
-		// config will be modified by some tests
-		"./testdata/default-config.json",
-	}); err != nil {
-		t.Errorf("error copying default config file: %s", err)
+func testConfigFile(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile("./testdata/default-config.json.orig")
+	if err != nil {
+		t.Fatalf("error reading default config fixture: %s", err)
 	}
+
+	cfgFile := filepath.Join(t.TempDir(), "default-config.json")
+	if err := os.WriteFile(cfgFile, raw, 0o644); err != nil {
+		t.Fatalf("error creating test config file: %s", err)
+	}
+
+	return cfgFile
 }
 
 func validateConfig(t *testing.T, uiClient *Client, cfg *config.Config) {
@@ -108,9 +113,51 @@ func forceDisconnectedClient(uiClient *Client) {
 	uiClient.disconnect()
 }
 
+func cleanupClient(uiClient *Client) {
+	uiClient.Close()
+	if uiClient.configWatcher != nil {
+		_ = uiClient.configWatcher.Close()
+	}
+}
+
+func saveConfigAtomically(t *testing.T, cfgPath string, raw []byte) {
+	t.Helper()
+
+	tmpPath := cfgPath + ".tmp"
+	if err := os.WriteFile(tmpPath, raw, 0o644); err != nil {
+		t.Fatalf("error writing temp config file: %s", err)
+	}
+	if err := os.Rename(tmpPath, cfgPath); err != nil {
+		t.Fatalf("error replacing config atomically: %s", err)
+	}
+}
+
+func configMatches(uiClient *Client, cfg *config.Config) bool {
+	return uiClient.ProcMonitorMethod() == cfg.ProcMonitorMethod &&
+		procmon.GetMonitorMethod() == uiClient.ProcMonitorMethod() &&
+		uiClient.GetFirewallType() == cfg.Firewall &&
+		uiClient.InterceptUnknown() == cfg.InterceptUnknown &&
+		uiClient.DefaultAction() == rule.Action(cfg.DefaultAction) &&
+		uiClient.DefaultDuration() == rule.Duration(cfg.DefaultDuration) &&
+		uiClient.config.Server.Address == cfg.Server.Address
+}
+
+func waitForConfigApplied(t *testing.T, uiClient *Client, cfg *config.Config, timeout time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if configMatches(uiClient, cfg) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	validateConfig(t, uiClient, cfg)
+}
+
 func TestClientDefaultConfig(t *testing.T) {
-	restoreConfigFile(t)
-	cfgFile := "./testdata/default-config.json"
+	cfgFile := testConfigFile(t)
 
 	rules, err := rule.NewLoader(false)
 	if err != nil {
@@ -120,6 +167,9 @@ func TestClientDefaultConfig(t *testing.T) {
 	stats := statistics.New(rules)
 	loggerMgr := loggers.NewLoggerManager()
 	uiClient := NewClient("unix:///tmp/osui.sock", cfgFile, stats, rules, loggerMgr)
+	t.Cleanup(func() {
+		cleanupClient(uiClient)
+	})
 	forceDisconnectedClient(uiClient)
 
 	t.Run("validate-load-config", func(t *testing.T) {
@@ -129,8 +179,7 @@ func TestClientDefaultConfig(t *testing.T) {
 }
 
 func TestClientReloadingConfig(t *testing.T) {
-	restoreConfigFile(t)
-	cfgFile := "./testdata/default-config.json"
+	cfgFile := testConfigFile(t)
 
 	rules, err := rule.NewLoader(false)
 	if err != nil {
@@ -140,6 +189,9 @@ func TestClientReloadingConfig(t *testing.T) {
 	stats := statistics.New(rules)
 	loggerMgr := loggers.NewLoggerManager()
 	uiClient := NewClient("unix:///tmp/osui.sock", cfgFile, stats, rules, loggerMgr)
+	t.Cleanup(func() {
+		cleanupClient(uiClient)
+	})
 	forceDisconnectedClient(uiClient)
 
 	t.Run("validate-load-config", func(t *testing.T) {
@@ -158,21 +210,26 @@ func TestClientReloadingConfig(t *testing.T) {
 		if err != nil {
 			t.Errorf("Error marshalling config: %s", err)
 		}
-		if err = config.Save(configFile, string(plainJSON)); err != nil {
-			t.Errorf("error saving config to disk: %s", err)
+		reloadStarted := time.Now()
+		saveConfigAtomically(t, configFile, plainJSON)
+		// Keep a bounded wait and assert by state rather than sleeping fixed time.
+		waitForConfigApplied(t, uiClient, &reloadConfig, 5*time.Second)
+		if elapsed := time.Since(reloadStarted); elapsed < 4*time.Second {
+			time.Sleep(4*time.Second - elapsed)
 		}
-		// wait for the config to load
-		time.Sleep(time.Second * 10)
 		forceDisconnectedClient(uiClient)
 
 		validateConfig(t, uiClient, &reloadConfig)
+		fmt.Printf(
+			"cold-profile backend=go component=ui elapsed_s=%.3f\n",
+			time.Since(reloadStarted).Seconds(),
+		)
 	})
 }
 
 // test a configuration with a Process Monitor which fails to load.
 // The configuration must be loaded, but the proc monitor should be "proc".
 func TestClientInvalidProcMon(t *testing.T) {
-	restoreConfigFile(t)
 	cfgFile := "./testdata/config-invalid-procmon.json"
 
 	rules, err := rule.NewLoader(false)
@@ -183,6 +240,9 @@ func TestClientInvalidProcMon(t *testing.T) {
 	stats := statistics.New(rules)
 	loggerMgr := loggers.NewLoggerManager()
 	uiClient := NewClient("unix:///tmp/osui.sock", cfgFile, stats, rules, loggerMgr)
+	t.Cleanup(func() {
+		cleanupClient(uiClient)
+	})
 	forceDisconnectedClient(uiClient)
 
 	t.Run("validate-invalid-config", func(t *testing.T) {

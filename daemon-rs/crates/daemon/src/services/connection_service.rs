@@ -1,11 +1,6 @@
-use opensnitch_proto::pb;
-
-use crate::{
-    adapters::proto_mapper::to_proto_connection,
-    models::{
-        connection_state::ConnectionAttempt,
-        process_state::{ProcessInfo, ProcessNode},
-    },
+use crate::models::{
+    connection_state::ConnectionAttempt,
+    process_state::{ProcessInfo, ProcessNode},
 };
 
 use super::{dns_service::DnsService, process_service::ProcessService};
@@ -20,7 +15,6 @@ pub struct ConnectionContext {
     pub attempt: ConnectionAttempt,
     pub process: ProcessInfo,
     pub dst_host: Option<String>,
-    pub pb_conn: pb::Connection,
 }
 
 impl ConnectionService {
@@ -29,7 +23,9 @@ impl ConnectionService {
     }
 
     pub async fn resolve(&self, attempt: ConnectionAttempt) -> ConnectionContext {
-        let attempt = crate::utils::pid_resolver::enrich_connection_owner_async(attempt).await;
+        let mut attempt =
+            crate::utils::pid_resolver::PidResolverState::enrich_connection_owner_async(attempt)
+                .await;
 
         let process = if attempt.pid == 0 {
             ProcessInfo {
@@ -38,6 +34,7 @@ impl ConnectionService {
                 args: Vec::new(),
                 cwd: None,
                 env_preview: Vec::new(),
+                env_map: std::collections::HashMap::new(),
                 process_hash: None,
                 process_hash_md5: None,
                 process_hash_sha1: None,
@@ -55,6 +52,7 @@ impl ConnectionService {
                     args: Vec::new(),
                     cwd: None,
                     env_preview: Vec::new(),
+                    env_map: std::collections::HashMap::new(),
                     process_hash: None,
                     process_hash_md5: None,
                     process_hash_sha1: None,
@@ -67,21 +65,18 @@ impl ConnectionService {
         };
 
         let mut dst_host = if attempt.dst_port == 53 {
-            attempt.dns_query.clone()
+            attempt.dns_query.take()
         } else {
             None
         };
         if dst_host.is_none() {
-            dst_host = self.dns.lookup(&attempt.dst_ip).await;
+            dst_host = self.dns.lookup_ip(attempt.dst_addr).await;
         }
-
-        let pb_conn = to_proto_connection(&attempt, &process, dst_host.clone());
 
         ConnectionContext {
             attempt,
             process,
             dst_host,
-            pb_conn,
         }
     }
 }

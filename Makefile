@@ -1,7 +1,10 @@
 all: protocol opensnitch_daemon gui
 
-STRESS_ROUNDS ?= 4000
-PARITY_STRESS_ROUNDS ?= 4000
+STRESS_ROUNDS ?= 1000
+PARITY_STRESS_ROUNDS ?= 1000
+PERF_REPEATS ?= 5
+GO_KERNEL_PRESSURE_SECS ?= 3
+GO_KERNEL_PRESSURE_SWEEP_SECS ?= 2
 DAEMON_RS_MANIFEST := daemon-rs/Cargo.toml
 DAEMON_RS_PACKAGE := opensnitchd-rs
 DAEMON_RS_TOOLS_RUN := cargo run --release --manifest-path $(DAEMON_RS_MANIFEST) -p tools --
@@ -10,12 +13,13 @@ RUST_TEST_LOG_LEVEL ?= info,opensnitchd_rs=debug
 HARNESS_RUST_LOG_LEVEL ?= error
 HARNESS_GO_LOG_LEVEL ?= error
 PERF_RUST_LOG_LEVEL ?= error
+PERF_PREBUILD ?= 1
 DAEMON_RS_LIVE_RUST_LOG ?= info
 
-.PHONY: protocol go-protocol go-test-full go-stress-profile rust-parity-tests rust-kernel-it go-rust-parity-full parity-hot-path-harness parity-cold-path-harness parity-hot-cold-matrix parity-hot-cold-delta daemon-rs-kernel-profile-harness update-run-perf parity-gate quick-pressure-sweep-tunables auto-tune-kernel-pressure-tunables microbench-connect-dispatch daemon-rs-live-logs daemon-rs-live-stop
+.PHONY: protocol go-protocol go-test-full go-stress-profile go-kernel-profile-harness rust-parity-tests rust-kernel-it go-rust-parity-full parity-hot-path-harness parity-hot-path-harness-once parity-cold-path-harness parity-hot-cold-matrix parity-hot-cold-delta parity-hot-cold-delta-once daemon-rs-kernel-profile-harness update-run-perf parity-gate quick-pressure-sweep-tunables auto-tune-kernel-pressure-tunables microbench-connect-dispatch daemon-rs-live-logs daemon-rs-live-stop daemon-rs-async-send-audit daemon-rs-snapshot-clone-audit daemon-rs-policy-audit
 
 install:
-	@cd daemon && make install	
+	@cd daemon && make install
 	@cd ui && make install
 
 protocol:
@@ -39,20 +43,20 @@ run:
 	opensnitch-ui --socket unix:///tmp/osui.sock &
 	./daemon/opensnitchd -rules-path /etc/opensnitchd/rules -ui-socket unix:///tmp/osui.sock -cpu-profile cpu.profile -mem-profile mem.profile
 
-test: 
-	clear 
+test:
+	clear
 	make clean
 	clear
 	mkdir -p rules
-	make 
+	make
 	clear
 	make run
 
 adblocker:
-	clear 
+	clear
 	make clean
 	clear
-	make 
+	make
 	clear
 	python make_ads_rules.py
 	clear
@@ -64,15 +68,28 @@ daemon-rs-build:
 	@cargo build --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE)
 
 daemon-rs-profile-test:
-	@RUST_LOG=$(HARNESS_RUST_LOG_LEVEL) OPENSNITCH_STRESS_ROUNDS=$(STRESS_ROUNDS) cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) stress_profile_reports_connect_latency_and_pipeline_drops -- --ignored --nocapture
+	@set -e; \
+	for i in $$(seq 1 $(PERF_REPEATS)); do \
+		echo "daemon-rs-profile-test run $$i/$(PERF_REPEATS)"; \
+		RUST_LOG=$(HARNESS_RUST_LOG_LEVEL) OPENSNITCH_STRESS_ROUNDS=$(STRESS_ROUNDS) cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) stress_profile_reports_connect_latency_and_pipeline_drops -- --ignored --nocapture; \
+	done
 
 daemon-rs-kernel-profile-harness:
-	@RUST_LOG=error OPENSNITCH_STRESS_SKIP_REGRESSION_CHECK=1 cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) stress_profile_reports_kernel_pipeline_pressure -- --ignored --nocapture
-	@RUST_LOG=error OPENSNITCH_STRESS_SKIP_REGRESSION_CHECK=1 cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) stress_profile_reports_kernel_pipeline_timeout_sweep -- --ignored --nocapture
+	@set -e; \
+	for i in $$(seq 1 $(PERF_REPEATS)); do \
+		echo "daemon-rs-kernel-profile-harness pressure run $$i/$(PERF_REPEATS)"; \
+		RUST_LOG=error OPENSNITCH_STRESS_SKIP_REGRESSION_CHECK=1 cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) stress_profile_reports_kernel_pipeline_pressure -- --ignored --nocapture; \
+	done
+	@set -e; \
+	for i in $$(seq 1 $(PERF_REPEATS)); do \
+		echo "daemon-rs-kernel-profile-harness sweep run $$i/$(PERF_REPEATS)"; \
+		RUST_LOG=error OPENSNITCH_STRESS_SKIP_REGRESSION_CHECK=1 cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) stress_profile_reports_kernel_pipeline_timeout_sweep -- --ignored --nocapture; \
+	done
 
 profile-backends: daemon-rs-build daemon-rs-profile-test go-protocol
 	@echo "Running Rust (release) and Go stress profiles with STRESS_ROUNDS=$(STRESS_ROUNDS)"
-	@cd daemon && OPENSNITCH_HARNESS_GO_LOG_LEVEL=$(HARNESS_GO_LOG_LEVEL) OPENSNITCH_STRESS_PROFILE=1 OPENSNITCH_STRESS_ROUNDS=$(STRESS_ROUNDS) go test ./runtimeprofile -run TestStressProfileReportsConnectLatencyAndPipelineDrops -count=1 -v
+	@$(MAKE) go-stress-profile STRESS_ROUNDS=$(STRESS_ROUNDS) PERF_REPEATS=$(PERF_REPEATS)
+	@$(MAKE) go-kernel-profile-harness PERF_REPEATS=$(PERF_REPEATS) GO_KERNEL_PRESSURE_SECS=$(GO_KERNEL_PRESSURE_SECS) GO_KERNEL_PRESSURE_SWEEP_SECS=$(GO_KERNEL_PRESSURE_SWEEP_SECS)
 
 go-test-full: go-protocol
 	@set -e; \
@@ -97,99 +114,54 @@ go-test-full: go-protocol
 	}
 
 go-stress-profile: go-protocol
-	@cd daemon && OPENSNITCH_HARNESS_GO_LOG_LEVEL=$(HARNESS_GO_LOG_LEVEL) OPENSNITCH_STRESS_PROFILE=1 OPENSNITCH_STRESS_ROUNDS=$(STRESS_ROUNDS) go test ./runtimeprofile -run TestStressProfileReportsConnectLatencyAndPipelineDrops -count=1 -v
+	@set -e; \
+	for i in $$(seq 1 $(PERF_REPEATS)); do \
+		echo "go-stress-profile run $$i/$(PERF_REPEATS)"; \
+		cd daemon && OPENSNITCH_HARNESS_GO_LOG_LEVEL=$(HARNESS_GO_LOG_LEVEL) OPENSNITCH_STRESS_PROFILE=1 OPENSNITCH_STRESS_ROUNDS=$(STRESS_ROUNDS) go test ./runtimeprofile -run TestStressProfileReportsConnectLatencyAndPipelineDrops -count=1 -v; \
+		cd ..; \
+	done
+
+go-kernel-profile-harness: go-protocol
+	@set -e; \
+	for i in $$(seq 1 $(PERF_REPEATS)); do \
+		echo "go-kernel-profile-harness pressure run $$i/$(PERF_REPEATS)"; \
+		cd daemon && OPENSNITCH_HARNESS_GO_LOG_LEVEL=$(HARNESS_GO_LOG_LEVEL) OPENSNITCH_STRESS_PROFILE=1 OPENSNITCH_KERNEL_PRESSURE_SECS=$(GO_KERNEL_PRESSURE_SECS) go test ./runtimeprofile -run TestStressProfileReportsKernelPipelinePressure -count=1 -v; \
+		cd ..; \
+	done
+	@set -e; \
+	for i in $$(seq 1 $(PERF_REPEATS)); do \
+		echo "go-kernel-profile-harness sweep run $$i/$(PERF_REPEATS)"; \
+		cd daemon && OPENSNITCH_HARNESS_GO_LOG_LEVEL=$(HARNESS_GO_LOG_LEVEL) OPENSNITCH_STRESS_PROFILE=1 OPENSNITCH_KERNEL_PRESSURE_SWEEP_SECS=$(GO_KERNEL_PRESSURE_SWEEP_SECS) go test ./runtimeprofile -run TestStressProfileReportsKernelPipelineTimeoutSweep -count=1 -v; \
+		cd ..; \
+	done
 
 parity-hot-path-harness: go-protocol
-	@echo "Running hot-path parity harness (Go + Rust) with STRESS_ROUNDS=$(STRESS_ROUNDS)"
-	@cd daemon && OPENSNITCH_HARNESS_GO_LOG_LEVEL=$(HARNESS_GO_LOG_LEVEL) go test ./runtimeprofile -run TestConnectAttemptProgressesUnderMixedNonConnectSaturation -count=1 -v
-	@cd daemon && OPENSNITCH_HARNESS_GO_LOG_LEVEL=$(HARNESS_GO_LOG_LEVEL) OPENSNITCH_STRESS_PROFILE=1 OPENSNITCH_STRESS_ROUNDS=$(STRESS_ROUNDS) go test ./runtimeprofile -run TestStressProfileReportsConnectLatencyAndPipelineDrops -count=1 -v
-	@RUST_LOG=$(HARNESS_RUST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) connect_attempt_progresses_under_mixed_non_connect_saturation -- --nocapture
-	@RUST_LOG=$(HARNESS_RUST_LOG_LEVEL) OPENSNITCH_STRESS_ROUNDS=$(STRESS_ROUNDS) cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) stress_profile_reports_connect_latency_and_pipeline_drops -- --ignored --nocapture
-	@echo "PARITY HOT-PATH STATUS: PASS"
+	@set -e; \
+	for i in $$(seq 1 $(PERF_REPEATS)); do \
+		echo "parity-hot-path-harness run $$i/$(PERF_REPEATS)"; \
+		if [ "$$i" -eq 1 ]; then prebuild=1; else prebuild=0; fi; \
+		$(MAKE) parity-hot-path-harness-once STRESS_ROUNDS=$(STRESS_ROUNDS) PERF_REPEATS=1 PERF_PREBUILD=$$prebuild; \
+	done
+
+parity-hot-path-harness-once: go-protocol
+	@OPENSNITCH_PARITY_STRESS_ROUNDS=$(STRESS_ROUNDS) OPENSNITCH_PERF_RUST_LOG_LEVEL=$(PERF_RUST_LOG_LEVEL) OPENSNITCH_PERF_GO_LOG_LEVEL=$(HARNESS_GO_LOG_LEVEL) OPENSNITCH_PARITY_PREBUILD=$(PERF_PREBUILD) GO_KERNEL_PRESSURE_SECS=$(GO_KERNEL_PRESSURE_SECS) GO_KERNEL_PRESSURE_SWEEP_SECS=$(GO_KERNEL_PRESSURE_SWEEP_SECS) $(DAEMON_RS_TOOLS_RUN) parity-hot-path-harness-once
 
 parity-cold-path-harness: go-protocol
-	@set -e; \
-	fixture_backup=$$(mktemp); \
-	cp -f $(GO_UI_TEST_FIXTURE) "$$fixture_backup"; \
-	trap 'cp -f "$$fixture_backup" $(GO_UI_TEST_FIXTURE) >/dev/null 2>&1 || true; rm -f "$$fixture_backup"' EXIT; \
-	echo "Running cold-path parity harness (watch/reload paths, Go + Rust)"; \
-	(cd daemon && OPENSNITCH_HARNESS_GO_LOG_LEVEL=$(HARNESS_GO_LOG_LEVEL) go test ./rule -run TestLiveReload -count=1 -v); \
-	(cd daemon && OPENSNITCH_HARNESS_GO_LOG_LEVEL=$(HARNESS_GO_LOG_LEVEL) go test ./ui -run TestClientReloadingConfig -count=1 -v); \
-	(cd daemon && OPENSNITCH_HARNESS_GO_LOG_LEVEL=$(HARNESS_GO_LOG_LEVEL) go test ./tasks -run TestTaskManager -count=1 -v); \
-	RUST_LOG=$(HARNESS_RUST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) tests::watch_service:: -- --nocapture; \
-	RUST_LOG=$(HARNESS_RUST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) tests::config_service:: -- --nocapture; \
-	RUST_LOG=$(HARNESS_RUST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) tests::notification_flow:: -- --nocapture; \
-	RUST_LOG=$(HARNESS_RUST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) tests::process_service:: -- --nocapture; \
-	RUST_LOG=$(HARNESS_RUST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) tests::task_runtime:: -- --nocapture; \
-	echo "PARITY COLD-PATH STATUS: PASS"
+	@OPENSNITCH_PERF_RUST_LOG_LEVEL=$(PERF_RUST_LOG_LEVEL) OPENSNITCH_PERF_GO_LOG_LEVEL=$(HARNESS_GO_LOG_LEVEL) OPENSNITCH_PARITY_PREBUILD=$(PERF_PREBUILD) $(DAEMON_RS_TOOLS_RUN) parity-cold-path-harness
 
 parity-hot-cold-matrix: parity-hot-path-harness parity-cold-path-harness
 	@echo "PARITY MATRIX STATUS: hot-path + cold-path = PASS"
 
 parity-hot-cold-delta: go-protocol
-	@set -eu; \
-	go_hot_log=$$(mktemp); \
-	rust_hot_log=$$(mktemp); \
-	go_rule_log=$$(mktemp); \
-	go_ui_log=$$(mktemp); \
-	go_tasks_log=$$(mktemp); \
-	rust_watch_log=$$(mktemp); \
-	rust_cfg_log=$$(mktemp); \
-	rust_notify_log=$$(mktemp); \
-	rust_process_log=$$(mktemp); \
-	rust_tasks_log=$$(mktemp); \
-	fixture_backup=$$(mktemp); \
-	cp -f $(GO_UI_TEST_FIXTURE) "$$fixture_backup"; \
-	trap 'rm -f "$$go_hot_log" "$$rust_hot_log" "$$go_rule_log" "$$go_ui_log" "$$go_tasks_log" "$$rust_watch_log" "$$rust_cfg_log" "$$rust_notify_log" "$$rust_process_log" "$$rust_tasks_log"; cp -f "$$fixture_backup" $(GO_UI_TEST_FIXTURE) >/dev/null 2>&1 || true; rm -f "$$fixture_backup"' EXIT; \
-	echo "Running hot/cold parity delta harness with STRESS_ROUNDS=$(STRESS_ROUNDS)"; \
-	s=$$(date +%s%3N); (cd daemon && OPENSNITCH_HARNESS_GO_LOG_LEVEL=$(HARNESS_GO_LOG_LEVEL) OPENSNITCH_STRESS_PROFILE=1 OPENSNITCH_STRESS_ROUNDS=$(STRESS_ROUNDS) go test ./runtimeprofile -run TestStressProfileReportsConnectLatencyAndPipelineDrops -count=1 -v >"$$go_hot_log" 2>&1); e=$$(date +%s%3N); go_hot_elapsed=$$(awk -v s="$$s" -v e="$$e" 'BEGIN{printf "%.3f", (e-s)/1000}'); \
-	cat "$$go_hot_log"; \
-	s=$$(date +%s%3N); RUST_LOG=$(PERF_RUST_LOG_LEVEL) OPENSNITCH_STRESS_ROUNDS=$(STRESS_ROUNDS) cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) stress_profile_reports_connect_latency_and_pipeline_drops -- --ignored --nocapture >"$$rust_hot_log" 2>&1; e=$$(date +%s%3N); rust_hot_elapsed=$$(awk -v s="$$s" -v e="$$e" 'BEGIN{printf "%.3f", (e-s)/1000}'); \
-	cat "$$rust_hot_log"; \
-	s=$$(date +%s%3N); (cd daemon && OPENSNITCH_HARNESS_GO_LOG_LEVEL=$(HARNESS_GO_LOG_LEVEL) go test ./rule -run TestLiveReload -count=1 -v >"$$go_rule_log" 2>&1); e=$$(date +%s%3N); go_rule_elapsed=$$(awk -v s="$$s" -v e="$$e" 'BEGIN{printf "%.3f", (e-s)/1000}'); \
-	tail -n 3 "$$go_rule_log"; \
-	s=$$(date +%s%3N); (cd daemon && OPENSNITCH_HARNESS_GO_LOG_LEVEL=$(HARNESS_GO_LOG_LEVEL) go test ./ui -run TestClientReloadingConfig -count=1 -v >"$$go_ui_log" 2>&1); e=$$(date +%s%3N); go_ui_elapsed=$$(awk -v s="$$s" -v e="$$e" 'BEGIN{printf "%.3f", (e-s)/1000}'); \
-	tail -n 5 "$$go_ui_log"; \
-	s=$$(date +%s%3N); (cd daemon && OPENSNITCH_HARNESS_GO_LOG_LEVEL=$(HARNESS_GO_LOG_LEVEL) go test ./tasks -run TestTaskManager -count=1 -v >"$$go_tasks_log" 2>&1); e=$$(date +%s%3N); go_tasks_elapsed=$$(awk -v s="$$s" -v e="$$e" 'BEGIN{printf "%.3f", (e-s)/1000}'); \
-	tail -n 4 "$$go_tasks_log"; \
-	s=$$(date +%s%3N); RUST_LOG=$(PERF_RUST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) tests::watch_service:: -- --nocapture >"$$rust_watch_log" 2>&1; e=$$(date +%s%3N); rust_watch_elapsed=$$(awk -v s="$$s" -v e="$$e" 'BEGIN{printf "%.3f", (e-s)/1000}'); \
-	tail -n 3 "$$rust_watch_log"; \
-	s=$$(date +%s%3N); RUST_LOG=$(PERF_RUST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) tests::config_service:: -- --nocapture >"$$rust_cfg_log" 2>&1; e=$$(date +%s%3N); rust_cfg_elapsed=$$(awk -v s="$$s" -v e="$$e" 'BEGIN{printf "%.3f", (e-s)/1000}'); \
-	tail -n 3 "$$rust_cfg_log"; \
-	s=$$(date +%s%3N); RUST_LOG=$(PERF_RUST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) tests::notification_flow:: -- --nocapture >"$$rust_notify_log" 2>&1; e=$$(date +%s%3N); rust_notify_elapsed=$$(awk -v s="$$s" -v e="$$e" 'BEGIN{printf "%.3f", (e-s)/1000}'); \
-	tail -n 5 "$$rust_notify_log"; \
-	s=$$(date +%s%3N); RUST_LOG=$(PERF_RUST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) tests::process_service:: -- --nocapture >"$$rust_process_log" 2>&1; e=$$(date +%s%3N); rust_process_elapsed=$$(awk -v s="$$s" -v e="$$e" 'BEGIN{printf "%.3f", (e-s)/1000}'); \
-	tail -n 3 "$$rust_process_log"; \
-	s=$$(date +%s%3N); RUST_LOG=$(PERF_RUST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) --release -p $(DAEMON_RS_PACKAGE) tests::task_runtime:: -- --nocapture >"$$rust_tasks_log" 2>&1; e=$$(date +%s%3N); rust_tasks_elapsed=$$(awk -v s="$$s" -v e="$$e" 'BEGIN{printf "%.3f", (e-s)/1000}'); \
-	tail -n 3 "$$rust_tasks_log"; \
-	go_line=$$(grep 'stress-profile backend=go' "$$go_hot_log" | tail -n1); \
-	rust_line=$$(grep '^stress-profile rounds=' "$$rust_hot_log" | tail -n1); \
-	if [ -z "$$go_line" ] || [ -z "$$rust_line" ]; then \
-		echo "Failed to parse hot-path stress-profile lines from harness output."; \
-		exit 1; \
-	fi; \
-	get_metric() { \
-		echo "$$1" | awk -v key="$$2" '{for (i=1;i<=NF;i++) if ($$i ~ ("^" key "=")) {split($$i,a,"="); print a[2]; exit}}'; \
-	}; \
-	go_p50=$$(get_metric "$$go_line" p50_ms); \
-	go_p95=$$(get_metric "$$go_line" p95_ms); \
-	go_p99=$$(get_metric "$$go_line" p99_ms); \
-	go_max=$$(get_metric "$$go_line" max_ms); \
-	go_drop=$$(get_metric "$$go_line" drop_total); \
-	rust_p50=$$(get_metric "$$rust_line" p50_ms); \
-	rust_p95=$$(get_metric "$$rust_line" p95_ms); \
-	rust_p99=$$(get_metric "$$rust_line" p99_ms); \
-	rust_max=$$(get_metric "$$rust_line" max_ms); \
-	rust_drop=$$(get_metric "$$rust_line" drop_total); \
-	delta() { awk -v a="$$1" -v b="$$2" 'BEGIN{printf "%.3f", a-b}'; }; \
-	delta_drop() { awk -v a="$$1" -v b="$$2" 'BEGIN{printf "%d", a-b}'; }; \
-	go_cold=$$(awk -v a="$$go_rule_elapsed" -v b="$$go_ui_elapsed" -v c="$$go_tasks_elapsed" 'BEGIN{printf "%.3f", a+b+c}'); \
-	rust_cold=$$(awk -v a="$$rust_watch_elapsed" -v b="$$rust_cfg_elapsed" -v c="$$rust_notify_elapsed" -v d="$$rust_process_elapsed" -v e="$$rust_tasks_elapsed" 'BEGIN{printf "%.3f", a+b+c+d+e}'); \
-	echo "PARITY DELTA COLD COMPONENTS: go_rule_s=$$go_rule_elapsed go_ui_s=$$go_ui_elapsed go_tasks_s=$$go_tasks_elapsed rust_watch_s=$$rust_watch_elapsed rust_config_s=$$rust_cfg_elapsed rust_notification_s=$$rust_notify_elapsed rust_process_s=$$rust_process_elapsed rust_tasks_s=$$rust_tasks_elapsed"; \
-	echo "PARITY DELTA HOT COMPONENTS: go_hot_wall_s=$$go_hot_elapsed rust_hot_wall_s=$$rust_hot_elapsed"; \
-	echo "PARITY DELTA HOT: vs_go p50=$$(delta "$$rust_p50" "$$go_p50") p95=$$(delta "$$rust_p95" "$$go_p95") p99=$$(delta "$$rust_p99" "$$go_p99") max=$$(delta "$$rust_max" "$$go_max") drop_total=$$(delta_drop "$$rust_drop" "$$go_drop")"; \
-	echo "PARITY DELTA COLD: go_total_s=$$go_cold rust_total_s=$$rust_cold delta_s=$$(delta "$$rust_cold" "$$go_cold")"; \
-	echo "PARITY DELTA STATUS: PASS"
+	@set -e; \
+	for i in $$(seq 1 $(PERF_REPEATS)); do \
+		echo "parity-hot-cold-delta run $$i/$(PERF_REPEATS)"; \
+		if [ "$$i" -eq 1 ]; then prebuild=1; else prebuild=0; fi; \
+		$(MAKE) parity-hot-cold-delta-once STRESS_ROUNDS=$(STRESS_ROUNDS) PERF_REPEATS=1 PERF_PREBUILD=$$prebuild; \
+	done
+
+parity-hot-cold-delta-once: go-protocol
+	@OPENSNITCH_PARITY_STRESS_ROUNDS=$(STRESS_ROUNDS) OPENSNITCH_PERF_RUST_LOG_LEVEL=$(PERF_RUST_LOG_LEVEL) OPENSNITCH_PERF_GO_LOG_LEVEL=$(HARNESS_GO_LOG_LEVEL) OPENSNITCH_PARITY_PREBUILD=$(PERF_PREBUILD) GO_KERNEL_PRESSURE_SECS=$(GO_KERNEL_PRESSURE_SECS) GO_KERNEL_PRESSURE_SWEEP_SECS=$(GO_KERNEL_PRESSURE_SWEEP_SECS) $(DAEMON_RS_TOOLS_RUN) parity-hot-cold-delta-once
 
 rust-parity-tests:
 	@RUST_LOG=$(RUST_TEST_LOG_LEVEL) cargo test --manifest-path $(DAEMON_RS_MANIFEST) -p $(DAEMON_RS_PACKAGE) config::tests:: -- --nocapture
@@ -211,10 +183,10 @@ go-rust-parity-full:
 	@echo "PARITY STATUS: Go full suite + Rust parity tests + Rust strict kernel IT = PASS"
 
 update-run-perf:
-	@STRESS_ROUNDS=$(STRESS_ROUNDS) OPENSNITCH_PARITY_STRESS_ROUNDS=$(PARITY_STRESS_ROUNDS) $(DAEMON_RS_TOOLS_RUN) update-run-perf
+	@STRESS_ROUNDS=$(STRESS_ROUNDS) OPENSNITCH_PERF_REPEATS=$(PERF_REPEATS) OPENSNITCH_PARITY_STRESS_ROUNDS=$(PARITY_STRESS_ROUNDS) $(DAEMON_RS_TOOLS_RUN) update-run-perf
 
 parity-gate:
-	@OPENSNITCH_PARITY_STRESS_ROUNDS=$(PARITY_STRESS_ROUNDS) $(DAEMON_RS_TOOLS_RUN) parity-gate
+	@OPENSNITCH_PERF_REPEATS=$(PERF_REPEATS) OPENSNITCH_PARITY_STRESS_ROUNDS=$(PARITY_STRESS_ROUNDS) OPENSNITCH_PARITY_PREBUILD=$(PERF_PREBUILD) $(DAEMON_RS_TOOLS_RUN) parity-gate
 
 quick-pressure-sweep-tunables:
 	@$(DAEMON_RS_TOOLS_RUN) quick-pressure-sweep-tunables
@@ -223,7 +195,7 @@ auto-tune-kernel-pressure-tunables:
 	@$(DAEMON_RS_TOOLS_RUN) auto-tune-kernel-pressure-tunables
 
 microbench-connect-dispatch:
-	@$(DAEMON_RS_TOOLS_RUN) microbench-connect-dispatch
+	@OPENSNITCH_PERF_REPEATS=$(PERF_REPEATS) OPENSNITCH_PARITY_PREBUILD=$(PERF_PREBUILD) $(DAEMON_RS_TOOLS_RUN) microbench-connect-dispatch
 
 daemon-rs-live-logs:
 	@OPENSNITCH_DAEMON_RS_RUST_LOG=$(DAEMON_RS_LIVE_RUST_LOG) $(DAEMON_RS_TOOLS_RUN) launch-daemon-live-logs
@@ -231,3 +203,11 @@ daemon-rs-live-logs:
 daemon-rs-live-stop:
 	@$(DAEMON_RS_TOOLS_RUN) stop-daemon-live-logs
 
+daemon-rs-async-send-audit:
+	@daemon-rs/scripts/check_async_send_policy.sh
+
+daemon-rs-snapshot-clone-audit:
+	@daemon-rs/scripts/check_snapshot_clone_policy.sh
+
+daemon-rs-policy-audit: daemon-rs-async-send-audit daemon-rs-snapshot-clone-audit
+	@echo "daemon-rs policy audit: pass"

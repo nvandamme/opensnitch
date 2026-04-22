@@ -2,7 +2,10 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::Read,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -18,16 +21,26 @@ use crate::models::{
     kernel_event::ProcEventKind,
     process_state::{ProcessInfo, ProcessNode},
 };
+use crate::utils::lru_cache::LruCache;
 
 #[derive(Clone, Default)]
 pub struct ProcessService {
     cache: Arc<RwLock<ProcessCache>>,
 }
 
-#[derive(Default)]
 struct ProcessCache {
-    entries: HashMap<u32, CachedProcessEntry>,
+    entries: LruCache<u32, CachedProcessEntry>,
     exit_deadlines: HashMap<u32, Instant>,
+}
+
+impl Default for ProcessCache {
+    fn default() -> Self {
+        let capacity = PROCESS_INFO_CACHE_CAPACITY.load(Ordering::Relaxed).max(1);
+        Self {
+            entries: LruCache::new(capacity),
+            exit_deadlines: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -38,48 +51,61 @@ struct CachedProcessEntry {
 
 const EXIT_CACHE_TTL: Duration = Duration::from_secs(2);
 const EXIT_CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
+#[cfg(not(test))]
+const DEFAULT_PROCESS_INFO_CACHE_CAPACITY: usize = 131_072;
+#[cfg(test)]
+const DEFAULT_PROCESS_INFO_CACHE_CAPACITY: usize = 8_192;
+static PROCESS_INFO_CACHE_CAPACITY: AtomicUsize =
+    AtomicUsize::new(DEFAULT_PROCESS_INFO_CACHE_CAPACITY);
 
-trait ProcPidExt {
-    fn inspect_process(self) -> Result<ProcessInfo>;
-    fn compute_process_hashes(self) -> Option<(String, String, String)>;
-    fn build_parent_chain(self) -> Vec<ProcessNode>;
-}
+impl ProcessService {
+    pub(crate) fn configure_cache_capacity(capacity: usize) {
+        PROCESS_INFO_CACHE_CAPACITY.store(capacity.max(1), Ordering::Relaxed);
+    }
 
-impl ProcPidExt for u32 {
-    fn inspect_process(self) -> Result<ProcessInfo> {
-        let path = fs::read_link(format!("/proc/{self}/exe"))
-            .with_context(|| format!("read exe for pid {self}"))?
+    fn inspect_process(pid: u32) -> Result<ProcessInfo> {
+        let path = fs::read_link(format!("/proc/{pid}/exe"))
+            .with_context(|| format!("read exe for pid {pid}"))?
             .to_string_lossy()
             .into_owned();
 
-        let args: Vec<String> = fs::read(format!("/proc/{self}/cmdline"))
+        let args: Vec<String> = fs::read(format!("/proc/{pid}/cmdline"))
             .unwrap_or_default()
             .split(|&b| b == 0)
             .filter(|s| !s.is_empty())
             .map(|s| String::from_utf8_lossy(s).into_owned())
             .collect();
 
-        let cwd = fs::read_link(format!("/proc/{self}/cwd"))
+        let cwd = fs::read_link(format!("/proc/{pid}/cwd"))
             .ok()
             .map(|p| p.to_string_lossy().into_owned());
 
-        let env_preview: Vec<String> = fs::read(format!("/proc/{self}/environ"))
-            .unwrap_or_default()
-            .split(|&b| b == 0)
-            .filter(|s| !s.is_empty())
-            .map(|s| String::from_utf8_lossy(s).into_owned())
-            .collect();
+        let raw_environ = fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+        let env_entries_hint = if raw_environ.is_empty() {
+            0
+        } else {
+            raw_environ.iter().filter(|&&byte| byte == 0).count() + 1
+        };
+        let mut env_preview = Vec::with_capacity(env_entries_hint);
+        let mut env_map = HashMap::with_capacity(env_entries_hint);
+        for entry in raw_environ.split(|&b| b == 0).filter(|s| !s.is_empty()) {
+            let entry_text = String::from_utf8_lossy(entry).into_owned();
+            if let Some((key, value)) = entry_text.split_once('=') {
+                env_map.insert(key.to_string(), value.to_string());
+            }
+            env_preview.push(entry_text);
+        }
 
-        let parent_chain = self.build_parent_chain();
-
-        let hashes = self.compute_process_hashes();
+        let parent_chain = Self::build_parent_chain(pid);
+        let hashes = Self::compute_process_hashes(pid);
 
         Ok(ProcessInfo {
-            pid: self,
+            pid,
             path,
             args,
             cwd,
             env_preview,
+            env_map,
             process_hash: hashes.as_ref().map(|(_, _, sha256)| sha256.clone()),
             process_hash_md5: hashes.as_ref().map(|(md5, _, _)| md5.clone()),
             process_hash_sha1: hashes.as_ref().map(|(_, sha1, _)| sha1.clone()),
@@ -87,8 +113,8 @@ impl ProcPidExt for u32 {
         })
     }
 
-    fn compute_process_hashes(self) -> Option<(String, String, String)> {
-        let exe_path = fs::read_link(format!("/proc/{self}/exe")).ok()?;
+    fn compute_process_hashes(pid: u32) -> Option<(String, String, String)> {
+        let exe_path = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
         let mut file = fs::File::open(exe_path).ok()?;
         let mut hasher_md5 = Md5::new();
         let mut hasher_sha1 = Sha1::new();
@@ -115,10 +141,10 @@ impl ProcPidExt for u32 {
         ))
     }
 
-    fn build_parent_chain(self) -> Vec<ProcessNode> {
+    fn build_parent_chain(pid: u32) -> Vec<ProcessNode> {
         let mut chain = Vec::new();
         let mut seen = HashSet::new();
-        let mut current = self;
+        let mut current = pid;
 
         loop {
             if !seen.insert(current) {
@@ -157,16 +183,16 @@ impl ProcPidExt for u32 {
 
         chain
     }
-}
 
-fn read_proc_starttime(pid: u32) -> Option<u64> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let after_comm = stat.rsplit_once(") ")?.1;
-    let fields: Vec<&str> = after_comm.split_whitespace().collect();
-    fields.get(19)?.parse::<u64>().ok()
-}
+    fn read_proc_starttime(pid: u32) -> Option<u64> {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let after_comm = stat.rsplit_once(") ")?.1;
+        after_comm
+            .split_whitespace()
+            .nth(19)
+            .and_then(|value| value.parse::<u64>().ok())
+    }
 
-impl ProcessService {
     pub async fn cleanup_expired(&self) {
         let mut cache = self.cache.write().await;
         cache.cleanup_expired();
@@ -176,7 +202,7 @@ impl ProcessService {
         self.spawn_cleanup_task_with_interval(shutdown, EXIT_CACHE_CLEANUP_INTERVAL)
     }
 
-    fn spawn_cleanup_task_with_interval(
+    pub(crate) fn spawn_cleanup_task_with_interval(
         &self,
         shutdown: CancellationToken,
         interval: Duration,
@@ -212,7 +238,7 @@ impl ProcessService {
                     cache.exit_deadlines.remove(&pid);
                 }
 
-                let info = tokio::task::spawn_blocking(move || pid.inspect_process())
+                let info = tokio::task::spawn_blocking(move || Self::inspect_process(pid))
                     .await
                     .ok()
                     .and_then(Result::ok);
@@ -223,7 +249,7 @@ impl ProcessService {
                         pid,
                         CachedProcessEntry {
                             info,
-                            starttime: read_proc_starttime(pid),
+                            starttime: Self::read_proc_starttime(pid),
                         },
                     );
                 }
@@ -238,14 +264,15 @@ impl ProcessService {
             match cache.exit_deadlines.get(&pid) {
                 Some(deadline) if *deadline <= now => true,
                 _ => {
-                    if let Some(entry) = cache.entries.get(&pid) {
-                        let is_same_process = match (entry.starttime, read_proc_starttime(pid)) {
-                            (Some(cached), Some(current)) => cached == current,
-                            _ => true,
-                        };
+                    if let Some(entry) = cache.entries.peek_cloned_by(&pid) {
+                        let is_same_process =
+                            match (entry.starttime, Self::read_proc_starttime(pid)) {
+                                (Some(cached), Some(current)) => cached == current,
+                                _ => true,
+                            };
 
                         if is_same_process {
-                            return Ok(entry.info.clone());
+                            return Ok(entry.info);
                         }
                     }
                     true
@@ -256,29 +283,101 @@ impl ProcessService {
         if should_cleanup {
             let mut cache = self.cache.write().await;
             cache.cleanup_expired();
-            if let Some(entry) = cache.entries.get(&pid).cloned() {
-                let is_same_process = match (entry.starttime, read_proc_starttime(pid)) {
+            if let Some(entry) = cache.entries.get_cloned_by(&pid) {
+                let is_same_process = match (entry.starttime, Self::read_proc_starttime(pid)) {
                     (Some(cached), Some(current)) => cached == current,
                     _ => true,
                 };
                 if is_same_process {
                     return Ok(entry.info);
                 }
-                cache.entries.remove(&pid);
+                cache.entries.remove_by(&pid);
             }
         }
 
-        let info = tokio::task::spawn_blocking(move || pid.inspect_process()).await??;
+        let info = tokio::task::spawn_blocking(move || Self::inspect_process(pid)).await??;
         let mut cache = self.cache.write().await;
         cache.entries.insert(
             pid,
             CachedProcessEntry {
                 info: info.clone(),
-                starttime: read_proc_starttime(pid),
+                starttime: Self::read_proc_starttime(pid),
             },
         );
         cache.exit_deadlines.remove(&pid);
         Ok(info)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn probe_inject_expired_cache_entry(&self, pid: u32) {
+        let mut cache = self.cache.write().await;
+        cache.entries.insert(
+            pid,
+            CachedProcessEntry {
+                info: ProcessInfo {
+                    pid,
+                    path: "/usr/bin/curl".to_string(),
+                    args: vec!["curl".to_string()],
+                    cwd: None,
+                    env_preview: Vec::new(),
+                    env_map: HashMap::new(),
+                    process_hash: None,
+                    process_hash_md5: None,
+                    process_hash_sha1: None,
+                    parent_chain: Vec::new(),
+                },
+                starttime: None,
+            },
+        );
+        cache.exit_deadlines.insert(
+            pid,
+            Instant::now()
+                .checked_sub(Duration::from_millis(1))
+                .unwrap_or_else(Instant::now),
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn probe_cache_len(&self) -> usize {
+        self.cache.read().await.entries.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_cache_capacity() -> usize {
+        PROCESS_INFO_CACHE_CAPACITY.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn probe_insert_cache_entry_for_pid(&self, pid: u32) {
+        let mut cache = self.cache.write().await;
+        cache.entries.insert(
+            pid,
+            CachedProcessEntry {
+                info: ProcessInfo {
+                    pid,
+                    path: "/usr/bin/true".to_string(),
+                    args: vec!["true".to_string()],
+                    cwd: None,
+                    env_preview: Vec::new(),
+                    env_map: HashMap::new(),
+                    process_hash: None,
+                    process_hash_md5: None,
+                    process_hash_sha1: None,
+                    parent_chain: Vec::new(),
+                },
+                starttime: None,
+            },
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn probe_cache_contains_pid(&self, pid: u32) -> bool {
+        self.cache
+            .read()
+            .await
+            .entries
+            .peek_cloned_by(&pid)
+            .is_some()
     }
 }
 
@@ -293,61 +392,9 @@ impl ProcessCache {
             if *deadline > now {
                 true
             } else {
-                self.entries.remove(pid);
+                self.entries.remove_by(pid);
                 false
             }
         });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::time::timeout;
-
-    #[tokio::test]
-    async fn cleanup_task_prunes_expired_entries() {
-        let service = ProcessService::default();
-        {
-            let mut cache = service.cache.write().await;
-            cache.entries.insert(
-                4242,
-                CachedProcessEntry {
-                    info: ProcessInfo {
-                        pid: 4242,
-                        path: "/usr/bin/curl".to_string(),
-                        args: vec!["curl".to_string()],
-                        cwd: None,
-                        env_preview: Vec::new(),
-                        process_hash: None,
-                        process_hash_md5: None,
-                        process_hash_sha1: None,
-                        parent_chain: Vec::new(),
-                    },
-                    starttime: None,
-                },
-            );
-            cache
-                .exit_deadlines
-                .insert(4242, Instant::now() - Duration::from_millis(1));
-        }
-
-        let shutdown = CancellationToken::new();
-        let handle =
-            service.spawn_cleanup_task_with_interval(shutdown.clone(), Duration::from_millis(10));
-
-        timeout(Duration::from_secs(1), async {
-            loop {
-                if service.cache.read().await.entries.is_empty() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("cleanup task should prune expired entries");
-
-        shutdown.cancel();
-        let _ = timeout(Duration::from_secs(1), handle).await;
     }
 }

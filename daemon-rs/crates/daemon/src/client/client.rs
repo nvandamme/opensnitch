@@ -25,76 +25,77 @@ enum SocketTarget<'a> {
     UnixAbstract(&'a str),
 }
 
-fn classify_socket_target(addr: &str) -> SocketTarget<'_> {
-    if let Some(path) = addr.strip_prefix("unix:") {
-        return SocketTarget::UnixPath(path);
+impl Client {
+    fn classify_socket_target(addr: &str) -> SocketTarget<'_> {
+        if let Some(path) = addr.strip_prefix("unix:") {
+            return SocketTarget::UnixPath(path);
+        }
+        if let Some(name) = addr.strip_prefix("unix-abstract:") {
+            return SocketTarget::UnixAbstract(name);
+        }
+        SocketTarget::Tcp(addr)
     }
-    if let Some(name) = addr.strip_prefix("unix-abstract:") {
-        return SocketTarget::UnixAbstract(name);
+
+    fn endpoint_with_keepalive(addr: &str) -> Result<Endpoint> {
+        Ok(Endpoint::from_shared(addr.to_string())?
+            .http2_keep_alive_interval(Duration::from_secs(5))
+            .keep_alive_timeout(Duration::from_secs(22))
+            .keep_alive_while_idle(true)
+            .tcp_keepalive(Some(Duration::from_secs(20))))
     }
-    SocketTarget::Tcp(addr)
-}
 
-fn endpoint_with_keepalive(addr: &str) -> Result<Endpoint> {
-    Ok(Endpoint::from_shared(addr.to_string())?
-        .http2_keep_alive_interval(Duration::from_secs(5))
-        .keep_alive_timeout(Duration::from_secs(22))
-        .keep_alive_while_idle(true)
-        .tcp_keepalive(Some(Duration::from_secs(20))))
-}
+    async fn connect_unix_channel(path: String) -> Result<Channel> {
+        let endpoint = Endpoint::try_from("http://[::]:50051")?;
+        let channel = endpoint
+            .connect_with_connector(service_fn(move |_: Uri| {
+                let path = path.clone();
+                async move { UnixStream::connect(path).await.map(TokioIo::new) }
+            }))
+            .await?;
+        Ok(channel)
+    }
 
-async fn connect_unix_channel(path: String) -> Result<Channel> {
-    let endpoint = Endpoint::try_from("http://[::]:50051")?;
-    let channel = endpoint
-        .connect_with_connector(service_fn(move |_: Uri| {
-            let path = path.clone();
-            async move { UnixStream::connect(path).await.map(TokioIo::new) }
-        }))
-        .await?;
-    Ok(channel)
-}
-
-async fn connect_abstract_unix_stream(name: String) -> std::io::Result<TokioIo<UnixStream>> {
-    let std_stream =
-        tokio::task::spawn_blocking(move || -> std::io::Result<std::os::unix::net::UnixStream> {
-            let fd = nix::sys::socket::socket(
-                nix::sys::socket::AddressFamily::Unix,
-                nix::sys::socket::SockType::Stream,
-                nix::sys::socket::SockFlag::SOCK_CLOEXEC,
-                None,
-            )
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
-            let addr = nix::sys::socket::UnixAddr::new_abstract(name.as_bytes())
+    async fn connect_abstract_unix_stream(name: String) -> std::io::Result<TokioIo<UnixStream>> {
+        let std_stream = tokio::task::spawn_blocking(
+            move || -> std::io::Result<std::os::unix::net::UnixStream> {
+                let fd = nix::sys::socket::socket(
+                    nix::sys::socket::AddressFamily::Unix,
+                    nix::sys::socket::SockType::Stream,
+                    nix::sys::socket::SockFlag::SOCK_CLOEXEC,
+                    None,
+                )
                 .map_err(|err| std::io::Error::other(err.to_string()))?;
-            nix::sys::socket::connect(fd.as_raw_fd(), &addr)
-                .map_err(|err| std::io::Error::other(err.to_string()))?;
-            Ok(std::os::unix::net::UnixStream::from(fd))
-        })
+                let addr = nix::sys::socket::UnixAddr::new_abstract(name.as_bytes())
+                    .map_err(|err| std::io::Error::other(err.to_string()))?;
+                nix::sys::socket::connect(fd.as_raw_fd(), &addr)
+                    .map_err(|err| std::io::Error::other(err.to_string()))?;
+                Ok(std::os::unix::net::UnixStream::from(fd))
+            },
+        )
         .await
         .map_err(|err| std::io::Error::other(err.to_string()))??;
 
-    std_stream.set_nonblocking(true)?;
-    UnixStream::from_std(std_stream).map(TokioIo::new)
-}
+        std_stream.set_nonblocking(true)?;
+        UnixStream::from_std(std_stream).map(TokioIo::new)
+    }
 
-async fn connect_unix_abstract_channel(name: String) -> Result<Channel> {
-    let endpoint = Endpoint::try_from("http://[::]:50051")?;
-    let channel = endpoint
-        .connect_with_connector(service_fn(move |_: Uri| {
-            let name = name.clone();
-            async move { connect_abstract_unix_stream(name).await }
-        }))
-        .await?;
-    Ok(channel)
-}
+    async fn connect_unix_abstract_channel(name: String) -> Result<Channel> {
+        let endpoint = Endpoint::try_from("http://[::]:50051")?;
+        let channel = endpoint
+            .connect_with_connector(service_fn(move |_: Uri| {
+                let name = name.clone();
+                async move { Self::connect_abstract_unix_stream(name).await }
+            }))
+            .await?;
+        Ok(channel)
+    }
 
-impl Client {
     pub async fn connect(addr: &str) -> Result<Self> {
-        let channel = match classify_socket_target(addr) {
-            SocketTarget::Tcp(target) => endpoint_with_keepalive(target)?.connect().await?,
-            SocketTarget::UnixPath(path) => connect_unix_channel(path.to_string()).await?,
+        let channel = match Self::classify_socket_target(addr) {
+            SocketTarget::Tcp(target) => Self::endpoint_with_keepalive(target)?.connect().await?,
+            SocketTarget::UnixPath(path) => Self::connect_unix_channel(path.to_string()).await?,
             SocketTarget::UnixAbstract(name) => {
-                connect_unix_abstract_channel(name.to_string()).await?
+                Self::connect_unix_abstract_channel(name.to_string()).await?
             }
         };
         let grpc = UiClient::new(channel);
@@ -112,7 +113,7 @@ impl Client {
             config.client_addr.clone()
         };
 
-        let endpoint = endpoint_with_keepalive(&addr)?;
+        let endpoint = Self::endpoint_with_keepalive(&addr)?;
 
         let channel = if config.client_auth.tls_options.skip_verify {
             Self::connect_with_skip_verify(&endpoint, config).await?
@@ -203,11 +204,6 @@ impl Client {
         Ok(tls)
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_grpc(grpc: UiClient<Channel>) -> Self {
-        Self { grpc }
-    }
-
     pub(crate) fn runtime_identity() -> (String, String) {
         let name = Self::read_text_file_trimmed("/proc/sys/kernel/hostname")
             .filter(|value| !value.is_empty())
@@ -226,15 +222,16 @@ impl Client {
             .map(|value| value.trim().to_string())
     }
 
-    pub fn build_subscribe_config(
-        &self,
+    pub fn build_subscribe_config_from_snapshots(
         config: &Config,
-        rules: Vec<pb::Rule>,
+        rules: &Arc<Vec<pb::Rule>>,
         is_firewall_running: bool,
-        system_firewall: Option<pb::SysFirewall>,
+        system_firewall: &Arc<Option<pb::SysFirewall>>,
     ) -> pb::ClientConfig {
         let (name, version) = Self::runtime_identity();
 
+        // Protobuf request messages are owned values. At the gRPC boundary,
+        // clone once from Arc snapshots to preserve immutable runtime snapshots.
         pb::ClientConfig {
             id: 1,
             name,
@@ -242,9 +239,26 @@ impl Client {
             is_firewall_running,
             config: config.raw_json.clone(),
             log_level: config.log_level,
-            rules,
-            system_firewall,
+            rules: rules.as_ref().clone(),
+            system_firewall: system_firewall.as_ref().clone(),
         }
+    }
+
+    #[cfg(test)]
+    pub fn build_subscribe_config(
+        config: &Config,
+        rules: Vec<pb::Rule>,
+        is_firewall_running: bool,
+        system_firewall: Option<pb::SysFirewall>,
+    ) -> pb::ClientConfig {
+        let rules = Arc::new(rules);
+        let system_firewall = Arc::new(system_firewall);
+        Self::build_subscribe_config_from_snapshots(
+            config,
+            &rules,
+            is_firewall_running,
+            &system_firewall,
+        )
     }
 
     pub async fn subscribe(&mut self, cfg: pb::ClientConfig) -> Result<pb::ClientConfig> {

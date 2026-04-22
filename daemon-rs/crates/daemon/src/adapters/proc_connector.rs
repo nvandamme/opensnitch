@@ -28,48 +28,35 @@ pub(crate) const PROC_EVENT_FORK: u32 = 0x0000_0001;
 pub(crate) const PROC_EVENT_EXEC: u32 = 0x0000_0002;
 pub(crate) const PROC_EVENT_EXIT: u32 = 0x8000_0000;
 
-pub(crate) trait ProcConnectorFrameExt {
-    fn parse_proc_pid_event(&self) -> Option<ProcPidEvent>;
-    fn connector_payload(&self) -> Option<&[u8]>;
-    fn read_u16_ne_at(&self, offset: usize) -> Option<u16>;
-    fn read_u32_ne_at(&self, offset: usize) -> Option<u32>;
-}
+impl ProcEventSocket {
+    pub fn recv_pid_event(&self, timeout: Duration) -> Result<Option<ProcPidEvent>> {
+        let mut buf = vec![0_u8; 4096];
+        let Some(size) = Self::recv_with_timeout(&self.sock, &mut buf, timeout)? else {
+            return Ok(None);
+        };
 
-impl ProcConnectorFrameExt for [u8] {
-    fn parse_proc_pid_event(&self) -> Option<ProcPidEvent> {
-        let payload = self.connector_payload()?;
-        let what = payload.read_u32_ne_at(0)?;
-
-        match what {
-            PROC_EVENT_EXEC | PROC_EVENT_EXIT => {
-                let pid = payload.read_u32_ne_at(PROC_EVENT_EXEC_PID_OFFSET)?;
-                let kind = if what == PROC_EVENT_EXEC {
-                    ProcEventKind::Exec
-                } else {
-                    ProcEventKind::Exit
-                };
-                Some(ProcPidEvent { pid, kind })
-            }
-            PROC_EVENT_FORK => {
-                let pid = payload.read_u32_ne_at(PROC_EVENT_FORK_CHILD_PID_OFFSET)?;
-                Some(ProcPidEvent {
-                    pid,
-                    kind: ProcEventKind::Fork,
-                })
-            }
-            _ => None,
-        }
+        Ok(Self::parse_pid_event(&buf[..size]))
     }
 
-    fn connector_payload(&self) -> Option<&[u8]> {
+    fn read_u16_ne_at(frame: &[u8], offset: usize) -> Option<u16> {
+        let bytes = frame.get(offset..offset + 2)?;
+        Some(u16::from_ne_bytes([bytes[0], bytes[1]]))
+    }
+
+    fn read_u32_ne_at(frame: &[u8], offset: usize) -> Option<u32> {
+        let bytes = frame.get(offset..offset + 4)?;
+        Some(u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn connector_payload(frame: &[u8]) -> Option<&[u8]> {
         let payload_offset = NLMSG_HDR_LEN + CN_MSG_LEN;
         let min_len = payload_offset + PROC_EVENT_HEADER_LEN;
-        if self.len() < min_len {
+        if frame.len() < min_len {
             return None;
         }
 
-        let payload = &self[payload_offset..];
-        let cn_msg_data_len = self.read_u16_ne_at(NLMSG_HDR_LEN + 16)? as usize;
+        let payload = &frame[payload_offset..];
+        let cn_msg_data_len = Self::read_u16_ne_at(frame, NLMSG_HDR_LEN + 16)? as usize;
         if cn_msg_data_len == 0 {
             return None;
         }
@@ -80,84 +67,112 @@ impl ProcConnectorFrameExt for [u8] {
         Some(&payload[..cn_msg_data_len])
     }
 
-    fn read_u16_ne_at(&self, offset: usize) -> Option<u16> {
-        let bytes = self.get(offset..offset + 2)?;
-        Some(u16::from_ne_bytes([bytes[0], bytes[1]]))
+    fn parse_pid_event(frame: &[u8]) -> Option<ProcPidEvent> {
+        let payload = Self::connector_payload(frame)?;
+        let what = Self::read_u32_ne_at(payload, 0)?;
+
+        match what {
+            PROC_EVENT_EXEC | PROC_EVENT_EXIT => {
+                let pid = Self::read_u32_ne_at(payload, PROC_EVENT_EXEC_PID_OFFSET)?;
+                let kind = if what == PROC_EVENT_EXEC {
+                    ProcEventKind::Exec
+                } else {
+                    ProcEventKind::Exit
+                };
+                Some(ProcPidEvent { pid, kind })
+            }
+            PROC_EVENT_FORK => {
+                let pid = Self::read_u32_ne_at(payload, PROC_EVENT_FORK_CHILD_PID_OFFSET)?;
+                Some(ProcPidEvent {
+                    pid,
+                    kind: ProcEventKind::Fork,
+                })
+            }
+            _ => None,
+        }
     }
 
-    fn read_u32_ne_at(&self, offset: usize) -> Option<u32> {
-        let bytes = self.get(offset..offset + 4)?;
-        Some(u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-    }
-}
+    fn recv_with_timeout(
+        sock: &Socket,
+        buf: &mut [u8],
+        timeout: Duration,
+    ) -> Result<Option<usize>> {
+        // SAFETY: socket fd stays valid for the duration of this function.
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(sock.as_raw_fd()) };
+        let mut pfd = [PollFd::new(&borrowed_fd, PollFlags::IN)];
+        let timeout_ts = Timespec::try_from(timeout).ok();
 
-impl ProcEventSocket {
-    pub fn recv_pid_event(&self, timeout: Duration) -> Result<Option<ProcPidEvent>> {
-        let mut buf = vec![0_u8; 4096];
-        let Some(size) = recv_with_timeout(&self.sock, &mut buf, timeout)? else {
+        let poll_rc = poll(&mut pfd, timeout_ts.as_ref())?;
+        if poll_rc == 0 {
             return Ok(None);
-        };
+        }
 
-        Ok(buf[..size].parse_proc_pid_event())
-    }
-}
+        if !pfd[0].revents().contains(PollFlags::IN) {
+            return Ok(None);
+        }
 
-pub fn open_proc_events() -> Result<ProcEventSocket> {
-    let _ = switch_to_host_netns();
-    let mut sock = Socket::new(libc::NETLINK_CONNECTOR as isize)?;
-    sock.bind(&SocketAddr::new(std::process::id(), CN_IDX_PROC))?;
-    sock.send_to(&build_proc_listen_msg(), &SocketAddr::new(0, 0), 0)?;
-    Ok(ProcEventSocket { sock })
-}
-
-fn recv_with_timeout(sock: &Socket, buf: &mut [u8], timeout: Duration) -> Result<Option<usize>> {
-    // SAFETY: socket fd stays valid for the duration of this function.
-    let borrowed_fd = unsafe { BorrowedFd::borrow_raw(sock.as_raw_fd()) };
-    let mut pfd = [PollFd::new(&borrowed_fd, PollFlags::IN)];
-    let timeout_ts = Timespec::try_from(timeout).ok();
-
-    let poll_rc = poll(&mut pfd, timeout_ts.as_ref())?;
-    if poll_rc == 0 {
-        return Ok(None);
+        match sock.recv(&mut &mut buf[..], libc::MSG_DONTWAIT) {
+            Ok(size) => Ok(Some(size)),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            Err(err) => Err(err.into()),
+        }
     }
 
-    if !pfd[0].revents().contains(PollFlags::IN) {
-        return Ok(None);
+    fn switch_to_host_netns() -> Result<()> {
+        let host_netns = std::fs::File::open("/proc/1/ns/net")?;
+        move_into_link_name_space(host_netns.as_fd(), Some(LinkNameSpaceType::Network))?;
+        Ok(())
     }
 
-    match sock.recv(&mut &mut buf[..], libc::MSG_DONTWAIT) {
-        Ok(size) => Ok(Some(size)),
-        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
-        Err(err) => Err(err.into()),
+    fn build_listen_msg() -> Vec<u8> {
+        let mut msg = vec![0_u8; 40];
+
+        // nlmsghdr
+        msg[0..4].copy_from_slice(&(40_u32).to_ne_bytes());
+        msg[4..6].copy_from_slice(&(libc::NLMSG_DONE as u16).to_ne_bytes());
+        msg[6..8].copy_from_slice(&(0_u16).to_ne_bytes());
+        msg[8..12].copy_from_slice(&(0_u32).to_ne_bytes());
+        msg[12..16].copy_from_slice(&(std::process::id()).to_ne_bytes());
+
+        // cn_msg
+        msg[16..20].copy_from_slice(&CN_IDX_PROC.to_ne_bytes());
+        msg[20..24].copy_from_slice(&CN_VAL_PROC.to_ne_bytes());
+        msg[24..28].copy_from_slice(&(0_u32).to_ne_bytes());
+        msg[28..32].copy_from_slice(&(0_u32).to_ne_bytes());
+        msg[32..34].copy_from_slice(&(4_u16).to_ne_bytes());
+        msg[34..36].copy_from_slice(&(0_u16).to_ne_bytes());
+
+        // proc_cn_mcast_op
+        msg[36..40].copy_from_slice(&PROC_CN_MCAST_LISTEN.to_ne_bytes());
+
+        msg
     }
-}
 
-fn switch_to_host_netns() -> Result<()> {
-    let host_netns = std::fs::File::open("/proc/1/ns/net")?;
-    move_into_link_name_space(host_netns.as_fd(), Some(LinkNameSpaceType::Network))?;
-    Ok(())
-}
+    pub fn open() -> Result<Self> {
+        let _ = Self::switch_to_host_netns();
+        let mut sock = Socket::new(libc::NETLINK_CONNECTOR as isize)?;
+        sock.bind(&SocketAddr::new(std::process::id(), CN_IDX_PROC))?;
+        sock.send_to(&Self::build_listen_msg(), &SocketAddr::new(0, 0), 0)?;
+        Ok(Self { sock })
+    }
 
-fn build_proc_listen_msg() -> Vec<u8> {
-    let mut msg = vec![0_u8; 40];
+    #[cfg(test)]
+    pub(crate) fn probe_read_u16_ne_at(frame: &[u8], offset: usize) -> Option<u16> {
+        Self::read_u16_ne_at(frame, offset)
+    }
 
-    // nlmsghdr
-    msg[0..4].copy_from_slice(&(40_u32).to_ne_bytes());
-    msg[4..6].copy_from_slice(&(libc::NLMSG_DONE as u16).to_ne_bytes());
-    msg[6..8].copy_from_slice(&(0_u16).to_ne_bytes());
-    msg[8..12].copy_from_slice(&(0_u32).to_ne_bytes());
-    msg[12..16].copy_from_slice(&(std::process::id()).to_ne_bytes());
+    #[cfg(test)]
+    pub(crate) fn probe_read_u32_ne_at(frame: &[u8], offset: usize) -> Option<u32> {
+        Self::read_u32_ne_at(frame, offset)
+    }
 
-    // cn_msg
-    msg[16..20].copy_from_slice(&CN_IDX_PROC.to_ne_bytes());
-    msg[20..24].copy_from_slice(&CN_VAL_PROC.to_ne_bytes());
-    msg[24..28].copy_from_slice(&(0_u32).to_ne_bytes());
-    msg[28..32].copy_from_slice(&(0_u32).to_ne_bytes());
-    msg[32..34].copy_from_slice(&(4_u16).to_ne_bytes());
-    msg[34..36].copy_from_slice(&(0_u16).to_ne_bytes());
+    #[cfg(test)]
+    pub(crate) fn probe_connector_payload(frame: &[u8]) -> Option<&[u8]> {
+        Self::connector_payload(frame)
+    }
 
-    // proc_cn_mcast_op
-    msg[36..40].copy_from_slice(&PROC_CN_MCAST_LISTEN.to_ne_bytes());
-
-    msg
+    #[cfg(test)]
+    pub(crate) fn probe_parse_pid_event(frame: &[u8]) -> Option<ProcPidEvent> {
+        Self::parse_pid_event(frame)
+    }
 }

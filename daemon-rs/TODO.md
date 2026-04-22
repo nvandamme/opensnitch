@@ -88,6 +88,9 @@ Override at runtime when needed:
 - [x] Extend Rust config/logging parity for Go-managed logging fields and outputs (`LogUTC`, `LogMicro`, `Server.LogFile`, `Server.Loggers`, logger-manager style sinks) by parsing/applying these fields and enabling active file/UDP sink routing.
 - [x] Port the Go `dns/systemd.ResolvedMonitor` compatibility path by adding direct systemd-resolved varlink socket monitoring in Rust with `resolvectl` fallback.
 
+6. Rule operator scope parity follow-up
+- [ ] Add optional `scope` field to gRPC/proto `Operator` in a dedicated compatibility PR (default dst semantics, backward-compatible wire evolution, Go/Rust/Python client alignment).
+
 ## Netlink Parity Matrix
 
 | Protocol Family | Current Use In Daemon | Current Rust Crates | Recommended Stack | Recommendation |

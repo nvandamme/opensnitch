@@ -55,35 +55,34 @@ impl Default for BusCaps {
     }
 }
 
-#[allow(dead_code)]
-pub fn build_bus(cap: usize) -> (Bus, BusRx) {
-    build_bus_with_caps(BusCaps::uniform(cap))
-}
+pub struct BusState;
 
-pub fn build_bus_with_caps(caps: BusCaps) -> (Bus, BusRx) {
-    let (connect_tx, connect_rx) = mpsc::channel(caps.connect);
-    let (kernel_tx, kernel_rx) = mpsc::channel(caps.kernel);
-    let (client_cmd_tx, client_cmd_rx) = mpsc::channel(caps.client_cmd);
-    let (verdict_tx, verdict_rx) = mpsc::channel(caps.verdict);
-    let (task_reply_tx, task_reply_rx) = mpsc::channel(caps.task_reply);
-    let (alert_tx, alert_rx) = mpsc::channel(caps.alert);
+impl BusState {
+    pub fn build_with_caps(caps: BusCaps) -> (Bus, BusRx) {
+        let (connect_tx, connect_rx) = mpsc::channel(caps.connect);
+        let (kernel_tx, kernel_rx) = mpsc::channel(caps.kernel);
+        let (client_cmd_tx, client_cmd_rx) = mpsc::channel(caps.client_cmd);
+        let (verdict_tx, verdict_rx) = mpsc::channel(caps.verdict);
+        let (task_reply_tx, task_reply_rx) = mpsc::channel(caps.task_reply);
+        let (alert_tx, alert_rx) = mpsc::channel(caps.alert);
 
-    (
-        Bus {
-            connect_tx,
-            kernel_tx,
-            client_cmd_tx,
-            verdict_tx,
-            task_reply_tx,
-            alert_tx,
-        },
-        BusRx {
-            connect_rx,
-            kernel_rx,
-            client_cmd_rx,
-            verdict_rx,
-            task_reply_rx,
-            alert_rx,
-        },
-    )
+        (
+            Bus {
+                connect_tx,
+                kernel_tx,
+                client_cmd_tx,
+                verdict_tx,
+                task_reply_tx,
+                alert_tx,
+            },
+            BusRx {
+                connect_rx,
+                kernel_rx,
+                client_cmd_rx,
+                verdict_rx,
+                task_reply_rx,
+                alert_rx,
+            },
+        )
+    }
 }

@@ -31,7 +31,6 @@ pub enum WorkerJoinStatus {
     Panicked,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerCommand {
     Start,
@@ -39,7 +38,6 @@ pub enum WorkerCommand {
     Probe,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerCommandResult {
     Applied,
@@ -53,22 +51,6 @@ pub trait WorkerControl: Send {
     fn control(&self, command: WorkerCommand) -> WorkerCommandResult {
         let _ = command;
         WorkerCommandResult::Unsupported
-    }
-
-    // Optional spawn hooks for workers with explicit lifecycle control.
-    fn spawn_once(&self) -> WorkerCommandResult {
-        self.control(WorkerCommand::Start)
-    }
-
-    #[allow(dead_code)]
-    fn spawn(&self) -> WorkerCommandResult {
-        self.spawn_once()
-    }
-
-    // Optional start/stop hooks for workers that support explicit command/control.
-    #[allow(dead_code)]
-    fn start(&self) {
-        let _ = self.spawn();
     }
 
     fn stop(&self) {
@@ -87,7 +69,11 @@ pub trait WorkerControl: Send {
     fn join(self: Box<Self>) -> WorkerJoinStatus;
 }
 
-struct ThreadWorkerControl {
+// Marker for worker controls that are intended to be started once per runtime
+// lifecycle, then only restarted through explicit control commands.
+pub trait OneShotWorker {}
+
+pub(crate) struct ThreadWorkerControl {
     name: &'static str,
     handle: ThreadJoinHandle<()>,
 }
@@ -96,13 +82,13 @@ impl ThreadWorkerControl {
     fn new(name: &'static str, handle: ThreadJoinHandle<()>) -> Self {
         Self { name, handle }
     }
-}
 
-pub fn boxed_thread_worker(
-    name: &'static str,
-    handle: ThreadJoinHandle<()>,
-) -> Box<dyn WorkerControl> {
-    Box::new(ThreadWorkerControl::new(name, handle))
+    pub(crate) fn boxed(
+        name: &'static str,
+        handle: ThreadJoinHandle<()>,
+    ) -> Box<dyn WorkerControl> {
+        Box::new(Self::new(name, handle))
+    }
 }
 
 impl WorkerControl for ThreadWorkerControl {
@@ -169,36 +155,36 @@ impl RuntimeHandles {
         }
 
         let workers = self.workers;
-        match tokio::task::spawn_blocking(move || join_workers(workers)).await {
+        match tokio::task::spawn_blocking(move || Self::join_workers(workers)).await {
             Ok(()) => {}
             Err(err) => error!("worker join task failed: {}", err),
         }
     }
-}
 
-fn join_workers(workers: Vec<Box<dyn WorkerControl>>) {
-    for worker in workers {
-        let name = worker.worker_name();
-        let started = Instant::now();
+    fn join_workers(workers: Vec<Box<dyn WorkerControl>>) {
+        for worker in workers {
+            let name = worker.worker_name();
+            let started = Instant::now();
 
-        while !worker.is_finished() && started.elapsed() < WORKER_JOIN_TIMEOUT {
-            thread::sleep(WORKER_JOIN_POLL_INTERVAL);
-        }
+            while !worker.is_finished() && started.elapsed() < WORKER_JOIN_TIMEOUT {
+                thread::sleep(WORKER_JOIN_POLL_INTERVAL);
+            }
 
-        if !worker.is_finished() {
-            worker.stop();
-            warn!(
-                "worker '{}' state='{}' did not stop within {:?}; detaching thread",
-                name,
-                worker.state().as_str(),
-                WORKER_JOIN_TIMEOUT
-            );
-            continue;
-        }
+            if !worker.is_finished() {
+                worker.stop();
+                warn!(
+                    "worker '{}' state='{}' did not stop within {:?}; detaching thread",
+                    name,
+                    worker.state().as_str(),
+                    WORKER_JOIN_TIMEOUT
+                );
+                continue;
+            }
 
-        match worker.join() {
-            WorkerJoinStatus::Stopped => info!("worker '{}' stopped", name),
-            WorkerJoinStatus::Panicked => error!("worker '{}' panicked", name),
+            match worker.join() {
+                WorkerJoinStatus::Stopped => info!("worker '{}' stopped", name),
+                WorkerJoinStatus::Panicked => error!("worker '{}' panicked", name),
+            }
         }
     }
 }

@@ -28,238 +28,260 @@ const TCP_ALL_STATES: u32 = (1 << 1)
     | (1 << 12)
     | (0x2001);
 
-pub(crate) trait SocketInfoDiagExt {
-    fn diag_socket_id(&self) -> SocketId;
-    fn cookie_bytes(&self) -> [u8; 8];
-}
+pub(crate) struct SocketDiagAdapter;
 
-impl SocketInfoDiagExt for SocketInfo {
-    fn diag_socket_id(&self) -> SocketId {
-        SocketId {
-            source_port: self.src_port,
-            destination_port: self.dst_port,
-            source_address: self.src,
-            destination_address: self.dst,
-            interface_id: self.iface,
-            cookie: self.cookie_bytes(),
-        }
-    }
-
-    fn cookie_bytes(&self) -> [u8; 8] {
+impl SocketDiagAdapter {
+    fn socket_cookie_bytes(socket: &SocketInfo) -> [u8; 8] {
         let mut cookie = [0_u8; 8];
-        cookie[..4].copy_from_slice(&self.cookie0.to_ne_bytes());
-        cookie[4..].copy_from_slice(&self.cookie1.to_ne_bytes());
+        cookie[..4].copy_from_slice(&socket.cookie0.to_ne_bytes());
+        cookie[4..].copy_from_slice(&socket.cookie1.to_ne_bytes());
         cookie
     }
-}
 
-pub(crate) trait SocketCookieExt {
-    fn decode_words(self) -> (u32, u32);
-}
+    fn diag_socket_id(socket: &SocketInfo) -> SocketId {
+        SocketId {
+            source_port: socket.src_port,
+            destination_port: socket.dst_port,
+            source_address: socket.src,
+            destination_address: socket.dst,
+            interface_id: socket.iface,
+            cookie: Self::socket_cookie_bytes(socket),
+        }
+    }
 
-impl SocketCookieExt for [u8; 8] {
-    fn decode_words(self) -> (u32, u32) {
+    fn decode_cookie_words(cookie: [u8; 8]) -> (u32, u32) {
         (
-            u32::from_ne_bytes([self[0], self[1], self[2], self[3]]),
-            u32::from_ne_bytes([self[4], self[5], self[6], self[7]]),
+            u32::from_ne_bytes([cookie[0], cookie[1], cookie[2], cookie[3]]),
+            u32::from_ne_bytes([cookie[4], cookie[5], cookie[6], cookie[7]]),
         )
     }
-}
 
-pub fn dump_sockets(family: u8, protocol: u8) -> Result<Vec<SocketInfo>> {
-    let families: Vec<u8> = match family {
-        0 => vec![AF_INET, AF_INET6],
-        AF_INET | AF_INET6 => vec![family],
-        _ => Vec::new(),
-    };
+    fn select_socket_candidates(
+        sockets: &[SocketInfo],
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+    ) -> Vec<SocketInfo> {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
 
-    if families.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let protocols: Vec<u8> = match protocol {
-        0 => vec![IPPROTO_TCP, IPPROTO_UDP],
-        _ => vec![protocol],
-    };
-
-    let mut out = Vec::new();
-    for af in families {
-        for proto in &protocols {
-            out.extend(dump_sockets_family_proto(af, *proto)?);
-        }
-    }
-
-    Ok(out)
-}
-
-fn dump_sockets_family_proto(family: u8, protocol: u8) -> Result<Vec<SocketInfo>> {
-    let mut socket = Socket::new(NETLINK_SOCK_DIAG)?;
-    let _ = socket.bind_auto()?.port_number();
-    socket.connect(&SocketAddr::new(0, 0))?;
-
-    let request = build_typed_request(family, protocol);
-    let mut req_buf = vec![0; request.header.length as usize];
-    request.serialize(&mut req_buf);
-    socket.send(&req_buf, 0)?;
-
-    let mut out = Vec::new();
-    let mut recv_buf = vec![0_u8; 64 * 1024];
-
-    while let Ok(size) = socket.recv(&mut &mut recv_buf[..], 0) {
-        let mut offset = 0_usize;
-        while offset < size {
-            let bytes = &recv_buf[offset..size];
-            let msg = match NetlinkMessage::<SockDiagMessage>::deserialize(bytes) {
-                Ok(msg) => msg,
-                Err(_) => break,
-            };
-
-            match msg.payload {
-                NetlinkPayload::InnerMessage(SockDiagMessage::InetResponse(resp)) => {
-                    out.push(SocketInfo::from(resp.as_ref()));
+        for s in sockets {
+            if s.src_port == src_port && s.dst_port == dst_port && s.src == src && s.dst == dst {
+                if seen.insert((s.inode, s.uid, s.src_port, s.dst_port)) {
+                    out.push(s.clone());
                 }
-                NetlinkPayload::Done(_) => return Ok(out),
-                _ => {}
-            }
-
-            let len = msg.header.length as usize;
-            if len == 0 {
-                break;
-            }
-            offset += len;
-        }
-    }
-
-    Ok(out)
-}
-
-pub fn find_socket(
-    family: u8,
-    protocol: u8,
-    src: IpAddr,
-    src_port: u16,
-    dst: IpAddr,
-    dst_port: u16,
-) -> Result<Option<SocketInfo>> {
-    let candidates = find_socket_candidates(family, protocol, src, src_port, dst, dst_port)?;
-    Ok(candidates.into_iter().next())
-}
-
-pub fn find_socket_candidates(
-    family: u8,
-    protocol: u8,
-    src: IpAddr,
-    src_port: u16,
-    dst: IpAddr,
-    dst_port: u16,
-) -> Result<Vec<SocketInfo>> {
-    let sockets = dump_sockets(family, protocol)?;
-    Ok(select_socket_candidates(
-        &sockets, src, src_port, dst, dst_port,
-    ))
-}
-
-pub(crate) fn select_socket_candidates(
-    sockets: &[SocketInfo],
-    src: IpAddr,
-    src_port: u16,
-    dst: IpAddr,
-    dst_port: u16,
-) -> Vec<SocketInfo> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-
-    for s in sockets {
-        if s.src_port == src_port && s.dst_port == dst_port && s.src == src && s.dst == dst {
-            if seen.insert((s.inode, s.uid, s.src_port, s.dst_port)) {
-                out.push(s.clone());
             }
         }
-    }
 
-    // Go parity fallback: include wildcard destination rows as potential matches.
-    for s in sockets {
-        if s.src_port == src_port && s.src == src && s.dst_port == 0 && s.dst.is_unspecified() {
-            if seen.insert((s.inode, s.uid, s.src_port, s.dst_port)) {
-                out.push(s.clone());
+        // Go parity fallback: include wildcard destination rows as potential matches.
+        for s in sockets {
+            if s.src_port == src_port && s.src == src && s.dst_port == 0 && s.dst.is_unspecified() {
+                if seen.insert((s.inode, s.uid, s.src_port, s.dst_port)) {
+                    out.push(s.clone());
+                }
             }
         }
-    }
 
-    // Go parity fallback: include same src/src-port/dst-port rows even when destination IP differs.
-    for s in sockets {
-        if s.src_port == src_port && s.src == src && s.dst_port == dst_port {
-            if seen.insert((s.inode, s.uid, s.src_port, s.dst_port)) {
-                out.push(s.clone());
+        // Go parity fallback: include same src/src-port/dst-port rows even when destination IP differs.
+        for s in sockets {
+            if s.src_port == src_port && s.src == src && s.dst_port == dst_port {
+                if seen.insert((s.inode, s.uid, s.src_port, s.dst_port)) {
+                    out.push(s.clone());
+                }
             }
         }
+
+        out
     }
 
-    out
-}
+    fn build_destroy_message(
+        family: u8,
+        protocol: u8,
+        socket: &SocketInfo,
+    ) -> NetlinkMessage<SockDiagMessage> {
+        let socket_id = Self::diag_socket_id(socket);
 
-pub fn kill_socket(family: u8, protocol: u8, socket: &SocketInfo) -> Result<()> {
-    let mut sock = Socket::new(libc::NETLINK_INET_DIAG as isize)?;
-    let _ = sock.bind_auto()?.port_number();
-    sock.connect(&SocketAddr::new(0, 0))?;
-    let msg = build_destroy_message(family, protocol, socket);
-    let mut req = vec![0_u8; msg.buffer_len()];
-    msg.serialize(&mut req);
-    sock.send(&req, 0)?;
-    Ok(())
-}
+        let mut header = NetlinkHeader::default();
+        header.flags = NLM_F_REQUEST | NLM_F_ACK;
+        header.sequence_number = 1;
+        header.port_number = std::process::id();
 
-fn build_typed_request(family: u8, protocol: u8) -> NetlinkMessage<SockDiagMessage> {
-    let mut nl_hdr = NetlinkHeader::default();
-    nl_hdr.flags = NLM_F_REQUEST | NLM_F_DUMP;
+        let mut msg = NetlinkMessage::new(
+            header,
+            SockDiagMessage::InetRequest(InetRequest {
+                family,
+                protocol,
+                extensions: ExtensionFlags::empty(),
+                states: StateFlags::from_bits_truncate(TCP_ALL_STATES),
+                socket_id,
+            })
+            .into(),
+        );
+        msg.finalize();
+        msg.header.message_type = SOCK_DESTROY;
+        msg
+    }
 
-    let socket_id = if family == AF_INET6 {
-        SocketId::new_v6()
-    } else {
-        SocketId::new_v4()
-    };
+    pub fn dump_sockets(family: u8, protocol: u8) -> Result<Vec<SocketInfo>> {
+        let families: Vec<u8> = match family {
+            0 => vec![AF_INET, AF_INET6],
+            AF_INET | AF_INET6 => vec![family],
+            _ => Vec::new(),
+        };
 
-    let mut msg = NetlinkMessage::new(
-        nl_hdr,
-        SockDiagMessage::InetRequest(InetRequest {
-            family,
-            protocol,
-            extensions: netlink_packet_sock_diag::inet::ExtensionFlags::all(),
-            states: StateFlags::all(),
-            socket_id,
-        })
-        .into(),
-    );
-    msg.finalize();
-    msg
-}
+        if families.is_empty() {
+            return Ok(Vec::new());
+        }
 
-pub(crate) fn build_destroy_message(
-    family: u8,
-    protocol: u8,
-    socket: &SocketInfo,
-) -> NetlinkMessage<SockDiagMessage> {
-    let socket_id = socket.diag_socket_id();
+        let protocols: Vec<u8> = match protocol {
+            0 => vec![IPPROTO_TCP, IPPROTO_UDP],
+            _ => vec![protocol],
+        };
 
-    let mut header = NetlinkHeader::default();
-    header.flags = NLM_F_REQUEST | NLM_F_ACK;
-    header.sequence_number = 1;
-    header.port_number = std::process::id();
+        let mut out = Vec::new();
+        for af in families {
+            for proto in &protocols {
+                out.extend(Self::dump_sockets_family_proto(af, *proto)?);
+            }
+        }
 
-    let mut msg = NetlinkMessage::new(
-        header,
-        SockDiagMessage::InetRequest(InetRequest {
-            family,
-            protocol,
-            extensions: ExtensionFlags::empty(),
-            states: StateFlags::from_bits_truncate(TCP_ALL_STATES),
-            socket_id,
-        })
-        .into(),
-    );
-    msg.finalize();
-    msg.header.message_type = SOCK_DESTROY;
-    msg
+        Ok(out)
+    }
+
+    fn dump_sockets_family_proto(family: u8, protocol: u8) -> Result<Vec<SocketInfo>> {
+        let mut socket = Socket::new(NETLINK_SOCK_DIAG)?;
+        let _ = socket.bind_auto()?.port_number();
+        socket.connect(&SocketAddr::new(0, 0))?;
+
+        let request = Self::build_typed_request(family, protocol);
+        let mut req_buf = vec![0; request.header.length as usize];
+        request.serialize(&mut req_buf);
+        socket.send(&req_buf, 0)?;
+
+        let mut out = Vec::new();
+        let mut recv_buf = vec![0_u8; 64 * 1024];
+
+        while let Ok(size) = socket.recv(&mut &mut recv_buf[..], 0) {
+            let mut offset = 0_usize;
+            while offset < size {
+                let bytes = &recv_buf[offset..size];
+                let msg = match NetlinkMessage::<SockDiagMessage>::deserialize(bytes) {
+                    Ok(msg) => msg,
+                    Err(_) => break,
+                };
+
+                match msg.payload {
+                    NetlinkPayload::InnerMessage(SockDiagMessage::InetResponse(resp)) => {
+                        out.push(SocketInfo::from(resp.as_ref()));
+                    }
+                    NetlinkPayload::Done(_) => return Ok(out),
+                    _ => {}
+                }
+
+                let len = msg.header.length as usize;
+                if len == 0 {
+                    break;
+                }
+                offset += len;
+            }
+        }
+
+        Ok(out)
+    }
+
+    pub fn find_socket(
+        family: u8,
+        protocol: u8,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+    ) -> Result<Option<SocketInfo>> {
+        let candidates =
+            Self::find_socket_candidates(family, protocol, src, src_port, dst, dst_port)?;
+        Ok(candidates.into_iter().next())
+    }
+
+    pub fn find_socket_candidates(
+        family: u8,
+        protocol: u8,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+    ) -> Result<Vec<SocketInfo>> {
+        let sockets = Self::dump_sockets(family, protocol)?;
+        Ok(Self::select_socket_candidates(
+            &sockets, src, src_port, dst, dst_port,
+        ))
+    }
+
+    pub fn kill_socket(family: u8, protocol: u8, socket: &SocketInfo) -> Result<()> {
+        let mut sock = Socket::new(libc::NETLINK_INET_DIAG as isize)?;
+        let _ = sock.bind_auto()?.port_number();
+        sock.connect(&SocketAddr::new(0, 0))?;
+        let msg = Self::build_destroy_message(family, protocol, socket);
+        let mut req = vec![0_u8; msg.buffer_len()];
+        msg.serialize(&mut req);
+        sock.send(&req, 0)?;
+        Ok(())
+    }
+
+    fn build_typed_request(family: u8, protocol: u8) -> NetlinkMessage<SockDiagMessage> {
+        let mut nl_hdr = NetlinkHeader::default();
+        nl_hdr.flags = NLM_F_REQUEST | NLM_F_DUMP;
+
+        let socket_id = if family == AF_INET6 {
+            SocketId::new_v6()
+        } else {
+            SocketId::new_v4()
+        };
+
+        let mut msg = NetlinkMessage::new(
+            nl_hdr,
+            SockDiagMessage::InetRequest(InetRequest {
+                family,
+                protocol,
+                extensions: netlink_packet_sock_diag::inet::ExtensionFlags::all(),
+                states: StateFlags::all(),
+                socket_id,
+            })
+            .into(),
+        );
+        msg.finalize();
+        msg
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_socket_cookie_bytes(socket: &SocketInfo) -> [u8; 8] {
+        Self::socket_cookie_bytes(socket)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_decode_cookie_words(cookie: [u8; 8]) -> (u32, u32) {
+        Self::decode_cookie_words(cookie)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_select_socket_candidates(
+        sockets: &[SocketInfo],
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+    ) -> Vec<SocketInfo> {
+        Self::select_socket_candidates(sockets, src, src_port, dst, dst_port)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_build_destroy_message(
+        family: u8,
+        protocol: u8,
+        socket: &SocketInfo,
+    ) -> NetlinkMessage<SockDiagMessage> {
+        Self::build_destroy_message(family, protocol, socket)
+    }
 }
 
 impl From<&netlink_packet_sock_diag::inet::InetResponse> for SocketInfo {
@@ -281,7 +303,7 @@ impl From<&netlink_packet_sock_diag::inet::InetResponse> for SocketInfo {
             }
         }
 
-        let (cookie0, cookie1) = header.socket_id.cookie.decode_words();
+        let (cookie0, cookie1) = SocketDiagAdapter::decode_cookie_words(header.socket_id.cookie);
 
         Self {
             family: header.family,

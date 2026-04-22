@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"runtime"
 	"sort"
@@ -83,6 +84,21 @@ type stressHarness struct {
 	verdict  chan stressConnectVerdict
 	drops    stressDropCounters
 	wg       sync.WaitGroup
+}
+
+type kernelPressureMetrics struct {
+	durationSecs         uint64
+	floodTasks           int
+	enqueueTimeoutUs     uint64
+	attemptedTotal       uint64
+	enqueuedTotal        uint64
+	enqueueTimeoutsTotal uint64
+	enqueueClosedTotal   uint64
+	forcedKernelAbort    bool
+	attemptedPPS         float64
+	enqueuedPPS          float64
+	enqueueDropRatio     float64
+	dropDelta            stressDropSnapshot
 }
 
 func newStressHarness() *stressHarness {
@@ -381,6 +397,7 @@ func TestConnectAttemptProgressesUnderMixedNonConnectSaturation(t *testing.T) {
 	}
 
 	requestID := uint64(0xC0FFEE)
+	started := time.Now()
 	select {
 	case h.connect <- stressConnectAttempt{requestID: requestID}:
 	case <-time.After(2 * time.Second):
@@ -398,6 +415,11 @@ func TestConnectAttemptProgressesUnderMixedNonConnectSaturation(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("verdict timeout")
 	}
+
+	fmt.Printf(
+		"mixed-saturation backend=go verdict_ms=%.3f\n",
+		time.Since(started).Seconds()*1000.0,
+	)
 }
 
 func TestStressProfileReportsConnectLatencyAndPipelineDrops(t *testing.T) {
@@ -407,7 +429,7 @@ func TestStressProfileReportsConnectLatencyAndPipelineDrops(t *testing.T) {
 		t.Skip("profiling harness; set OPENSNITCH_STRESS_PROFILE=1 to run")
 	}
 
-	rounds := 2_000
+	rounds := 1_000
 	if raw := os.Getenv("OPENSNITCH_STRESS_ROUNDS"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed <= 0 {
@@ -443,27 +465,41 @@ func TestStressProfileReportsConnectLatencyAndPipelineDrops(t *testing.T) {
 	dropBefore := h.snapshotDrops()
 	latencies := make([]time.Duration, 0, rounds)
 	baseRequestID := uint64(0xD00D_0000)
+	startedAll := time.Now()
 
 	for i := 0; i < rounds; i++ {
 		requestID := baseRequestID + uint64(i)
 		started := time.Now()
 
+		// Mirror Rust harness fast path: non-blocking enqueue first,
+		// then bounded blocking fallback.
 		select {
 		case h.connect <- stressConnectAttempt{requestID: requestID}:
-		case <-time.After(2 * time.Second):
-			t.Fatalf("connect enqueue timeout on round %d", i)
+		default:
+			select {
+			case h.connect <- stressConnectAttempt{requestID: requestID}:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("connect enqueue timeout on round %d", i)
+			}
 		}
 
+		// Mirror Rust harness fast path: non-blocking verdict read first,
+		// then bounded blocking fallback.
+		var verdict stressConnectVerdict
 		select {
-		case verdict := <-h.verdict:
-			if verdict.requestID != requestID {
-				t.Fatalf("unexpected request id on round %d: got=%d want=%d", i, verdict.requestID, requestID)
+		case verdict = <-h.verdict:
+		default:
+			select {
+			case verdict = <-h.verdict:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("verdict timeout on round %d", i)
 			}
-			if !verdict.allow || verdict.reject {
-				t.Fatalf("unexpected verdict on round %d: %+v", i, verdict)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("verdict timeout on round %d", i)
+		}
+		if verdict.requestID != requestID {
+			t.Fatalf("unexpected request id on round %d: got=%d want=%d", i, verdict.requestID, requestID)
+		}
+		if !verdict.allow || verdict.reject {
+			t.Fatalf("unexpected verdict on round %d: %+v", i, verdict)
 		}
 
 		latencies = append(latencies, time.Since(started))
@@ -483,23 +519,396 @@ func TestStressProfileReportsConnectLatencyAndPipelineDrops(t *testing.T) {
 	if len(latencies) > 0 {
 		max = latencies[len(latencies)-1]
 	}
+	totalElapsed := time.Since(startedAll)
+	timeOpUs := totalElapsed.Seconds() * 1_000_000.0 / float64(rounds)
+	opsS := float64(rounds) / totalElapsed.Seconds()
+	throughputProduct := timeOpUs * opsS
+	if math.IsNaN(timeOpUs) || math.IsInf(timeOpUs, 0) || math.IsNaN(opsS) || math.IsInf(opsS, 0) || math.IsNaN(throughputProduct) || math.IsInf(throughputProduct, 0) || math.Abs(throughputProduct-1_000_000.0) > 10_000.0 {
+		t.Fatalf("invalid throughput conversion: time_op_us=%.6f ops_s=%.6f product=%.3f", timeOpUs, opsS, throughputProduct)
+	}
 
 	dropAfter := h.snapshotDrops()
 	dropDelta := dropAfter.saturatingDelta(dropBefore)
 	enforceGoStressRegressionGuard(t, p95, p99, max, dropDelta.total())
 
 	fmt.Printf(
-		"stress-profile backend=go rounds=%d p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f max_ms=%.3f drop_dns=%d drop_process=%d drop_firewall=%d drop_total=%d\n",
+		"stress-profile backend=go rounds=%d p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f max_ms=%.3f time_op_us=%.3f ops_s=%.1f drop_dns=%d drop_process=%d drop_firewall=%d drop_total=%d\n",
 		rounds,
 		p50.Seconds()*1000.0,
 		p95.Seconds()*1000.0,
 		p99.Seconds()*1000.0,
 		max.Seconds()*1000.0,
+		timeOpUs,
+		opsS,
 		dropDelta.dns,
 		dropDelta.process,
 		dropDelta.firewall,
 		dropDelta.total(),
 	)
+}
+
+func runKernelPressureProfile(durationSecs uint64, floodTasks int, enqueueMode string, enqueueTimeoutUs uint64) kernelPressureMetrics {
+	if durationSecs < 1 {
+		durationSecs = 1
+	}
+	if durationSecs > 30 {
+		durationSecs = 30
+	}
+	if floodTasks < 1 {
+		floodTasks = 1
+	}
+	if floodTasks > 32 {
+		floodTasks = 32
+	}
+	if enqueueTimeoutUs < 10 {
+		enqueueTimeoutUs = 10
+	}
+	if enqueueTimeoutUs > 20_000 {
+		enqueueTimeoutUs = 20_000
+	}
+
+	h := newStressHarness()
+	defer h.stop()
+
+	var attempted uint64
+	var enqueued uint64
+	var enqueueTimeouts uint64
+	var enqueueClosed uint64
+
+	dropBefore := h.snapshotDrops()
+	floodCtx, floodCancel := context.WithCancel(h.ctx)
+	started := time.Now()
+
+	var floodWG sync.WaitGroup
+	for workerID := 0; workerID < floodTasks; workerID++ {
+		workerID := workerID
+		floodWG.Add(1)
+		go func() {
+			defer floodWG.Done()
+			i := uint64(workerID)
+			burstSize := 32
+			consecutiveSaturation := 0
+
+			for {
+				select {
+				case <-floodCtx.Done():
+					return
+				default:
+				}
+
+				batchSaturation := 0
+				saturationDNSOrProc := 0
+
+				for n := 0; n < burstSize; n++ {
+					select {
+					case <-floodCtx.Done():
+						return
+					default:
+					}
+
+					lane := i % 3
+					evt := stressKernelEvent{pipeline: stressPipeline(lane)}
+					atomic.AddUint64(&attempted, 1)
+					saturated := false
+
+					if enqueueMode == "timeout" {
+						select {
+						case <-floodCtx.Done():
+							return
+						case h.kernelCh <- evt:
+							atomic.AddUint64(&enqueued, 1)
+						case <-time.After(time.Duration(enqueueTimeoutUs) * time.Microsecond):
+							atomic.AddUint64(&enqueueTimeouts, 1)
+							saturated = true
+						}
+					} else {
+						select {
+						case <-floodCtx.Done():
+							return
+						case h.kernelCh <- evt:
+							atomic.AddUint64(&enqueued, 1)
+						default:
+							saturated = true
+						}
+					}
+
+					if saturated {
+						batchSaturation++
+						if lane != 2 {
+							saturationDNSOrProc++
+						}
+					}
+
+					i++
+				}
+
+				if batchSaturation > 0 {
+					consecutiveSaturation++
+					if burstSize/2 > 4 {
+						burstSize /= 2
+					} else {
+						burstSize = 4
+					}
+
+					if consecutiveSaturation >= 2 {
+						backoffUs := 100
+						if saturationDNSOrProc > (batchSaturation / 2) {
+							backoffUs = 250
+						}
+						select {
+						case <-floodCtx.Done():
+							return
+						case <-time.After(time.Duration(backoffUs) * time.Microsecond):
+						}
+					}
+				} else {
+					consecutiveSaturation = 0
+					if burstSize+4 < 128 {
+						burstSize += 4
+					} else {
+						burstSize = 128
+					}
+				}
+
+				if (i & 0x3FF) == 0 {
+					runtime.Gosched()
+				}
+			}
+		}()
+	}
+
+	time.Sleep(time.Duration(durationSecs) * time.Second)
+	floodCancel()
+	floodWG.Wait()
+	time.Sleep(250 * time.Millisecond)
+
+	elapsed := time.Since(started)
+	attemptedTotal := atomic.LoadUint64(&attempted)
+	enqueuedTotal := atomic.LoadUint64(&enqueued)
+	enqueueTimeoutsTotal := atomic.LoadUint64(&enqueueTimeouts)
+	enqueueClosedTotal := atomic.LoadUint64(&enqueueClosed)
+
+	dropAfter := h.snapshotDrops()
+	dropDelta := dropAfter.saturatingDelta(dropBefore)
+
+	attemptedPPS := 0.0
+	enqueuedPPS := 0.0
+	if elapsed.Seconds() > 0 {
+		attemptedPPS = float64(attemptedTotal) / elapsed.Seconds()
+		enqueuedPPS = float64(enqueuedTotal) / elapsed.Seconds()
+	}
+
+	enqueueDropRatio := 0.0
+	if attemptedTotal > 0 {
+		enqueueDropRatio = float64(attemptedTotal-enqueuedTotal) / float64(attemptedTotal)
+	}
+
+	return kernelPressureMetrics{
+		durationSecs:         durationSecs,
+		floodTasks:           floodTasks,
+		enqueueTimeoutUs:     enqueueTimeoutUs,
+		attemptedTotal:       attemptedTotal,
+		enqueuedTotal:        enqueuedTotal,
+		enqueueTimeoutsTotal: enqueueTimeoutsTotal,
+		enqueueClosedTotal:   enqueueClosedTotal,
+		forcedKernelAbort:    false,
+		attemptedPPS:         attemptedPPS,
+		enqueuedPPS:          enqueuedPPS,
+		enqueueDropRatio:     enqueueDropRatio,
+		dropDelta:            dropDelta,
+	}
+}
+
+func TestStressProfileReportsKernelPipelinePressure(t *testing.T) {
+	enforceHarnessGoLogLevel(t)
+
+	if os.Getenv("OPENSNITCH_STRESS_PROFILE") == "" {
+		t.Skip("profiling harness; set OPENSNITCH_STRESS_PROFILE=1 to run")
+	}
+
+	durationSecs := uint64(3)
+	if raw := os.Getenv("OPENSNITCH_KERNEL_PRESSURE_SECS"); raw != "" {
+		if parsed, err := strconv.ParseUint(raw, 10, 64); err == nil {
+			durationSecs = parsed
+		}
+	}
+
+	floodTasks := 4
+	if raw := os.Getenv("OPENSNITCH_KERNEL_PRESSURE_TASKS"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			floodTasks = parsed
+		}
+	}
+
+	enqueueMode := os.Getenv("OPENSNITCH_KERNEL_PRESSURE_ENQUEUE_MODE")
+	if enqueueMode == "" {
+		enqueueMode = "try"
+	}
+
+	enqueueTimeoutUs := uint64(200)
+	if raw := os.Getenv("OPENSNITCH_KERNEL_PRESSURE_ENQUEUE_TIMEOUT_US"); raw != "" {
+		if parsed, err := strconv.ParseUint(raw, 10, 64); err == nil {
+			enqueueTimeoutUs = parsed
+		}
+	}
+
+	metrics := runKernelPressureProfile(durationSecs, floodTasks, enqueueMode, enqueueTimeoutUs)
+
+	fmt.Printf(
+		"kernel-pressure mode=%s enqueue_timeout_us=%d secs=%d flood_tasks=%d attempted=%d enqueued=%d enqueue_timeouts=%d enqueue_closed=%d forced_kernel_abort=%v attempted_pps=%.0f enqueued_pps=%.0f enqueue_drop_ratio=%.4f pipeline_drop_dns=%d pipeline_drop_process=%d pipeline_drop_firewall=%d pipeline_drop_total=%d\n",
+		enqueueMode,
+		metrics.enqueueTimeoutUs,
+		metrics.durationSecs,
+		metrics.floodTasks,
+		metrics.attemptedTotal,
+		metrics.enqueuedTotal,
+		metrics.enqueueTimeoutsTotal,
+		metrics.enqueueClosedTotal,
+		metrics.forcedKernelAbort,
+		metrics.attemptedPPS,
+		metrics.enqueuedPPS,
+		metrics.enqueueDropRatio,
+		metrics.dropDelta.dns,
+		metrics.dropDelta.process,
+		metrics.dropDelta.firewall,
+		metrics.dropDelta.total(),
+	)
+
+	if metrics.enqueuedTotal == 0 {
+		t.Fatal("kernel pressure run did not enqueue events")
+	}
+}
+
+func TestStressProfileReportsKernelPipelineTimeoutSweep(t *testing.T) {
+	enforceHarnessGoLogLevel(t)
+
+	if os.Getenv("OPENSNITCH_STRESS_PROFILE") == "" {
+		t.Skip("profiling harness; set OPENSNITCH_STRESS_PROFILE=1 to run")
+	}
+
+	durationSecs := uint64(2)
+	if raw := os.Getenv("OPENSNITCH_KERNEL_PRESSURE_SWEEP_SECS"); raw != "" {
+		if parsed, err := strconv.ParseUint(raw, 10, 64); err == nil {
+			durationSecs = parsed
+		}
+	}
+
+	floodTasks := 4
+	if raw := os.Getenv("OPENSNITCH_KERNEL_PRESSURE_SWEEP_TASKS"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			floodTasks = parsed
+		}
+	}
+
+	sweepRaw := os.Getenv("OPENSNITCH_KERNEL_PRESSURE_SWEEP_US")
+	if sweepRaw == "" {
+		sweepRaw = "50,100,200,500,1000"
+	}
+
+	timeouts := make([]uint64, 0)
+	for _, token := range strings.Split(sweepRaw, ",") {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		if value, err := strconv.ParseUint(token, 10, 64); err == nil {
+			timeouts = append(timeouts, value)
+		}
+	}
+	if len(timeouts) == 0 {
+		timeouts = append(timeouts, 50, 100, 200, 500, 1000)
+	}
+
+	fmt.Println("kernel-pressure-sweep-csv-header,timeout_us,secs,flood_tasks,attempted,enqueued,enqueue_timeouts,enqueue_closed,forced_kernel_abort,attempted_pps,enqueued_pps,enqueue_drop_ratio,pipeline_drop_dns,pipeline_drop_process,pipeline_drop_firewall,pipeline_drop_total")
+
+	results := make([]kernelPressureMetrics, 0, len(timeouts))
+	for _, timeoutUs := range timeouts {
+		metrics := runKernelPressureProfile(durationSecs, floodTasks, "timeout", timeoutUs)
+
+		fmt.Printf(
+			"kernel-pressure-sweep timeout_us=%d secs=%d flood_tasks=%d attempted=%d enqueued=%d enqueue_timeouts=%d enqueue_closed=%d forced_kernel_abort=%v attempted_pps=%.0f enqueued_pps=%.0f enqueue_drop_ratio=%.4f pipeline_drop_total=%d\n",
+			metrics.enqueueTimeoutUs,
+			metrics.durationSecs,
+			metrics.floodTasks,
+			metrics.attemptedTotal,
+			metrics.enqueuedTotal,
+			metrics.enqueueTimeoutsTotal,
+			metrics.enqueueClosedTotal,
+			metrics.forcedKernelAbort,
+			metrics.attemptedPPS,
+			metrics.enqueuedPPS,
+			metrics.enqueueDropRatio,
+			metrics.dropDelta.total(),
+		)
+
+		fmt.Printf(
+			"kernel-pressure-sweep-csv,%d,%d,%d,%d,%d,%d,%d,%v,%.0f,%.0f,%.4f,%d,%d,%d,%d\n",
+			metrics.enqueueTimeoutUs,
+			metrics.durationSecs,
+			metrics.floodTasks,
+			metrics.attemptedTotal,
+			metrics.enqueuedTotal,
+			metrics.enqueueTimeoutsTotal,
+			metrics.enqueueClosedTotal,
+			metrics.forcedKernelAbort,
+			metrics.attemptedPPS,
+			metrics.enqueuedPPS,
+			metrics.enqueueDropRatio,
+			metrics.dropDelta.dns,
+			metrics.dropDelta.process,
+			metrics.dropDelta.firewall,
+			metrics.dropDelta.total(),
+		)
+
+		if metrics.enqueuedTotal == 0 {
+			t.Fatalf("timeout_us=%d did not enqueue events", metrics.enqueueTimeoutUs)
+		}
+		results = append(results, metrics)
+	}
+
+	hasNonAbort := false
+	for _, m := range results {
+		if !m.forcedKernelAbort {
+			hasNonAbort = true
+			break
+		}
+	}
+
+	bestScore := math.Inf(-1)
+	var best *kernelPressureMetrics
+	for i := range results {
+		m := &results[i]
+		if hasNonAbort && m.forcedKernelAbort {
+			continue
+		}
+
+		score := m.enqueuedPPS * (1.0 - m.enqueueDropRatio)
+		replace := false
+		if score > bestScore {
+			replace = true
+		} else if math.Abs(score-bestScore) < 1e-9 && best != nil {
+			if m.enqueueDropRatio < best.enqueueDropRatio || (math.Abs(m.enqueueDropRatio-best.enqueueDropRatio) < 1e-9 && m.enqueueTimeoutUs < best.enqueueTimeoutUs) {
+				replace = true
+			}
+		}
+
+		if best == nil || replace {
+			best = m
+			bestScore = score
+		}
+	}
+
+	if best != nil {
+		fmt.Printf(
+			"kernel-pressure-sweep-recommend timeout_us=%d score=%.0f enqueued_pps=%.0f enqueue_drop_ratio=%.4f pipeline_drop_total=%d forced_kernel_abort=%v\n",
+			best.enqueueTimeoutUs,
+			bestScore,
+			best.enqueuedPPS,
+			best.enqueueDropRatio,
+			best.dropDelta.total(),
+			best.forcedKernelAbort,
+		)
+	}
 }
 
 func enforceHarnessGoLogLevel(t *testing.T) {

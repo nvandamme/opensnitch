@@ -62,7 +62,6 @@ fn try_send_payload(payload: &str) -> std::io::Result<bool> {
         return Ok(false);
     };
 
-    // Path-based sockets are the common systemd service mode.
     if socket_path.starts_with('@') {
         emit_fallback_notice("abstract NOTIFY_SOCKET is not supported by this notifier");
         return Ok(false);

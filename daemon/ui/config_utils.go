@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 
@@ -65,7 +66,11 @@ func (c *Client) loadDiskConfiguration(reload bool) {
 	// - malformed json file
 	// - intermediate file removal (when writing we receive 2 write events, one of 0 bytes)
 	if err := c.configWatcher.Add(configFile); err != nil {
-		log.Error("[config] Could not watch path: %s", err)
+		if os.IsNotExist(err) {
+			log.Debug("[config] Watch path temporarily unavailable (will retry): %s", err)
+		} else {
+			log.Error("[config] Could not watch path: %s", err)
+		}
 	}
 
 	raw, err := config.Load(configFile)

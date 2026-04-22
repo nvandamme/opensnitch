@@ -48,7 +48,11 @@ pub struct RawFwRule {
     pub uuid: String,
     #[serde(rename = "Enabled", default)]
     pub enabled: bool,
-    #[serde(rename = "Position", default, deserialize_with = "deserialize_u64")]
+    #[serde(
+        rename = "Position",
+        default,
+        deserialize_with = "crate::utils::serde_helpers::deserialize_u64"
+    )]
     pub position: u64,
     #[serde(rename = "Description", default)]
     pub description: String,
@@ -170,21 +174,4 @@ pub struct PersistedStatementValue {
     pub key: String,
     #[serde(rename = "Value")]
     pub value: String,
-}
-
-pub fn deserialize_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum RawValue {
-        Integer(u64),
-        String(String),
-    }
-
-    Ok(match RawValue::deserialize(deserializer)? {
-        RawValue::Integer(value) => value,
-        RawValue::String(value) => value.parse().unwrap_or(0),
-    })
 }

@@ -98,13 +98,15 @@ func TestRuleLoaderInvalidRegexp(t *testing.T) {
 
 // Test rules of type operator.list. There're these scenarios:
 // - Enabled rules:
-//    * operator Data field is ignored if it contains the list of operators as json string.
-//    * the operarots list is expanded as json objecs under "list": []
+//   - operator Data field is ignored if it contains the list of operators as json string.
+//   - the operarots list is expanded as json objecs under "list": []
+//
 // For new rules (> v1.6.3), Data field will be empty.
 //
 // - Disabled rules
-//    * (old) the Data field contains the list of operators as json string, and the list of operarots is empty.
-//    * Data field empty, and the list of operators expanded.
+//   - (old) the Data field contains the list of operators as json string, and the list of operarots is empty.
+//   - Data field empty, and the list of operators expanded.
+//
 // In all cases the list of operators must be loaded.
 func TestRuleLoaderList(t *testing.T) {
 	l, err := NewLoader(true)
@@ -150,6 +152,7 @@ func TestRuleLoaderList(t *testing.T) {
 func TestLiveReload(t *testing.T) {
 	t.Parallel()
 	t.Log("Test rules loader with live reload")
+
 	l, err := NewLoader(true)
 	if err != nil {
 		t.Fail()
@@ -165,24 +168,25 @@ func TestLiveReload(t *testing.T) {
 	}
 	//wait for watcher to activate
 	time.Sleep(time.Second)
+	reloadStarted := time.Now()
 	if err = Copy("testdata/live_reload/test-live-reload-remove.json", tmpDir+"/test-live-reload-remove.json"); err != nil {
 		t.Error("Error copying rules into temp dir")
 	}
 	if err = Copy("testdata/live_reload/test-live-reload-delete.json", tmpDir+"/test-live-reload-delete.json"); err != nil {
 		t.Error("Error copying rules into temp dir")
 	}
-	//wait for watcher to pick up the changes
-	time.Sleep(time.Second)
-	testNumRules(t, l, 4)
+	waitForRuleCount(t, l, 4, 3*time.Second)
 	if err = os.Remove(tmpDir + "/test-live-reload-remove.json"); err != nil {
 		t.Error("Error Remove()ing file from temp dir")
 	}
 	if err = l.Delete("test-live-reload-delete"); err != nil {
 		t.Error("Error Delete()ing file from temp dir")
 	}
-	//wait for watcher to pick up the changes
-	time.Sleep(time.Second)
-	testNumRules(t, l, 2)
+	waitForRuleCount(t, l, 2, 3*time.Second)
+	fmt.Printf(
+		"cold-profile backend=go component=rule elapsed_s=%.3f\n",
+		time.Since(reloadStarted).Seconds(),
+	)
 }
 
 func randString() string {
@@ -218,6 +222,20 @@ func Copy(src, dst string) error {
 func testNumRules(t *testing.T, l *Loader, num int) {
 	if l.NumRules() != num {
 		t.Error("rules number should be (2): ", num)
+	}
+}
+
+func waitForRuleCount(t *testing.T, l *Loader, expected int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if l.NumRules() == expected {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting for rule count=%d, got=%d", expected, l.NumRules())
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

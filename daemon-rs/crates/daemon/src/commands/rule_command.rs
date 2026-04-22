@@ -1,70 +1,91 @@
 use opensnitch_proto::pb;
 
-use crate::{commands::task_runtime::send_task_reply, services::rule_service::RuleService};
+use crate::services::rule_service::RuleService;
 
-pub(crate) async fn enable_rules(
-    notification_id: u64,
-    updated_rules: Vec<pb::Rule>,
-    rules: &RuleService,
-    task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
-) {
-    RuleUpdateMode::Enable
-        .apply(notification_id, updated_rules, rules, task_reply_tx)
-        .await;
-}
+#[derive(Clone, Default)]
+pub(crate) struct RuleCommandService;
 
-pub(crate) async fn disable_rules(
-    notification_id: u64,
-    updated_rules: Vec<pb::Rule>,
-    rules: &RuleService,
-    task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
-) {
-    RuleUpdateMode::Disable
-        .apply(notification_id, updated_rules, rules, task_reply_tx)
-        .await;
-}
+impl RuleCommandService {
+    pub(crate) async fn enable_rules(
+        &self,
+        notification_id: u64,
+        updated_rules: Vec<pb::Rule>,
+        rules: &RuleService,
+        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+    ) {
+        RuleUpdateMode::Enable
+            .apply(self, notification_id, updated_rules, rules, task_reply_tx)
+            .await;
+    }
 
-pub(crate) async fn upsert_rules(
-    notification_id: u64,
-    updated_rules: Vec<pb::Rule>,
-    rules: &RuleService,
-    task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
-) {
-    RuleUpdateMode::Upsert
-        .apply(notification_id, updated_rules, rules, task_reply_tx)
-        .await;
-}
+    pub(crate) async fn disable_rules(
+        &self,
+        notification_id: u64,
+        updated_rules: Vec<pb::Rule>,
+        rules: &RuleService,
+        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+    ) {
+        RuleUpdateMode::Disable
+            .apply(self, notification_id, updated_rules, rules, task_reply_tx)
+            .await;
+    }
 
-pub(crate) async fn delete_rules(
-    notification_id: u64,
-    rule_names: Vec<String>,
-    rules: &RuleService,
-    task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
-) {
-    let mut errors = Vec::new();
-    for rule_name in rule_names {
-        if let Err(err) = rules.delete_by_name(&rule_name).await {
-            tracing::error!(rule = %rule_name, "failed to delete rule: {err}");
-            errors.push(format!("{}: {}", rule_name, err));
+    pub(crate) async fn upsert_rules(
+        &self,
+        notification_id: u64,
+        updated_rules: Vec<pb::Rule>,
+        rules: &RuleService,
+        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+    ) {
+        RuleUpdateMode::Upsert
+            .apply(self, notification_id, updated_rules, rules, task_reply_tx)
+            .await;
+    }
+
+    pub(crate) async fn delete_rules(
+        &self,
+        notification_id: u64,
+        rule_names: Vec<String>,
+        rules: &RuleService,
+        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+    ) {
+        let mut errors = Vec::new();
+        for rule_name in rule_names {
+            if let Err(err) = rules.delete_by_name(&rule_name).await {
+                tracing::error!(rule = %rule_name, "failed to delete rule: {err}");
+                errors.push(format!("{}: {}", rule_name, err));
+            }
+        }
+
+        if errors.is_empty() {
+            self.send_task_reply(
+                task_reply_tx,
+                notification_id,
+                pb::NotificationReplyCode::Ok,
+                serde_json::json!({"status": "ok"}).to_string(),
+            )
+            .await;
+        } else {
+            self.send_task_reply(
+                task_reply_tx,
+                notification_id,
+                pb::NotificationReplyCode::Error,
+                format!("failed to delete some rules: {}", errors.join(", ")),
+            )
+            .await;
         }
     }
 
-    if errors.is_empty() {
-        send_task_reply(
-            task_reply_tx,
-            notification_id,
-            pb::NotificationReplyCode::Ok,
-            serde_json::json!({"status": "ok"}).to_string(),
-        )
-        .await;
-    } else {
-        send_task_reply(
-            task_reply_tx,
-            notification_id,
-            pb::NotificationReplyCode::Error,
-            format!("failed to delete some rules: {}", errors.join(", ")),
-        )
-        .await;
+    async fn send_task_reply(
+        &self,
+        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        notification_id: u64,
+        code: pb::NotificationReplyCode,
+        data: String,
+    ) {
+        crate::commands::task_runtime::TaskRuntimeService
+            .send_task_reply(task_reply_tx, notification_id, code, data)
+            .await;
     }
 }
 
@@ -102,6 +123,7 @@ impl RuleUpdateMode {
 
     async fn apply(
         self,
+        service: &RuleCommandService,
         notification_id: u64,
         updated_rules: Vec<pb::Rule>,
         rules: &RuleService,
@@ -117,21 +139,23 @@ impl RuleUpdateMode {
         }
 
         if errors.is_empty() {
-            send_task_reply(
-                task_reply_tx,
-                notification_id,
-                pb::NotificationReplyCode::Ok,
-                serde_json::json!({"status": "ok"}).to_string(),
-            )
-            .await;
+            service
+                .send_task_reply(
+                    task_reply_tx,
+                    notification_id,
+                    pb::NotificationReplyCode::Ok,
+                    serde_json::json!({"status": "ok"}).to_string(),
+                )
+                .await;
         } else {
-            send_task_reply(
-                task_reply_tx,
-                notification_id,
-                pb::NotificationReplyCode::Error,
-                format!("{}: {}", self.error_prefix(), errors.join(", ")),
-            )
-            .await;
+            service
+                .send_task_reply(
+                    task_reply_tx,
+                    notification_id,
+                    pb::NotificationReplyCode::Error,
+                    format!("{}: {}", self.error_prefix(), errors.join(", ")),
+                )
+                .await;
         }
     }
 }

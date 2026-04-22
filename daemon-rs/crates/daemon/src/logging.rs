@@ -22,7 +22,8 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
-static LOG_FILTER_HANDLE: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
+pub(crate) static LOG_FILTER_HANDLE: OnceLock<reload::Handle<EnvFilter, Registry>> =
+    OnceLock::new();
 static LOG_SINK_OPTIONS: OnceLock<RwLock<LogSinkOptions>> = OnceLock::new();
 
 // Atomic fast-path flags updated in sync with LOG_SINK_OPTIONS so that
@@ -99,7 +100,7 @@ impl<'a> MakeWriter<'a> for OpensnitchMakeWriter {
             };
         }
 
-        let options = sink_options()
+        let options = LoggingState::sink_options()
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default();
@@ -143,149 +144,133 @@ impl Write for OpensnitchWriter {
     }
 }
 
-fn sink_options() -> &'static RwLock<LogSinkOptions> {
-    LOG_SINK_OPTIONS.get_or_init(|| {
-        RwLock::new(LogSinkOptions {
-            log_file: None,
-            log_utc: true,
-            log_micro: false,
-            udp_target: None,
+pub struct LoggingState;
+
+impl LoggingState {
+    fn sink_options() -> &'static RwLock<LogSinkOptions> {
+        LOG_SINK_OPTIONS.get_or_init(|| {
+            RwLock::new(LogSinkOptions {
+                log_file: None,
+                log_utc: true,
+                log_micro: false,
+                udp_target: None,
+            })
         })
-    })
-}
-
-pub fn apply_config(config: &crate::config::Config) -> Result<()> {
-    let override_log_file = env::var("OPENSNITCH_DAEMON_RS_LOG_FILE")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    let effective_log_file = override_log_file.or_else(|| config.log_file.clone());
-
-    let udp_target = config
-        .loggers
-        .iter()
-        .find(|logger| {
-            logger.protocol.eq_ignore_ascii_case("udp") && !logger.server.trim().is_empty()
-        })
-        .and_then(|logger| parse_udp_target(&logger.server));
-
-    if let Ok(mut guard) = sink_options().write() {
-        guard.log_file = effective_log_file.clone();
-        guard.log_utc = config.log_utc;
-        guard.log_micro = config.log_micro;
-        guard.udp_target = udp_target;
     }
 
-    // Keep atomic fast-path flags in sync so make_writer() and format_time()
-    // can avoid the RwLock in the common stdout-only case.
-    LOG_SINK_HAS_FILE.store(effective_log_file.is_some(), Ordering::Relaxed);
-    LOG_SINK_HAS_UDP.store(udp_target.is_some(), Ordering::Relaxed);
-    LOG_SINK_UTC.store(config.log_utc, Ordering::Relaxed);
-    LOG_SINK_MICRO.store(config.log_micro, Ordering::Relaxed);
-
-    for logger in &config.loggers {
-        if logger.name.trim().is_empty() {
-            continue;
+    fn parse_udp_target(server: &str) -> Option<SocketAddr> {
+        let value = server.trim();
+        if value.is_empty() {
+            return None;
         }
-        let supported = logger.protocol.eq_ignore_ascii_case("udp") && !logger.server.is_empty();
-        warn!(
-            logger_name = %logger.name,
-            logger_format = %logger.format,
-            logger_protocol = %logger.protocol,
-            logger_server = %logger.server,
-            logger_tag = %logger.tag,
-            logger_write_timeout = %logger.write_timeout,
-            logger_connect_timeout = %logger.connect_timeout,
-            logger_workers = logger.workers,
-            logger_max_connect_attempts = logger.max_connect_attempts,
-            logger_supported = supported,
-            "configured log sink detected"
-        );
+        value.to_socket_addrs().ok()?.next()
     }
 
-    set_opensnitch_log_level(config.log_level as i32)
-}
+    pub fn apply_config(config: &crate::config::Config) -> Result<()> {
+        let override_log_file = env::var("OPENSNITCH_DAEMON_RS_LOG_FILE")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let effective_log_file = override_log_file.or_else(|| config.log_file.clone());
 
-fn parse_udp_target(server: &str) -> Option<SocketAddr> {
-    let value = server.trim();
-    if value.is_empty() {
-        return None;
+        let udp_target = config
+            .loggers
+            .iter()
+            .find(|logger| {
+                logger.protocol.eq_ignore_ascii_case("udp") && !logger.server.trim().is_empty()
+            })
+            .and_then(|logger| Self::parse_udp_target(&logger.server));
+
+        if let Ok(mut guard) = Self::sink_options().write() {
+            guard.log_file = effective_log_file.clone();
+            guard.log_utc = config.log_utc;
+            guard.log_micro = config.log_micro;
+            guard.udp_target = udp_target;
+        }
+
+        LOG_SINK_HAS_FILE.store(effective_log_file.is_some(), Ordering::Relaxed);
+        LOG_SINK_HAS_UDP.store(udp_target.is_some(), Ordering::Relaxed);
+        LOG_SINK_UTC.store(config.log_utc, Ordering::Relaxed);
+        LOG_SINK_MICRO.store(config.log_micro, Ordering::Relaxed);
+
+        for logger in &config.loggers {
+            if logger.name.trim().is_empty() {
+                continue;
+            }
+            let supported =
+                logger.protocol.eq_ignore_ascii_case("udp") && !logger.server.is_empty();
+            warn!(
+                logger_name = %logger.name,
+                logger_format = %logger.format,
+                logger_protocol = %logger.protocol,
+                logger_server = %logger.server,
+                logger_tag = %logger.tag,
+                logger_write_timeout = %logger.write_timeout,
+                logger_connect_timeout = %logger.connect_timeout,
+                logger_workers = logger.workers,
+                logger_max_connect_attempts = logger.max_connect_attempts,
+                logger_supported = supported,
+                "configured log sink detected"
+            );
+        }
+
+        Self::set_opensnitch_log_level(config.log_level as i32)
     }
-    value.to_socket_addrs().ok()?.next()
-}
 
-pub fn init() {
-    let (filter_layer, handle) = reload::Layer::new(EnvFilter::from_default_env());
-    let _ = LOG_FILTER_HANDLE.set(handle);
+    pub fn init() {
+        let (filter_layer, handle) = reload::Layer::new(EnvFilter::from_default_env());
+        let _ = LOG_FILTER_HANDLE.set(handle);
 
-    tracing_subscriber::registry()
-        .with(filter_layer)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .with_timer(OpensnitchTimer)
-                .with_writer(OpensnitchMakeWriter),
-        )
-        .init();
-}
+        tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_timer(OpensnitchTimer)
+                    .with_writer(OpensnitchMakeWriter),
+            )
+            .init();
+    }
 
-#[cfg(test)]
-pub fn init_for_tests() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,opensnitchd_rs=debug"));
-    let (filter_layer, handle) = reload::Layer::new(filter);
-    let _ = LOG_FILTER_HANDLE.set(handle);
+    pub fn set_opensnitch_log_level(level: i32) -> Result<()> {
+        let directive = match level {
+            i if i <= -1 => "trace",
+            0 => "debug",
+            1 => "info",
+            2 => "info",
+            3 => "warn",
+            _ => "error",
+        };
 
-    let _ = tracing_subscriber::registry()
-        .with(filter_layer)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .compact()
-                .without_time()
-                .with_target(false)
-                .with_test_writer(),
-        )
-        .try_init();
-}
+        let handle = LOG_FILTER_HANDLE
+            .get()
+            .ok_or_else(|| anyhow!("logging subsystem is not initialized"))?;
+        handle.reload(EnvFilter::new(directive))?;
+        Ok(())
+    }
 
-pub fn set_opensnitch_log_level(level: i32) -> Result<()> {
-    let directive = match level {
-        i if i <= -1 => "trace",
-        0 => "debug",
-        1 => "info",
-        2 => "info",
-        3 => "warn",
-        _ => "error",
-    };
+    pub fn forward_task_notification(task_name: &str, data: &str, is_error: bool) {
+        let payload = serde_json::json!({
+            "Name": task_name,
+            "Data": data,
+        })
+        .to_string();
 
-    let handle = LOG_FILTER_HANDLE
-        .get()
-        .ok_or_else(|| anyhow!("logging subsystem is not initialized"))?;
-    handle.reload(EnvFilter::new(directive))?;
-    Ok(())
-}
-
-pub fn forward_task_notification(task_name: &str, data: &str, is_error: bool) {
-    let payload = serde_json::json!({
-        "Name": task_name,
-        "Data": data,
-    })
-    .to_string();
-
-    if is_error {
-        tracing::error!(
-            target: "opensnitch.task",
-            task = %task_name,
-            task_notification = %payload,
-            "forwarding task notification"
-        );
-    } else {
-        tracing::info!(
-            target: "opensnitch.task",
-            task = %task_name,
-            task_notification = %payload,
-            "forwarding task notification"
-        );
+        if is_error {
+            tracing::error!(
+                target: "opensnitch.task",
+                task = %task_name,
+                task_notification = %payload,
+                "forwarding task notification"
+            );
+        } else {
+            tracing::info!(
+                target: "opensnitch.task",
+                task = %task_name,
+                task_notification = %payload,
+                "forwarding task notification"
+            );
+        }
     }
 }

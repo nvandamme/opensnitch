@@ -1,0 +1,26 @@
+name: daemon-rs policy audit
+
+on:
+  push:
+    paths:
+      - 'daemon-rs/**'
+      - 'Makefile'
+      - '.github/workflows/daemon-rs-policy-audit.yml'
+  pull_request:
+    paths:
+      - 'daemon-rs/**'
+      - 'Makefile'
+      - '.github/workflows/daemon-rs-policy-audit.yml'
+  workflow_dispatch:
+
+jobs:
+  policy-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run daemon-rs policy audits
+        run: |
+          set -euo pipefail
+          make daemon-rs-policy-audit

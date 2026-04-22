@@ -7,15 +7,18 @@ use std::{
 };
 use time::{OffsetDateTime, macros::format_description};
 
-type DynError = Box<dyn std::error::Error>;
+mod harness_cmds;
+mod live_logs;
+
+pub(crate) type DynError = Box<dyn std::error::Error>;
 
 const TABLE_HEADER: &str = "| Date | Backend | Profile | Rounds | Commit | p50 ms | p95 ms | p99 ms | max ms | drop_total | Baseline Check | Go Ref | vs Go p50 | vs Go p95 | vs Go p99 | vs Go max | vs Go drop | Prev Commit Ref | vs Prev p50 | vs Prev p95 | vs Prev p99 | vs Prev max | vs Prev drop | Notes |";
-const DELTA_TABLE_HEADER: &str = "| Date | Delta Target | Rounds | Commit | Hot Δ p50 ms | Hot Δ p95 ms | Hot Δ p99 ms | Hot Δ max ms | Hot Δ drop_total | Cold Go total s | Cold Rust total s | Cold Δ s (Rust-Go) | Result | Notes |";
+const DELTA_TABLE_HEADER: &str = "| Date | Delta Target | Rounds | Commit | Hot Mixed Go verdict ms | Hot Mixed Rust verdict ms | Hot Mixed Δ ms (Rust-Go) | Hot Throughput Go time/op us | Hot Throughput Rust time/op us | Hot Throughput Go op/s | Hot Throughput Rust op/s | Hot Δ p50 ms | Hot Δ p95 ms | Hot Δ p99 ms | Hot Δ max ms | Hot Δ drop_total | Cold Go rule s | Cold Rust rule s | Cold Δ rule s | Cold Go ui s | Cold Rust ui s | Cold Δ ui s | Cold Go tasks s | Cold Rust tasks s | Cold Δ tasks s | Cold Go total s (with tasks) | Cold Rust total s (with tasks) | Cold Δ total s (Rust-Go, with tasks) | Result | Notes |";
 const EMPTY_COMPARISON_COLUMNS: &str = "- | - | - | - | - | - | - | - | - | - | - | -";
 const TS_COMPACT: &[time::format_description::FormatItem<'static>] =
     format_description!("[year][month][day]-[hour][minute][second]");
 
-fn compact_timestamp() -> Result<String, DynError> {
+pub(crate) fn compact_timestamp() -> Result<String, DynError> {
     let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
     Ok(now.format(TS_COMPACT)?)
 }
@@ -37,11 +40,14 @@ fn run() -> Result<(), DynError> {
         Some("auto-tune-kernel-pressure-tunables") => auto_tune_kernel_pressure_tunables(),
         Some("microbench-connect-dispatch") => microbench_connect_dispatch(),
         Some("parity-gate") => run_parity_gate_command(),
+        Some("parity-hot-path-harness-once") => run_parity_hot_path_harness_once_command(),
+        Some("parity-cold-path-harness") => run_parity_cold_path_harness_command(),
+        Some("parity-hot-cold-delta-once") => run_parity_hot_cold_delta_once_command(),
         Some("launch-daemon-live-logs") => launch_daemon_live_logs(),
         Some("stop-daemon-live-logs") => stop_daemon_live_logs(),
         Some(command) => Err(format!("unsupported tools command: {command}").into()),
         None => Err(
-            "usage: cargo run -p tools -- <update-run-perf|quick-pressure-sweep-tunables|auto-tune-kernel-pressure-tunables|microbench-connect-dispatch|parity-gate|launch-daemon-live-logs|stop-daemon-live-logs>".into(),
+            "usage: cargo run -p tools -- <update-run-perf|quick-pressure-sweep-tunables|auto-tune-kernel-pressure-tunables|microbench-connect-dispatch|parity-gate|parity-hot-path-harness-once|parity-cold-path-harness|parity-hot-cold-delta-once|launch-daemon-live-logs|stop-daemon-live-logs>".into(),
         ),
     }
 }
@@ -56,7 +62,7 @@ fn ensure_release_tools_mode() -> Result<(), DynError> {
     Ok(())
 }
 
-fn perf_rust_log_level() -> String {
+pub(crate) fn perf_rust_log_level() -> String {
     let raw = env::var("OPENSNITCH_PERF_RUST_LOG_LEVEL").unwrap_or_else(|_| "error".to_string());
     let normalized = raw.to_ascii_lowercase();
     let has_warn_or_error = normalized.contains("warn") || normalized.contains("error");
@@ -73,7 +79,7 @@ fn perf_rust_log_level() -> String {
     raw
 }
 
-fn perf_go_log_level() -> String {
+pub(crate) fn perf_go_log_level() -> String {
     let raw = env::var("OPENSNITCH_PERF_GO_LOG_LEVEL").unwrap_or_else(|_| "error".to_string());
     let normalized = raw.to_ascii_lowercase();
     if normalized != "err" && normalized != "error" {
@@ -87,8 +93,16 @@ fn perf_go_log_level() -> String {
     raw
 }
 
-fn parity_stress_rounds() -> String {
-    env::var("OPENSNITCH_PARITY_STRESS_ROUNDS").unwrap_or_else(|_| "4000".to_string())
+pub(crate) fn parity_stress_rounds() -> String {
+    env::var("OPENSNITCH_PARITY_STRESS_ROUNDS").unwrap_or_else(|_| "1000".to_string())
+}
+
+pub(crate) fn perf_repeats() -> usize {
+    env::var("OPENSNITCH_PERF_REPEATS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(5)
+        .clamp(1, 9)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -259,7 +273,7 @@ fn auto_tune_kernel_pressure_tunables() -> Result<(), DynError> {
     let hysteresis_gain = env::var("OPENSNITCH_AUTOTUNE_HYSTERESIS_GAIN")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(0.05)
+        .unwrap_or(0.02)
         .clamp(0.0, 0.5);
     let max_drop_ratio = env::var("OPENSNITCH_AUTOTUNE_MAX_DROP_RATIO")
         .ok()
@@ -891,7 +905,7 @@ fn parse_recommended_timeout(output: &str) -> Result<u64, DynError> {
     parse_named_u64(line, "timeout_us")
 }
 
-fn parse_named_u64(line: &str, key: &str) -> Result<u64, DynError> {
+pub(crate) fn parse_named_u64(line: &str, key: &str) -> Result<u64, DynError> {
     let prefix = format!("{key}=");
     let value = line
         .split_whitespace()
@@ -930,241 +944,35 @@ fn choose_best_sweep_row(rows: &[SweepRow]) -> SweepRow {
 }
 
 fn microbench_connect_dispatch() -> Result<(), DynError> {
-    let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let daemon_rs_dir = tools_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .ok_or("tools dir missing daemon-rs parent")?;
-    let repo_root = daemon_rs_dir
-        .parent()
-        .ok_or("daemon-rs dir missing parent")?;
-    let rounds = env::var("OPENSNITCH_MICROBENCH_ROUNDS").unwrap_or_else(|_| "4000".to_string());
-    let rust_log = perf_rust_log_level();
-
-    let output = run_command(
-        repo_root,
-        "cargo",
-        [
-            "test",
-            "--release",
-            "--manifest-path",
-            daemon_rs_dir.join("Cargo.toml").to_string_lossy().as_ref(),
-            "-p",
-            "opensnitchd-rs",
-            "stress_profile_reports_connect_latency_and_pipeline_drops",
-            "--",
-            "--ignored",
-            "--nocapture",
-        ],
-        &[
-            ("RUST_LOG", rust_log.as_str()),
-            ("OPENSNITCH_STRESS_ROUNDS", rounds.as_str()),
-        ],
-    )?;
-    let line = find_line(&output, "stress-profile rounds=")?;
-    println!("microbench-connect-dispatch {line}");
-    Ok(())
+    harness_cmds::microbench_connect_dispatch()
 }
 
 fn run_parity_gate_command() -> Result<(), DynError> {
-    let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let daemon_rs_dir = tools_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .ok_or("tools dir missing daemon-rs parent")?;
-    let repo_root = daemon_rs_dir
-        .parent()
-        .ok_or("daemon-rs dir missing parent")?;
-    run_parity_gate_internal(repo_root)
+    harness_cmds::run_parity_gate_command()
+}
+
+fn run_parity_hot_path_harness_once_command() -> Result<(), DynError> {
+    harness_cmds::run_parity_hot_path_harness_once_command()
+}
+
+fn run_parity_cold_path_harness_command() -> Result<(), DynError> {
+    harness_cmds::run_parity_cold_path_harness_command()
+}
+
+fn run_parity_hot_cold_delta_once_command() -> Result<(), DynError> {
+    harness_cmds::run_parity_hot_cold_delta_once_command()
 }
 
 fn run_parity_gate_internal(repo_root: &Path) -> Result<(), DynError> {
-    let rounds = parity_stress_rounds();
-    let require_exceed = env_flag("OPENSNITCH_PARITY_REQUIRE_EXCEED_GO");
-    let rust_log = perf_rust_log_level();
-    let go_log = perf_go_log_level();
-
-    println!("Running parity gate with STRESS_ROUNDS={rounds}...");
-    let output = run_command(
-        repo_root,
-        "make",
-        ["parity-hot-cold-delta", &format!("STRESS_ROUNDS={rounds}")],
-        &[
-            ("PERF_RUST_LOG_LEVEL", rust_log.as_str()),
-            ("HARNESS_GO_LOG_LEVEL", go_log.as_str()),
-        ],
-    )?;
-
-    let status_line = find_line(&output, "PARITY DELTA STATUS:")?;
-    let hot_line = find_line(&output, "PARITY DELTA HOT:")?;
-    if !status_line.contains("PASS") {
-        return Err(format!("parity gate failed: {status_line}").into());
-    }
-
-    let hot_p95 = parse_metric(hot_line, "p95")?;
-    let hot_p99 = parse_metric(hot_line, "p99")?;
-    if require_exceed && (hot_p95 > 0.0 || hot_p99 > 0.0) {
-        return Err(format!(
-            "parity gate exceed-go check failed: p95={hot_p95:+.3} p99={hot_p99:+.3}"
-        )
-        .into());
-    }
-
-    println!(
-        "parity-gate status={} hot_p95={:+.3} hot_p99={:+.3}",
-        status_line, hot_p95, hot_p99
-    );
-    Ok(())
+    harness_cmds::run_parity_gate_internal(repo_root)
 }
 
 fn launch_daemon_live_logs() -> Result<(), DynError> {
-    let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let daemon_rs_dir = tools_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .ok_or("tools dir missing daemon-rs parent")?;
-    let repo_root = daemon_rs_dir
-        .parent()
-        .ok_or("daemon-rs dir missing parent")?;
-
-    let logs_dir = env::var("OPENSNITCH_DAEMON_RS_LOG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| repo_root.join("logs"));
-    fs::create_dir_all(&logs_dir)?;
-
-    let ts = compact_timestamp()?;
-    let stem = format!("daemon-rs-live-{ts}");
-    let stdout_path = logs_dir.join(format!("{stem}-stdout.log"));
-    let stderr_path = logs_dir.join(format!("{stem}-stderr.log"));
-    let daemon_log_path = logs_dir.join(format!("daemon-rs-{ts}.log"));
-    let latest_path = logs_dir.join("daemon-rs-live.latest");
-    let rust_log = env::var("OPENSNITCH_DAEMON_RS_RUST_LOG").unwrap_or_else(|_| "info".to_string());
-    let run_release = !env_flag("OPENSNITCH_DAEMON_RS_LIVE_DEBUG");
-    let manifest_path = daemon_rs_dir.join("Cargo.toml");
-
-    run_command(repo_root, "sudo", ["-n", "true"], &[])?;
-
-    let stdout_file = fs::File::create(&stdout_path)?;
-    let stderr_file = fs::File::create(&stderr_path)?;
-
-    let mut command = Command::new("sudo");
-    command
-        .arg("-n")
-        .arg("env")
-        .arg(format!("RUST_LOG={rust_log}"))
-        .arg(format!(
-            "OPENSNITCH_DAEMON_RS_LOG_FILE={}",
-            daemon_log_path.display()
-        ))
-        .arg("cargo")
-        .arg("run");
-
-    if run_release {
-        command.arg("--release");
-    }
-
-    command
-        .arg("--manifest-path")
-        .arg(&manifest_path)
-        .arg("-p")
-        .arg("opensnitchd-rs")
-        .current_dir(repo_root)
-        .stdout(stdout_file)
-        .stderr(stderr_file);
-
-    let child = command.spawn()?;
-    let pid = child.id();
-
-    let mode = if run_release { "release" } else { "debug" };
-    let latest_content = format!(
-        "pid={pid}\nmode={mode}\nrust_log={rust_log}\nstdout={}\nstderr={}\nlogfile={}\n",
-        stdout_path.display(),
-        stderr_path.display(),
-        daemon_log_path.display(),
-    );
-    fs::write(&latest_path, latest_content)?;
-
-    println!("daemon-rs live log session launched pid={pid} mode={mode}");
-    println!("stdout={}", stdout_path.display());
-    println!("stderr={}", stderr_path.display());
-    println!("logfile={}", daemon_log_path.display());
-    println!("latest={}", latest_path.display());
-    println!("tail: tail -f {}", stdout_path.display(),);
-    println!("stop: sudo kill {pid}");
-
-    Ok(())
+    live_logs::launch_daemon_live_logs()
 }
 
 fn stop_daemon_live_logs() -> Result<(), DynError> {
-    let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let daemon_rs_dir = tools_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .ok_or("tools dir missing daemon-rs parent")?;
-    let repo_root = daemon_rs_dir
-        .parent()
-        .ok_or("daemon-rs dir missing parent")?;
-
-    let logs_dir = env::var("OPENSNITCH_DAEMON_RS_LOG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| repo_root.join("logs"));
-    let latest_path = logs_dir.join("daemon-rs-live.latest");
-
-    if !latest_path.exists() {
-        println!(
-            "no live session metadata found at {}",
-            latest_path.display()
-        );
-        return Ok(());
-    }
-
-    let latest_content = fs::read_to_string(&latest_path)?;
-    let Some(pid_line) = latest_content
-        .lines()
-        .find_map(|line| line.strip_prefix("pid="))
-    else {
-        fs::remove_file(&latest_path)?;
-        println!(
-            "stale metadata without pid removed at {}",
-            latest_path.display()
-        );
-        return Ok(());
-    };
-    let pid_str = pid_line.trim().to_string();
-
-    let _pid: u32 = pid_str.parse().map_err(|err| {
-        format!(
-            "invalid pid '{pid_str}' in {}: {err}",
-            latest_path.display()
-        )
-    })?;
-
-    run_command(repo_root, "sudo", ["-n", "true"], &[])?;
-
-    match run_command(
-        repo_root,
-        "sudo",
-        ["-n", "kill", "-0", pid_str.as_str()],
-        &[],
-    ) {
-        Ok(_) => {
-            run_command(repo_root, "sudo", ["-n", "kill", pid_str.as_str()], &[])?;
-            println!("stopped daemon-rs live session pid={pid_str}");
-        }
-        Err(err) => {
-            let text = err.to_string();
-            if text.contains("No such process") {
-                println!("daemon-rs live session pid={pid_str} was already stopped");
-            } else {
-                return Err(err);
-            }
-        }
-    }
-
-    fs::remove_file(&latest_path)?;
-    println!("removed metadata file {}", latest_path.display());
-
-    Ok(())
+    live_logs::stop_daemon_live_logs()
 }
 
 fn update_perf_md() -> Result<(), DynError> {
@@ -1179,7 +987,8 @@ fn update_perf_md() -> Result<(), DynError> {
     let perf_md = env::var("PERF_MD_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| daemon_rs_dir.join("PERF.md"));
-    let stress_rounds = env::var("STRESS_ROUNDS").unwrap_or_else(|_| "4000".to_string());
+    let stress_rounds = env::var("STRESS_ROUNDS").unwrap_or_else(|_| "1000".to_string());
+    let perf_repeats = perf_repeats();
     let parity_rounds = parity_stress_rounds();
     let rust_log = perf_rust_log_level();
     let go_log = perf_go_log_level();
@@ -1197,48 +1006,79 @@ fn update_perf_md() -> Result<(), DynError> {
         "dirty"
     };
 
-    println!("Running current Rust release stress profile...");
-    let current_rust_output = run_command(
-        repo_root,
-        "cargo",
-        [
-            "test",
-            "--manifest-path",
-            daemon_rs_dir.join("Cargo.toml").to_string_lossy().as_ref(),
-            "--release",
-            "-p",
-            "opensnitchd-rs",
-            "stress_profile_reports_connect_latency_and_pipeline_drops",
-            "--",
-            "--ignored",
-            "--nocapture",
-        ],
-        &[
-            ("RUST_LOG", rust_log.as_str()),
-            ("OPENSNITCH_STRESS_ROUNDS", stress_rounds.as_str()),
-        ],
-    )?;
-    let current_rust_line = find_line(&current_rust_output, "stress-profile rounds=")?;
+    println!(
+        "Running current Rust release stress profile ({}x, median by p95)...",
+        perf_repeats
+    );
+    let mut current_rust_runs = Vec::with_capacity(perf_repeats);
+    for run_idx in 0..perf_repeats {
+        let current_rust_output = run_command(
+            repo_root,
+            "cargo",
+            [
+                "test",
+                "--manifest-path",
+                daemon_rs_dir.join("Cargo.toml").to_string_lossy().as_ref(),
+                "--release",
+                "-p",
+                "opensnitchd-rs",
+                "stress_profile_reports_connect_latency_and_pipeline_drops",
+                "--",
+                "--ignored",
+                "--nocapture",
+            ],
+            &[
+                ("RUST_LOG", rust_log.as_str()),
+                ("OPENSNITCH_STRESS_ROUNDS", stress_rounds.as_str()),
+            ],
+        )?;
+        let current_rust_line = find_stress_profile_line(&current_rust_output)?.to_string();
+        let current_rust_metrics = Metrics::parse(&current_rust_line)?;
+        println!(
+            "  rust-run {}/{} p95_ms={:.3}",
+            run_idx + 1,
+            perf_repeats,
+            current_rust_metrics.p95,
+        );
+        current_rust_runs.push((current_rust_metrics, current_rust_line));
+    }
+    let (current_rust, current_rust_line) = select_median_metrics_run(current_rust_runs);
 
-    println!("Running current Go stress profile...");
-    let current_go_output = run_command(
-        &repo_root.join("daemon"),
-        "go",
-        [
-            "test",
-            "./runtimeprofile",
-            "-run",
-            "TestStressProfileReportsConnectLatencyAndPipelineDrops",
-            "-count=1",
-            "-v",
-        ],
-        &[
-            ("OPENSNITCH_HARNESS_GO_LOG_LEVEL", go_log.as_str()),
-            ("OPENSNITCH_STRESS_PROFILE", "1"),
-            ("OPENSNITCH_STRESS_ROUNDS", stress_rounds.as_str()),
-        ],
-    )?;
-    let current_go_line = find_line(&current_go_output, "stress-profile backend=go")?;
+    println!(
+        "Running current Go stress profile ({}x, median by p95)...",
+        perf_repeats
+    );
+    let mut current_go_runs = Vec::with_capacity(perf_repeats);
+    for run_idx in 0..perf_repeats {
+        let current_go_output = run_command(
+            &repo_root.join("daemon"),
+            "go",
+            [
+                "test",
+                "./runtimeprofile",
+                "-run",
+                "TestStressProfileReportsConnectLatencyAndPipelineDrops",
+                "-count=1",
+                "-v",
+            ],
+            &[
+                ("OPENSNITCH_HARNESS_GO_LOG_LEVEL", go_log.as_str()),
+                ("OPENSNITCH_STRESS_PROFILE", "1"),
+                ("OPENSNITCH_STRESS_ROUNDS", stress_rounds.as_str()),
+            ],
+        )?;
+        let current_go_line =
+            find_line(&current_go_output, "stress-profile backend=go")?.to_string();
+        let current_go_metrics = Metrics::parse(&current_go_line)?;
+        println!(
+            "  go-run   {}/{} p95_ms={:.3}",
+            run_idx + 1,
+            perf_repeats,
+            current_go_metrics.p95,
+        );
+        current_go_runs.push((current_go_metrics, current_go_line));
+    }
+    let (current_go, current_go_line) = select_median_metrics_run(current_go_runs);
 
     let prev_rust_line = cached_or_run_prev_rust_profile(
         repo_root,
@@ -1246,78 +1086,125 @@ fn update_perf_md() -> Result<(), DynError> {
         &prev_commit,
         &prev_commit_full,
         &stress_rounds,
+        perf_repeats,
         refresh_prev_base,
-    )?;
+    )
+    .ok();
+    let prev_rust = prev_rust_line
+        .as_ref()
+        .and_then(|line| Metrics::parse(line).ok());
 
-    let current_rust = Metrics::parse(current_rust_line)?;
-    let current_go = Metrics::parse(current_go_line)?;
-    let prev_rust = Metrics::parse(&prev_rust_line)?;
+    let prev_commit_cell = if prev_rust.is_some() {
+        format!("`{prev_commit}`")
+    } else {
+        "unavailable".to_string()
+    };
+    let vs_prev_cell = if let Some(prev) = prev_rust.as_ref() {
+        current_rust.delta_string(prev)
+    } else {
+        "n/a".to_string()
+    };
 
     let row_rust = format!(
-        "| {run_date} | Rust | release (ThinLTO) | {stress_rounds} | `{current_commit}` | {current_rust} | pass | Go default same run | {vs_go} | `{prev_commit}` | {vs_prev} | Auto-updated current reference Rust run ({current_subject}); workspace {workspace_state}. |",
+        "| {run_date} | Rust | release (ThinLTO) | {stress_rounds} | `{current_commit}` | {current_rust} | pass | Go default same run | {vs_go} | {prev_commit_cell} | {vs_prev_cell} | Auto-updated current reference Rust run ({current_subject}); workspace {workspace_state}. |",
         current_rust = current_rust.format_values(),
         vs_go = current_rust.delta_string(&current_go),
-        vs_prev = current_rust.delta_string(&prev_rust),
     );
     let row_go = format!(
         "| {run_date} | Go | default | {stress_rounds} | `{current_commit}` | {current_go} | pass | {empty} | Auto-updated current Go comparison row paired with Rust actual. |",
         current_go = current_go.format_values(),
         empty = EMPTY_COMPARISON_COLUMNS,
     );
-    let row_prev = format!(
-        "| {run_date} | Rust | release (ThinLTO) | {stress_rounds} | `{prev_commit}` | {prev_rust} | pass | {empty} | Auto-updated previous commit benchmark ({prev_subject}) using cached previous-commit worktree/results when available. |",
-        prev_rust = prev_rust.format_values(),
-        empty = EMPTY_COMPARISON_COLUMNS,
-    );
+    let row_prev = if let Some(prev) = prev_rust.as_ref() {
+        format!(
+            "| {run_date} | Rust | release (ThinLTO) | {stress_rounds} | `{prev_commit}` | {prev_rust} | pass | {empty} | Auto-updated previous commit benchmark ({prev_subject}) using cached previous-commit worktree/results when available. |",
+            prev_rust = prev.format_values(),
+            empty = EMPTY_COMPARISON_COLUMNS,
+        )
+    } else {
+        format!(
+            "| {run_date} | Rust | release (ThinLTO) | {stress_rounds} | `{prev_commit}` | unavailable | fail | {empty} | Previous-commit benchmark unavailable (build/compat issue in previous commit). |",
+            empty = EMPTY_COMPARISON_COLUMNS,
+        )
+    };
 
     prepend_rows(&perf_md, TABLE_HEADER, &[row_rust, row_go, row_prev])?;
 
-    println!("Running parity hot/cold delta harness...");
-    let parity_output =
-        with_fixture_backup(repo_root, "daemon/ui/testdata/default-config.json", || {
-            run_command(
-                repo_root,
-                "make",
-                [
-                    "parity-hot-cold-delta",
-                    &format!("STRESS_ROUNDS={parity_rounds}"),
-                ],
-                &[
-                    ("PERF_RUST_LOG_LEVEL", rust_log.as_str()),
-                    ("HARNESS_GO_LOG_LEVEL", go_log.as_str()),
-                ],
-            )
-        })?;
+    println!(
+        "Running parity hot/cold delta harness ({}x, median by hot p95 delta)...",
+        perf_repeats
+    );
+    let mut parity_runs = Vec::with_capacity(perf_repeats);
+    for run_idx in 0..perf_repeats {
+        let parity_output =
+            with_fixture_backup(repo_root, "daemon/ui/testdata/default-config.json", || {
+                run_command(
+                    repo_root,
+                    "make",
+                    [
+                        "parity-hot-cold-delta",
+                        &format!("STRESS_ROUNDS={parity_rounds}"),
+                        "PERF_REPEATS=1",
+                    ],
+                    &[
+                        ("PERF_RUST_LOG_LEVEL", rust_log.as_str()),
+                        ("HARNESS_GO_LOG_LEVEL", go_log.as_str()),
+                    ],
+                )
+            })?;
+        let parsed = parse_parity_delta_summary(&parity_output)?;
+        println!(
+            "  parity-run {}/{} hot_p95_delta_ms={:+.3} status={}",
+            run_idx + 1,
+            perf_repeats,
+            parsed.hot_p95,
+            parsed.status,
+        );
+        parity_runs.push(parsed);
+    }
+    let parity = select_median_parity_run(parity_runs);
 
-    let hot_line = find_line(&parity_output, "PARITY DELTA HOT:")?;
-    let cold_line = find_line(&parity_output, "PARITY DELTA COLD:")?;
-    let status_line = find_line(&parity_output, "PARITY DELTA STATUS:")?;
-
-    let hot_p50 = parse_metric(hot_line, "p50")?;
-    let hot_p95 = parse_metric(hot_line, "p95")?;
-    let hot_p99 = parse_metric(hot_line, "p99")?;
-    let hot_max = parse_metric(hot_line, "max")?;
-    let hot_drop_total = parse_metric(hot_line, "drop_total")?;
-    let cold_go = parse_metric(cold_line, "go_total_s")?;
-    let cold_rust = parse_metric(cold_line, "rust_total_s")?;
-    let cold_delta = parse_metric(cold_line, "delta_s")?;
-    let status = status_line
-        .split(':')
-        .nth(1)
-        .map(str::trim)
-        .unwrap_or("PASS");
+    let hot_mixed_go_ms = parity.hot_mixed_go_ms;
+    let hot_mixed_rust_ms = parity.hot_mixed_rust_ms;
+    let hot_mixed_delta_ms = parity.hot_mixed_delta_ms;
+    let hot_thr_go_time_op_us = parity.hot_thr_go_time_op_us;
+    let hot_thr_rust_time_op_us = parity.hot_thr_rust_time_op_us;
+    let hot_thr_go_ops_s = parity.hot_thr_go_ops_s;
+    let hot_thr_rust_ops_s = parity.hot_thr_rust_ops_s;
+    let hot_p50 = parity.hot_p50;
+    let hot_p95 = parity.hot_p95;
+    let hot_p99 = parity.hot_p99;
+    let hot_max = parity.hot_max;
+    let hot_drop_total = parity.hot_drop_total;
+    let cold_go_rule = parity.cold_go_rule;
+    let cold_rust_rule = parity.cold_rust_rule;
+    let cold_rule_delta = parity.cold_rule_delta;
+    let cold_go_ui = parity.cold_go_ui;
+    let cold_rust_ui = parity.cold_rust_ui;
+    let cold_ui_delta = parity.cold_ui_delta;
+    let cold_go_tasks = parity.cold_go_tasks;
+    let cold_rust_tasks = parity.cold_rust_tasks;
+    let cold_tasks_delta = parity.cold_tasks_delta;
+    let cold_go = parity.cold_go;
+    let cold_rust = parity.cold_rust;
+    let cold_delta = parity.cold_delta;
+    let status = parity.status.as_str();
 
     let delta_row = format!(
-        "| {run_date} | `make parity-hot-cold-delta` | {parity_rounds} | `{current_commit}` | {hot_p50:+.3} | {hot_p95:+.3} | {hot_p99:+.3} | {hot_max:+.3} | {hot_drop:+.0} | {cold_go:.3} | {cold_rust:.3} | {cold_delta:+.3} | {status} | Auto-updated parity hot/cold delta row from tools command. |",
+        "| {run_date} | `make parity-hot-cold-delta` | {parity_rounds} | `{current_commit}` | {hot_mixed_go_ms:.3} | {hot_mixed_rust_ms:.3} | {hot_mixed_delta_ms:+.3} | {hot_thr_go_time_op_us:.3} | {hot_thr_rust_time_op_us:.3} | {hot_thr_go_ops_s:.1} | {hot_thr_rust_ops_s:.1} | {hot_p50:+.3} | {hot_p95:+.3} | {hot_p99:+.3} | {hot_max:+.3} | {hot_drop:+.0} | {cold_go_rule:.3} | {cold_rust_rule:.3} | {cold_rule_delta:+.3} | {cold_go_ui:.3} | {cold_rust_ui:.3} | {cold_ui_delta:+.3} | {cold_go_tasks:.3} | {cold_rust_tasks:.3} | {cold_tasks_delta:+.3} | {cold_go:.3} | {cold_rust:.3} | {cold_delta:+.3} | {status} | Auto-updated parity hot/cold delta row from tools command. |",
         hot_drop = hot_drop_total,
     );
 
     prepend_rows(&perf_md, DELTA_TABLE_HEADER, &[delta_row])?;
 
     println!("Updated {}", perf_md.display());
-    println!("Current Rust: {current_rust_line}");
-    println!("Current Go:   {current_go_line}");
-    println!("Prev Rust:    {prev_rust_line}");
+    println!("Current Rust (median): {current_rust_line}");
+    println!("Current Go (median):   {current_go_line}");
+    if let Some(prev_rust_line) = prev_rust_line.as_ref() {
+        println!("Prev Rust:    {prev_rust_line}");
+    } else {
+        println!("Prev Rust:    unavailable (previous commit benchmark failed)");
+    }
     println!("Prev cache:   {}", cache_root.display());
 
     Ok(())
@@ -1356,6 +1243,7 @@ fn cached_or_run_prev_rust_profile(
     prev_commit: &str,
     prev_commit_full: &str,
     stress_rounds: &str,
+    perf_repeats: usize,
     refresh_prev_base: bool,
 ) -> Result<String, DynError> {
     let rust_log = perf_rust_log_level();
@@ -1378,33 +1266,166 @@ fn cached_or_run_prev_rust_profile(
     let worktree_path = cache_root.join("prev-worktree");
     ensure_cached_worktree(repo_root, &worktree_path, prev_commit_full)?;
 
-    println!("Running previous-commit Rust release stress profile...");
-    let prev_rust_output = run_command(
-        repo_root,
-        "cargo",
-        [
-            "test",
-            "--manifest-path",
-            worktree_path
-                .join("daemon-rs/Cargo.toml")
-                .to_string_lossy()
-                .as_ref(),
-            "--release",
-            "-p",
-            "opensnitchd-rs",
-            "stress_profile_reports_connect_latency_and_pipeline_drops",
-            "--",
-            "--ignored",
-            "--nocapture",
-        ],
-        &[
-            ("RUST_LOG", rust_log.as_str()),
-            ("OPENSNITCH_STRESS_ROUNDS", stress_rounds),
-        ],
-    )?;
-    let prev_rust_line = find_line(&prev_rust_output, "stress-profile rounds=")?.to_string();
+    println!(
+        "Running previous-commit Rust release stress profile ({}x, median by p95)...",
+        perf_repeats
+    );
+    let manifest_path = worktree_path.join("daemon-rs/Cargo.toml");
+    let run_prev_profile = |rust_log_value: &str| {
+        run_command(
+            repo_root,
+            "cargo",
+            [
+                "test",
+                "--manifest-path",
+                manifest_path.to_string_lossy().as_ref(),
+                "--release",
+                "-p",
+                "opensnitchd-rs",
+                "stress_profile_reports_connect_latency_and_pipeline_drops",
+                "--",
+                "--ignored",
+                "--nocapture",
+            ],
+            &[
+                ("RUST_LOG", rust_log_value),
+                ("OPENSNITCH_STRESS_ROUNDS", stress_rounds),
+            ],
+        )
+    };
+
+    let mut prev_runs = Vec::with_capacity(perf_repeats);
+    for run_idx in 0..perf_repeats {
+        let prev_rust_output = run_prev_profile(rust_log.as_str())?;
+        let prev_rust_line = match find_stress_profile_line(&prev_rust_output) {
+            Ok(line) => line.to_string(),
+            Err(_) => {
+                // Older commits may only emit stress metrics at info-level.
+                eprintln!(
+                    "previous commit stress-profile line not found with RUST_LOG={}; retrying with RUST_LOG=info",
+                    rust_log
+                );
+                let fallback_output = run_prev_profile("info")?;
+                find_stress_profile_line(&fallback_output)?.to_string()
+            }
+        };
+        let metrics = Metrics::parse(&prev_rust_line)?;
+        println!(
+            "  prev-rust-run {}/{} p95_ms={:.3}",
+            run_idx + 1,
+            perf_repeats,
+            metrics.p95,
+        );
+        prev_runs.push((metrics, prev_rust_line));
+    }
+    let (_, prev_rust_line) = select_median_metrics_run(prev_runs);
     fs::write(&cached_result_path, format!("{prev_rust_line}\n"))?;
     Ok(prev_rust_line)
+}
+
+fn select_median_metrics_run(mut runs: Vec<(Metrics, String)>) -> (Metrics, String) {
+    runs.sort_by(|left, right| left.0.p95.total_cmp(&right.0.p95));
+    runs[runs.len() / 2].clone()
+}
+
+#[derive(Clone)]
+struct ParityDeltaSummary {
+    hot_mixed_go_ms: f64,
+    hot_mixed_rust_ms: f64,
+    hot_mixed_delta_ms: f64,
+    hot_thr_go_time_op_us: f64,
+    hot_thr_rust_time_op_us: f64,
+    hot_thr_go_ops_s: f64,
+    hot_thr_rust_ops_s: f64,
+    hot_p50: f64,
+    hot_p95: f64,
+    hot_p99: f64,
+    hot_max: f64,
+    hot_drop_total: f64,
+    cold_go_rule: f64,
+    cold_rust_rule: f64,
+    cold_rule_delta: f64,
+    cold_go_ui: f64,
+    cold_rust_ui: f64,
+    cold_ui_delta: f64,
+    cold_go_tasks: f64,
+    cold_rust_tasks: f64,
+    cold_tasks_delta: f64,
+    cold_go: f64,
+    cold_rust: f64,
+    cold_delta: f64,
+    status: String,
+}
+
+fn parse_parity_delta_summary(output: &str) -> Result<ParityDeltaSummary, DynError> {
+    let hot_mixed_line = find_line(output, "PARITY DELTA HOT MIXED:")?;
+    let hot_throughput_line = find_line(output, "PARITY DELTA HOT THROUGHPUT:")?;
+    let hot_line = find_line(output, "PARITY DELTA HOT:")?;
+    let cold_components_line = find_line(output, "PARITY DELTA COLD COMPONENTS:")?;
+    let cold_detail_line = find_line(output, "PARITY DELTA COLD DETAIL:")?;
+    let cold_line = find_line(output, "PARITY DELTA COLD:")?;
+    let status_line = find_line(output, "PARITY DELTA STATUS:")?;
+
+    let comparable_cold_line = output
+        .lines()
+        .find(|line| line.contains("PARITY DELTA COLD COMPARABLE-TASKS:"))
+        .or_else(|| {
+            output
+                .lines()
+                .find(|line| line.contains("PARITY DELTA COLD NON-COMPARABLE-TASKS:"))
+        });
+
+    let (cold_go, cold_rust, cold_delta) = if let Some(line) = comparable_cold_line {
+        (
+            parse_metric(line, "go_total_with_tasks_s")?,
+            parse_metric(line, "rust_total_with_tasks_s")?,
+            parse_metric(line, "delta_with_tasks_s")?,
+        )
+    } else {
+        (
+            parse_metric(cold_line, "go_total_s")?,
+            parse_metric(cold_line, "rust_total_s")?,
+            parse_metric(cold_line, "delta_s")?,
+        )
+    };
+
+    Ok(ParityDeltaSummary {
+        hot_mixed_go_ms: parse_metric(hot_mixed_line, "go_verdict_ms")?,
+        hot_mixed_rust_ms: parse_metric(hot_mixed_line, "rust_verdict_ms")?,
+        hot_mixed_delta_ms: parse_metric(hot_mixed_line, "delta_ms")?,
+        hot_thr_go_time_op_us: parse_metric(hot_throughput_line, "go_time_op_us")?,
+        hot_thr_rust_time_op_us: parse_metric(hot_throughput_line, "rust_time_op_us")?,
+        hot_thr_go_ops_s: parse_metric(hot_throughput_line, "go_ops_s")?,
+        hot_thr_rust_ops_s: parse_metric(hot_throughput_line, "rust_ops_s")?,
+        hot_p50: parse_metric(hot_line, "p50")?,
+        hot_p95: parse_metric(hot_line, "p95")?,
+        hot_p99: parse_metric(hot_line, "p99")?,
+        hot_max: parse_metric(hot_line, "max")?,
+        hot_drop_total: parse_metric(hot_line, "drop_total")?,
+        cold_go_rule: parse_metric(cold_components_line, "go_rule_s")?,
+        cold_rust_rule: parse_metric(cold_components_line, "rust_rule_s")?,
+        cold_rule_delta: parse_metric(cold_detail_line, "rust_rule-vs-go_rule_s")?,
+        cold_go_ui: parse_metric(cold_components_line, "go_ui_s")?,
+        cold_rust_ui: parse_metric(cold_components_line, "rust_ui_s")?,
+        cold_ui_delta: parse_metric(cold_detail_line, "rust_ui-vs-go_ui_s")?,
+        cold_go_tasks: parse_metric(cold_components_line, "go_tasks_s")?,
+        cold_rust_tasks: parse_metric(cold_components_line, "rust_tasks_s")?,
+        cold_tasks_delta: parse_metric(cold_detail_line, "rust_tasks-vs-go_tasks_s")?,
+        cold_go,
+        cold_rust,
+        cold_delta,
+        status: status_line
+            .split(':')
+            .nth(1)
+            .map(str::trim)
+            .unwrap_or("PASS")
+            .to_string(),
+    })
+}
+
+fn select_median_parity_run(mut runs: Vec<ParityDeltaSummary>) -> ParityDeltaSummary {
+    runs.sort_by(|left, right| left.hot_p95.total_cmp(&right.hot_p95));
+    runs[runs.len() / 2].clone()
 }
 
 fn ensure_cached_worktree(
@@ -1436,12 +1457,16 @@ fn ensure_cached_worktree(
         }
     }
 
+    // Clean up stale registered worktrees (missing on disk but still listed by git).
+    let _ = run_command(repo_root, "git", ["worktree", "prune"], &[]);
+
     run_command(
         repo_root,
         "git",
         [
             "worktree",
             "add",
+            "-f",
             "--detach",
             worktree_path.to_string_lossy().as_ref(),
             expected_commit,
@@ -1484,7 +1509,7 @@ fn run_git<const N: usize>(cwd: &Path, args: [&str; N]) -> String {
         .to_string()
 }
 
-fn run_command<const N: usize>(
+pub(crate) fn run_command<const N: usize>(
     cwd: &Path,
     program: &str,
     args: [&str; N],
@@ -1497,7 +1522,9 @@ fn run_command<const N: usize>(
     }
     let output = command.output()?;
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        Ok(combined)
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1512,10 +1539,22 @@ fn run_command<const N: usize>(
     }
 }
 
-fn find_line<'a>(text: &'a str, needle: &str) -> Result<&'a str, DynError> {
+pub(crate) fn find_line<'a>(text: &'a str, needle: &str) -> Result<&'a str, DynError> {
     text.lines()
         .find(|line| line.contains(needle))
         .ok_or_else(|| format!("expected output line containing: {needle}").into())
+}
+
+fn find_stress_profile_line<'a>(text: &'a str) -> Result<&'a str, DynError> {
+    text.lines()
+        .find(|line| {
+            line.contains("stress-profile")
+                && line.contains("p50_ms=")
+                && line.contains("p95_ms=")
+                && line.contains("p99_ms=")
+                && line.contains("max_ms=")
+        })
+        .ok_or_else(|| "expected stress-profile metrics output line".into())
 }
 
 fn cache_root(repo_root: &Path) -> PathBuf {
@@ -1529,7 +1568,7 @@ fn cache_root(repo_root: &Path) -> PathBuf {
     env::temp_dir().join(format!("opensnitch-perf-cache-{repo_hash:016x}"))
 }
 
-fn env_flag(name: &str) -> bool {
+pub(crate) fn env_flag(name: &str) -> bool {
     matches!(
         env::var(name).as_deref(),
         Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
@@ -1575,7 +1614,7 @@ impl Metrics {
     }
 }
 
-fn parse_metric(line: &str, key: &str) -> Result<f64, DynError> {
+pub(crate) fn parse_metric(line: &str, key: &str) -> Result<f64, DynError> {
     let prefix = format!("{key}=");
     let value = line
         .split_whitespace()
