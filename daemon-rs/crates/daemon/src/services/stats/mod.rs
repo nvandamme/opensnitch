@@ -1,5 +1,6 @@
 mod counters;
 mod internal;
+mod runtime_lifecycle;
 mod snapshot_ops;
 mod stats;
 #[cfg(test)]

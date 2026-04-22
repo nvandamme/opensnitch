@@ -6,6 +6,7 @@ use tracing::{debug, error, info};
 use super::{
     Daemon,
     proc_workers::{DaemonProcWorkerControlPort, DaemonProcWorkerReconfigurePort},
+    reload::DaemonReloadPortAdapter,
 };
 use crate::{
     bus::BusRx,
@@ -37,7 +38,6 @@ impl Daemon {
         notification_flow: NotificationFlow,
     ) {
         info!("starting runtime task set");
-        crate::services::task::reply::configure_alert_sender(self.inner.bus.alert_tx.clone());
         let task_reply_rx = rx.task_reply_rx;
         let alert_rx = rx.alert_rx;
         handles.push_task(
@@ -48,16 +48,16 @@ impl Daemon {
 
         handles.push_task(
             "connect-attempts",
-            self.spawn_connect_attempt_task(verdict_flow, self.inner.stats.clone(), rx.connect_rx),
+            self.spawn_connect_attempt_task(verdict_flow, self.runtime.stats.clone(), rx.connect_rx),
         );
         debug!("connect-attempt task started");
 
         handles.push_task(
             "kernel-events",
             self.spawn_kernel_task(
-                self.inner.process.clone(),
-                self.inner.dns.clone(),
-                self.inner.stats.clone(),
+                self.runtime.process.clone(),
+                self.runtime.dns.clone(),
+                self.runtime.stats.clone(),
                 rx.kernel_rx,
             ),
         );
@@ -65,28 +65,32 @@ impl Daemon {
 
         handles.push_task(
             "process-cache-cleanup",
-            self.inner
+            self.runtime
                 .process
-                .spawn_cleanup_task(self.inner.shutdown.clone()),
+                .spawn_cleanup_task(self.runtime.shutdown.clone()),
         );
         debug!("process-cache-cleanup task started");
 
         handles.push_task(
             "client-commands",
             CommandFlow::new(
-                self.inner.shutdown.clone(),
-                self.inner.config.clone(),
-                self.inner.rules.clone(),
-                self.inner.firewall.clone(),
-                self.inner.process.clone(),
-                self.inner.stats.clone(),
-                self.inner.bus.task_reply_tx.clone(),
-                self.inner.task_runtime.clone(),
+                self.runtime.shutdown.clone(),
+                self.runtime.client.clone(),
+                self.runtime.config.clone(),
+                self.runtime.rules.clone(),
+                self.runtime.firewall.clone(),
+                self.runtime.process.clone(),
+                self.runtime.stats.clone(),
+                self.runtime.bus.task_reply_tx.clone(),
+                self.runtime.tasks.clone(),
                 Arc::new(DaemonProcWorkerReconfigurePort {
                     daemon: self.clone(),
                 }),
                 Arc::new(DaemonProcWorkerControlPort {
                     proc_workers: self.proc_workers_control(),
+                }),
+                Arc::new(DaemonReloadPortAdapter {
+                    daemon: self.clone(),
                 }),
             )
             .spawn(rx.client_cmd_rx),
@@ -95,25 +99,26 @@ impl Daemon {
 
         handles.push_task(
             "verdict-replies",
-            self.spawn_verdict_rpc_task(rx.verdict_rx, self.inner.stats.clone()),
+            self.spawn_verdict_rpc_task(rx.verdict_rx, self.runtime.stats.clone()),
         );
         debug!("verdict-rpc task started");
 
         handles.push_task(
             "stats",
             self.spawn_stats_flow(
-                self.inner.config.clone(),
-                self.inner.rules.clone(),
-                self.inner.stats.clone(),
+                self.runtime.config.clone(),
+                self.runtime.rules.clone(),
+                self.runtime.stats.clone(),
+                self.runtime.dns.clone(),
             ),
         );
         debug!("stats task started");
 
         handles.push_task(
             "subscription-scheduler",
-            self.inner
+            self.runtime
                 .subscriptions
-                .spawn_scheduler(self.inner.shutdown.clone(), self.inner.stats.clone()),
+                .spawn_scheduler(self.runtime.shutdown.clone(), self.runtime.stats.clone()),
         );
         debug!("subscription-scheduler task started");
 
@@ -123,30 +128,32 @@ impl Daemon {
             Box::pin(async move { daemon.reconfigure_proc_workers(method).await })
         });
 
-        handles.push_worker_control(self.inner.config.spawn_watch_task(
-            self.inner.shutdown.clone(),
-            self.inner.rules.clone(),
-            self.inner.firewall.clone(),
-            self.inner.stats.clone(),
-            self.inner.bus.alert_tx.clone(),
+        handles.push_worker_control(self.runtime.config.spawn_watch_task(
+            self.runtime.shutdown.clone(),
+            self.runtime.rules.clone(),
+            self.runtime.firewall.clone(),
+            self.runtime.stats.clone(),
+            self.runtime.alert_buffer.clone(),
+            self.runtime.bus.alert_tx.clone(),
             reconfigure_proc_workers,
         ));
         handles.push_worker_control(
-            self.inner
+            self.runtime
                 .rules
-                .spawn_watch_task(self.inner.shutdown.clone()),
+                .spawn_watch_task(self.runtime.shutdown.clone()),
         );
-        handles.push_worker_control(self.inner.task_runtime.spawn_storage_tasks_watch_task(
-            self.inner.shutdown.clone(),
-            self.inner.config.clone(),
-            self.inner.process.clone(),
-            self.inner.bus.task_reply_tx.clone(),
-            self.inner.bus.alert_tx.clone(),
+        handles.push_worker_control(self.runtime.tasks.spawn_storage_tasks_watch_task(
+            self.runtime.shutdown.clone(),
+            self.runtime.config.clone(),
+            self.runtime.process.clone(),
+            self.runtime.bus.task_reply_tx.clone(),
+            self.runtime.alert_buffer.clone(),
+            self.runtime.bus.alert_tx.clone(),
         ));
         handles.push_worker_control(
-            self.inner
+            self.runtime
                 .firewall
-                .spawn_watch_task(self.inner.shutdown.clone(), self.inner.config.clone()),
+                .spawn_watch_task(self.runtime.shutdown.clone(), self.runtime.config.clone()),
         );
         debug!("watch tasks started");
     }
@@ -157,7 +164,7 @@ impl Daemon {
         task_reply_rx: tokio::sync::mpsc::Receiver<opensnitch_proto::pb::NotificationReply>,
         alert_rx: tokio::sync::mpsc::Receiver<crate::models::ui_alert::UiAlert>,
     ) -> JoinHandle<()> {
-        let shutdown = self.inner.shutdown.clone();
+        let shutdown = self.runtime.shutdown.clone();
 
         tokio::spawn(async move {
             tokio::select! {
@@ -178,9 +185,9 @@ impl Daemon {
         connect_rx: tokio::sync::mpsc::Receiver<ConnectionAttempt>,
     ) -> JoinHandle<()> {
         ConnectFlow::new(
-            self.inner.shutdown.clone(),
-            self.inner.tunables,
-            self.inner.bus.verdict_tx.clone(),
+            self.runtime.shutdown.clone(),
+            self.runtime.tunables,
+            self.runtime.bus.verdict_tx.clone(),
         )
         .spawn(flow, stats, connect_rx)
     }
@@ -192,7 +199,11 @@ impl Daemon {
         stats: StatsService,
         kernel_rx: tokio::sync::mpsc::Receiver<crate::models::kernel_event::KernelEvent>,
     ) -> JoinHandle<()> {
-        KernelFlow::new(self.inner.shutdown.clone(), self.inner.tunables)
+        KernelFlow::new(
+            self.runtime.shutdown.clone(),
+            self.runtime.tunables,
+            self.runtime.kernel_pipeline_counters.clone(),
+        )
             .spawn(process, dns, stats, kernel_rx)
     }
 
@@ -202,19 +213,23 @@ impl Daemon {
         client_cmd_rx: tokio::sync::mpsc::Receiver<crate::models::command_rpc::ClientCommand>,
     ) -> JoinHandle<()> {
         CommandFlow::new(
-            self.inner.shutdown.clone(),
-            self.inner.config.clone(),
-            self.inner.rules.clone(),
-            self.inner.firewall.clone(),
-            self.inner.process.clone(),
-            self.inner.stats.clone(),
-            self.inner.bus.task_reply_tx.clone(),
-            self.inner.task_runtime.clone(),
+            self.runtime.shutdown.clone(),
+            self.runtime.client.clone(),
+            self.runtime.config.clone(),
+            self.runtime.rules.clone(),
+            self.runtime.firewall.clone(),
+            self.runtime.process.clone(),
+            self.runtime.stats.clone(),
+            self.runtime.bus.task_reply_tx.clone(),
+            self.runtime.tasks.clone(),
             Arc::new(DaemonProcWorkerReconfigurePort {
                 daemon: self.clone(),
             }),
             Arc::new(DaemonProcWorkerControlPort {
                 proc_workers: self.proc_workers_control(),
+            }),
+            Arc::new(DaemonReloadPortAdapter {
+                daemon: self.clone(),
             }),
         )
         .spawn(client_cmd_rx)
@@ -225,7 +240,7 @@ impl Daemon {
         verdict_rx: tokio::sync::mpsc::Receiver<crate::models::verdict_rpc::VerdictReply>,
         stats: StatsService,
     ) -> JoinHandle<()> {
-        VerdictSubmitFlow::new(self.inner.shutdown.clone()).spawn(verdict_rx, stats)
+        VerdictSubmitFlow::new(self.runtime.shutdown.clone()).spawn(verdict_rx, stats)
     }
 
     pub(super) fn spawn_stats_flow(
@@ -233,8 +248,10 @@ impl Daemon {
         config: ConfigService,
         rules: RuleService,
         stats: StatsService,
+        dns: DnsService,
     ) -> JoinHandle<()> {
         let proc_workers = self.proc_workers_control();
+        let kernel_pipeline_counters = self.runtime.kernel_pipeline_counters.clone();
         let worker_name = proc_workers.worker_name();
         let worker_snapshot = Arc::new(move || {
             let snapshot = proc_workers.snapshot();
@@ -248,14 +265,22 @@ impl Daemon {
         });
 
         StatsFlow::new(
-            self.inner.shutdown.clone(),
+            self.runtime.shutdown.clone(),
             config,
+            self.runtime.client.clone(),
             rules,
             stats,
-            Arc::new(Self::kernel_pipeline_ingress_stats),
-            Arc::new(Self::kernel_pipeline_drop_stats),
+            {
+                let kernel_pipeline_counters = kernel_pipeline_counters.clone();
+                Arc::new(move || kernel_pipeline_counters.ingress_stats())
+            },
+            {
+                let kernel_pipeline_counters = kernel_pipeline_counters.clone();
+                Arc::new(move || kernel_pipeline_counters.drop_stats())
+            },
             worker_name,
             worker_snapshot,
+            dns,
         )
         .spawn()
     }

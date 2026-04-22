@@ -16,7 +16,11 @@ async fn kernel_flow_dns_event_updates_dns_cache() {
     let stats = StatsService::default();
 
     let (kernel_tx, kernel_rx) = tokio::sync::mpsc::channel(16);
-    let flow = KernelFlow::new(shutdown.clone(), RuntimeTunables::default());
+    let flow = KernelFlow::new(
+        shutdown.clone(),
+        RuntimeTunables::default(),
+        std::sync::Arc::new(crate::daemon::KernelPipelineCounters::default()),
+    );
     let join = flow.spawn(process, dns.clone(), stats, kernel_rx);
 
     kernel_tx
@@ -58,7 +62,11 @@ async fn kernel_flow_respects_custom_ingress_dispatch_batch_tunable() {
     tunables.kernel_process_dispatch_batch_size = 8;
     tunables.kernel_firewall_dispatch_batch_size = 8;
 
-    let flow = KernelFlow::new(shutdown.clone(), tunables);
+    let flow = KernelFlow::new(
+        shutdown.clone(),
+        tunables,
+        std::sync::Arc::new(crate::daemon::KernelPipelineCounters::default()),
+    );
     let join = flow.spawn(process, dns.clone(), stats, kernel_rx);
 
     kernel_tx

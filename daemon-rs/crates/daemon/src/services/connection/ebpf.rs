@@ -4,25 +4,18 @@ use std::{
     collections::HashMap,
     net::{Ipv4Addr, Ipv6Addr},
     process::Command,
-    sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
 use super::ConnectionService;
 
-static BPF_MAP_IDS: OnceLock<Mutex<BpfMapIdCache>> = OnceLock::new();
-
 #[derive(Default)]
-struct BpfMapIdCache {
+pub(super) struct BpfMapIdCache {
     refreshed_at: Option<Instant>,
     by_name: HashMap<String, u32>,
 }
 
 impl BpfMapIdCache {
-    fn global() -> &'static Mutex<Self> {
-        BPF_MAP_IDS.get_or_init(|| Mutex::new(Self::default()))
-    }
-
     fn get_map_id(&mut self, map_name: &str) -> Option<u32> {
         let now = Instant::now();
         let stale = self
@@ -162,6 +155,7 @@ impl ConnectionService {
     }
 
     pub(super) fn resolve_owner_by_ebpf_map(
+        &self,
         protocol: TransportProtocol,
         src_ip: &str,
         src_port: u16,
@@ -169,7 +163,7 @@ impl ConnectionService {
         dst_port: u16,
     ) -> Option<ConnectionOwner> {
         let map_name = Self::bpf_map_name(protocol, src_ip, dst_ip)?;
-        let map_id = BpfMapIdCache::global().lock().ok()?.get_map_id(map_name)?;
+        let map_id = self.bpf_map_ids().lock().ok()?.get_map_id(map_name)?;
 
         let mut key = Self::build_bpf_key(protocol, src_ip, src_port, dst_ip, dst_port)?;
         if let Some((pid, uid)) = Self::lookup_bpf_owner(map_id, &key) {

@@ -22,6 +22,8 @@ mod command_flow;
 mod config_parsing;
 #[path = "parsing/data_contract_ownership.rs"]
 mod data_contract_ownership;
+#[path = "parsing/runtime_lifecycle_split.rs"]
+mod runtime_lifecycle_split;
 #[path = "watch_reload/config_service.rs"]
 mod config_service;
 #[path = "flows/connect_flow.rs"]
@@ -104,6 +106,8 @@ mod string_iter;
 mod stats_flow;
 #[path = "services/stats_service.rs"]
 mod stats_service;
+#[path = "services/service_lifecycle_contracts.rs"]
+mod service_lifecycle_contracts;
 #[path = "services/storage_service.rs"]
 mod storage_service;
 #[path = "services/subscription_service.rs"]
@@ -117,8 +121,8 @@ mod subscription_refresh_targets;
 mod subscription_storage;
 #[path = "runtime_tasks/task_runtime.rs"]
 mod task_runtime;
-#[path = "services/ui_session_service.rs"]
-mod ui_session_service;
+#[path = "services/client_session_service.rs"]
+mod client_session_service;
 #[path = "flows/verdict_flow.rs"]
 mod verdict_flow;
 #[path = "watch_reload/watch_workers.rs"]

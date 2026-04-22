@@ -9,7 +9,7 @@ use crate::{
     flows::{connect::ConnectFlow, verdict::VerdictFlow},
     models::connection_state::{ConnectionAttempt, TransportProtocol},
     services::{
-        client::UiSessionService, config::ConfigService, connection::ConnectionService,
+        client::ClientService, config::ConfigService, connection::ConnectionService,
         dns::DnsService, process::ProcessService, rule::RuleService, stats::StatsService,
     },
     tunables::RuntimeTunables,
@@ -47,8 +47,9 @@ async fn connect_flow_self_connect_emits_allow_verdict() {
     let dns = DnsService::default();
     let verdict_flow = VerdictFlow::new(
         bus.clone(),
+        crate::services::client::AlertBuffer::default(),
         ConfigService::new(Config::default()),
-        UiSessionService::default(),
+        ClientService::default(),
         RuleService::default(),
         ConnectionService::new(process, dns),
         StatsService::default(),

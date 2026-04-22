@@ -2,7 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::OnceLock,
+    sync::{OnceLock, RwLock},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -35,7 +35,7 @@ const MAX_RING_BUFFER_CAPACITY: usize = 1_000_000;
 const MIN_NETLINK_DELAY_MS: usize = 100;
 const MAX_NETLINK_DELAY_MS: usize = 10_000;
 
-static EFFECTIVE_TUNABLES: OnceLock<RuntimeTunables> = OnceLock::new();
+static EFFECTIVE_TUNABLES: OnceLock<RwLock<RuntimeTunables>> = OnceLock::new();
 
 impl NfqueueOverloadPolicy {
     fn parse(raw: &str) -> Option<Self> {
@@ -86,11 +86,28 @@ impl Default for RuntimeTunables {
 
 impl RuntimeTunables {
     pub fn publish_global(self) {
-        let _ = EFFECTIVE_TUNABLES.set(self);
+        if let Some(global) = EFFECTIVE_TUNABLES.get() {
+            if let Ok(mut current) = global.write() {
+                *current = self;
+            }
+            return;
+        }
+
+        let _ = EFFECTIVE_TUNABLES.set(RwLock::new(self));
     }
 
     pub fn global() -> Self {
-        EFFECTIVE_TUNABLES.get().copied().unwrap_or_default()
+        EFFECTIVE_TUNABLES
+            .get()
+            .and_then(|global| global.read().ok().map(|current| *current))
+            .unwrap_or_default()
+    }
+
+    #[allow(dead_code)]
+    pub fn reload_global() -> (Self, String) {
+        let (tunables, source) = Self::load_effective();
+        tunables.publish_global();
+        (tunables, source)
     }
 
     pub fn load_effective() -> (Self, String) {

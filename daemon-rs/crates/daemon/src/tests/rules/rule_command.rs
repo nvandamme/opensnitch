@@ -1,18 +1,26 @@
 use opensnitch_proto::pb;
 
 use crate::commands::rule::RuleCommandService;
+use crate::services::client::ClientService;
 use crate::services::rule::RuleService;
 use crate::tests::support::TestDir;
 
 #[tokio::test]
 async fn enable_rules_persists_enabled_rules_and_replies_ok() {
     let svc = RuleCommandService::default();
+    let client_service = ClientService::default();
     let temp_dir = TestDir::new("opensnitch-rule-command-service");
     let rules = initialized_rule_service(&temp_dir).await;
     let (task_reply_tx, mut task_reply_rx) = tokio::sync::mpsc::channel(4);
 
-    svc.enable_rules(7, vec![sample_rule("allow-ssh")], &rules, &task_reply_tx)
-        .await;
+    svc.enable_rules(
+        7,
+        vec![sample_rule("allow-ssh")],
+        &rules,
+        &task_reply_tx,
+        &client_service,
+    )
+    .await;
 
     let reply = task_reply_rx.recv().await.expect("reply");
     assert_eq!(reply.id, 7);
@@ -28,16 +36,29 @@ async fn enable_rules_persists_enabled_rules_and_replies_ok() {
 #[tokio::test]
 async fn disable_rules_persists_disabled_rules_and_replies_ok() {
     let svc = RuleCommandService::default();
+    let client_service = ClientService::default();
     let temp_dir = TestDir::new("opensnitch-rule-command-service");
     let rules = initialized_rule_service(&temp_dir).await;
     let (task_reply_tx, mut task_reply_rx) = tokio::sync::mpsc::channel(8);
 
-    svc.enable_rules(1, vec![sample_rule("deny-http")], &rules, &task_reply_tx)
-        .await;
+    svc.enable_rules(
+        1,
+        vec![sample_rule("deny-http")],
+        &rules,
+        &task_reply_tx,
+        &client_service,
+    )
+    .await;
     let _ = task_reply_rx.recv().await;
 
-    svc.disable_rules(2, vec![sample_rule("deny-http")], &rules, &task_reply_tx)
-        .await;
+    svc.disable_rules(
+        2,
+        vec![sample_rule("deny-http")],
+        &rules,
+        &task_reply_tx,
+        &client_service,
+    )
+    .await;
 
     let reply = task_reply_rx.recv().await.expect("reply");
     assert_eq!(reply.id, 2);
@@ -51,17 +72,30 @@ async fn disable_rules_persists_disabled_rules_and_replies_ok() {
 #[tokio::test]
 async fn delete_rules_removes_rule_file_and_replies_ok() {
     let svc = RuleCommandService::default();
+    let client_service = ClientService::default();
     let temp_dir = TestDir::new("opensnitch-rule-command-service");
     let rules = initialized_rule_service(&temp_dir).await;
     let (task_reply_tx, mut task_reply_rx) = tokio::sync::mpsc::channel(8);
 
-    svc.upsert_rules(3, vec![sample_rule("temp-rule")], &rules, &task_reply_tx)
-        .await;
+    svc.upsert_rules(
+        3,
+        vec![sample_rule("temp-rule")],
+        &rules,
+        &task_reply_tx,
+        &client_service,
+    )
+    .await;
     let _ = task_reply_rx.recv().await;
     assert!(temp_dir.path.join("temp-rule.json").exists());
 
-    svc.delete_rules(4, vec!["temp-rule".to_string()], &rules, &task_reply_tx)
-        .await;
+    svc.delete_rules(
+        4,
+        vec!["temp-rule".to_string()],
+        &rules,
+        &task_reply_tx,
+        &client_service,
+    )
+    .await;
 
     let reply = task_reply_rx.recv().await.expect("reply");
     assert_eq!(reply.id, 4);

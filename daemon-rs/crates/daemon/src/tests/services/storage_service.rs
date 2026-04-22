@@ -88,10 +88,10 @@ fn sync_atomic_write_helper_emits_write_event() {
 }
 
 #[test]
-fn path_exists_sync_and_notify_have_explicit_event_intent() {
+fn path_exists_sync_and_notify_have_explicit_event_semantics() {
     let service = StorageService::new();
     let mut subscription = service.subscribe_events();
-    let dir = test_dir("path-exists-sync-intent");
+    let dir = test_dir("path-exists-sync-semantics");
     let file_path = dir.path.join("payload.txt");
     write_text(&file_path, "hello");
 
@@ -298,10 +298,10 @@ async fn list_dir_returns_entries_without_scan_event() {
 }
 
 #[tokio::test]
-async fn path_exists_and_notify_have_explicit_event_intent() {
+async fn path_exists_and_notify_have_explicit_event_semantics() {
     let service = StorageService::new();
     let mut subscription = service.subscribe_events();
-    let dir = test_dir("path-exists-intent");
+    let dir = test_dir("path-exists-semantics");
     let file_path = dir.path.join("payload.txt");
     write_text(&file_path, "hello");
 

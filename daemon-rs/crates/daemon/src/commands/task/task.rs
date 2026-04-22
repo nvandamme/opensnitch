@@ -28,19 +28,19 @@ impl TaskCommandService {
             }
             ClientCommand::PauseRuntimeTasks => {
                 if let Err(err) = task_runtime.pause().await {
-                    tracing::warn!("task runtime intent pause failed: {err}");
+                    tracing::warn!("task runtime pause failed: {err}");
                 }
                 TaskCommandDispatch::HandledContinue
             }
             ClientCommand::ResumeRuntimeTasks => {
                 if let Err(err) = task_runtime.resume().await {
-                    tracing::warn!("task runtime intent resume failed: {err}");
+                    tracing::warn!("task runtime resume failed: {err}");
                 }
                 TaskCommandDispatch::HandledContinue
             }
             ClientCommand::StopRuntimeTasks => {
                 if let Err(err) = task_runtime.stop().await {
-                    tracing::warn!("task runtime intent stop failed: {err}");
+                    tracing::warn!("task runtime stop failed: {err}");
                 }
                 TaskCommandDispatch::HandledContinue
             }

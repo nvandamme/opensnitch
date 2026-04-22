@@ -3,19 +3,17 @@ use std::{
     net::IpAddr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU8, AtomicUsize, Ordering},
     },
     time::Instant,
 };
-use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::bus::Bus;
 use crate::models::dns_worker_state::{DnsWorkerState, DnsWorkerKind};
 use crate::services::ebpf::EbpfObjectAvailability;
 use crate::services::lifecycle::{
-    EventSubscription, ServiceEvent, ServiceLifecycle, ServiceMonitorStats, ServiceState,
-    ServiceStatus, StatusSubscription,
+    EventSubscription, ServiceLifecycle, ServiceMonitorStats, ServiceStatus, StatusSubscription,
 };
 use crate::tunables::RuntimeTunables;
 use crate::utils::lru_cache::DualLayerLruMap;
@@ -23,6 +21,8 @@ use crate::workers::{
     dns::{dns_worker::DnsWorkerControl, ebpf_worker::EbpfDnsWorkerControl},
     runtime::control::WorkerControl,
 };
+
+use super::runtime_lifecycle::DnsLifecycle;
 
 const fn default_dns_cache_capacity() -> usize {
     if cfg!(test) {
@@ -37,82 +37,19 @@ pub(super) static DNS_CACHE_CAPACITY: AtomicUsize = AtomicUsize::new(DEFAULT_DNS
 
 pub struct DnsRuntime {
     pub(super) state: Mutex<DnsWorkerState>,
-    pub(super) status_tx: watch::Sender<ServiceStatus>,
-    pub(super) event_tx: broadcast::Sender<ServiceEvent>,
-    pub(super) status_subscribers: Arc<AtomicUsize>,
-    pub(super) event_subscribers: Arc<AtomicUsize>,
-    pub(super) lifecycle_state: Mutex<ServiceState>,
-    pub(super) last_error: Mutex<Option<String>>,
+    pub(super) monitor_state: Arc<AtomicU8>,
 }
 
 impl Default for DnsRuntime {
     fn default() -> Self {
-        let (status_tx, _) = watch::channel(ServiceStatus {
-            state: ServiceState::Uninitialized,
-            last_error: None,
-        });
-        let (event_tx, _) = broadcast::channel(64);
-
         Self {
             state: Mutex::new(DnsWorkerState::default()),
-            status_tx,
-            event_tx,
-            status_subscribers: Arc::new(AtomicUsize::new(0)),
-            event_subscribers: Arc::new(AtomicUsize::new(0)),
-            lifecycle_state: Mutex::new(ServiceState::Uninitialized),
-            last_error: Mutex::new(None),
+            monitor_state: Arc::new(AtomicU8::new(0)),
         }
     }
 }
 
 impl DnsRuntime {
-    pub(super) fn current_status(&self) -> ServiceStatus {
-        ServiceStatus {
-            state: self
-                .lifecycle_state
-                .lock()
-                .map(|state| *state)
-                .unwrap_or(ServiceState::Degraded),
-            last_error: self
-                .last_error
-                .lock()
-                .map(|err| err.clone())
-                .unwrap_or_else(|_| Some("dns intent state unavailable".to_string())),
-        }
-    }
-
-    fn publish_status(&self) {
-        let _ = self.status_subscribers.load(Ordering::Relaxed);
-        let _ = self.event_subscribers.load(Ordering::Relaxed);
-        let _ = self.status_tx.send(self.current_status());
-    }
-
-    pub(super) fn transition_state(&self, to: ServiceState) {
-        let from = self
-            .lifecycle_state
-            .lock()
-            .map(|mut state| {
-                let from = *state;
-                *state = to;
-                from
-            })
-            .unwrap_or(ServiceState::Degraded);
-
-        self.publish_status();
-        let _ = self.event_tx.send(ServiceEvent::StateChanged {
-            from,
-            to,
-            last_error: self.last_error.lock().ok().and_then(|err| err.clone()),
-        });
-    }
-
-    pub(super) fn set_error(&self, error: Option<String>) {
-        if let Ok(mut last_error) = self.last_error.lock() {
-            *last_error = error;
-        }
-        self.publish_status();
-    }
-
     pub fn init_workers(
         &self,
         bus: Bus,
@@ -124,8 +61,6 @@ impl DnsRuntime {
             if let Ok(mut st) = self.state.lock() {
                 st.worker_kind = DnsWorkerKind::Ebpf;
             }
-            self.set_error(None);
-            self.transition_state(ServiceState::Running);
             return vec![Box::new(EbpfDnsWorkerControl::new(
                 bus,
                 daemon_shutdown,
@@ -136,9 +71,7 @@ impl DnsRuntime {
         if let Ok(mut st) = self.state.lock() {
             st.worker_kind = DnsWorkerKind::Fallback;
         }
-        self.set_error(None);
-        self.transition_state(ServiceState::Running);
-        vec![Box::new(DnsWorkerControl::new(bus, daemon_shutdown))]
+        vec![Box::new(DnsWorkerControl::new(bus, daemon_shutdown, self.monitor_state.clone()))]
     }
 
     pub fn snapshot(&self) -> DnsWorkerState {
@@ -150,7 +83,8 @@ impl DnsRuntime {
 pub struct DnsService {
     pub(super) ip_lookup: Arc<DualLayerLruMap<IpAddr, Arc<str>>>,
     pub(super) alias_lookup: Arc<DualLayerLruMap<Arc<str>, Arc<str>>>,
-    intent: Arc<DnsRuntime>,
+    runtime: Arc<DnsRuntime>,
+    lifecycle: DnsLifecycle,
 }
 
 impl Default for DnsService {
@@ -159,7 +93,8 @@ impl Default for DnsService {
         Self {
             ip_lookup: Arc::new(DualLayerLruMap::new(capacity)),
             alias_lookup: Arc::new(DualLayerLruMap::new(capacity)),
-            intent: Arc::new(DnsRuntime::default()),
+            runtime: Arc::new(DnsRuntime::default()),
+            lifecycle: DnsLifecycle::default(),
         }
     }
 }
@@ -180,27 +115,36 @@ impl DnsService {
         tunables: RuntimeTunables,
         ebpf_availability: EbpfObjectAvailability,
     ) -> Vec<Box<dyn WorkerControl>> {
-        self.intent
-            .init_workers(bus, daemon_shutdown, tunables, ebpf_availability)
+        let workers = self
+            .runtime
+            .init_workers(bus, daemon_shutdown, tunables, ebpf_availability);
+        self.lifecycle.mark_running();
+        workers
+    }
+
+    pub(crate) fn dns_monitor_state_label(&self) -> &'static str {
+        crate::workers::dns::dns_worker::decode_dns_monitor_state_label(
+            self.runtime.monitor_state.load(Ordering::Relaxed),
+        )
     }
 
     pub fn worker_state(&self) -> DnsWorkerState {
-        self.intent.snapshot()
+        self.runtime.snapshot()
     }
 
     pub fn subscribe_status(&self) -> anyhow::Result<StatusSubscription> {
-        ServiceLifecycle::subscribe_status(self.intent.as_ref())
+        ServiceLifecycle::subscribe_status(&self.lifecycle)
     }
 
     pub fn subscribe_events(&self) -> anyhow::Result<EventSubscription> {
-        ServiceLifecycle::subscribe_events(self.intent.as_ref())
+        ServiceLifecycle::subscribe_events(&self.lifecycle)
     }
 
     pub fn status(&self) -> ServiceStatus {
-        ServiceLifecycle::status(self.intent.as_ref())
+        ServiceLifecycle::status(&self.lifecycle)
     }
 
     pub fn monitor_stats(&self) -> ServiceMonitorStats {
-        ServiceLifecycle::monitor_stats(self.intent.as_ref())
+        ServiceLifecycle::monitor_stats(&self.lifecycle)
     }
 }

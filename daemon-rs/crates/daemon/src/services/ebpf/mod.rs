@@ -4,6 +4,7 @@ mod ebpf;
 mod ebpf_probe_support;
 mod paths;
 mod ringbuf;
+mod runtime_lifecycle;
 
 pub use crate::models::ebpf_availability::EbpfObjectAvailability;
 pub use ebpf::*;

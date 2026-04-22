@@ -10,25 +10,29 @@ use crate::{
     services::{
         config::ConfigService,
         lifecycle::{
-            EventSubscription, ServiceLifecycle, ServiceMonitorStats, ServiceStatus,
+            EventSubscription, ServiceLifecycle, ServiceMonitorStats, ServiceState, ServiceStatus,
             StatusSubscription,
         },
     },
     workers::firewall::watch_worker as firewall_watch_worker,
 };
 
-use super::state::{FirewallRuntime, FirewallRuntimeState};
+use super::{
+    runtime_lifecycle::FirewallLifecycle,
+    runtime_store::{FirewallRuntime, FirewallRuntimeStore},
+};
 
 #[derive(Clone)]
 pub struct FirewallService {
-    pub(super) intent: FirewallRuntimeState,
+    pub(super) runtime: FirewallRuntimeStore,
+    pub(super) lifecycle: FirewallLifecycle,
     pub(super) error_tx: broadcast::Sender<String>,
 }
 
 impl FirewallService {
     pub fn new(config: &Config) -> Result<Self> {
         let (error_tx, _) = broadcast::channel(256);
-        let intent = FirewallRuntimeState::new(FirewallRuntime {
+        let runtime = FirewallRuntimeStore::new(FirewallRuntime {
             state: FirewallState {
                 enabled: false,
                 backend: config.firewall_backend,
@@ -40,6 +44,7 @@ impl FirewallService {
                 &config.firewall_config_path,
             )?),
         });
+        let lifecycle = FirewallLifecycle::new(ServiceState::Stopped);
         tracing::info!(
             backend = ?config.firewall_backend,
             queue = config.firewall_queue_num,
@@ -47,7 +52,11 @@ impl FirewallService {
             path = %config.firewall_config_path.display(),
             "initializing firewall service"
         );
-        Ok(Self { intent, error_tx })
+        Ok(Self {
+            runtime,
+            lifecycle,
+            error_tx,
+        })
     }
 
     pub fn subscribe_errors(&self) -> broadcast::Receiver<String> {
@@ -55,19 +64,19 @@ impl FirewallService {
     }
 
     pub fn subscribe_status(&self) -> anyhow::Result<StatusSubscription> {
-        ServiceLifecycle::subscribe_status(&self.intent)
+        ServiceLifecycle::subscribe_status(&self.lifecycle)
     }
 
     pub fn subscribe_events(&self) -> anyhow::Result<EventSubscription> {
-        ServiceLifecycle::subscribe_events(&self.intent)
+        ServiceLifecycle::subscribe_events(&self.lifecycle)
     }
 
     pub fn status(&self) -> ServiceStatus {
-        ServiceLifecycle::status(&self.intent)
+        ServiceLifecycle::status(&self.lifecycle)
     }
 
     pub fn monitor_stats(&self) -> ServiceMonitorStats {
-        ServiceLifecycle::monitor_stats(&self.intent)
+        ServiceLifecycle::monitor_stats(&self.lifecycle)
     }
 
     pub async fn ensure_rules(&self) -> Result<()> {

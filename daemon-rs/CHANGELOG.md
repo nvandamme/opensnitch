@@ -9,6 +9,26 @@ Versioning baseline:
 - `v0.3.0`
 - `v0.4.0`
 
+## [Unreleased]
+
+### Added
+- Transactional policy mutation coordinator (`services/policy_tx`) with:
+  - idempotency dedup (`DuplicateInFlight` / `DuplicateCommitted`),
+  - serialized apply path,
+  - rollback callback support,
+  - persisted changesets and audit log records.
+- Verdict-flow multi-user race arbitration via per-connection decision key/epoch gate.
+- Async verdict rule persistence worker that keeps immediate verdict emission on the hot path while delegating durable rule writes to background transactional execution.
+- Runtime config field `AskTimeoutPolicy` (`allow|drop|default`, with default behavior when missing/null) parsed from config JSON and wired into daemon-side UI-miss fallback handling.
+
+### Changed
+- Rule/control command mutation paths now execute through shared transactional coordinator ownership-tagged by active client principal (`primary_owner()`).
+- `SetInterception`, `SetFirewall`, and `ReloadFirewall` now share transactional semantics with rollback-on-failure behavior.
+- Compatibility reference expanded for transactional mutation model, multi-user precedence/owner attribution, and `AskTimeoutPolicy` safeguard semantics.
+
+### Notes
+- `AskTimeoutPolicy` is intentionally a daemon safeguard for ambiguous/no-decision paths (UI connect failure, AskRule RPC failure, stale/discarded decision). When UI returns a concrete rule, that rule remains authoritative.
+
 ## [v0.4.0] - 2026-03-23
 
 ### Added

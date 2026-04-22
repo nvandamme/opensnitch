@@ -4,7 +4,7 @@ use std::{
     os::unix::net::UnixStream,
     path::Path,
     process::{Command, Stdio},
-    sync::{Mutex, atomic::Ordering},
+    sync::Mutex,
     thread,
     thread::JoinHandle,
     time::{Duration, SystemTime},
@@ -37,7 +37,30 @@ const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const CHILD_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 const RESOLVED_VARLINK_SOCKET: &str = "/run/systemd/resolve/io.systemd.Resolve.Monitor";
 const RESOLVED_VARLINK_METHOD: &str = "io.systemd.Resolve.Monitor.SubscribeQueryResults";
-static DNS_MONITOR_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+pub(crate) fn decode_dns_monitor_state_label(state: u8) -> &'static str {
+    match state {
+        DNS_MONITOR_STATE_IDLE => "idle",
+        DNS_MONITOR_STATE_VARLINK_CONNECTING => "varlink-connecting",
+        DNS_MONITOR_STATE_VARLINK_SUBSCRIBED => "varlink-subscribed",
+        DNS_MONITOR_STATE_VARLINK_DISCONNECTED => "varlink-disconnected",
+        DNS_MONITOR_STATE_VARLINK_ERROR => "varlink-error",
+        DNS_MONITOR_STATE_FALLBACK_RESOLVECTL => "resolvectl-fallback",
+        DNS_MONITOR_STATE_FALLBACK_DISCONNECTED => "resolvectl-disconnected",
+        DNS_MONITOR_STATE_STOPPED => "stopped",
+        _ => "unknown",
+    }
+}
+
+fn set_monitor_state(monitor_state: &std::sync::atomic::AtomicU8, state: u8) {
+    use std::sync::atomic::Ordering;
+    let previous = monitor_state.swap(state, Ordering::Relaxed);
+    if previous == state {
+        return;
+    }
+    let label = decode_dns_monitor_state_label(state);
+    notify(NotifyState::Status(&format!("DNS monitor state: {label}")));
+}
+
 const RESOLVED_STATE_SUCCESS: &str = "success";
 const DNS_TYPE_A: u64 = 1;
 const DNS_TYPE_CNAME: u64 = 5;
@@ -61,39 +84,17 @@ pub struct DnsWorkerControl {
     bus: Bus,
     daemon_shutdown: CancellationToken,
     runtime: Mutex<DnsWorkerRuntime>,
+    monitor_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl DnsWorkerControl {
-    fn publish_dns_status() {
-        let monitor = Self::dns_monitor_state_label();
-        notify(NotifyState::Status(&format!("DNS monitor state: {monitor}")));
-    }
-
-    fn set_dns_monitor_state(state: u8) {
-        let previous = DNS_MONITOR_STATE.swap(state, Ordering::Relaxed);
-        if previous == state {
-            return;
-        }
-        Self::publish_dns_status();
-    }
-
-    pub(crate) fn dns_monitor_state_label() -> &'static str {
-        match DNS_MONITOR_STATE.load(Ordering::Relaxed) {
-            DNS_MONITOR_STATE_IDLE => "idle",
-            DNS_MONITOR_STATE_VARLINK_CONNECTING => "varlink-connecting",
-            DNS_MONITOR_STATE_VARLINK_SUBSCRIBED => "varlink-subscribed",
-            DNS_MONITOR_STATE_VARLINK_DISCONNECTED => "varlink-disconnected",
-            DNS_MONITOR_STATE_VARLINK_ERROR => "varlink-error",
-            DNS_MONITOR_STATE_FALLBACK_RESOLVECTL => "resolvectl-fallback",
-            DNS_MONITOR_STATE_FALLBACK_DISCONNECTED => "resolvectl-disconnected",
-            DNS_MONITOR_STATE_STOPPED => "stopped",
-            _ => "unknown",
-        }
-    }
-
-    pub fn new(bus: Bus, daemon_shutdown: CancellationToken) -> Self {
+    pub fn new(
+        bus: Bus,
+        daemon_shutdown: CancellationToken,
+        monitor_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    ) -> Self {
         let worker_shutdown = daemon_shutdown.child_token();
-        let handle = Self::spawn_worker_thread(bus.clone(), worker_shutdown.clone());
+        let handle = Self::spawn_worker_thread(bus.clone(), worker_shutdown.clone(), monitor_state.clone());
         Self {
             bus,
             daemon_shutdown,
@@ -101,6 +102,7 @@ impl DnsWorkerControl {
                 shutdown: worker_shutdown,
                 handle: Some(handle),
             }),
+            monitor_state,
         }
     }
 
@@ -136,18 +138,24 @@ impl DnsWorkerControl {
             runtime.handle = Some(Self::spawn_worker_thread(
                 self.bus.clone(),
                 runtime.shutdown.clone(),
+                self.monitor_state.clone(),
             ));
         }
 
         WorkerCommandResult::Applied
     }
 
-    fn spawn_worker_thread(bus: Bus, shutdown: CancellationToken) -> JoinHandle<()> {
+    fn spawn_worker_thread(
+        bus: Bus,
+        shutdown: CancellationToken,
+        monitor_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    ) -> JoinHandle<()> {
         thread::spawn(move || {
             let monitor_shutdown = shutdown.clone();
             let monitor_bus = bus.clone();
+            let monitor_state_clone = monitor_state.clone();
             let monitor_handle = thread::spawn(move || {
-                Self::run_systemd_resolved_monitor(monitor_bus, monitor_shutdown);
+                Self::run_systemd_resolved_monitor(monitor_bus, monitor_shutdown, monitor_state_clone);
             });
 
             let mut last_mtime: Option<SystemTime> = None;
@@ -240,19 +248,23 @@ impl DnsWorkerControl {
 impl_restartable_thread_worker_control!(DnsWorkerControl, "dns");
 
 impl DnsWorkerControl {
-    fn run_systemd_resolved_monitor(bus: Bus, shutdown: CancellationToken) {
-        Self::set_dns_monitor_state(DNS_MONITOR_STATE_IDLE);
+    fn run_systemd_resolved_monitor(
+        bus: Bus,
+        shutdown: CancellationToken,
+        monitor_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    ) {
+        set_monitor_state(&monitor_state, DNS_MONITOR_STATE_IDLE);
         while !shutdown.is_cancelled() {
             if Path::new(RESOLVED_VARLINK_SOCKET).exists() {
-                Self::set_dns_monitor_state(DNS_MONITOR_STATE_VARLINK_CONNECTING);
+                set_monitor_state(&monitor_state, DNS_MONITOR_STATE_VARLINK_CONNECTING);
                 debug!(
                     socket = RESOLVED_VARLINK_SOCKET,
                     "[DNS] using systemd-resolved varlink monitor"
                 );
-                match Self::run_systemd_resolved_varlink_session(&bus, &shutdown) {
+                match Self::run_systemd_resolved_varlink_session(&bus, &shutdown, &monitor_state) {
                     Ok(()) => {}
                     Err(err) => {
-                        Self::set_dns_monitor_state(DNS_MONITOR_STATE_VARLINK_ERROR);
+                        set_monitor_state(&monitor_state, DNS_MONITOR_STATE_VARLINK_ERROR);
                         warn!("dns worker: systemd-resolved varlink monitor failed: {err}");
                     }
                 }
@@ -263,9 +275,9 @@ impl DnsWorkerControl {
             }
 
             if resolve_command_path("resolvectl").is_some() {
-                Self::set_dns_monitor_state(DNS_MONITOR_STATE_FALLBACK_RESOLVECTL);
+                set_monitor_state(&monitor_state, DNS_MONITOR_STATE_FALLBACK_RESOLVECTL);
                 debug!("[DNS] using resolvectl monitor fallback");
-                Self::run_resolvectl_monitor_session(&bus, &shutdown);
+                Self::run_resolvectl_monitor_session(&bus, &shutdown, &monitor_state);
             }
 
             if crate::workers::sleep_with_shutdown(
@@ -276,12 +288,13 @@ impl DnsWorkerControl {
                 break;
             }
         }
-        Self::set_dns_monitor_state(DNS_MONITOR_STATE_STOPPED);
+        set_monitor_state(&monitor_state, DNS_MONITOR_STATE_STOPPED);
     }
 
     fn run_systemd_resolved_varlink_session(
         bus: &Bus,
         shutdown: &CancellationToken,
+        monitor_state: &std::sync::atomic::AtomicU8,
     ) -> Result<(), String> {
         debug!(
             socket = RESOLVED_VARLINK_SOCKET,
@@ -303,7 +316,7 @@ impl DnsWorkerControl {
         stream
             .write_all(&request)
             .map_err(|err| format!("failed to send varlink subscribe request: {err}"))?;
-        Self::set_dns_monitor_state(DNS_MONITOR_STATE_VARLINK_SUBSCRIBED);
+        set_monitor_state(monitor_state, DNS_MONITOR_STATE_VARLINK_SUBSCRIBED);
         info!("[DNS] subscribed to systemd-resolved monitor events");
 
         let mut buf = vec![0_u8; 8192];
@@ -312,7 +325,7 @@ impl DnsWorkerControl {
         while !shutdown.is_cancelled() {
             match stream.read(&mut buf) {
                 Ok(0) => {
-                    Self::set_dns_monitor_state(DNS_MONITOR_STATE_VARLINK_DISCONNECTED);
+                    set_monitor_state(monitor_state, DNS_MONITOR_STATE_VARLINK_DISCONNECTED);
                     debug!("[DNS] systemd-resolved varlink monitor disconnected");
                     break;
                 }
@@ -346,7 +359,7 @@ impl DnsWorkerControl {
         }
 
         if shutdown.is_cancelled() {
-            Self::set_dns_monitor_state(DNS_MONITOR_STATE_STOPPED);
+            set_monitor_state(monitor_state, DNS_MONITOR_STATE_STOPPED);
             info!("[DNS] systemd-resolved monitor stopped");
         }
 
@@ -448,7 +461,11 @@ impl DnsWorkerControl {
         }
     }
 
-    fn run_resolvectl_monitor_session(bus: &Bus, shutdown: &CancellationToken) {
+    fn run_resolvectl_monitor_session(
+        bus: &Bus,
+        shutdown: &CancellationToken,
+        monitor_state: &std::sync::atomic::AtomicU8,
+    ) {
         let re_a = Regex::new(r"(?i)\b([^\s]+)\s+IN\s+(A|AAAA)\s+([0-9a-f:.]+)\b").ok();
         let re_cname = Regex::new(r"(?i)\b([^\s]+)\s+IN\s+CNAME\s+([^\s]+)\b").ok();
 
@@ -523,10 +540,10 @@ impl DnsWorkerControl {
         let _ = child.kill();
         let _ = child.wait();
         if shutdown.is_cancelled() {
-            Self::set_dns_monitor_state(DNS_MONITOR_STATE_STOPPED);
+            set_monitor_state(monitor_state, DNS_MONITOR_STATE_STOPPED);
             info!("[DNS] resolvectl monitor stopped");
         } else {
-            Self::set_dns_monitor_state(DNS_MONITOR_STATE_FALLBACK_DISCONNECTED);
+            set_monitor_state(monitor_state, DNS_MONITOR_STATE_FALLBACK_DISCONNECTED);
             debug!("[DNS] resolvectl monitor disconnected");
         }
     }

@@ -1,4 +1,4 @@
-use std::{env, sync::atomic::Ordering};
+use std::sync::atomic::Ordering;
 
 use opensnitch_proto::pb;
 use time::macros::format_description;
@@ -6,24 +6,10 @@ use time::macros::format_description;
 use crate::models::connection_state::ConnectionAttempt;
 
 use super::{internal::StatsInner, stats::StatsService};
-
-const GO_BACKEND_COMPAT_VERSION: &str = "1.9.0";
-static DAEMON_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 const EVENT_TIME_FORMAT: &[time::format_description::FormatItem<'static>] =
     format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
 
 impl StatsService {
-    fn daemon_version_string() -> &'static str {
-        DAEMON_VERSION
-            .get_or_init(|| {
-                env::var("OPENSNITCH_DAEMON_VERSION")
-                    .ok()
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| GO_BACKEND_COMPAT_VERSION.to_string())
-            })
-            .as_str()
-    }
-
     pub(super) fn format_event_time(unix_nano: i64) -> String {
         let secs = unix_nano.div_euclid(1_000_000_000);
         let nanos = unix_nano.rem_euclid(1_000_000_000) as u32;
@@ -54,7 +40,7 @@ impl StatsService {
         let events = inner.events.drain_all();
 
         pb::Statistics {
-            daemon_version: Self::daemon_version_string().to_string(),
+            daemon_version: Self::daemon_version_string(),
             rules: rules_count,
             uptime: inner
                 .started_at

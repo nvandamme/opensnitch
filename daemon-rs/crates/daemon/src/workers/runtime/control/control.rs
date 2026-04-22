@@ -14,7 +14,7 @@ const WORKER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 const WORKER_JOIN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 
-pub fn worker_state_from_thread_handle(handle: &ThreadJoinHandle<()>) -> WorkerState {
+pub(crate) fn worker_state_from_thread_handle(handle: &ThreadJoinHandle<()>) -> WorkerState {
     if handle.is_finished() {
         WorkerState::Stopped
     } else {
@@ -22,7 +22,7 @@ pub fn worker_state_from_thread_handle(handle: &ThreadJoinHandle<()>) -> WorkerS
     }
 }
 
-pub fn worker_join_status_from_thread_result(
+pub(crate) fn worker_join_status_from_thread_result(
     result: thread::Result<()>,
 ) -> WorkerJoinStatus {
     match result {
@@ -31,7 +31,7 @@ pub fn worker_join_status_from_thread_result(
     }
 }
 
-pub fn restartable_worker_state_from_runtime(
+pub(crate) fn restartable_worker_state_from_runtime(
     shutdown_cancelled: bool,
     handle: Option<&ThreadJoinHandle<()>>,
 ) -> WorkerState {
@@ -44,7 +44,7 @@ pub fn restartable_worker_state_from_runtime(
     }
 }
 
-pub fn restartable_worker_is_finished_from_runtime(handle: Option<&ThreadJoinHandle<()>>) -> bool {
+pub(crate) fn restartable_worker_is_finished_from_runtime(handle: Option<&ThreadJoinHandle<()>>) -> bool {
     handle.is_none_or(|handle| handle.is_finished())
 }
 
@@ -105,7 +105,6 @@ macro_rules! impl_restartable_thread_worker_control {
             }
         }
 
-        impl $crate::workers::runtime::control::OneShotWorker for $worker_ty {}
     };
 }
 
@@ -113,6 +112,13 @@ pub(crate) use impl_restartable_thread_worker_control;
 
 pub trait WorkerControl: Send {
     fn worker_name(&self) -> &'static str;
+
+    fn into_worker_control(self) -> Box<dyn WorkerControl>
+    where
+        Self: Sized + 'static,
+    {
+        Box::new(self)
+    }
 
     // Generic command hook; workers can opt in to supported commands.
     fn control(&self, command: WorkerCommand) -> WorkerCommandResult {
@@ -160,10 +166,6 @@ pub trait WorkerControl: Send {
         SpawnOnceWorkerControl::spawn_async_thread(name, arg, run_once)
     }
 }
-
-// Marker for worker controls that are intended to be started once per runtime
-// lifecycle, then only restarted through explicit control commands.
-pub trait OneShotWorker {}
 
 pub struct SpawnOnceWorkerControl {
     name: &'static str,
@@ -224,8 +226,6 @@ impl WorkerControl for SpawnOnceWorkerControl {
         worker_join_status_from_thread_result(self.handle.join())
     }
 }
-
-impl OneShotWorker for SpawnOnceWorkerControl {}
 
 pub(crate) struct ThreadWorkerControl {
     name: &'static str,

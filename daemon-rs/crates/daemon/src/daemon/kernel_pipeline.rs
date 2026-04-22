@@ -1,7 +1,4 @@
-use std::sync::{
-    OnceLock,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::Daemon;
 pub(crate) use crate::models::kernel_pipeline::{
@@ -76,8 +73,6 @@ struct KernelPipelineDropCounters {
     firewall: CacheAlignedAtomicU64,
 }
 
-static KERNEL_PIPELINE_DROP_COUNTERS: OnceLock<KernelPipelineDropCounters> = OnceLock::new();
-
 #[derive(Default)]
 struct KernelPipelineIngressCounters {
     dns: CacheAlignedAtomicU64,
@@ -85,62 +80,59 @@ struct KernelPipelineIngressCounters {
     firewall: CacheAlignedAtomicU64,
 }
 
-static KERNEL_PIPELINE_INGRESS_COUNTERS: OnceLock<KernelPipelineIngressCounters> = OnceLock::new();
+#[derive(Default)]
+pub(crate) struct KernelPipelineCounters {
+    drop: KernelPipelineDropCounters,
+    ingress: KernelPipelineIngressCounters,
+}
+
+impl KernelPipelineCounters {
+    pub(crate) fn drop_stats(&self) -> KernelPipelineDropStats {
+        KernelPipelineDropStats {
+            dns: self.drop.dns.load(Ordering::Relaxed),
+            process: self.drop.process.load(Ordering::Relaxed),
+            firewall: self.drop.firewall.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(crate) fn ingress_stats(&self) -> KernelPipelineIngressStats {
+        KernelPipelineIngressStats {
+            dns: self.ingress.dns.load(Ordering::Relaxed),
+            process: self.ingress.process.load(Ordering::Relaxed),
+            firewall: self.ingress.firewall.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(crate) fn increment_drop(&self, pipeline: KernelPipeline) -> u64 {
+        let previous = match pipeline {
+            KernelPipeline::Dns => self.drop.dns.fetch_add(1, Ordering::Relaxed),
+            KernelPipeline::Process => self.drop.process.fetch_add(1, Ordering::Relaxed),
+            KernelPipeline::Firewall => self.drop.firewall.fetch_add(1, Ordering::Relaxed),
+        };
+        previous.saturating_add(1)
+    }
+
+    pub(crate) fn increment_ingress(&self, pipeline: KernelPipeline) -> u64 {
+        let previous = match pipeline {
+            KernelPipeline::Dns => self.ingress.dns.fetch_add(1, Ordering::Relaxed),
+            KernelPipeline::Process => self.ingress.process.fetch_add(1, Ordering::Relaxed),
+            KernelPipeline::Firewall => self.ingress.firewall.fetch_add(1, Ordering::Relaxed),
+        };
+        previous.saturating_add(1)
+    }
+}
 
 impl Daemon {
-    fn kernel_pipeline_drop_counters() -> &'static KernelPipelineDropCounters {
-        KERNEL_PIPELINE_DROP_COUNTERS.get_or_init(KernelPipelineDropCounters::default)
+    pub(super) fn kernel_pipeline_drop_stats(&self) -> KernelPipelineDropStats {
+        self.runtime.kernel_pipeline_counters.drop_stats()
     }
 
-    fn kernel_pipeline_ingress_counters() -> &'static KernelPipelineIngressCounters {
-        KERNEL_PIPELINE_INGRESS_COUNTERS.get_or_init(KernelPipelineIngressCounters::default)
-    }
-
-    pub(super) fn kernel_pipeline_drop_stats() -> KernelPipelineDropStats {
-        let counters = Self::kernel_pipeline_drop_counters();
-        KernelPipelineDropStats {
-            dns: counters.dns.load(Ordering::Relaxed),
-            process: counters.process.load(Ordering::Relaxed),
-            firewall: counters.firewall.load(Ordering::Relaxed),
-        }
-    }
-
-    pub(super) fn kernel_pipeline_ingress_stats() -> KernelPipelineIngressStats {
-        let counters = Self::kernel_pipeline_ingress_counters();
-        KernelPipelineIngressStats {
-            dns: counters.dns.load(Ordering::Relaxed),
-            process: counters.process.load(Ordering::Relaxed),
-            firewall: counters.firewall.load(Ordering::Relaxed),
-        }
-    }
-
-    pub(crate) fn increment_kernel_pipeline_drop(pipeline: KernelPipeline) -> u64 {
-        let counters = Self::kernel_pipeline_drop_counters();
-        let previous = match pipeline {
-            KernelPipeline::Dns => counters.dns.fetch_add(1, Ordering::Relaxed),
-            KernelPipeline::Process => counters.process.fetch_add(1, Ordering::Relaxed),
-            KernelPipeline::Firewall => counters.firewall.fetch_add(1, Ordering::Relaxed),
-        };
-        previous.saturating_add(1)
-    }
-
-    pub(crate) fn increment_kernel_pipeline_ingress(pipeline: KernelPipeline) -> u64 {
-        let counters = Self::kernel_pipeline_ingress_counters();
-        let previous = match pipeline {
-            KernelPipeline::Dns => counters.dns.fetch_add(1, Ordering::Relaxed),
-            KernelPipeline::Process => counters.process.fetch_add(1, Ordering::Relaxed),
-            KernelPipeline::Firewall => counters.firewall.fetch_add(1, Ordering::Relaxed),
-        };
-        previous.saturating_add(1)
+    pub(crate) fn increment_kernel_pipeline_drop(&self, pipeline: KernelPipeline) -> u64 {
+        self.runtime.kernel_pipeline_counters.increment_drop(pipeline)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn probe_kernel_pipeline_drop_stats() -> KernelPipelineDropStats {
-        Self::kernel_pipeline_drop_stats()
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn probe_kernel_pipeline_ingress_stats() -> KernelPipelineIngressStats {
-        Self::kernel_pipeline_ingress_stats()
+    pub(crate) fn probe_kernel_pipeline_drop_stats(&self) -> KernelPipelineDropStats {
+        self.kernel_pipeline_drop_stats()
     }
 }

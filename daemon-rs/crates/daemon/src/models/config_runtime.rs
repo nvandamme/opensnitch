@@ -67,6 +67,13 @@ pub enum ProcMonitorMethod {
     Audit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskFallbackPolicy {
+    DefaultAction,
+    Allow,
+    Drop,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub client_addr: String,
@@ -78,6 +85,7 @@ pub struct Config {
     pub client_auth: ClientAuthConfig,
     pub rules_enable_checksums: bool,
     pub default_action: DefaultAction,
+    pub ask_timeout_policy: AskFallbackPolicy,
     pub default_duration: DefaultDuration,
     pub intercept_unknown: bool,
     pub proc_monitor_method: ProcMonitorMethod,

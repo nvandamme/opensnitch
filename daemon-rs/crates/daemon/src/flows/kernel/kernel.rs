@@ -3,7 +3,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    daemon::{Daemon, KernelPipeline, ProcessKernelEvent},
+    daemon::{KernelPipeline, KernelPipelineCounters, ProcessKernelEvent},
     models::{dns_payload::DnsPayload, kernel_event::KernelEvent},
     services::{dns::DnsService, process::ProcessService, stats::StatsService},
     tunables::RuntimeTunables,
@@ -19,17 +19,27 @@ use crate::{
 pub struct KernelFlow {
     shutdown: CancellationToken,
     tunables: RuntimeTunables,
+    counters: std::sync::Arc<KernelPipelineCounters>,
 }
 
 impl KernelFlow {
-    pub(crate) fn new(shutdown: CancellationToken, tunables: RuntimeTunables) -> Self {
-        Self { shutdown, tunables }
+    pub(crate) fn new(
+        shutdown: CancellationToken,
+        tunables: RuntimeTunables,
+        counters: std::sync::Arc<KernelPipelineCounters>,
+    ) -> Self {
+        Self {
+            shutdown,
+            tunables,
+            counters,
+        }
     }
 
     fn spawn_pipeline_dispatch_task<T: Send + 'static>(
         mut ingress_rx: tokio::sync::mpsc::UnboundedReceiver<T>,
         dispatch_tx: tokio::sync::mpsc::Sender<T>,
         shutdown: CancellationToken,
+        counters: std::sync::Arc<KernelPipelineCounters>,
         pipeline: KernelPipeline,
         batch_size: usize,
     ) -> JoinHandle<()> {
@@ -50,7 +60,10 @@ impl KernelFlow {
                     first,
                     &shutdown,
                     pipeline.as_str(),
-                    move || Daemon::increment_kernel_pipeline_drop(pipeline),
+                    {
+                        let counters = counters.clone();
+                        move || counters.increment_drop(pipeline)
+                    },
                 )
                 .await
                 {
@@ -68,7 +81,10 @@ impl KernelFlow {
                         next,
                         &shutdown,
                         pipeline.as_str(),
-                        move || Daemon::increment_kernel_pipeline_drop(pipeline),
+                        {
+                            let counters = counters.clone();
+                            move || counters.increment_drop(pipeline)
+                        },
                     )
                     .await
                     {
@@ -126,6 +142,7 @@ impl KernelFlow {
     ) -> JoinHandle<()> {
         let shutdown = self.shutdown.clone();
         let tunables = self.tunables;
+        let counters = self.counters.clone();
 
         tokio::spawn(async move {
             let kernel_fanout_batch = tunables.kernel_ingress_dispatch_batch_size;
@@ -195,6 +212,7 @@ impl KernelFlow {
                 dns_ingress_rx,
                 dns_tx.clone(),
                 shutdown.clone(),
+                counters.clone(),
                 KernelPipeline::Dns,
                 kernel_dns_dispatch_batch,
             );
@@ -203,6 +221,7 @@ impl KernelFlow {
                 process_ingress_rx,
                 process_tx.clone(),
                 shutdown.clone(),
+                counters.clone(),
                 KernelPipeline::Process,
                 kernel_process_dispatch_batch,
             );
@@ -211,6 +230,7 @@ impl KernelFlow {
                 firewall_ingress_rx,
                 firewall_tx.clone(),
                 shutdown.clone(),
+                counters.clone(),
                 KernelPipeline::Firewall,
                 kernel_firewall_dispatch_batch,
             );
@@ -221,9 +241,7 @@ impl KernelFlow {
                     msg = kernel_rx.recv() => {
                         match msg {
                             Some(event) => {
-                                Daemon::increment_kernel_pipeline_ingress(
-                                    Self::classify_kernel_pipeline(&event),
-                                );
+                                counters.increment_ingress(Self::classify_kernel_pipeline(&event));
 
                                 if !kernel_dispatch::fanout_kernel_ingress_event(
                                     event,
@@ -241,9 +259,7 @@ impl KernelFlow {
                                 );
                                 let mut drained = 1usize;
                                 for next in burst.items {
-                                    Daemon::increment_kernel_pipeline_ingress(
-                                        Self::classify_kernel_pipeline(&next),
-                                    );
+                                    counters.increment_ingress(Self::classify_kernel_pipeline(&next));
 
                                     if !kernel_dispatch::fanout_kernel_ingress_event(
                                         next,

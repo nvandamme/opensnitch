@@ -12,6 +12,8 @@ pub struct RawConfig {
     pub log_micro: Option<bool>,
     #[serde(rename = "DefaultAction", default)]
     pub default_action: String,
+    #[serde(rename = "AskTimeoutPolicy", default)]
+    pub ask_timeout_policy: Option<String>,
     #[serde(rename = "DefaultDuration", default)]
     pub default_duration: String,
     #[serde(rename = "InterceptUnknown", default)]

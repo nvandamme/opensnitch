@@ -5,7 +5,7 @@ use opensnitch_proto::pb;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::{TaskRuntimeService, naming as task_runtime_naming, reply as task_runtime_reply};
+use super::{TaskService, naming as task_runtime_naming, reply as task_runtime_reply};
 use crate::{
     models::{
         proc_net_packet::{ProcNetPacketRow, ProcNetXdpRow},
@@ -28,7 +28,7 @@ use crate::{
     },
 };
 
-impl TaskRuntimeService {
+impl TaskService {
     async fn wait_periodic_tick(
         token: &CancellationToken,
         interval: std::time::Duration,
@@ -60,7 +60,7 @@ impl TaskRuntimeService {
     }
 }
 
-impl TaskRuntimeService {
+impl TaskService {
     fn task_interval(data: &Value) -> std::time::Duration {
         let raw =
             json_value::field_string_or_u64(data, "interval").unwrap_or_else(|| "5s".to_string());
@@ -616,7 +616,7 @@ impl TaskRuntimeService {
                             if ioc_cfg
                                 .as_ref()
                                 .map(|cfg| {
-                                    TaskRuntimeService::ioc_schedule_matches_now_cfg(
+                                    TaskService::ioc_schedule_matches_now_cfg(
                                         cfg.as_ref(),
                                         now,
                                     )
@@ -676,8 +676,16 @@ impl TaskRuntimeService {
         code: pb::NotificationReplyCode,
         data: String,
     ) {
-        task_runtime_reply::send_task_event(task_reply_tx, task_name, notification_id, code, data)
-            .await;
+        task_runtime_reply::send_task_event(
+            task_reply_tx,
+            None,
+            None,
+            task_name,
+            notification_id,
+            code,
+            data,
+        )
+        .await;
     }
 
     async fn dispatch_downloader_result(

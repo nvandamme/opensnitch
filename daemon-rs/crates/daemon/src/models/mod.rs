@@ -19,6 +19,7 @@ pub mod kernel_event;
 pub mod kernel_pipeline;
 pub mod lifecycle_contract;
 pub mod notification_stream;
+pub mod policy_tx;
 pub mod proc_event;
 pub mod proc_net_packet;
 pub mod process_worker_state;

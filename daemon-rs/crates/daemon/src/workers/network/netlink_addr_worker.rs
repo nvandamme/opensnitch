@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    sync::{Arc, OnceLock, RwLock},
+    sync::{Arc, RwLock},
     thread,
     thread::JoinHandle,
     time::Duration,
@@ -9,22 +9,25 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::platform::adapters::net_iface::NetIfaceAdapter;
+use crate::platform::ports::local_addr_port::LocalAddrPort;
 use crate::workers::runtime::support::build_current_thread_runtime;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
-static LOCAL_ADDRS: OnceLock<RwLock<Arc<Vec<String>>>> = OnceLock::new();
+pub(crate) type LocalAddrStore = Arc<RwLock<Arc<Vec<String>>>>;
 
 pub(crate) struct NetlinkAddrWorkerControl;
 
 impl NetlinkAddrWorkerControl {
-    fn local_addr_store() -> &'static RwLock<Arc<Vec<String>>> {
-        LOCAL_ADDRS.get_or_init(|| RwLock::new(Arc::new(Vec::new())))
+    fn new_local_addr_store() -> LocalAddrStore {
+        Arc::new(RwLock::new(Arc::new(Vec::new())))
     }
 
-    pub fn spawn(shutdown: CancellationToken) -> JoinHandle<()> {
-        thread::spawn(move || {
+    pub fn spawn(shutdown: CancellationToken) -> (JoinHandle<()>, LocalAddrStore) {
+        let local_addr_store = Self::new_local_addr_store();
+        let local_addr_store_for_worker = Arc::clone(&local_addr_store);
+
+        let handle = thread::spawn(move || {
             let Some(runtime) =
                 build_current_thread_runtime("unable to build local address runtime")
             else {
@@ -36,7 +39,7 @@ impl NetlinkAddrWorkerControl {
                     match Self::fetch_local_addrs().await {
                         Ok(latest) => {
                             let previous_snapshot = {
-                                let guard = Self::local_addr_store()
+                                let guard = local_addr_store_for_worker
                                     .read()
                                     .expect("local addr read lock poisoned");
                                 Arc::clone(&guard)
@@ -54,7 +57,7 @@ impl NetlinkAddrWorkerControl {
                             let mut latest_sorted: Vec<String> = latest.into_iter().collect();
                             latest_sorted.sort();
 
-                            let mut guard = Self::local_addr_store()
+                            let mut guard = local_addr_store_for_worker
                                 .write()
                                 .expect("local addr write lock poisoned");
                             *guard = Arc::new(latest_sorted);
@@ -70,20 +73,20 @@ impl NetlinkAddrWorkerControl {
                     }
                 }
             });
-        })
+        });
+
+        (handle, local_addr_store)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn snapshot_local_addrs() -> Vec<String> {
-        let guard = Self::local_addr_store()
+    pub fn snapshot_local_addrs(local_addr_store: &LocalAddrStore) -> Vec<String> {
+        let guard = local_addr_store
             .read()
             .expect("local addr read lock poisoned");
         guard.as_ref().clone()
     }
 
     async fn fetch_local_addrs() -> anyhow::Result<HashSet<String>> {
-        // Keep behavior close to Go by enumerating local addresses without
-        // strict netlink attribute parsing that can emit noisy kernel-version warnings.
-        NetIfaceAdapter::local_ip_addrs_async().await
+        LocalAddrPort::local_ip_addrs().await
     }
 }

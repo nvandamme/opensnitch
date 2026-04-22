@@ -1,6 +1,6 @@
 use std::fs;
 
-use crate::config::{ClientAuthType, Config, DefaultAction, ProcMonitorMethod};
+use crate::config::{AskFallbackPolicy, ClientAuthType, Config, DefaultAction, ProcMonitorMethod};
 use crate::{models::firewall_state::FirewallBackend, tests::support::TestDir};
 
 #[test]
@@ -133,6 +133,74 @@ fn from_raw_json_accepts_drop_alias_for_default_action() {
 
     let cfg = Config::from_raw_json(&config_path, raw).expect("parse config");
     assert!(matches!(cfg.default_action, DefaultAction::Deny));
+}
+
+#[test]
+fn from_raw_json_parses_ask_timeout_policy_values() {
+    let dir = TestDir::new("opensnitch-config-ask-timeout-policy");
+    let config_path = dir.path.join("default-config.json");
+
+    let raw = r#"{
+"Server": {"Address": "http://127.0.0.1:50051"},
+"AskTimeoutPolicy": "drop"
+}"#
+    .to_string();
+
+    let cfg = Config::from_raw_json(&config_path, raw).expect("parse config");
+    assert!(matches!(cfg.ask_timeout_policy, AskFallbackPolicy::Drop));
+}
+
+#[test]
+fn from_raw_json_parses_ask_timeout_policy_default_keyword() {
+    let dir = TestDir::new("opensnitch-config-ask-timeout-policy-default-keyword");
+    let config_path = dir.path.join("default-config.json");
+
+    let raw = r#"{
+"Server": {"Address": "http://127.0.0.1:50051"},
+"AskTimeoutPolicy": "default"
+}"#
+    .to_string();
+
+    let cfg = Config::from_raw_json(&config_path, raw).expect("parse config");
+    assert!(matches!(
+        cfg.ask_timeout_policy,
+        AskFallbackPolicy::DefaultAction
+    ));
+}
+
+#[test]
+fn from_raw_json_ask_timeout_policy_defaults_to_default_action() {
+    let dir = TestDir::new("opensnitch-config-ask-timeout-policy-default");
+    let config_path = dir.path.join("default-config.json");
+
+    let raw = r#"{
+"Server": {"Address": "http://127.0.0.1:50051"}
+}"#
+    .to_string();
+
+    let cfg = Config::from_raw_json(&config_path, raw).expect("parse config");
+    assert!(matches!(
+        cfg.ask_timeout_policy,
+        AskFallbackPolicy::DefaultAction
+    ));
+}
+
+#[test]
+fn from_raw_json_ask_timeout_policy_null_defaults_to_default_action() {
+    let dir = TestDir::new("opensnitch-config-ask-timeout-policy-null");
+    let config_path = dir.path.join("default-config.json");
+
+    let raw = r#"{
+"Server": {"Address": "http://127.0.0.1:50051"},
+"AskTimeoutPolicy": null
+}"#
+    .to_string();
+
+    let cfg = Config::from_raw_json(&config_path, raw).expect("parse config");
+    assert!(matches!(
+        cfg.ask_timeout_policy,
+        AskFallbackPolicy::DefaultAction
+    ));
 }
 
 #[test]

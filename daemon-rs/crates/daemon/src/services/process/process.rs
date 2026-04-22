@@ -1,6 +1,5 @@
-use std::sync::{Arc, Mutex, atomic::AtomicUsize};
+use std::sync::{Arc, Mutex};
 
-use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::bus::Bus;
@@ -8,8 +7,7 @@ use crate::config::ProcMonitorMethod;
 use crate::models::process_worker_state::ProcessWorkerState;
 use crate::services::ebpf::EbpfObjectAvailability;
 use crate::services::lifecycle::{
-    EventSubscription, ServiceEvent, ServiceLifecycle, ServiceMonitorStats, ServiceState,
-    ServiceStatus, StatusSubscription,
+    EventSubscription, ServiceLifecycle, ServiceMonitorStats, ServiceStatus, StatusSubscription,
 };
 use crate::tunables::RuntimeTunables;
 use crate::workers::{
@@ -20,34 +18,17 @@ use crate::workers::{
     runtime::control::{ThreadWorkerControl, WorkerControl},
 };
 
+use super::runtime_lifecycle::ProcessLifecycle;
 use super::cache::ProcessCache;
 
 pub struct ProcessRuntime {
     pub(super) state: Mutex<ProcessWorkerState>,
-    pub(super) status_tx: watch::Sender<ServiceStatus>,
-    pub(super) event_tx: broadcast::Sender<ServiceEvent>,
-    pub(super) status_subscribers: Arc<AtomicUsize>,
-    pub(super) event_subscribers: Arc<AtomicUsize>,
-    pub(super) lifecycle_state: Mutex<ServiceState>,
-    pub(super) last_error: Mutex<Option<String>>,
 }
 
 impl Default for ProcessRuntime {
     fn default() -> Self {
-        let (status_tx, _) = watch::channel(ServiceStatus {
-            state: ServiceState::Uninitialized,
-            last_error: None,
-        });
-        let (event_tx, _) = broadcast::channel(64);
-
         Self {
             state: Mutex::new(ProcessWorkerState::default()),
-            status_tx,
-            event_tx,
-            status_subscribers: Arc::new(AtomicUsize::new(0)),
-            event_subscribers: Arc::new(AtomicUsize::new(0)),
-            lifecycle_state: Mutex::new(ServiceState::Uninitialized),
-            last_error: Mutex::new(None),
         }
     }
 }
@@ -110,17 +91,27 @@ impl ProcessRuntime {
             st.ebpf_requested = matches!(method, ProcMonitorMethod::Ebpf);
             st.ebpf_available = ebpf_availability.proc_available;
         }
-        self.set_error(None);
-        self.transition_state(ServiceState::Running);
 
         handles
+    }
+
+    pub(super) fn reset_for_stop(&self) {
+        if let Ok(mut st) = self.state.lock() {
+            st.worker_count = 0;
+            st.ebpf_requested = false;
+        }
+    }
+
+    pub(super) fn snapshot(&self) -> ProcessWorkerState {
+        self.state.lock().map(|state| *state).unwrap_or_default()
     }
 }
 
 #[derive(Clone, Default)]
 pub struct ProcessService {
     pub(super) cache: Arc<ProcessCache>,
-    intent: Arc<ProcessRuntime>,
+    runtime: Arc<ProcessRuntime>,
+    lifecycle: ProcessLifecycle,
 }
 
 impl ProcessService {
@@ -141,7 +132,7 @@ impl ProcessService {
         requested_method: ProcMonitorMethod,
         ebpf_availability: EbpfObjectAvailability,
     ) -> ProcMonitorMethod {
-        self.intent
+        self.runtime
             .preferred_monitor_method(requested_method, ebpf_availability)
     }
 
@@ -154,33 +145,35 @@ impl ProcessService {
         audit_socket_path: std::path::PathBuf,
         ebpf_availability: EbpfObjectAvailability,
     ) -> Vec<Box<dyn WorkerControl>> {
-        self.intent.init_workers(
+        let workers = self.runtime.init_workers(
             method,
             bus,
             shutdown,
             tunables,
             audit_socket_path,
             ebpf_availability,
-        )
+        );
+        self.lifecycle.mark_running();
+        workers
     }
 
     pub fn worker_state(&self) -> ProcessWorkerState {
-        self.intent.snapshot()
+        self.runtime.snapshot()
     }
 
     pub fn subscribe_status(&self) -> anyhow::Result<StatusSubscription> {
-        ServiceLifecycle::subscribe_status(self.intent.as_ref())
+        ServiceLifecycle::subscribe_status(&self.lifecycle)
     }
 
     pub fn subscribe_events(&self) -> anyhow::Result<EventSubscription> {
-        ServiceLifecycle::subscribe_events(self.intent.as_ref())
+        ServiceLifecycle::subscribe_events(&self.lifecycle)
     }
 
     pub fn status(&self) -> ServiceStatus {
-        ServiceLifecycle::status(self.intent.as_ref())
+        ServiceLifecycle::status(&self.lifecycle)
     }
 
     pub fn monitor_stats(&self) -> ServiceMonitorStats {
-        ServiceLifecycle::monitor_stats(self.intent.as_ref())
+        ServiceLifecycle::monitor_stats(&self.lifecycle)
     }
 }

@@ -76,8 +76,6 @@ impl WorkerControl for ProcWorkersControl {
     }
 }
 
-impl crate::workers::runtime::control::OneShotWorker for ProcWorkersControl {}
-
 pub(super) struct DaemonProcWorkerReconfigurePort {
     pub(super) daemon: Daemon,
 }
@@ -112,12 +110,12 @@ impl Daemon {
         method: ProcMonitorMethod,
         shutdown: CancellationToken,
     ) -> Vec<Box<dyn WorkerControl>> {
-        self.inner.process.init_workers(
+        self.runtime.process.init_workers(
             method,
-            self.inner.bus.clone(),
+            self.runtime.bus.clone(),
             shutdown,
-            self.inner.tunables,
-            self.inner.audit_socket_path.clone(),
+            self.runtime.tunables,
+            self.runtime.audit_socket_path.clone(),
             EbpfService::probe_availability(),
         )
     }
@@ -130,7 +128,7 @@ impl Daemon {
 
     pub(super) fn proc_workers_snapshot(&self) -> ProcWorkersSnapshot {
         let runtime = self
-            .inner
+            .runtime
             .proc_workers
             .lock()
             .expect("proc workers mutex poisoned");
@@ -157,7 +155,7 @@ impl Daemon {
 
     pub(super) fn control_proc_workers_sync(&self, command: WorkerCommand) -> WorkerCommandResult {
         let mut runtime = self
-            .inner
+            .runtime
             .proc_workers
             .lock()
             .expect("proc workers mutex poisoned");
@@ -196,7 +194,7 @@ impl Daemon {
     ) -> Result<()> {
         let previous_method = {
             let runtime = self
-                .inner
+                .runtime
                 .proc_workers
                 .lock()
                 .expect("proc workers mutex poisoned");
@@ -205,7 +203,7 @@ impl Daemon {
 
         let to_join = {
             let mut runtime = self
-                .inner
+                .runtime
                 .proc_workers
                 .lock()
                 .expect("proc workers mutex poisoned");
@@ -243,7 +241,7 @@ impl Daemon {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let running = {
                 let runtime = self
-                    .inner
+                    .runtime
                     .proc_workers
                     .lock()
                     .expect("proc workers mutex poisoned");
@@ -258,7 +256,7 @@ impl Daemon {
                 if previous_method != method {
                     let failed_handles = {
                         let mut runtime = self
-                            .inner
+                            .runtime
                             .proc_workers
                             .lock()
                             .expect("proc workers mutex poisoned");
@@ -276,7 +274,7 @@ impl Daemon {
                     }
 
                     let mut runtime = self
-                        .inner
+                        .runtime
                         .proc_workers
                         .lock()
                         .expect("proc workers mutex poisoned");
@@ -312,7 +310,7 @@ impl Daemon {
     pub(super) async fn stop_proc_workers(&self) {
         let to_join = {
             let mut runtime = self
-                .inner
+                .runtime
                 .proc_workers
                 .lock()
                 .expect("proc workers mutex poisoned");

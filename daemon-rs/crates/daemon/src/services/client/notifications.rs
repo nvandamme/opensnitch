@@ -5,10 +5,10 @@ use tokio_stream::wrappers::ReceiverStream;
 
 pub use crate::models::notification_stream::NotificationStream;
 
-use super::client::Client;
+use super::client::ClientService;
 
 impl NotificationStream {
-    pub async fn open(client: &mut Client) -> Result<Self> {
+    pub async fn open(client: &mut ClientService) -> Result<Self> {
         let (reply_tx, reply_rx) = mpsc::channel::<pb::NotificationReply>(64);
         let outbound = ReceiverStream::new(reply_rx);
 

@@ -141,7 +141,31 @@ pub(crate) fn clear_error_and_transition_mut<T, ClearError, TransitionState>(
 }
 
 #[allow(dead_code)]
-#[tonic::async_trait]
+#[async_trait::async_trait]
+pub(crate) trait ServiceFactory: Sized {
+    type FactoryInput: Send;
+
+    async fn init(input: Self::FactoryInput) -> anyhow::Result<Self>;
+}
+
+#[allow(dead_code)]
+#[async_trait::async_trait]
+pub(crate) trait ServiceRuntimeControl {
+    type ReloadInput: Send;
+
+    async fn start(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn reload(&mut self, input: Self::ReloadInput) -> anyhow::Result<()>;
+}
+
+#[allow(dead_code)]
+#[async_trait::async_trait]
 pub(crate) trait ServiceLifecycle {
     async fn init(&mut self) -> anyhow::Result<()> {
         Ok(())

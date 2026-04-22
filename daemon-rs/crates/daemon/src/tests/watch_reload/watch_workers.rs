@@ -390,6 +390,7 @@ async fn config_watch_task_reloads_runtime_snapshot_after_file_change() {
             rules_service,
             firewall_service,
             StatsService::default(),
+            crate::services::client::AlertBuffer::default(),
             alert_tx,
             reconfigure_proc_workers,
         ),

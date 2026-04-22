@@ -1,7 +1,7 @@
 use crate::services::{
     lifecycle::ServiceLifecycle,
     task::{
-        TaskRuntime, TaskRuntimeService, TaskStorageRuntime, naming as task_runtime_naming,
+        TaskRuntime, TaskService, TaskStorageRuntime, naming as task_runtime_naming,
         validation as task_runtime_validation,
     },
 };
@@ -152,7 +152,7 @@ async fn stop_runtime_tasks_cancels_all_handles() {
         ),
     ]);
 
-    assert_eq!(TaskRuntimeService::stop_runtime_tasks(&mut handles), 2);
+    assert_eq!(TaskService::stop_runtime_tasks(&mut handles), 2);
     assert!(handles.is_empty());
 }
 
@@ -162,31 +162,31 @@ async fn lifecycle_subscriptions_increment_and_decrement_monitor_counters() {
 
     let (task_reply_tx, _task_reply_rx) = tokio::sync::mpsc::channel::<pb::NotificationReply>(8);
     let shutdown = CancellationToken::new();
-    let intent = TaskRuntime::new(
-        TaskRuntimeService,
+    let runtime = TaskRuntime::new(
+        TaskService,
         ProcessService::default(),
         task_reply_tx,
         shutdown,
     );
 
-    let stats = ServiceLifecycle::monitor_stats(&intent);
+    let stats = ServiceLifecycle::monitor_stats(&runtime);
     assert_eq!(stats.status_subscribers, 0);
     assert_eq!(stats.event_subscribers, 0);
 
-    let status_sub = ServiceLifecycle::subscribe_status(&intent).expect("subscribe status");
-    let event_sub = ServiceLifecycle::subscribe_events(&intent).expect("subscribe events");
+    let status_sub = ServiceLifecycle::subscribe_status(&runtime).expect("subscribe status");
+    let event_sub = ServiceLifecycle::subscribe_events(&runtime).expect("subscribe events");
 
-    let stats = ServiceLifecycle::monitor_stats(&intent);
+    let stats = ServiceLifecycle::monitor_stats(&runtime);
     assert_eq!(stats.status_subscribers, 1);
     assert_eq!(stats.event_subscribers, 1);
 
     drop(status_sub);
-    let stats = ServiceLifecycle::monitor_stats(&intent);
+    let stats = ServiceLifecycle::monitor_stats(&runtime);
     assert_eq!(stats.status_subscribers, 0);
     assert_eq!(stats.event_subscribers, 1);
 
     drop(event_sub);
-    let stats = ServiceLifecycle::monitor_stats(&intent);
+    let stats = ServiceLifecycle::monitor_stats(&runtime);
     assert_eq!(stats.status_subscribers, 0);
     assert_eq!(stats.event_subscribers, 0);
 }
@@ -236,7 +236,7 @@ async fn spawn_task_monitor_emits_adding_task_log() {
     crate::tests::support::init_test_logging();
     let (tx, _rx) = tokio::sync::mpsc::channel::<pb::NotificationReply>(1);
     let token = CancellationToken::new();
-    let handle = TaskRuntimeService.spawn_task_monitor_snapshot(
+    let handle = TaskService.spawn_task_monitor_snapshot(
         "basic-task",
         1,
         Arc::new(json!({})),
@@ -255,7 +255,7 @@ async fn pid_monitor_emits_first_sample_without_waiting_full_interval() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<pb::NotificationReply>(4);
     let token = CancellationToken::new();
-    let handle = TaskRuntimeService.spawn_task_monitor_snapshot(
+    let handle = TaskService.spawn_task_monitor_snapshot(
         "pid-monitor",
         11_001,
         Arc::new(json!({
@@ -284,7 +284,7 @@ async fn node_monitor_emits_first_sample_without_waiting_full_interval() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<pb::NotificationReply>(4);
     let token = CancellationToken::new();
-    let handle = TaskRuntimeService.spawn_task_monitor_snapshot(
+    let handle = TaskService.spawn_task_monitor_snapshot(
         "node-monitor",
         12_001,
         Arc::new(json!({
@@ -313,7 +313,7 @@ async fn looper_reply_payload_matches_go_interval_string() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<pb::NotificationReply>(4);
     let token = CancellationToken::new();
-    let handle = TaskRuntimeService.spawn_task_monitor_snapshot(
+    let handle = TaskService.spawn_task_monitor_snapshot(
         "looper",
         13_001,
         Arc::new(json!({"interval": "100ms"})),
@@ -340,7 +340,7 @@ async fn ioc_scanner_without_schedule_emits_no_periodic_results() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<pb::NotificationReply>(4);
     let token = CancellationToken::new();
-    let handle = TaskRuntimeService.spawn_task_monitor_snapshot(
+    let handle = TaskService.spawn_task_monitor_snapshot(
         "ioc-scanner",
         14_001,
         Arc::new(json!({
@@ -370,7 +370,7 @@ async fn downloader_notify_payload_matches_go_success_message_shape() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<pb::NotificationReply>(4);
     let token = CancellationToken::new();
-    let handle = TaskRuntimeService.spawn_task_monitor_snapshot(
+    let handle = TaskService.spawn_task_monitor_snapshot(
         "downloader",
         15_001,
         Arc::new(json!({
@@ -520,7 +520,7 @@ fn ioc_schedule_matches_now_from_time_entry() {
         .with_hms(11, 22, 33)
         .expect("valid time")
         .assume_utc();
-    assert!(TaskRuntimeService.ioc_schedule_matches_now(&data, now));
+    assert!(TaskService.ioc_schedule_matches_now(&data, now));
 }
 
 #[test]
@@ -541,7 +541,7 @@ fn ioc_schedule_matches_now_from_hour_minute_second_arrays() {
         .with_hms(14, 9, 7)
         .expect("valid time")
         .assume_utc();
-    assert!(TaskRuntimeService.ioc_schedule_matches_now(&data, now));
+    assert!(TaskService.ioc_schedule_matches_now(&data, now));
 }
 
 #[test]
@@ -599,6 +599,6 @@ async fn stop_disk_tasks_cancels_all_handles() {
         },
     )]);
 
-    assert_eq!(TaskRuntimeService::stop_runtime_tasks(&mut handles), 1);
+    assert_eq!(TaskService::stop_runtime_tasks(&mut handles), 1);
     assert!(handles.is_empty());
 }

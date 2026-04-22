@@ -20,7 +20,7 @@ use crate::{
         kernel_event::KernelEvent,
     },
     services::{
-        client::UiSessionService,
+        client::ClientService,
         config::ConfigService,
         connection::ConnectionService,
         dns::DnsService,
@@ -55,7 +55,7 @@ struct TestUiServer {
     ask_calls: Arc<AtomicUsize>,
 }
 
-#[tonic::async_trait]
+#[async_trait::async_trait]
 impl pb::ui_server::Ui for TestUiServer {
     type NotificationsStream =
         tokio_stream::wrappers::ReceiverStream<Result<pb::Notification, Status>>;
@@ -140,8 +140,9 @@ async fn handle_event_ignores_non_connection_events() -> Result<()> {
     let dns = DnsService::default();
     let _flow = VerdictFlow::new(
         bus.clone(),
+        crate::services::client::AlertBuffer::default(),
         ConfigService::new(Config::default()),
-        UiSessionService::default(),
+        ClientService::default(),
         RuleService::default(),
         ConnectionService::new(process, dns),
         StatsService::default(),
@@ -166,8 +167,9 @@ async fn self_connection_is_fast_allowed() -> Result<()> {
     let dns = DnsService::default();
     let flow = VerdictFlow::new(
         bus,
+        crate::services::client::AlertBuffer::default(),
         ConfigService::new(Config::default()),
-        UiSessionService::default(),
+        ClientService::default(),
         RuleService::default(),
         ConnectionService::new(process, dns),
         StatsService::default(),
@@ -232,8 +234,9 @@ async fn concurrent_ui_ask_uses_single_inflight_gate() -> Result<()> {
     rules.load_path(&rules_dir.path).await?;
     let flow = VerdictFlow::new(
         bus,
+        crate::services::client::AlertBuffer::default(),
         ConfigService::new(config),
-        UiSessionService::default(),
+        ClientService::default(),
         rules,
         ConnectionService::new(process, dns),
         stats.clone(),

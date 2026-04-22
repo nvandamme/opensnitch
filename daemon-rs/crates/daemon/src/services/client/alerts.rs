@@ -1,6 +1,5 @@
 use std::{
-    sync::{Mutex, OnceLock},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{Arc, Mutex},
 };
 
 use opensnitch_proto::pb;
@@ -10,23 +9,43 @@ use crate::models::ui_alert::{UiAlert, UiAlertData};
 use crate::utils::ring_buffer::RingBuffer;
 
 const ALERT_OVERFLOW_CAP: usize = 32;
-static ALERT_OVERFLOW_CAPACITY: AtomicUsize = AtomicUsize::new(ALERT_OVERFLOW_CAP);
-static ALERT_OVERFLOW: OnceLock<Mutex<RingBuffer<UiAlert>>> = OnceLock::new();
 
-fn overflow_queue() -> &'static Mutex<RingBuffer<UiAlert>> {
-    ALERT_OVERFLOW.get_or_init(|| {
-        let cap = ALERT_OVERFLOW_CAPACITY.load(Ordering::Relaxed).max(1);
-        Mutex::new(RingBuffer::new(cap))
-    })
+#[derive(Clone)]
+pub struct AlertBuffer {
+    overflow: Arc<Mutex<RingBuffer<UiAlert>>>,
 }
 
-pub(crate) fn configure_alert_overflow_ring_capacity(capacity: usize) {
-    let capacity = capacity.max(1);
-    ALERT_OVERFLOW_CAPACITY.store(capacity, Ordering::Relaxed);
-    if let Some(queue) = ALERT_OVERFLOW.get()
-        && let Ok(mut queue) = queue.lock()
-    {
-        queue.set_capacity(capacity);
+impl Default for AlertBuffer {
+    fn default() -> Self {
+        Self::with_capacity(ALERT_OVERFLOW_CAP)
+    }
+}
+
+impl AlertBuffer {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            overflow: Arc::new(Mutex::new(RingBuffer::new(capacity.max(1)))),
+        }
+    }
+
+    pub(crate) fn enqueue(&self, alert_tx: &mpsc::Sender<UiAlert>, alert: UiAlert) {
+        match alert_tx.try_send(alert) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(alert)) => {
+                if let Ok(mut queue) = self.overflow.lock() {
+                    queue.push_overwrite(alert);
+                }
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
+
+    pub(crate) fn drain_overflow_alerts(&self) -> Vec<UiAlert> {
+        if let Ok(mut queue) = self.overflow.lock() {
+            queue.drain_all()
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -62,24 +81,16 @@ pub(crate) fn warning_process_alert(proc: pb::Process) -> UiAlert {
     }
 }
 
-pub(crate) fn enqueue_alert(alert_tx: &mpsc::Sender<UiAlert>, alert: UiAlert) {
-    match alert_tx.try_send(alert) {
-        Ok(()) => {}
-        Err(mpsc::error::TrySendError::Full(alert)) => {
-            if let Ok(mut queue) = overflow_queue().lock() {
-                queue.push_overwrite(alert);
-            }
-        }
-        Err(mpsc::error::TrySendError::Closed(_)) => {}
-    }
+pub(crate) fn enqueue_alert(
+    alert_buffer: &AlertBuffer,
+    alert_tx: &mpsc::Sender<UiAlert>,
+    alert: UiAlert,
+) {
+    alert_buffer.enqueue(alert_tx, alert);
 }
 
-pub(crate) fn drain_overflow_alerts() -> Vec<UiAlert> {
-    if let Ok(mut queue) = overflow_queue().lock() {
-        queue.drain_all()
-    } else {
-        Vec::new()
-    }
+pub(crate) fn drain_overflow_alerts(alert_buffer: &AlertBuffer) -> Vec<UiAlert> {
+    alert_buffer.drain_overflow_alerts()
 }
 
 fn generic_text_alert(

@@ -10,7 +10,7 @@ use super::{ConnectionContext, ConnectionService};
 impl ConnectionService {
     pub(super) async fn resolve_context(&self, attempt: ConnectionAttempt) -> ConnectionContext {
         let mut attempt = attempt;
-        if let Some(owner) = Self::resolve_owner_by_ebpf_map(
+        if let Some(owner) = self.resolve_owner_by_ebpf_map(
             attempt.protocol,
             &attempt.src_addr.to_string(),
             attempt.src_port,

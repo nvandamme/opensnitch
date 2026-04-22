@@ -5,6 +5,7 @@ pub mod dns;
 pub mod ebpf;
 pub mod firewall;
 pub mod lifecycle;
+pub mod policy_tx;
 pub mod process;
 pub mod rule;
 pub mod stats;

@@ -36,14 +36,14 @@ async fn lifecycle_flow_spawns_expected_observers_and_stops_on_shutdown() {
 
     let names: BTreeSet<&'static str> = handles.tasks.iter().map(|task| task.name).collect();
     let expected: BTreeSet<&'static str> = [
-        "intent-connection-status",
-        "intent-connection-events",
-        "intent-process-status",
-        "intent-process-events",
-        "intent-dns-status",
-        "intent-dns-events",
-        "intent-firewall-status",
-        "intent-firewall-events",
+        "connection-status",
+        "connection-events",
+        "process-status",
+        "process-events",
+        "dns-status",
+        "dns-events",
+        "firewall-status",
+        "firewall-events",
     ]
     .into_iter()
     .collect();

@@ -5,7 +5,7 @@ use opensnitch_proto::pb;
 
 use std::sync::Arc;
 
-use crate::services::firewall::{FirewallService, state::FirewallRuntime};
+use crate::{models::firewall_runtime::FirewallRuntime, services::firewall::FirewallService};
 
 impl FirewallService {
     pub(crate) fn snapshot(&self) -> Arc<FirewallRuntime> {

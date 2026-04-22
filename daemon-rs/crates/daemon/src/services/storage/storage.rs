@@ -1,7 +1,6 @@
 use std::{
     io::{self, ErrorKind},
     path::{Path, PathBuf},
-    sync::OnceLock,
     time::SystemTime,
 };
 
@@ -9,6 +8,9 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 
 use super::event_bus::StorageEventBus;
+use super::runtime_lifecycle::{
+    global_storage_service, reload_global_storage_service, subscribe_global_storage_reload,
+};
 
 pub(crate) use super::event_bus::StorageEventSubscription;
 pub(crate) use crate::models::storage_dir_entry::StorageDirEntry;
@@ -46,8 +48,17 @@ impl StorageService {
     }
 
     pub(crate) fn global() -> Self {
-        static GLOBAL: OnceLock<StorageService> = OnceLock::new();
-        GLOBAL.get_or_init(Self::new).clone()
+        global_storage_service()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn reload_global() -> Self {
+        reload_global_storage_service()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn subscribe_global_reload() -> tokio::sync::watch::Receiver<u64> {
+        subscribe_global_storage_reload()
     }
 
     #[cfg_attr(not(test), allow(dead_code))]

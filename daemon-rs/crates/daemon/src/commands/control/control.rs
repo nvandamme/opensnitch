@@ -5,19 +5,43 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    config::ProcMonitorMethod,
+    config::{Config, ProcMonitorMethod},
     models::command_rpc::ClientCommand,
     services::{
-        config::ConfigService, firewall::FirewallService, rule::RuleService, stats::StatsService,
+        client::ClientService,
+        config::ConfigService,
+        firewall::FirewallService,
+        policy_tx::{PolicyOwner, PolicyTxCoordinator, PolicyTxError, PolicyTxRequest, global_policy_tx},
+        rule::RuleService,
+        stats::StatsService,
     },
     utils::config_reload::{
-        RuntimeApplyPolicy, apply_runtime_config_services, apply_runtime_core,
-        has_firewall_runtime_change, has_proc_runtime_change,
-        runtime_apply_stage_messages, RuntimeApplyMessageContext,
+        has_firewall_runtime_change, has_proc_runtime_change, log_config_delta,
     },
     utils::notification_reply::{send_notification_reply, status_payload},
     workers::runtime::control::{WorkerCommand, WorkerCommandResult},
 };
+
+/// Selective reload scope passed to [`DaemonReloadPort::daemon_reload`].
+/// Mirrors [`crate::daemon::reload::ReloadScope`] without depending on the
+/// daemon module.
+#[derive(Debug, Clone)]
+pub(crate) struct DaemonReloadScope {
+    pub(crate) services: Vec<String>,
+}
+
+/// Port for calling [`Daemon::reload`].
+/// Implemented in the daemon module; injected here via trait object to avoid
+/// a circular dependency between the commands layer and the daemon layer.
+pub(crate) trait DaemonReloadPort: Send + Sync {
+    /// `scope: None`    → full reload (all services).
+    /// `scope: Some(_)` → selective reload (skip unchanged services).
+    fn daemon_reload<'a>(
+        &'a self,
+        updated: &'a Config,
+        scope: Option<DaemonReloadScope>,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
+}
 
 pub(crate) trait ProcWorkerReconfigurePort: Send + Sync {
     fn reconfigure_proc_workers(
@@ -45,17 +69,85 @@ pub(crate) enum ControlCommandDispatch {
 const CONTROL_COMMAND_NOTIFICATION_LABEL: &str = "control command notification";
 
 impl CommandControlService {
+    fn policy_tx() -> &'static PolicyTxCoordinator {
+        global_policy_tx()
+    }
+
+    fn owner_from_client(client_service: &ClientService) -> PolicyOwner {
+        client_service
+            .primary_owner()
+            .map(PolicyOwner::from)
+            .unwrap_or(PolicyOwner::System)
+    }
+
+    fn tx_error_message(err: PolicyTxError) -> String {
+        match err {
+            PolicyTxError::ApplyFailed { error } => error,
+            PolicyTxError::RollbackFailed {
+                apply_error,
+                rollback_error,
+            } => format!("{apply_error}; rollback failed: {rollback_error}"),
+            PolicyTxError::DuplicateInFlight { tx_id } => {
+                format!("duplicate in-flight tx {tx_id}")
+            }
+            PolicyTxError::Conflict { expected, actual } => {
+                format!("revision conflict: expected {expected}, actual {actual}")
+            }
+            PolicyTxError::PersistFailed(error) => {
+                format!("transaction persistence failed: {error}")
+            }
+            PolicyTxError::DuplicateCommitted { tx_id, revision } => {
+                format!("duplicate committed tx {tx_id} @ revision {revision}")
+            }
+        }
+    }
+
+    fn selective_reload_services(
+        &self,
+        reload_proc: bool,
+        reload_fw: bool,
+    ) -> Vec<String> {
+        const ALWAYS_RELOAD: [&str; 9] = [
+            "config",
+            "client",
+            "rules",
+            "connections",
+            "dns",
+            "stats",
+            "subscription",
+            "task",
+            "storage",
+        ];
+
+        let mut services = ALWAYS_RELOAD
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect::<Vec<_>>();
+
+        if reload_fw {
+            services.push("firewall".to_string());
+        }
+
+        if reload_proc {
+            services.push("process".to_string());
+        }
+
+        services
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn try_handle_client_command(
         &self,
         cmd: ClientCommand,
         config: &ConfigService,
-        rules: &RuleService,
+        _rules: &RuleService,
         firewall: &FirewallService,
-        stats: &StatsService,
+        _stats: &StatsService,
         task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        client_service: &ClientService,
         reconfigure_proc_workers: &dyn ProcWorkerReconfigurePort,
         control_proc_workers: &dyn ProcWorkerControlPort,
+        daemon_reload: &dyn DaemonReloadPort,
         shutdown: &CancellationToken,
     ) -> ControlCommandDispatch {
         match cmd {
@@ -69,6 +161,7 @@ impl CommandControlService {
                     config,
                     firewall,
                     task_reply_tx,
+                    client_service,
                     reconfigure_proc_workers,
                     control_proc_workers,
                 )
@@ -79,16 +172,30 @@ impl CommandControlService {
                 notification_id,
                 enabled,
             } => {
-                self.set_firewall(notification_id, enabled, config, firewall, task_reply_tx)
-                    .await;
+                self.set_firewall(
+                    notification_id,
+                    enabled,
+                    config,
+                    firewall,
+                    task_reply_tx,
+                    client_service,
+                )
+                .await;
                 ControlCommandDispatch::HandledContinue
             }
             ClientCommand::ReloadFirewall {
                 notification_id,
                 sys_firewall,
             } => {
-                self.reload_firewall(notification_id, sys_firewall, config, firewall, task_reply_tx)
-                    .await;
+                self.reload_firewall(
+                    notification_id,
+                    sys_firewall,
+                    config,
+                    firewall,
+                    task_reply_tx,
+                    client_service,
+                )
+                .await;
                 ControlCommandDispatch::HandledContinue
             }
             ClientCommand::ApplyConfig {
@@ -99,11 +206,8 @@ impl CommandControlService {
                     notification_id,
                     raw_json,
                     config,
-                    rules,
-                    firewall,
-                    stats,
                     task_reply_tx,
-                    reconfigure_proc_workers,
+                    daemon_reload,
                 )
                 .await;
                 ControlCommandDispatch::HandledContinue
@@ -143,56 +247,102 @@ impl CommandControlService {
         config: &ConfigService,
         firewall: &FirewallService,
         task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        client_service: &ClientService,
         reconfigure_proc_workers: &dyn ProcWorkerReconfigurePort,
         control_proc_workers: &dyn ProcWorkerControlPort,
     ) {
-        if let Err(err) = firewall.set_interception(enabled).await {
-            tracing::error!(enabled, "failed to update interception state: {err}");
-            let _ = send_notification_reply(
-                task_reply_tx,
-                notification_id,
-                pb::NotificationReplyCode::Error,
-                format!("failed to update interception state: {err}"),
-                CONTROL_COMMAND_NOTIFICATION_LABEL,
+        let current = config.get_snapshot();
+        let previous = firewall.get_snapshot();
+        let method = config.get_snapshot().proc_monitor_method;
+        let owner = Self::owner_from_client(client_service);
+
+        let tx = Self::policy_tx()
+            .execute(
+                PolicyTxRequest {
+                    idempotency_key: format!("interception-set:{notification_id}:{enabled}"),
+                    owner,
+                    expected_revision: None,
+                    operations: vec![format!("interception_set_enabled:{enabled}")],
+                },
+                || async {
+                    firewall
+                        .set_interception(enabled)
+                        .await
+                        .map_err(|err| format!("failed to update interception state: {err}"))?;
+
+                    if enabled {
+                        reconfigure_proc_workers
+                            .reconfigure_proc_workers(self.reconfigure_target(true, method))
+                            .await
+                            .map_err(|err| {
+                                format!("failed to reconfigure process monitor workers: {err}")
+                            })?;
+                        let _ = control_proc_workers
+                            .control_proc_workers(WorkerCommand::Start)
+                            .await;
+                    } else {
+                        let _ = control_proc_workers
+                            .control_proc_workers(WorkerCommand::Stop)
+                            .await;
+                    }
+
+                    Ok(())
+                },
+                || async {
+                    firewall
+                        .set_interception(previous.interception_enabled)
+                        .await
+                        .map_err(|err| {
+                            format!("rollback failed to restore interception state: {err}")
+                        })?;
+
+                    if previous.interception_enabled {
+                        reconfigure_proc_workers
+                            .reconfigure_proc_workers(self.reconfigure_target(true, method))
+                            .await
+                            .map_err(|err| {
+                                format!("rollback failed to reconfigure process workers: {err}")
+                            })?;
+                        let _ = control_proc_workers
+                            .control_proc_workers(WorkerCommand::Start)
+                            .await;
+                    } else {
+                        let _ = control_proc_workers
+                            .control_proc_workers(WorkerCommand::Stop)
+                            .await;
+                    }
+
+                    let _ = firewall.reload_from_config(&current).await;
+                    Ok(())
+                },
             )
             .await;
-            return;
-        }
 
-        let method = config.get_snapshot().proc_monitor_method;
-        if enabled {
-            if let Err(err) = reconfigure_proc_workers
-                .reconfigure_proc_workers(self.reconfigure_target(true, method))
-                .await
-            {
-                tracing::error!("failed to reconfigure process monitor workers: {err}");
+        match tx {
+            Ok(_) | Err(PolicyTxError::DuplicateCommitted { .. }) => {
+                tracing::info!(enabled, "updated interception state");
+                let _ = send_notification_reply(
+                    task_reply_tx,
+                    notification_id,
+                    pb::NotificationReplyCode::Ok,
+                    status_payload("ok"),
+                    CONTROL_COMMAND_NOTIFICATION_LABEL,
+                )
+                .await;
+            }
+            Err(err) => {
+                let message = Self::tx_error_message(err);
+                tracing::error!(enabled, "{message}");
                 let _ = send_notification_reply(
                     task_reply_tx,
                     notification_id,
                     pb::NotificationReplyCode::Error,
-                    format!("failed to reconfigure process monitor workers: {err}"),
+                    message,
                     CONTROL_COMMAND_NOTIFICATION_LABEL,
                 )
                 .await;
-                return;
             }
-            let _ = control_proc_workers
-                .control_proc_workers(WorkerCommand::Start)
-                .await;
-        } else {
-            let _ = control_proc_workers
-                .control_proc_workers(WorkerCommand::Stop)
-                .await;
         }
-        tracing::info!(enabled, "updated interception state");
-        let _ = send_notification_reply(
-            task_reply_tx,
-            notification_id,
-            pb::NotificationReplyCode::Ok,
-            status_payload("ok"),
-            CONTROL_COMMAND_NOTIFICATION_LABEL,
-        )
-        .await;
     }
 
     pub(crate) async fn set_firewall(
@@ -202,63 +352,87 @@ impl CommandControlService {
         config: &ConfigService,
         firewall: &FirewallService,
         task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        client_service: &ClientService,
     ) {
         tracing::info!(
             notification_id,
             enabled,
             "received firewall interception command"
         );
-        if enabled {
-            let current = config.get_snapshot();
-            tracing::info!(backend = ?current.firewall_backend, path = %current.firewall_config_path.display(), "reloading firewall from runtime config");
-            if let Err(err) = firewall.reload_from_config(&current).await {
-                tracing::error!("failed to reload firewall config: {err}");
-                let _ = send_notification_reply(
-                    task_reply_tx,
-                    notification_id,
-                    pb::NotificationReplyCode::Error,
-                    format!("failed to reload firewall config: {err}"),
-                    CONTROL_COMMAND_NOTIFICATION_LABEL,
-                )
-                .await;
-                return;
-            }
-            if let Err(err) = firewall.set_enabled(true).await {
-                tracing::error!("failed to enable firewall: {err}");
-                let _ = send_notification_reply(
-                    task_reply_tx,
-                    notification_id,
-                    pb::NotificationReplyCode::Error,
-                    format!("failed to enable firewall: {err}"),
-                    CONTROL_COMMAND_NOTIFICATION_LABEL,
-                )
-                .await;
-                return;
-            }
-            tracing::info!("firewall interception enabled");
-        } else if let Err(err) = firewall.set_enabled(false).await {
-            tracing::error!("failed to disable firewall: {err}");
-            let _ = send_notification_reply(
-                task_reply_tx,
-                notification_id,
-                pb::NotificationReplyCode::Error,
-                format!("failed to disable firewall: {err}"),
-                CONTROL_COMMAND_NOTIFICATION_LABEL,
+        let current = config.get_snapshot();
+        let previous = firewall.get_snapshot();
+        let owner = Self::owner_from_client(client_service);
+
+        let tx = Self::policy_tx()
+            .execute(
+                PolicyTxRequest {
+                    idempotency_key: format!("firewall-set:{notification_id}:{enabled}"),
+                    owner,
+                    expected_revision: None,
+                    operations: vec![format!("firewall_set_enabled:{enabled}")],
+                },
+                || async {
+                    if enabled {
+                        tracing::info!(backend = ?current.firewall_backend, path = %current.firewall_config_path.display(), "reloading firewall from runtime config");
+                        firewall
+                            .reload_from_config(&current)
+                            .await
+                            .map_err(|err| format!("failed to reload firewall config: {err}"))?;
+                        firewall
+                            .set_enabled(true)
+                            .await
+                            .map_err(|err| format!("failed to enable firewall: {err}"))?;
+                    } else {
+                        firewall
+                            .set_enabled(false)
+                            .await
+                            .map_err(|err| format!("failed to disable firewall: {err}"))?;
+                    }
+                    Ok(())
+                },
+                || async {
+                    let prev_sysfw = previous.system_firewall.as_ref().as_ref().cloned();
+                    firewall
+                        .replace_system_firewall(prev_sysfw, &current)
+                        .await
+                        .map_err(|err| {
+                            format!("rollback failed to restore firewall rules payload: {err}")
+                        })?;
+                    firewall
+                        .set_enabled(previous.state.enabled)
+                        .await
+                        .map_err(|err| {
+                            format!("rollback failed to restore firewall enabled state: {err}")
+                        })
+                },
             )
             .await;
-            return;
-        } else {
-            tracing::info!("firewall interception disabled");
-        }
 
-        let _ = send_notification_reply(
-            task_reply_tx,
-            notification_id,
-            pb::NotificationReplyCode::Ok,
-            status_payload("ok"),
-            CONTROL_COMMAND_NOTIFICATION_LABEL,
-        )
-        .await;
+        match tx {
+            Ok(_) | Err(PolicyTxError::DuplicateCommitted { .. }) => {
+                tracing::info!(enabled, "updated firewall enabled state");
+                let _ = send_notification_reply(
+                    task_reply_tx,
+                    notification_id,
+                    pb::NotificationReplyCode::Ok,
+                    status_payload("ok"),
+                    CONTROL_COMMAND_NOTIFICATION_LABEL,
+                )
+                .await;
+            }
+            Err(err) => {
+                let message = Self::tx_error_message(err);
+                tracing::error!("{message}");
+                let _ = send_notification_reply(
+                    task_reply_tx,
+                    notification_id,
+                    pb::NotificationReplyCode::Error,
+                    message,
+                    CONTROL_COMMAND_NOTIFICATION_LABEL,
+                )
+                .await;
+            }
+        }
     }
 
     pub(crate) async fn reload_firewall(
@@ -268,6 +442,7 @@ impl CommandControlService {
         config: &ConfigService,
         firewall: &FirewallService,
         task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        client_service: &ClientService,
     ) {
         let Some(sys_firewall) = sys_firewall else {
             let _ = send_notification_reply(
@@ -282,72 +457,91 @@ impl CommandControlService {
         };
 
         let current = config.get_snapshot();
+        let previous = firewall.get_snapshot();
+        let owner = Self::owner_from_client(client_service);
         tracing::info!(notification_id, backend = ?current.firewall_backend, "received firewall reload command");
         crate::platform::ffi::nfqueue::NfqueueRuntimeState::set_default_action(
             current.default_action,
         );
-        let firewall = firewall.clone();
-        let task_reply_tx = task_reply_tx.clone();
-        tokio::spawn(async move {
-            let mut firewall_errors = firewall.subscribe_errors();
 
-            let reload = async {
-                tracing::info!(
-                    version = sys_firewall.version,
-                    "applying firewall payload from notification"
-                );
-                firewall
-                    .replace_system_firewall(Some(sys_firewall), &current)
-                    .await
-                    .map_err(|err| format!("failed to apply firewall rules payload: {err}"))?;
-                tracing::info!("firewall payload applied successfully");
-                Ok::<(), String>(())
-            };
+        let mut firewall_errors = firewall.subscribe_errors();
+        let tx = Self::policy_tx()
+            .execute(
+                PolicyTxRequest {
+                    idempotency_key: format!(
+                        "firewall-reload:{notification_id}:{}",
+                        sys_firewall.version
+                    ),
+                    owner,
+                    expected_revision: None,
+                    operations: vec![format!("firewall_reload:version:{}", sys_firewall.version)],
+                },
+                || async {
+                    tracing::info!(
+                        version = sys_firewall.version,
+                        "applying firewall payload from notification"
+                    );
+                    firewall
+                        .replace_system_firewall(Some(sys_firewall), &current)
+                        .await
+                        .map_err(|err| format!("failed to apply firewall rules payload: {err}"))
+                },
+                || async {
+                    let prev_sysfw = previous.system_firewall.as_ref().as_ref().cloned();
+                    firewall
+                        .replace_system_firewall(prev_sysfw, &current)
+                        .await
+                        .map_err(|err| {
+                            format!("rollback failed to restore firewall rules payload: {err}")
+                        })
+                },
+            )
+            .await;
 
-            match reload.await {
-                Ok(()) => {
-                    let aggregated_errors = Self::collect_firewall_errors_impl(
-                        &mut firewall_errors,
-                        std::time::Duration::from_secs(2),
-                    )
-                    .await;
+        match tx {
+            Ok(_) | Err(PolicyTxError::DuplicateCommitted { .. }) => {
+                let aggregated_errors = Self::collect_firewall_errors_impl(
+                    &mut firewall_errors,
+                    std::time::Duration::from_secs(2),
+                )
+                .await;
 
-                    if let Some(errors) = aggregated_errors {
-                        tracing::error!("{errors}");
-                        let _ = send_notification_reply(
-                            &task_reply_tx,
-                            notification_id,
-                            pb::NotificationReplyCode::Error,
-                            errors,
-                            CONTROL_COMMAND_NOTIFICATION_LABEL,
-                        )
-                        .await;
-                        return;
-                    }
-
-                    tracing::debug!("reload firewall timeout fired, no errors?");
+                if let Some(errors) = aggregated_errors {
+                    tracing::error!("{errors}");
                     let _ = send_notification_reply(
-                        &task_reply_tx,
-                        notification_id,
-                        pb::NotificationReplyCode::Ok,
-                        status_payload("ok"),
-                        CONTROL_COMMAND_NOTIFICATION_LABEL,
-                    )
-                    .await;
-                }
-                Err(err) => {
-                    tracing::error!("{err}");
-                    let _ = send_notification_reply(
-                        &task_reply_tx,
+                        task_reply_tx,
                         notification_id,
                         pb::NotificationReplyCode::Error,
-                        err,
+                        errors,
                         CONTROL_COMMAND_NOTIFICATION_LABEL,
                     )
                     .await;
+                    return;
                 }
+
+                tracing::debug!("reload firewall timeout fired, no errors?");
+                let _ = send_notification_reply(
+                    task_reply_tx,
+                    notification_id,
+                    pb::NotificationReplyCode::Ok,
+                    status_payload("ok"),
+                    CONTROL_COMMAND_NOTIFICATION_LABEL,
+                )
+                .await;
             }
-        });
+            Err(err) => {
+                let message = Self::tx_error_message(err);
+                tracing::error!("{message}");
+                let _ = send_notification_reply(
+                    task_reply_tx,
+                    notification_id,
+                    pb::NotificationReplyCode::Error,
+                    message,
+                    CONTROL_COMMAND_NOTIFICATION_LABEL,
+                )
+                .await;
+            }
+        }
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -404,96 +598,13 @@ impl CommandControlService {
         notification_id: u64,
         raw_json: String,
         config: &ConfigService,
-        rules: &RuleService,
-        firewall: &FirewallService,
-        stats: &StatsService,
         task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
-        reconfigure_proc_workers: &dyn ProcWorkerReconfigurePort,
+        daemon_reload: &dyn DaemonReloadPort,
     ) {
         tracing::debug!(notification_id, "received apply-config command");
         let previous = config.get_snapshot();
-        match config.parse_raw_json(&raw_json).await {
-            Ok(updated) => {
-                let reload_proc = has_proc_runtime_change(&previous, &updated);
-                let reload_fw = has_firewall_runtime_change(&previous, &updated, false);
-
-                crate::utils::config_reload::log_config_delta(&previous, &updated, false);
-                tracing::info!(
-                    notification_id,
-                    addr = %updated.client_addr,
-                    log_level = updated.log_level,
-                    ?updated.default_action,
-                    ?updated.proc_monitor_method,
-                    ?updated.firewall_backend,
-                    "applying config update to runtime services"
-                );
-                apply_runtime_core(&updated, stats);
-                let apply_report = apply_runtime_config_services(
-                    &updated,
-                    rules,
-                    firewall,
-                    RuntimeApplyPolicy::StopAfterRulesError,
-                )
-                .await;
-
-                if let Some((stage, err)) = apply_report.into_stage_errors().into_iter().next() {
-                    let messages =
-                        runtime_apply_stage_messages(RuntimeApplyMessageContext::ConfigCommand, stage);
-                    tracing::error!("{}: {err}", messages.log);
-                    let _ = send_notification_reply(
-                        task_reply_tx,
-                        notification_id,
-                        pb::NotificationReplyCode::Error,
-                        format!("{}: {err}", messages.external),
-                        CONTROL_COMMAND_NOTIFICATION_LABEL,
-                    )
-                    .await;
-                    return;
-                }
-                if let Err(err) = reconfigure_proc_workers
-                    .reconfigure_proc_workers(Some(updated.proc_monitor_method))
-                    .await
-                {
-                    tracing::error!("failed to reconfigure process monitor workers: {err}");
-                    let _ = send_notification_reply(
-                        task_reply_tx,
-                        notification_id,
-                        pb::NotificationReplyCode::Error,
-                        format!("failed to reconfigure process monitor workers: {err}"),
-                        CONTROL_COMMAND_NOTIFICATION_LABEL,
-                    )
-                    .await;
-                    return;
-                }
-                if (reload_proc || reload_fw) && updated.flush_conns_on_start {
-                    crate::utils::config_reload::flush_established_connections().await;
-                } else {
-                    tracing::debug!("[config] not flushing established connections");
-                }
-
-                if let Err(err) = config.persist_raw_json(&raw_json).await {
-                    tracing::error!("failed to persist config payload after runtime apply: {err}");
-                    let _ = send_notification_reply(
-                        task_reply_tx,
-                        notification_id,
-                        pb::NotificationReplyCode::Error,
-                        format!("failed to persist config payload after runtime apply: {err}"),
-                        CONTROL_COMMAND_NOTIFICATION_LABEL,
-                    )
-                    .await;
-                    return;
-                }
-                config.set_snapshot(updated.clone()).await;
-                tracing::info!(notification_id, "config update applied successfully");
-                let _ = send_notification_reply(
-                    task_reply_tx,
-                    notification_id,
-                    pb::NotificationReplyCode::Ok,
-                    status_payload("ok"),
-                    CONTROL_COMMAND_NOTIFICATION_LABEL,
-                )
-                .await;
-            }
+        let updated = match config.parse_raw_json(&raw_json).await {
+            Ok(updated) => updated,
             Err(err) => {
                 tracing::error!("failed to apply config update: {err}");
                 let _ = send_notification_reply(
@@ -504,8 +615,73 @@ impl CommandControlService {
                     CONTROL_COMMAND_NOTIFICATION_LABEL,
                 )
                 .await;
+                return;
             }
+        };
+
+        let reload_proc = has_proc_runtime_change(&previous, &updated);
+        let reload_fw = has_firewall_runtime_change(&previous, &updated, false);
+
+        log_config_delta(&previous, &updated, false);
+        tracing::info!(
+            notification_id,
+            addr = %updated.client_addr,
+            log_level = updated.log_level,
+            ?updated.default_action,
+            ?updated.proc_monitor_method,
+            ?updated.firewall_backend,
+            "applying config update to runtime services"
+        );
+
+        if let Err(err) = daemon_reload
+            .daemon_reload(
+                &updated,
+                Some(DaemonReloadScope {
+                    services: self.selective_reload_services(reload_proc, reload_fw),
+                }),
+            )
+            .await
+        {
+            tracing::error!("config update failed during daemon reload: {err}");
+            let _ = send_notification_reply(
+                task_reply_tx,
+                notification_id,
+                pb::NotificationReplyCode::Error,
+                format!("config update failed: {err}"),
+                CONTROL_COMMAND_NOTIFICATION_LABEL,
+            )
+            .await;
+            return;
         }
+
+        if (reload_proc || reload_fw) && updated.flush_conns_on_start {
+            crate::utils::config_reload::flush_established_connections().await;
+        } else {
+            tracing::debug!("[config] not flushing established connections");
+        }
+
+        if let Err(err) = config.persist_raw_json(&raw_json).await {
+            tracing::error!("failed to persist config payload after runtime apply: {err}");
+            let _ = send_notification_reply(
+                task_reply_tx,
+                notification_id,
+                pb::NotificationReplyCode::Error,
+                format!("failed to persist config payload after runtime apply: {err}"),
+                CONTROL_COMMAND_NOTIFICATION_LABEL,
+            )
+            .await;
+            return;
+        }
+        config.set_snapshot(updated.clone()).await;
+        tracing::info!(notification_id, "config update applied successfully");
+        let _ = send_notification_reply(
+            task_reply_tx,
+            notification_id,
+            pb::NotificationReplyCode::Ok,
+            status_payload("ok"),
+            CONTROL_COMMAND_NOTIFICATION_LABEL,
+        )
+        .await;
     }
 
     pub(crate) async fn set_log_level(

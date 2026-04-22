@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    RuntimeTaskHandles, TaskRuntimeService, TaskStorageRuntime, naming as task_runtime_naming,
+    RuntimeTaskHandles, TaskService, TaskStorageRuntime, naming as task_runtime_naming,
     validation as task_runtime_validation,
 };
 use crate::{
@@ -15,7 +15,7 @@ use crate::{
     models::ui_alert::UiAlert,
     services::storage::StorageService,
     services::{
-        client::{enqueue_alert, warning_alert},
+        client::{AlertBuffer, enqueue_alert, warning_alert},
         config::ConfigService,
         process::ProcessService,
     },
@@ -27,7 +27,7 @@ use crate::{
     },
 };
 
-impl TaskRuntimeService {
+impl TaskService {
     pub(crate) async fn sync_storage_tasks(
         &self,
         tasks_file: &std::path::Path,
@@ -179,9 +179,10 @@ impl TaskRuntimeService {
 }
 
 struct TaskWatchControl {
-    task_runtime_service: TaskRuntimeService,
+    task_service: TaskService,
     process: ProcessService,
     task_reply_tx: tokio::sync::mpsc::Sender<pb::NotificationReply>,
+    alert_buffer: AlertBuffer,
     alert_tx: tokio::sync::mpsc::Sender<UiAlert>,
     tasks_config_path: PathBuf,
     targets: Vec<PathBuf>,
@@ -204,9 +205,10 @@ impl WatchWorkerControl for TaskWatchControl {
     fn scan<'a>(
         &'a mut self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        let task_runtime_service = self.task_runtime_service.clone();
+        let task_service = self.task_service.clone();
         let process = self.process.clone();
         let task_reply_tx = self.task_reply_tx.clone();
+        let alert_buffer = self.alert_buffer.clone();
         let alert_tx = self.alert_tx.clone();
         let tasks_config_path = self.tasks_config_path.clone();
         let task_handles = self.task_handles.clone();
@@ -214,7 +216,7 @@ impl WatchWorkerControl for TaskWatchControl {
         Box::pin(async move {
             StorageService::global().emit_scan("task", tasks_config_path.as_path());
             let mut task_handles = task_handles.lock().await;
-            if let Err(err) = task_runtime_service
+            if let Err(err) = task_service
                 .sync_storage_tasks(
                     tasks_config_path.as_path(),
                     &mut task_handles,
@@ -225,6 +227,7 @@ impl WatchWorkerControl for TaskWatchControl {
             {
                 tracing::error!(path = %tasks_config_path.display(), "failed to sync disk tasks: {err}");
                 enqueue_alert(
+                    &alert_buffer,
                     &alert_tx,
                     warning_alert(format!("failed to sync disk tasks: {err}")),
                 );
@@ -316,11 +319,12 @@ impl WorkerControl for CleanupWorkerControl {
 }
 
 pub(super) fn start_task_watch_task(
-    task_runtime_service: TaskRuntimeService,
+    task_service: TaskService,
     shutdown: CancellationToken,
     config: ConfigService,
     process: ProcessService,
     task_reply_tx: tokio::sync::mpsc::Sender<pb::NotificationReply>,
+    alert_buffer: AlertBuffer,
     alert_tx: tokio::sync::mpsc::Sender<UiAlert>,
 ) -> Box<dyn WorkerControl> {
     let initial_snapshot = config.get_snapshot();
@@ -335,9 +339,10 @@ pub(super) fn start_task_watch_task(
     let task_handles = Arc::new(tokio::sync::Mutex::new(RuntimeTaskHandles::default()));
 
     let watch_handle = TaskWatchControl {
-        task_runtime_service: task_runtime_service.clone(),
+        task_service: task_service.clone(),
         process,
         task_reply_tx,
+        alert_buffer,
         alert_tx,
         tasks_config_path,
         targets,
@@ -355,7 +360,7 @@ pub(super) fn start_task_watch_task(
             _ = cleanup_token.cancelled() => {}
         }
         let mut task_handles = shutdown_handles.lock().await;
-        TaskRuntimeService::stop_runtime_tasks(&mut task_handles);
+        TaskService::stop_runtime_tasks(&mut task_handles);
     });
 
     Box::new(CompositeWatchWorkerControl {

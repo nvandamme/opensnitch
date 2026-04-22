@@ -15,7 +15,7 @@ use crate::{
     config::{Config, ProcMonitorMethod},
     models::ui_alert::UiAlert,
     services::{
-        client::{enqueue_alert, warning_alert},
+        client::{AlertBuffer, enqueue_alert, warning_alert},
         firewall::FirewallService,
         rule::RuleService,
         stats::StatsService,
@@ -76,6 +76,7 @@ struct ConfigWatchControl {
     rules: RuleService,
     firewall: FirewallService,
     stats: StatsService,
+    alert_buffer: AlertBuffer,
     alert_tx: tokio::sync::mpsc::Sender<UiAlert>,
     reconfigure_proc_workers: ProcWorkerReconfigure,
     config_path: PathBuf,
@@ -101,6 +102,7 @@ impl WatchWorkerControl for ConfigWatchControl {
         let rules = self.rules.clone();
         let firewall = self.firewall.clone();
         let stats = self.stats.clone();
+        let alert_buffer = self.alert_buffer.clone();
         let alert_tx = self.alert_tx.clone();
         let reconfigure_proc_workers = self.reconfigure_proc_workers.clone();
         let config_path = self.config_path.clone();
@@ -153,6 +155,7 @@ impl WatchWorkerControl for ConfigWatchControl {
                             &rules,
                             &firewall,
                             RuntimeApplyPolicy::ContinueOnError,
+                            true,
                         )
                         .await;
 
@@ -165,6 +168,7 @@ impl WatchWorkerControl for ConfigWatchControl {
 
                             tracing::error!("{}: {err}", messages.log);
                             enqueue_alert(
+                                &alert_buffer,
                                 &alert_tx,
                                 warning_alert(format!("{}: {err}", messages.external)),
                             );
@@ -190,6 +194,7 @@ impl WatchWorkerControl for ConfigWatchControl {
                                 "failed to reconfigure process monitor workers after config reload: {err}"
                             );
                             enqueue_alert(
+                                &alert_buffer,
                                 &alert_tx,
                                 warning_alert(format!(
                                     "failed to reconfigure process monitor workers after config reload: {err}"
@@ -208,6 +213,7 @@ impl WatchWorkerControl for ConfigWatchControl {
                     Err(err) => {
                         tracing::error!("failed to reload config from watched file: {err}");
                         enqueue_alert(
+                            &alert_buffer,
                             &alert_tx,
                             warning_alert(format!(
                                 "failed to reload config from watched file: {err}"
@@ -230,6 +236,7 @@ pub(super) fn start_config_watch_task(
     rules: RuleService,
     firewall: FirewallService,
     stats: StatsService,
+    alert_buffer: AlertBuffer,
     alert_tx: tokio::sync::mpsc::Sender<UiAlert>,
     reconfigure_proc_workers: ProcWorkerReconfigure,
 ) -> Box<dyn WorkerControl> {
@@ -242,6 +249,7 @@ pub(super) fn start_config_watch_task(
         rules,
         firewall,
         stats,
+        alert_buffer,
         alert_tx,
         reconfigure_proc_workers,
         config_path,

@@ -4,13 +4,15 @@ use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    commands::control::{ProcWorkerControlPort, ProcWorkerReconfigurePort},
+    commands::control::{
+        DaemonReloadPort, DaemonReloadScope, ProcWorkerControlPort, ProcWorkerReconfigurePort,
+    },
     config::Config,
     flows::command::CommandFlow,
     models::command_rpc::ClientCommand,
     services::{
-        config::ConfigService, firewall::FirewallService, process::ProcessService,
-        rule::RuleService, stats::StatsService, task::TaskRuntimeService,
+        client::ClientService, config::ConfigService, firewall::FirewallService,
+        process::ProcessService, rule::RuleService, stats::StatsService, task::TaskService,
     },
     workers::runtime::control::{WorkerCommand, WorkerCommandResult},
 };
@@ -37,6 +39,16 @@ impl ProcWorkerControlPort for TestProcWorkerPorts {
     }
 }
 
+impl DaemonReloadPort for TestProcWorkerPorts {
+    fn daemon_reload<'a>(
+        &'a self,
+        _updated: &'a crate::config::Config,
+        _scope: Option<DaemonReloadScope>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
 #[tokio::test]
 async fn command_flow_dispatches_log_level_and_shutdown() {
     let (client_cmd_tx, client_cmd_rx) = tokio::sync::mpsc::channel(8);
@@ -50,13 +62,15 @@ async fn command_flow_dispatches_log_level_and_shutdown() {
 
     let flow = CommandFlow::new(
         shutdown.clone(),
+        ClientService::default(),
         config_service,
         RuleService::default(),
         firewall_service,
         ProcessService::default(),
         StatsService::default(),
         task_reply_tx,
-        TaskRuntimeService,
+        TaskService,
+        ports.clone(),
         ports.clone(),
         ports.clone(),
     );

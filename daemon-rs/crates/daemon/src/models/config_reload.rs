@@ -15,7 +15,7 @@ pub(crate) struct RuntimeApplyStageMessages {
     pub(crate) external: &'static str,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum RuntimeApplyStage {
     Logging,
     Rules,

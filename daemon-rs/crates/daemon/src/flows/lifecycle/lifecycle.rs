@@ -98,7 +98,7 @@ impl ServiceLifecycleFlow {
         );
     }
 
-    /// Subscribe and spawn status + event observer tasks for all intent-monitored services.
+    /// Subscribe and spawn status + event observer tasks for all runtime-backed services.
     pub fn spawn_observers(
         &self,
         handles: &mut RuntimeHandles,
@@ -117,27 +117,27 @@ impl ServiceLifecycleFlow {
             last_error = ?connection_status.last_error,
             status_subscribers = connection_stats.status_subscribers,
             event_subscribers = connection_stats.event_subscribers,
-            "intent lifecycle observer bootstrap"
+            "service lifecycle observer bootstrap"
         );
         match connections.subscribe_status() {
             Ok(status_sub) => Self::spawn_status_observer(
                 handles,
-                "intent-connection-status",
+                "connection-status",
                 "connection",
                 status_sub,
                 shutdown.clone(),
             ),
-            Err(err) => warn!("failed to subscribe to connection intent status: {err}"),
+            Err(err) => warn!("failed to subscribe to connection runtime status: {err}"),
         }
         match connections.subscribe_events() {
             Ok(event_sub) => Self::spawn_event_observer(
                 handles,
-                "intent-connection-events",
+                "connection-events",
                 "connection",
                 event_sub,
                 shutdown.clone(),
             ),
-            Err(err) => warn!("failed to subscribe to connection intent events: {err}"),
+            Err(err) => warn!("failed to subscribe to connection runtime events: {err}"),
         }
 
         let process_stats = process.monitor_stats();
@@ -148,27 +148,27 @@ impl ServiceLifecycleFlow {
             last_error = ?process_status.last_error,
             status_subscribers = process_stats.status_subscribers,
             event_subscribers = process_stats.event_subscribers,
-            "intent lifecycle observer bootstrap"
+            "service lifecycle observer bootstrap"
         );
         match process.subscribe_status() {
             Ok(status_sub) => Self::spawn_status_observer(
                 handles,
-                "intent-process-status",
+                "process-status",
                 "process",
                 status_sub,
                 shutdown.clone(),
             ),
-            Err(err) => warn!("failed to subscribe to process intent status: {err}"),
+            Err(err) => warn!("failed to subscribe to process runtime status: {err}"),
         }
         match process.subscribe_events() {
             Ok(event_sub) => Self::spawn_event_observer(
                 handles,
-                "intent-process-events",
+                "process-events",
                 "process",
                 event_sub,
                 shutdown.clone(),
             ),
-            Err(err) => warn!("failed to subscribe to process intent events: {err}"),
+            Err(err) => warn!("failed to subscribe to process runtime events: {err}"),
         }
 
         let dns_stats = dns.monitor_stats();
@@ -179,27 +179,27 @@ impl ServiceLifecycleFlow {
             last_error = ?dns_status.last_error,
             status_subscribers = dns_stats.status_subscribers,
             event_subscribers = dns_stats.event_subscribers,
-            "intent lifecycle observer bootstrap"
+            "service lifecycle observer bootstrap"
         );
         match dns.subscribe_status() {
             Ok(status_sub) => Self::spawn_status_observer(
                 handles,
-                "intent-dns-status",
+                "dns-status",
                 "dns",
                 status_sub,
                 shutdown.clone(),
             ),
-            Err(err) => warn!("failed to subscribe to dns intent status: {err}"),
+            Err(err) => warn!("failed to subscribe to dns runtime status: {err}"),
         }
         match dns.subscribe_events() {
             Ok(event_sub) => Self::spawn_event_observer(
                 handles,
-                "intent-dns-events",
+                "dns-events",
                 "dns",
                 event_sub,
                 shutdown.clone(),
             ),
-            Err(err) => warn!("failed to subscribe to dns intent events: {err}"),
+            Err(err) => warn!("failed to subscribe to dns runtime events: {err}"),
         }
 
         let firewall_stats = firewall.monitor_stats();
@@ -210,27 +210,27 @@ impl ServiceLifecycleFlow {
             last_error = ?firewall_status.last_error,
             status_subscribers = firewall_stats.status_subscribers,
             event_subscribers = firewall_stats.event_subscribers,
-            "intent lifecycle observer bootstrap"
+            "service lifecycle observer bootstrap"
         );
         match firewall.subscribe_status() {
             Ok(status_sub) => Self::spawn_status_observer(
                 handles,
-                "intent-firewall-status",
+                "firewall-status",
                 "firewall",
                 status_sub,
                 shutdown.clone(),
             ),
-            Err(err) => warn!("failed to subscribe to firewall intent status: {err}"),
+            Err(err) => warn!("failed to subscribe to firewall runtime status: {err}"),
         }
         match firewall.subscribe_events() {
             Ok(event_sub) => Self::spawn_event_observer(
                 handles,
-                "intent-firewall-events",
+                "firewall-events",
                 "firewall",
                 event_sub,
                 shutdown,
             ),
-            Err(err) => warn!("failed to subscribe to firewall intent events: {err}"),
+            Err(err) => warn!("failed to subscribe to firewall runtime events: {err}"),
         }
     }
 }

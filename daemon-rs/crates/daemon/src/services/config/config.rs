@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::{Config, ProcMonitorMethod},
     models::ui_alert::UiAlert,
-    services::{firewall::FirewallService, rule::RuleService, stats::StatsService},
+    services::{client::AlertBuffer, firewall::FirewallService, rule::RuleService, stats::StatsService},
     workers::runtime::control::WorkerControl,
 };
 
@@ -66,6 +66,7 @@ impl ConfigService {
         rules: RuleService,
         firewall: FirewallService,
         stats: StatsService,
+        alert_buffer: AlertBuffer,
         alert_tx: tokio::sync::mpsc::Sender<UiAlert>,
         reconfigure_proc_workers: ProcWorkerReconfigure,
     ) -> Box<dyn WorkerControl> {
@@ -75,6 +76,7 @@ impl ConfigService {
             rules,
             firewall,
             stats,
+            alert_buffer,
             alert_tx,
             reconfigure_proc_workers,
         )

@@ -15,7 +15,10 @@ use tonic::{Request, Response, Status};
 use crate::{
     config::Config,
     flows::stats::{StatsFlow, WorkerTelemetrySnapshot},
-    services::{config::ConfigService, rule::RuleService, stats::StatsService},
+    services::{
+        client::ClientService, config::ConfigService, dns::DnsService, rule::RuleService,
+        stats::StatsService,
+    },
 };
 
 #[derive(Default)]
@@ -23,7 +26,7 @@ struct TestUiServer {
     ping_calls: Arc<AtomicUsize>,
 }
 
-#[tonic::async_trait]
+#[async_trait::async_trait]
 impl pb::ui_server::Ui for TestUiServer {
     type NotificationsStream =
         tokio_stream::wrappers::ReceiverStream<Result<pb::Notification, Status>>;
@@ -114,18 +117,27 @@ async fn stats_flow_sends_stats_when_pending() {
     config.client_addr = format!("http://{addr}");
     let config_service = ConfigService::new(config);
 
+    let dns = DnsService::default();
     let rules = RuleService::default();
     let stats = StatsService::default();
     stats.on_event(pb::Connection::default(), None);
+    let kernel_pipeline_counters = Arc::new(crate::daemon::KernelPipelineCounters::default());
 
     let flow_shutdown = CancellationToken::new();
     let flow = StatsFlow::new(
         flow_shutdown.clone(),
         config_service,
+        ClientService::default(),
         rules,
         stats,
-        Arc::new(crate::daemon::Daemon::probe_kernel_pipeline_ingress_stats),
-        Arc::new(crate::daemon::Daemon::probe_kernel_pipeline_drop_stats),
+        {
+            let kernel_pipeline_counters = kernel_pipeline_counters.clone();
+            Arc::new(move || kernel_pipeline_counters.ingress_stats())
+        },
+        {
+            let kernel_pipeline_counters = kernel_pipeline_counters.clone();
+            Arc::new(move || kernel_pipeline_counters.drop_stats())
+        },
         "proc-workers",
         Arc::new(|| WorkerTelemetrySnapshot {
             state: "running",
@@ -134,6 +146,7 @@ async fn stats_flow_sends_stats_when_pending() {
             running_handles: 0,
             shutdown_requested: false,
         }),
+        dns,
     );
 
     let flow_handle = flow.spawn();

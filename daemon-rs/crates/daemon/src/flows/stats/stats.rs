@@ -7,11 +7,11 @@ use tracing::{debug, warn};
 use crate::{
     daemon::{KernelPipelineDropStats, KernelPipelineIngressStats},
     services::{
-        client::Client, config::ConfigService, rule::RuleService, stats::StatsService,
+        client::ClientService, config::ConfigService, rule::RuleService, stats::StatsService,
         storage::StorageService,
     },
     utils::lru_cache::global_dual_layer_metrics_snapshot,
-    workers::dns::dns_worker::DnsWorkerControl,
+    services::dns::DnsService,
 };
 
 pub(crate) use crate::models::worker_telemetry::WorkerTelemetrySnapshot;
@@ -21,12 +21,14 @@ use crate::platform::ports::stats_exporter_port::StatsExporterPort;
 pub(crate) struct StatsFlow {
     shutdown: CancellationToken,
     config: ConfigService,
+    client_service: ClientService,
     rules: RuleService,
     stats: StatsService,
     ingress_stats_snapshot: Arc<dyn Fn() -> KernelPipelineIngressStats + Send + Sync>,
     drop_stats_snapshot: Arc<dyn Fn() -> KernelPipelineDropStats + Send + Sync>,
     worker_name: &'static str,
     worker_snapshot: Arc<dyn Fn() -> WorkerTelemetrySnapshot + Send + Sync>,
+    dns: DnsService,
     /// Optional stats snapshot exporter (Prometheus scrape, push-gateway, Loki, etc.)
     stats_exporter: Option<Arc<dyn StatsExporterPort>>,
 }
@@ -36,16 +38,19 @@ impl StatsFlow {
     pub(crate) fn new(
         shutdown: CancellationToken,
         config: ConfigService,
+        client_service: ClientService,
         rules: RuleService,
         stats: StatsService,
         ingress_stats_snapshot: Arc<dyn Fn() -> KernelPipelineIngressStats + Send + Sync>,
         drop_stats_snapshot: Arc<dyn Fn() -> KernelPipelineDropStats + Send + Sync>,
         worker_name: &'static str,
         worker_snapshot: Arc<dyn Fn() -> WorkerTelemetrySnapshot + Send + Sync>,
+        dns: DnsService,
     ) -> Self {
         Self {
             shutdown,
             config,
+            client_service,
             rules,
             stats,
             ingress_stats_snapshot,
@@ -53,6 +58,7 @@ impl StatsFlow {
             worker_name,
             worker_snapshot,
             stats_exporter: None,
+            dns,
         }
     }
 
@@ -77,6 +83,7 @@ impl StatsFlow {
         let Self {
             shutdown,
             config,
+            client_service,
             rules,
             stats,
             ingress_stats_snapshot,
@@ -84,16 +91,26 @@ impl StatsFlow {
             worker_name,
             worker_snapshot,
             stats_exporter,
+            dns,
         } = self;
 
         tokio::spawn(async move {
             let storage_shutdown = shutdown.clone();
             let storage_stats = stats.clone();
             let mut storage_events = StorageService::global().subscribe_events();
+            let mut storage_reload = StorageService::subscribe_global_reload();
             let storage_observer = tokio::spawn(async move {
                 loop {
                     tokio::select! {
                         _ = storage_shutdown.cancelled() => break,
+                        changed = storage_reload.changed() => {
+                            if changed.is_err() {
+                                break;
+                            }
+                            let generation = *storage_reload.borrow_and_update();
+                            storage_events = StorageService::global().subscribe_events();
+                            debug!(generation, "rebound storage event subscriber after storage runtime reload");
+                        }
                         storage_event = storage_events.recv() => {
                             match storage_event {
                                 Ok(event) => {
@@ -103,8 +120,8 @@ impl StatsFlow {
                                     warn!(skipped, "storage event subscriber lagged; events dropped");
                                 }
                                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                    warn!("storage event bus closed; stopping stats storage observer");
-                                    break;
+                                    storage_events = StorageService::global().subscribe_events();
+                                    warn!("storage event bus closed; rebound stats storage observer to current storage runtime");
                                 }
                             }
                         }
@@ -200,11 +217,17 @@ impl StatsFlow {
                                 worker = worker_name,
                                 state = snapshot.state,
                                 method = ?snapshot.method,
-                                dns_monitor_state = DnsWorkerControl::dns_monitor_state_label(),
+                                dns_monitor_state = dns.dns_monitor_state_label(),
                                 configured_handles = snapshot.configured_handles,
                                 running_handles = snapshot.running_handles,
                                 shutdown_requested = snapshot.shutdown_requested,
                                 "worker state telemetry snapshot"
+                            );
+
+                            debug!(
+                                worker = worker_name,
+                                connected_client_sessions = client_service.connected_sessions().len(),
+                                "client session telemetry snapshot"
                             );
 
                             let storage_events_total = stats.storage_event_counts();
@@ -260,7 +283,7 @@ impl StatsFlow {
 
                         let config_snapshot = config.get_snapshot();
                         let client_addr = config_snapshot.client_addr.as_str();
-                        let mut client = match Client::connect_with_config(&config_snapshot).await {
+                        let mut client = match ClientService::connect_with_config(&config_snapshot).await {
                             Ok(client) => client,
                             Err(err) => {
                                 debug!(addr = %client_addr, "periodic ping connect failed: {err}");

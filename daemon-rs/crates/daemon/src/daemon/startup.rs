@@ -5,13 +5,13 @@ use tracing::info;
 
 use super::Daemon;
 use crate::utils::systemd_notify::{NotifyState, notify};
-use crate::{config::Config, services::client::Client};
+use crate::{config::Config, services::client::ClientService};
 
 impl Daemon {
     pub(super) async fn startup_ui_handshake_once((daemon, config): (Daemon, Arc<Config>)) {
         match timeout(
             Self::STARTUP_UI_CONNECT_TIMEOUT,
-            Client::connect_with_config(&config),
+            ClientService::connect_with_config(&config),
         )
         .await
         {
@@ -44,12 +44,12 @@ impl Daemon {
         notify(NotifyState::Status(&message));
     }
 
-    pub(super) async fn startup_handshake(&self, client: &mut Client) -> anyhow::Result<()> {
-        let config = self.inner.config.get_snapshot();
-        let rules = self.inner.rules.get_proto_snapshot();
+    pub(super) async fn startup_handshake(&self, client: &mut ClientService) -> anyhow::Result<()> {
+        let config = self.runtime.config.get_snapshot();
+        let rules = self.runtime.rules.get_proto_snapshot();
         let rules_count = rules.len() as u64;
-        let firewall = self.inner.firewall.get_snapshot();
-        let subscribe_cfg = Client::build_subscribe_config_from_snapshots(
+        let firewall = self.runtime.firewall.get_snapshot();
+        let subscribe_cfg = ClientService::build_subscribe_config_from_snapshots(
             &config,
             &rules,
             firewall.state.enabled,
@@ -60,8 +60,8 @@ impl Daemon {
         if let Some(connected_default_action) =
             Self::parse_default_action_from_client_config(&subscribe_reply.config)
         {
-            self.inner
-                .ui_session
+            self.runtime
+                .client
                 .set_connected_default_action(connected_default_action);
             tracing::info!(
                 ?connected_default_action,
@@ -78,7 +78,7 @@ impl Daemon {
         let ping_reply = client
             .ping(opensnitch_proto::pb::PingRequest {
                 id: 1,
-                stats: Some(self.inner.stats.snapshot(rules_count)),
+                stats: Some(self.runtime.stats.snapshot(rules_count)),
             })
             .await?;
 

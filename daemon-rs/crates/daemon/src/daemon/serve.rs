@@ -12,10 +12,10 @@ use crate::{
 
 impl Daemon {
     pub async fn serve(&self, rx: BusRx) -> Result<()> {
-        let config = self.inner.config.get_snapshot();
+        let config = self.runtime.config.get_snapshot();
         notify(NotifyState::Status("Starting daemon runtime bootstrap..."));
         info!(addr = %config.client_addr, "daemon runtime: starting serve loop");
-        info!(queue = self.inner.nfqueue_num, "running on netfilter queue");
+        info!(queue = self.runtime.nfqueue_num, "running on netfilter queue");
         if let Err(err) = crate::logging::LoggingState::apply_config(&config) {
             warn!("failed to apply startup logging config: {err}");
         }
@@ -33,12 +33,13 @@ impl Daemon {
 
         #[allow(unused_mut)]
         let mut verdict_flow = VerdictFlow::new(
-            self.inner.bus.clone(),
-            self.inner.config.clone(),
-            self.inner.ui_session.clone(),
-            self.inner.rules.clone(),
-            self.inner.connections.clone(),
-            self.inner.stats.clone(),
+            self.runtime.bus.clone(),
+            self.runtime.alert_buffer.clone(),
+            self.runtime.config.clone(),
+            self.runtime.client.clone(),
+            self.runtime.rules.clone(),
+            self.runtime.connections.clone(),
+            self.runtime.stats.clone(),
         );
 
         let exporter = Arc::new(
@@ -54,13 +55,14 @@ impl Daemon {
         verdict_flow = verdict_flow.with_event_exporter(exporter);
 
         let notification_flow = NotificationFlow::new(
-            self.inner.bus.clone(),
-            self.inner.config.clone(),
-            self.inner.ui_session.clone(),
-            self.inner.rules.clone(),
-            self.inner.firewall.clone(),
-            self.inner.stats.clone(),
-            self.inner.subscriptions.clone(),
+            self.runtime.bus.clone(),
+            self.runtime.alert_buffer.clone(),
+            self.runtime.config.clone(),
+            self.runtime.client.clone(),
+            self.runtime.rules.clone(),
+            self.runtime.firewall.clone(),
+            self.runtime.stats.clone(),
+            self.runtime.subscriptions.clone(),
         );
 
         self.spawn_workers(&mut handles).await;
@@ -71,7 +73,7 @@ impl Daemon {
         self.run_signal_loop().await?;
 
         notify(NotifyState::Stopping(Some("Daemon stopping...")));
-        self.shutdown().await;
+        self.stop().await;
         self.stop_proc_workers().await;
         handles.join_all().await;
         info!("daemon runtime: shutdown complete");

@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
+use std::net::IpAddr;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -20,7 +21,8 @@ use crate::{
     },
     services::{
         client::{
-            Client, NotificationStream, UiSessionService, drain_overflow_alerts,
+            AlertBuffer, ClientPrincipal, ClientService, ClientSession, NotificationStream,
+            drain_overflow_alerts,
         },
         config::ConfigService,
         firewall::FirewallService,
@@ -38,8 +40,9 @@ use crate::{
 #[derive(Clone)]
 pub struct NotificationFlow {
     bus: Bus,
+    alert_buffer: AlertBuffer,
     config: ConfigService,
-    ui_session: UiSessionService,
+    client_service: ClientService,
     rules: RuleService,
     firewall: FirewallService,
     stats: StatsService,
@@ -51,13 +54,110 @@ impl NotificationFlow {
     const STARTUP_TRANSIENT_WINDOW: Duration = Duration::from_secs(20);
     const PERSISTENT_WARN_EVERY_ATTEMPTS: u64 = 10;
 
+    #[cfg(unix)]
+    fn try_unix_peer_uid(client_addr: &str) -> Option<u32> {
+        use std::os::fd::AsRawFd;
+
+        let fd = nix::sys::socket::socket(
+            nix::sys::socket::AddressFamily::Unix,
+            nix::sys::socket::SockType::Stream,
+            nix::sys::socket::SockFlag::SOCK_CLOEXEC,
+            None,
+        )
+        .ok()?;
+
+        let addr = if let Some(path) = client_addr.strip_prefix("unix:") {
+            nix::sys::socket::UnixAddr::new(path).ok()?
+        } else if let Some(name) = client_addr.strip_prefix("unix-abstract:") {
+            nix::sys::socket::UnixAddr::new_abstract(name.as_bytes()).ok()?
+        } else {
+            return None;
+        };
+
+        nix::sys::socket::connect(fd.as_raw_fd(), &addr).ok()?;
+        let creds = nix::sys::socket::getsockopt(&fd, nix::sys::socket::sockopt::PeerCredentials)
+            .ok()?;
+        Some(creds.uid())
+    }
+
+    #[cfg(not(unix))]
+    fn try_unix_peer_uid(_client_addr: &str) -> Option<u32> {
+        None
+    }
+
+    pub(crate) fn session_binding_from_client_addr(client_addr: &str) -> ClientSession {
+        if let Some(uid) = Self::try_unix_peer_uid(client_addr) {
+            return ClientSession::for_local_uid(uid, crate::config::DefaultAction::Deny);
+        }
+
+        if let Some(path) = client_addr.strip_prefix("unix:") {
+            return ClientSession::for_network_identity(
+                format!("unix:{path}"),
+                crate::config::DefaultAction::Deny,
+            );
+        }
+
+        if let Some(name) = client_addr.strip_prefix("unix-abstract:") {
+            return ClientSession::for_unix_abstract_name(name, crate::config::DefaultAction::Deny);
+        }
+
+        let endpoint = client_addr
+            .strip_prefix("http://")
+            .or_else(|| client_addr.strip_prefix("https://"))
+            .unwrap_or(client_addr)
+            .split('/')
+            .next()
+            .unwrap_or(client_addr);
+
+        let host = if let Some(stripped) = endpoint.strip_prefix('[') {
+            stripped.split(']').next().unwrap_or(endpoint)
+        } else {
+            endpoint.rsplit_once(':').map(|(h, _)| h).unwrap_or(endpoint)
+        };
+
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return ClientSession::for_ip_fallback(ip, crate::config::DefaultAction::Deny);
+        }
+
+        ClientSession::for_network_identity(
+            host.to_string(),
+            crate::config::DefaultAction::Deny,
+        )
+    }
+
+    fn connect_owner_bound_session(&self, session_template: &ClientSession) {
+        let default_action = self.client_service.connected_default_action();
+        let owner = session_template.owner.clone();
+        match owner {
+            ClientPrincipal::LocalUid(uid) => {
+                self.client_service
+                    .upsert_session(ClientSession::for_local_uid(uid, default_action));
+            }
+            ClientPrincipal::UnixAbstractName(name) => {
+                self.client_service
+                    .upsert_session(ClientSession::for_unix_abstract_name(name, default_action));
+            }
+            ClientPrincipal::NetworkIdentity(identity) => {
+                self.client_service
+                    .upsert_session(ClientSession::for_network_identity(identity, default_action));
+            }
+            ClientPrincipal::IpFallback(ip) => {
+                self.client_service
+                    .upsert_session(ClientSession::for_ip_fallback(ip, default_action));
+            }
+        }
+    }
+
     async fn do_reconnect(
         &self,
         task_reply_rx: &mpsc::Receiver<pb::NotificationReply>,
         reconnect_state: &mut ReconnectState,
+        active_session_id: &mut Option<String>,
         warning: Option<&str>,
     ) -> bool {
-        self.ui_session.set_connected(false);
+        if let Some(session_id) = active_session_id.take() {
+            self.client_service.disconnect_session(&session_id);
+        }
         if let Some(msg) = warning {
             reconnect_state.failures = reconnect_state.failures.saturating_add(1);
             let elapsed = reconnect_state.started_at.elapsed();
@@ -99,8 +199,9 @@ impl NotificationFlow {
 
     pub fn new(
         bus: Bus,
+        alert_buffer: AlertBuffer,
         config: ConfigService,
-        ui_session: UiSessionService,
+        client_service: ClientService,
         rules: RuleService,
         firewall: FirewallService,
         stats: StatsService,
@@ -108,8 +209,9 @@ impl NotificationFlow {
     ) -> Self {
         Self {
             bus,
+            alert_buffer,
             config,
-            ui_session,
+            client_service,
             rules,
             firewall,
             stats,
@@ -123,6 +225,7 @@ impl NotificationFlow {
         mut alert_rx: mpsc::Receiver<UiAlert>,
     ) -> Result<()> {
         let mut reconnect_state = ReconnectState::default();
+        let mut active_session_id: Option<String> = None;
         let subscription_command = SubscriptionCommandService::default();
         const QUEUED_ALERTS_MAX: usize = 32;
         let mut queued_alerts: VecDeque<pb::Alert> = VecDeque::with_capacity(QUEUED_ALERTS_MAX);
@@ -137,7 +240,7 @@ impl NotificationFlow {
         };
 
         let drain_alert_overflow = |queue: &mut VecDeque<pb::Alert>| {
-            for alert in drain_overflow_alerts() {
+            for alert in drain_overflow_alerts(&self.alert_buffer) {
                 queue_alert(queue, Self::build_alert(alert));
             }
         };
@@ -147,16 +250,18 @@ impl NotificationFlow {
             let config_snapshot = self.config.get_snapshot();
             let client_addr = config_snapshot.client_addr.as_str();
             let auth_mode = config_snapshot.client_auth.auth_type.as_name();
+            let session_binding = Self::session_binding_from_client_addr(client_addr);
             let current_auth_fingerprint = Self::auth_fingerprint(&config_snapshot);
             tracing::info!(addr = %client_addr, "notification flow: connecting to UI endpoint");
 
-            let mut client = match Client::connect_with_config(&config_snapshot).await {
+            let mut client = match ClientService::connect_with_config(&config_snapshot).await {
                 Ok(client) => client,
                 Err(err) => {
                     if self
                         .do_reconnect(
                             &task_reply_rx,
                             &mut reconnect_state,
+                            &mut active_session_id,
                             Some(&format!("notification flow connect failed: {err}")),
                         )
                         .await
@@ -169,7 +274,7 @@ impl NotificationFlow {
 
             let rules = self.rules.get_proto_snapshot();
             let firewall_state = self.firewall.get_snapshot();
-            let subscribe_cfg = Client::build_subscribe_config_from_snapshots(
+            let subscribe_cfg = ClientService::build_subscribe_config_from_snapshots(
                 &config_snapshot,
                 &rules,
                 firewall_state.state.enabled,
@@ -181,7 +286,7 @@ impl NotificationFlow {
                     if let Some(action) =
                         Self::parse_connected_default_action(&subscribe_reply.config)
                     {
-                        self.ui_session.set_connected_default_action(action);
+                        self.client_service.set_connected_default_action(action);
                     }
                 }
                 Err(err) => {
@@ -189,6 +294,7 @@ impl NotificationFlow {
                         .do_reconnect(
                             &task_reply_rx,
                             &mut reconnect_state,
+                            &mut active_session_id,
                             Some(&format!("notification subscribe failed: {err}")),
                         )
                         .await
@@ -212,6 +318,7 @@ impl NotificationFlow {
                         .do_reconnect(
                             &task_reply_rx,
                             &mut reconnect_state,
+                            &mut active_session_id,
                             Some(&format!("notification stream open failed: {err}")),
                         )
                         .await
@@ -227,7 +334,12 @@ impl NotificationFlow {
             tracing::debug!("UI auth: {auth_mode}");
             if !send_with_backpressure(&reply_tx, Self::notification_hello_reply()).await {
                 if self
-                    .do_reconnect(&task_reply_rx, &mut reconnect_state, None)
+                    .do_reconnect(
+                        &task_reply_rx,
+                        &mut reconnect_state,
+                        &mut active_session_id,
+                        None,
+                    )
                     .await
                 {
                     break;
@@ -235,7 +347,8 @@ impl NotificationFlow {
                 continue;
             }
             reconnect_state.failures = 0;
-            self.ui_session.set_connected(true);
+            self.connect_owner_bound_session(&session_binding);
+            active_session_id = Some(session_binding.id.clone());
             tracing::info!("notification flow: hello handshake sent");
             if !send_with_backpressure(&self.bus.client_cmd_tx, ClientCommand::ResumeRuntimeTasks)
                 .await
@@ -263,7 +376,9 @@ impl NotificationFlow {
                                 }
                             }
                             None => {
-                                self.ui_session.set_connected(false);
+                                if let Some(session_id) = active_session_id.take() {
+                                    self.client_service.disconnect_session(&session_id);
+                                }
                                 tracing::info!("uiClient exit");
                                 return Ok(());
                             }
@@ -399,7 +514,9 @@ impl NotificationFlow {
             };
 
             if stop_runtime_tasks {
-                self.ui_session.set_connected(false);
+                if let Some(session_id) = active_session_id.take() {
+                    self.client_service.disconnect_session(&session_id);
+                }
                 self.request_runtime_task_teardown().await;
             }
 
@@ -408,7 +525,9 @@ impl NotificationFlow {
             tokio::time::sleep(Self::RECONNECT_DELAY).await;
         }
 
-        self.ui_session.set_connected(false);
+        if let Some(session_id) = active_session_id.take() {
+            self.client_service.disconnect_session(&session_id);
+        }
         tracing::info!("uiClient exit");
         Ok(())
     }

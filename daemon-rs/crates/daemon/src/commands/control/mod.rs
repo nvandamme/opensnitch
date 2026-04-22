@@ -1,6 +1,6 @@
 pub mod control;
 
 pub(crate) use control::{
-	CommandControlService, ControlCommandDispatch, ProcWorkerControlPort,
-	ProcWorkerReconfigurePort,
+	CommandControlService, ControlCommandDispatch, DaemonReloadPort, DaemonReloadScope,
+	ProcWorkerControlPort, ProcWorkerReconfigurePort,
 };

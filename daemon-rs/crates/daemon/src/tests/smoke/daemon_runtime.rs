@@ -10,7 +10,7 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::daemon::{Daemon, DaemonInner, KernelPipeline, ProcWorkersRuntime, ProcessKernelEvent};
+use crate::daemon::{Daemon, DaemonRuntime, KernelPipeline, ProcWorkersRuntime, ProcessKernelEvent};
 use crate::{
     bus::{Bus, BusCaps, BusState},
     config::Config,
@@ -24,7 +24,7 @@ use crate::{
         proc_event::ProcEventKind,
     },
     services::{
-        client::UiSessionService, config::ConfigService, connection::ConnectionService,
+        client::ClientService, config::ConfigService, connection::ConnectionService,
         dns::DnsService, firewall::FirewallService,
         process::ProcessService, rule::RuleService,
         stats::StatsService,
@@ -40,13 +40,13 @@ fn build_test_daemon_with_tunables(bus: Bus, tunables: RuntimeTunables) -> Daemo
     let firewall = FirewallService::new(&config).expect("firewall service");
     let process = ProcessService::default();
     let dns = DnsService::default();
-    let ui_session = UiSessionService::default();
+    let client = ClientService::default();
     let connections = ConnectionService::new(process.clone(), dns.clone());
 
     Daemon {
-        inner: Arc::new(DaemonInner {
+        runtime: Arc::new(DaemonRuntime {
             config: ConfigService::new(config.clone()),
-            ui_session,
+            client,
             nfqueue_num: config.firewall_queue_num,
             default_action: config.default_action,
             audit_socket_path: config.audit_socket_path.clone(),
@@ -56,6 +56,8 @@ fn build_test_daemon_with_tunables(bus: Bus, tunables: RuntimeTunables) -> Daemo
                 handles: Vec::new(),
             })),
             bus,
+            alert_buffer: crate::services::client::AlertBuffer::default(),
+            kernel_pipeline_counters: Arc::new(crate::daemon::KernelPipelineCounters::default()),
             rules: RuleService::default(),
             connections,
             process,
@@ -64,7 +66,7 @@ fn build_test_daemon_with_tunables(bus: Bus, tunables: RuntimeTunables) -> Daemo
             firewall,
             subscriptions: crate::services::subscription::SubscriptionService::with_system_defaults(
             ),
-            task_runtime: crate::services::task::TaskRuntimeService,
+            tasks: crate::services::task::TaskService::default(),
             tunables,
             shutdown: CancellationToken::new(),
         }),
@@ -79,8 +81,9 @@ fn build_test_daemon(bus: Bus) -> Daemon {
 async fn dispatch_kernel_pipeline_event_stops_when_channel_is_closed() {
     let (tx, rx) = mpsc::channel::<u8>(1);
     drop(rx);
+    let daemon = build_test_daemon(crate::bus::BusState::build_with_caps(crate::bus::BusCaps::uniform(1)).0);
 
-    let keep_running = Daemon::probe_dispatch_kernel_pipeline_event(
+    let keep_running = daemon.probe_dispatch_kernel_pipeline_event(
         &tx,
         7_u8,
         &CancellationToken::new(),
@@ -95,17 +98,18 @@ async fn dispatch_kernel_pipeline_event_stops_when_channel_is_closed() {
 async fn dispatch_kernel_pipeline_event_drops_after_bounded_backoff_when_full() {
     let (tx, mut rx) = mpsc::channel::<u8>(1);
     assert!(tx.try_send(1_u8).is_ok());
+    let daemon = build_test_daemon(crate::bus::BusState::build_with_caps(crate::bus::BusCaps::uniform(1)).0);
 
-    let before = Daemon::probe_kernel_pipeline_drop_stats();
+    let before = daemon.probe_kernel_pipeline_drop_stats();
     let started = Instant::now();
-    let keep_running = Daemon::probe_dispatch_kernel_pipeline_event(
+    let keep_running = daemon.probe_dispatch_kernel_pipeline_event(
         &tx,
         2_u8,
         &CancellationToken::new(),
         KernelPipeline::Dns,
     )
     .await;
-    let after = Daemon::probe_kernel_pipeline_drop_stats();
+    let after = daemon.probe_kernel_pipeline_drop_stats();
 
     assert!(keep_running);
     assert!(started.elapsed() >= KERNEL_PIPELINE_SEND_BACKOFF);
@@ -277,7 +281,7 @@ async fn runtime_task_commands_ignore_unsupported_names_without_immediate_reply(
         "unsupported task stop should not emit immediate reply"
     );
 
-    daemon.shutdown().await;
+    daemon.stop().await;
     let _ = timeout(Duration::from_secs(1), cmd_handle).await;
     println!(
         "cold-profile backend=rust component=tasks elapsed_s={:.6}",
@@ -351,7 +355,7 @@ async fn runtime_task_start_duplicate_returns_error_without_initial_started_repl
         .await
         .expect("send stop runtime tasks");
 
-    daemon.shutdown().await;
+    daemon.stop().await;
     let _ = timeout(Duration::from_secs(1), cmd_handle).await;
     println!(
         "cold-profile backend=rust component=tasks elapsed_s={:.6}",
@@ -387,7 +391,7 @@ async fn runtime_task_pause_command_is_accepted_without_immediate_reply() {
         "pause runtime tasks should not emit immediate reply"
     );
 
-    daemon.shutdown().await;
+    daemon.stop().await;
     let _ = timeout(Duration::from_secs(1), cmd_handle).await;
 }
 
@@ -399,11 +403,12 @@ async fn connect_attempt_progresses_under_mixed_non_connect_saturation() {
 
     let verdict_flow = VerdictFlow::new(
         bus.clone(),
-        daemon.inner.config.clone(),
-        daemon.inner.ui_session.clone(),
-        daemon.inner.rules.clone(),
-        daemon.inner.connections.clone(),
-        daemon.inner.stats.clone(),
+        daemon.runtime.alert_buffer.clone(),
+        daemon.runtime.config.clone(),
+        daemon.runtime.client.clone(),
+        daemon.runtime.rules.clone(),
+        daemon.runtime.connections.clone(),
+        daemon.runtime.stats.clone(),
     );
 
     let crate::bus::BusRx {
@@ -416,14 +421,14 @@ async fn connect_attempt_progresses_under_mixed_non_connect_saturation() {
     } = rx;
 
     let connect_handle =
-        daemon.spawn_connect_attempt_task(verdict_flow, daemon.inner.stats.clone(), connect_rx);
+        daemon.spawn_connect_attempt_task(verdict_flow, daemon.runtime.stats.clone(), connect_rx);
 
     // Mirror Go runtimeprofile harness shape: lightweight per-pipeline workers and
     // bounded dispatch retries, instead of full daemon service handlers.
     let (dns_tx, mut dns_rx) = tokio::sync::mpsc::channel::<()>(32);
     let (process_tx, mut process_rx) = tokio::sync::mpsc::channel::<()>(32);
     let (firewall_tx, mut firewall_rx) = tokio::sync::mpsc::channel::<()>(32);
-    let kernel_shutdown = daemon.inner.shutdown.clone();
+    let kernel_shutdown = daemon.runtime.shutdown.clone();
 
     let dns_shutdown = kernel_shutdown.clone();
     let dns_worker = tokio::spawn(async move {
@@ -471,6 +476,7 @@ async fn connect_attempt_progresses_under_mixed_non_connect_saturation() {
     });
 
     let router_shutdown = kernel_shutdown.clone();
+    let kernel_router_daemon = daemon.clone();
     let kernel_handle = tokio::spawn(async move {
         let mut kernel_rx = kernel_rx;
 
@@ -480,7 +486,7 @@ async fn connect_attempt_progresses_under_mixed_non_connect_saturation() {
                 msg = kernel_rx.recv() => {
                     match msg {
                         Some(KernelEvent::DnsUpdate(_)) => {
-                            if !Daemon::probe_dispatch_kernel_pipeline_event(
+                            if !kernel_router_daemon.probe_dispatch_kernel_pipeline_event(
                                 &dns_tx,
                                 (),
                                 &router_shutdown,
@@ -496,7 +502,7 @@ async fn connect_attempt_progresses_under_mixed_non_connect_saturation() {
                             | KernelEvent::EbpfProcStateChanged(_)
                             | KernelEvent::EbpfProcessMapHit { .. }
                         ) => {
-                            if !Daemon::probe_dispatch_kernel_pipeline_event(
+                            if !kernel_router_daemon.probe_dispatch_kernel_pipeline_event(
                                 &process_tx,
                                 (),
                                 &router_shutdown,
@@ -508,7 +514,7 @@ async fn connect_attempt_progresses_under_mixed_non_connect_saturation() {
                             }
                         }
                         Some(KernelEvent::FirewallState(_)) => {
-                            if !Daemon::probe_dispatch_kernel_pipeline_event(
+                            if !kernel_router_daemon.probe_dispatch_kernel_pipeline_event(
                                 &firewall_tx,
                                 (),
                                 &router_shutdown,
@@ -594,7 +600,7 @@ async fn connect_attempt_progresses_under_mixed_non_connect_saturation() {
     );
 
     let _ = flood.await;
-    daemon.shutdown().await;
+    daemon.stop().await;
 
     let _ = timeout(Duration::from_secs(1), connect_handle).await;
     let _ = timeout(Duration::from_secs(1), kernel_handle).await;
@@ -835,9 +841,9 @@ async fn run_kernel_pressure_profile(
     } = rx;
 
     let kernel_handle = daemon.spawn_kernel_task(
-        daemon.inner.process.clone(),
-        daemon.inner.dns.clone(),
-        daemon.inner.stats.clone(),
+        daemon.runtime.process.clone(),
+        daemon.runtime.dns.clone(),
+        daemon.runtime.stats.clone(),
         kernel_rx,
     );
 
@@ -846,7 +852,7 @@ async fn run_kernel_pressure_profile(
     let enqueue_timeouts = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let enqueue_closed = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-    let drop_before = Daemon::probe_kernel_pipeline_drop_stats();
+    let drop_before = daemon.probe_kernel_pipeline_drop_stats();
     let flood_shutdown = CancellationToken::new();
     let started = Instant::now();
 
@@ -986,10 +992,10 @@ async fn run_kernel_pressure_profile(
     let enqueue_timeouts_total = enqueue_timeouts.load(std::sync::atomic::Ordering::Relaxed);
     let enqueue_closed_total = enqueue_closed.load(std::sync::atomic::Ordering::Relaxed);
 
-    let drop_after = Daemon::probe_kernel_pipeline_drop_stats();
+    let drop_after = daemon.probe_kernel_pipeline_drop_stats();
     let drop_delta = drop_after.saturating_delta(drop_before);
 
-    daemon.shutdown().await;
+    daemon.stop().await;
     let mut kernel_handle = kernel_handle;
     let forced_kernel_abort = if timeout(Duration::from_secs(10), &mut kernel_handle)
         .await
@@ -1074,11 +1080,12 @@ async fn stress_profile_reports_connect_latency_and_pipeline_drops() {
 
     let verdict_flow = VerdictFlow::new(
         bus.clone(),
-        daemon.inner.config.clone(),
-        daemon.inner.ui_session.clone(),
-        daemon.inner.rules.clone(),
-        daemon.inner.connections.clone(),
-        daemon.inner.stats.clone(),
+        daemon.runtime.alert_buffer.clone(),
+        daemon.runtime.config.clone(),
+        daemon.runtime.client.clone(),
+        daemon.runtime.rules.clone(),
+        daemon.runtime.connections.clone(),
+        daemon.runtime.stats.clone(),
     );
 
     let crate::bus::BusRx {
@@ -1091,14 +1098,14 @@ async fn stress_profile_reports_connect_latency_and_pipeline_drops() {
     } = rx;
 
     let connect_handle =
-        daemon.spawn_connect_attempt_task(verdict_flow, daemon.inner.stats.clone(), connect_rx);
+        daemon.spawn_connect_attempt_task(verdict_flow, daemon.runtime.stats.clone(), connect_rx);
 
     // Mirror Go runtimeprofile harness shape: lightweight per-pipeline workers and
     // bounded dispatch retries, instead of full daemon service handlers.
     let (dns_tx, mut dns_rx) = tokio::sync::mpsc::channel::<()>(32);
     let (process_tx, mut process_rx) = tokio::sync::mpsc::channel::<()>(32);
     let (firewall_tx, mut firewall_rx) = tokio::sync::mpsc::channel::<()>(32);
-    let kernel_shutdown = daemon.inner.shutdown.clone();
+    let kernel_shutdown = daemon.runtime.shutdown.clone();
 
     let dns_shutdown = kernel_shutdown.clone();
     let dns_worker = tokio::spawn(async move {
@@ -1146,6 +1153,7 @@ async fn stress_profile_reports_connect_latency_and_pipeline_drops() {
     });
 
     let router_shutdown = kernel_shutdown.clone();
+    let kernel_router_daemon = daemon.clone();
     let kernel_handle = tokio::spawn(async move {
         let mut kernel_rx = kernel_rx;
 
@@ -1155,7 +1163,7 @@ async fn stress_profile_reports_connect_latency_and_pipeline_drops() {
                 msg = kernel_rx.recv() => {
                     match msg {
                         Some(KernelEvent::DnsUpdate(_)) => {
-                            if !Daemon::probe_dispatch_kernel_pipeline_event(
+                            if !kernel_router_daemon.probe_dispatch_kernel_pipeline_event(
                                 &dns_tx,
                                 (),
                                 &router_shutdown,
@@ -1171,7 +1179,7 @@ async fn stress_profile_reports_connect_latency_and_pipeline_drops() {
                             | KernelEvent::EbpfProcStateChanged(_)
                             | KernelEvent::EbpfProcessMapHit { .. }
                         ) => {
-                            if !Daemon::probe_dispatch_kernel_pipeline_event(
+                            if !kernel_router_daemon.probe_dispatch_kernel_pipeline_event(
                                 &process_tx,
                                 (),
                                 &router_shutdown,
@@ -1183,7 +1191,7 @@ async fn stress_profile_reports_connect_latency_and_pipeline_drops() {
                             }
                         }
                         Some(KernelEvent::FirewallState(_)) => {
-                            if !Daemon::probe_dispatch_kernel_pipeline_event(
+                            if !kernel_router_daemon.probe_dispatch_kernel_pipeline_event(
                                 &firewall_tx,
                                 (),
                                 &router_shutdown,
@@ -1240,7 +1248,7 @@ async fn stress_profile_reports_connect_latency_and_pipeline_drops() {
         }
     });
 
-    let drop_before = Daemon::probe_kernel_pipeline_drop_stats();
+    let drop_before = daemon.probe_kernel_pipeline_drop_stats();
     let mut latencies = Vec::with_capacity(rounds);
     let base_request_id = 0xD00D_0000_u64;
     let daemon_pid = std::process::id();
@@ -1296,7 +1304,7 @@ async fn stress_profile_reports_connect_latency_and_pipeline_drops() {
         latencies.push(started.elapsed());
     }
 
-    let drop_after = Daemon::probe_kernel_pipeline_drop_stats();
+    let drop_after = daemon.probe_kernel_pipeline_drop_stats();
     let drop_delta = drop_after.saturating_delta(drop_before);
 
     flood_shutdown.cancel();
@@ -1322,7 +1330,7 @@ async fn stress_profile_reports_connect_latency_and_pipeline_drops() {
 
     enforce_stress_regression_guard(rounds, p95, p99, max, drop_delta.total());
 
-    daemon.shutdown().await;
+    daemon.stop().await;
     let _ = timeout(Duration::from_secs(1), connect_handle).await;
     let _ = timeout(Duration::from_secs(1), kernel_handle).await;
 

@@ -17,7 +17,7 @@ use crate::{
     },
     config::{ClientAuthType, Config},
     flows::notification::NotificationFlow,
-    services::client::{Client, NotificationStream, UiSessionService},
+    services::client::{ClientPrincipal, ClientService, NotificationStream},
     services::config::ConfigService,
     services::firewall::FirewallService,
     services::rule::RuleService,
@@ -104,7 +104,7 @@ async fn wait_for_server_ready(addr: std::net::SocketAddr, max_wait: StdDuration
     }
 }
 
-#[tonic::async_trait]
+#[async_trait::async_trait]
 impl pb::ui_server::Ui for TestUiServer {
     type NotificationsStream = ReceiverStream<Result<pb::Notification, Status>>;
 
@@ -181,6 +181,116 @@ fn stream_close_notification_recognizes_action_none_and_lower_values() {
     assert!(NotificationFlow::is_stream_close_notification(-1));
     assert!(!NotificationFlow::is_stream_close_notification(
         pb::Action::EnableInterception as i32
+    ));
+}
+
+#[test]
+fn session_binding_prefers_ip_owner_for_numeric_endpoints() {
+    let binding = NotificationFlow::session_binding_from_client_addr("http://127.0.0.1:50051");
+    assert_eq!(binding.id, "ip:127.0.0.1");
+    assert!(matches!(
+        binding.owner,
+        ClientPrincipal::IpFallback(ip) if ip == "127.0.0.1".parse::<std::net::IpAddr>().expect("valid test ip")
+    ));
+}
+
+#[test]
+fn session_binding_uses_network_identity_for_named_hosts() {
+    let binding = NotificationFlow::session_binding_from_client_addr("https://ui.example.test:50051");
+    assert_eq!(binding.id, "net:ui.example.test");
+    assert!(matches!(
+        binding.owner,
+        ClientPrincipal::NetworkIdentity(ref identity) if identity == "ui.example.test"
+    ));
+}
+
+#[test]
+fn session_binding_falls_back_to_unix_abstract_identity_when_uid_unavailable() {
+    let binding = NotificationFlow::session_binding_from_client_addr("unix-abstract:opensnitchd-ui");
+    assert_eq!(binding.id, "abs:opensnitchd-ui");
+    assert!(matches!(
+        binding.owner,
+        ClientPrincipal::UnixAbstractName(ref name) if name == "opensnitchd-ui"
+    ));
+}
+
+#[test]
+fn session_binding_falls_back_to_unix_path_identity_when_uid_unavailable() {
+    let binding = NotificationFlow::session_binding_from_client_addr("unix:/tmp/opensnitch-missing.sock");
+    assert_eq!(binding.id, "net:unix:/tmp/opensnitch-missing.sock");
+    assert!(matches!(
+        binding.owner,
+        ClientPrincipal::NetworkIdentity(ref identity) if identity == "unix:/tmp/opensnitch-missing.sock"
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn session_binding_extracts_local_uid_for_live_unix_path_listener() {
+    use std::os::unix::net::UnixListener;
+
+    let socket_path = std::env::temp_dir().join(format!(
+        "opensnitch-notification-flow-{}-{}.sock",
+        std::process::id(),
+        crate::utils::time_nonce::unix_epoch_nanos()
+    ));
+    let _ = std::fs::remove_file(&socket_path);
+
+    let listener = UnixListener::bind(&socket_path).expect("bind unix listener");
+    let binding = NotificationFlow::session_binding_from_client_addr(&format!(
+        "unix:{}",
+        socket_path.display()
+    ));
+
+    let expected_uid = nix::unistd::Uid::current().as_raw();
+    assert_eq!(binding.id, format!("uid:{expected_uid}"));
+    assert!(matches!(
+        binding.owner,
+        ClientPrincipal::LocalUid(uid) if uid == expected_uid
+    ));
+
+    drop(listener);
+    let _ = std::fs::remove_file(&socket_path);
+}
+
+#[cfg(unix)]
+#[test]
+fn session_binding_extracts_local_uid_for_live_unix_abstract_listener() {
+    use std::os::fd::AsRawFd;
+
+    let abstract_name = format!(
+        "opensnitch-notification-flow-{}-{}",
+        std::process::id(),
+        crate::utils::time_nonce::unix_epoch_nanos()
+    );
+
+    let listener_fd = nix::sys::socket::socket(
+        nix::sys::socket::AddressFamily::Unix,
+        nix::sys::socket::SockType::Stream,
+        nix::sys::socket::SockFlag::SOCK_CLOEXEC,
+        None,
+    )
+    .expect("create unix abstract listener socket");
+
+    let listener_addr = nix::sys::socket::UnixAddr::new_abstract(abstract_name.as_bytes())
+        .expect("create unix abstract addr");
+    nix::sys::socket::bind(listener_fd.as_raw_fd(), &listener_addr)
+        .expect("bind unix abstract listener");
+    nix::sys::socket::listen(
+        &listener_fd,
+        nix::sys::socket::Backlog::new(8).expect("valid backlog"),
+    )
+    .expect("listen unix abstract listener");
+
+    let binding = NotificationFlow::session_binding_from_client_addr(&format!(
+        "unix-abstract:{abstract_name}"
+    ));
+
+    let expected_uid = nix::unistd::Uid::current().as_raw();
+    assert_eq!(binding.id, format!("uid:{expected_uid}"));
+    assert!(matches!(
+        binding.owner,
+        ClientPrincipal::LocalUid(uid) if uid == expected_uid
     ));
 }
 
@@ -360,8 +470,9 @@ async fn notification_flow_runs_ui_poller_path_against_live_server() {
     let firewall = FirewallService::new(&config).expect("build firewall service");
     let _flow = NotificationFlow::new(
         bus,
+        crate::services::client::AlertBuffer::default(),
         ConfigService::new(config.clone()),
-        UiSessionService::default(),
+        ClientService::default(),
         rules.clone(),
         firewall.clone(),
         crate::services::stats::StatsService::default(),
@@ -369,13 +480,13 @@ async fn notification_flow_runs_ui_poller_path_against_live_server() {
     );
 
     eprintln!("[notification_flow_test] stage=client-connect");
-    let mut subscribe_client = Client::connect_with_config(&config)
+    let mut subscribe_client = ClientService::connect_with_config(&config)
         .await
         .expect("client connect should succeed");
 
     let rules_snapshot = rules.get_proto_snapshot();
     let firewall_state = firewall.get_snapshot();
-    let subscribe_cfg = Client::build_subscribe_config_from_snapshots(
+    let subscribe_cfg = ClientService::build_subscribe_config_from_snapshots(
         &config,
         &rules_snapshot,
         firewall_state.state.enabled,
@@ -387,7 +498,7 @@ async fn notification_flow_runs_ui_poller_path_against_live_server() {
         .expect("subscribe should succeed");
     eprintln!("[notification_flow_test] stage=subscribe-ok");
 
-    let mut stream_client = Client::connect_with_config(&config)
+    let mut stream_client = ClientService::connect_with_config(&config)
         .await
         .expect("stream client connect should succeed");
     let stream = NotificationStream::open(&mut stream_client)

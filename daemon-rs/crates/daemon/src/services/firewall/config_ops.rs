@@ -8,7 +8,7 @@ use crate::{
     models::firewall_state::{FirewallBackend, FirewallState},
 };
 
-use super::{firewall::FirewallService, state::FirewallRuntime};
+use super::{firewall::FirewallService, runtime_store::FirewallRuntime};
 
 impl FirewallService {
     pub async fn reload_from_config(&self, config: &Config) -> Result<()> {

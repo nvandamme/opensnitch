@@ -21,6 +21,7 @@ impl Daemon {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn probe_dispatch_kernel_pipeline_event<T>(
+        &self,
         tx: &tokio::sync::mpsc::Sender<T>,
         event: T,
         shutdown: &tokio_util::sync::CancellationToken,
@@ -31,7 +32,7 @@ impl Daemon {
             event,
             shutdown,
             pipeline.as_str(),
-            || Self::increment_kernel_pipeline_drop(pipeline),
+            || self.increment_kernel_pipeline_drop(pipeline),
         )
         .await
     }

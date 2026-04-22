@@ -7,6 +7,7 @@ mod mutations;
 mod presentation;
 mod regex_cache;
 mod rule;
+mod runtime_lifecycle;
 #[cfg(test)]
 #[path = "../../tests/rules/rule_probe_support.rs"]
 pub(crate) mod rule_probe_support;

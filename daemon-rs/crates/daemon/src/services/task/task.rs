@@ -1,45 +1,36 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
 };
 
 use opensnitch_proto::pb;
 use tokio::{
-    sync::{broadcast, watch},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    RuntimeTaskHandles, TaskLifecycleEvent, TaskRuntimeService, TaskStorageRuntime,
+    RuntimeTaskHandles, TaskLifecycleEvent, TaskService, TaskStorageRuntime,
+    runtime_lifecycle::TaskLifecycle,
 };
 use crate::{
     models::command_rpc::TaskNotification,
-    services::{
-        lifecycle::{ServiceEvent, ServiceLifecycle, ServiceState, ServiceStatus},
-        process::ProcessService,
-    },
+    services::{lifecycle::ServiceLifecycle, process::ProcessService},
     utils::notification_reply::send_notification_reply,
 };
 
 pub(crate) struct TaskRuntime {
-    task_runtime_service: TaskRuntimeService,
+    task_service: TaskService,
     process: ProcessService,
     task_reply_tx: tokio::sync::mpsc::Sender<pb::NotificationReply>,
     pub(super) task_handles: RuntimeTaskHandles,
     task_lifecycle_tx: tokio::sync::mpsc::Sender<TaskLifecycleEvent>,
     task_lifecycle_handle: JoinHandle<()>,
-    pub(super) status_tx: watch::Sender<ServiceStatus>,
-    pub(super) event_tx: broadcast::Sender<ServiceEvent>,
-    pub(super) status_subscribers: Arc<AtomicUsize>,
-    pub(super) event_subscribers: Arc<AtomicUsize>,
-    pub(super) lifecycle_state: ServiceState,
-    pub(super) last_error: Option<String>,
+    pub(super) lifecycle: TaskLifecycle,
 }
 
 impl TaskRuntime {
     pub(crate) fn new(
-        task_runtime_service: TaskRuntimeService,
+        task_service: TaskService,
         process: ProcessService,
         task_reply_tx: tokio::sync::mpsc::Sender<pb::NotificationReply>,
         shutdown: CancellationToken,
@@ -70,66 +61,16 @@ impl TaskRuntime {
                 }
             }
         });
-        let (status_tx, _) = watch::channel(ServiceStatus {
-            state: ServiceState::Uninitialized,
-            last_error: None,
-        });
-        let (event_tx, _) = broadcast::channel(256);
-        let status_subscribers = Arc::new(AtomicUsize::new(0));
-        let event_subscribers = Arc::new(AtomicUsize::new(0));
 
         Self {
-            task_runtime_service,
+            task_service,
             process,
             task_reply_tx,
             task_handles: RuntimeTaskHandles::default(),
             task_lifecycle_tx,
             task_lifecycle_handle,
-            status_tx,
-            event_tx,
-            status_subscribers,
-            event_subscribers,
-            lifecycle_state: ServiceState::Uninitialized,
-            last_error: None,
+            lifecycle: TaskLifecycle::default(),
         }
-    }
-
-    pub(super) fn current_status(&self) -> ServiceStatus {
-        ServiceStatus {
-            state: self.lifecycle_state,
-            last_error: self.last_error.clone(),
-        }
-    }
-
-    fn publish_status(&self) {
-        let _ = self.status_subscribers.load(Ordering::Relaxed);
-        let _ = self.event_subscribers.load(Ordering::Relaxed);
-        let _ = self.status_tx.send(self.current_status());
-    }
-
-    fn publish_state_change(
-        &self,
-        from: ServiceState,
-        to: ServiceState,
-        last_error: Option<String>,
-    ) {
-        let _ = self.event_tx.send(ServiceEvent::StateChanged {
-            from,
-            to,
-            last_error,
-        });
-    }
-
-    pub(super) fn transition_state(&mut self, to: ServiceState) {
-        let from = self.lifecycle_state;
-        self.lifecycle_state = to;
-        self.publish_status();
-        self.publish_state_change(from, to, self.last_error.clone());
-    }
-
-    pub(super) fn mark_last_error(&mut self, err: Option<String>) {
-        self.last_error = err;
-        self.publish_status();
     }
 
     pub(super) async fn emit_lifecycle_event(&self, event: TaskLifecycleEvent) {
@@ -175,7 +116,7 @@ impl TaskRuntime {
 
         let token = CancellationToken::new();
         let task_data_snapshot = Arc::new(task.data);
-        let handle = self.task_runtime_service.spawn_task_monitor_snapshot(
+        let handle = self.task_service.spawn_task_monitor_snapshot(
             &task.name,
             task.notification_id,
             task_data_snapshot,
@@ -211,7 +152,7 @@ impl TaskRuntime {
         }
     }
 
-    pub(crate) async fn shutdown(mut self) {
+    pub(crate) async fn stop(mut self) {
         let _ = ServiceLifecycle::stop(&mut self).await;
         drop(self.task_lifecycle_tx);
         let _ = self.task_lifecycle_handle.await;

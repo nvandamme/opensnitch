@@ -18,6 +18,13 @@ fn interface_name_cache() -> &'static RwLock<HashMap<u32, String>> {
 pub(crate) struct NetIfaceAdapter;
 
 impl NetIfaceAdapter {
+    #[allow(dead_code)]
+    pub(crate) fn clear_interface_name_cache() {
+        if let Ok(mut cache) = interface_name_cache().write() {
+            cache.clear();
+        }
+    }
+
     pub(crate) async fn local_ip_addrs_async() -> Result<HashSet<String>> {
         Self::local_ip_addrs_netlink_async_impl().await
     }

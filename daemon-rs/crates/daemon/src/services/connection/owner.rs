@@ -3,54 +3,13 @@ use crate::models::{
     connection_state::{ConnectionAttempt, TransportProtocol},
 };
 use crate::platform::ports::socket_diag_port::{NativeSocketDiagPort, SocketDiagPlatformPort};
-use crate::utils::lru_cache::SyncDualLayerLruMap;
 use crate::utils::proc_fs::proc_pid_exists;
 use crate::utils::proc_net::read_proc_net_packet_rows;
 use std::net::IpAddr;
-use std::sync::{OnceLock, atomic::{AtomicUsize, Ordering}};
 
 use super::ConnectionService;
 
-const fn default_inode_to_pid_cache_capacity() -> usize {
-    if cfg!(test) {
-        8_192
-    } else {
-        262_144
-    }
-}
-
-const fn default_inode_key_to_pid_cache_capacity() -> usize {
-    if cfg!(test) {
-        8_192
-    } else {
-        262_144
-    }
-}
-
-const DEFAULT_INODE_TO_PID_CACHE_CAPACITY: usize = default_inode_to_pid_cache_capacity();
-const DEFAULT_INODE_KEY_TO_PID_CACHE_CAPACITY: usize = default_inode_key_to_pid_cache_capacity();
-pub(super) static INODE_TO_PID_CACHE_CAPACITY: AtomicUsize =
-    AtomicUsize::new(DEFAULT_INODE_TO_PID_CACHE_CAPACITY);
-pub(super) static INODE_KEY_TO_PID_CACHE_CAPACITY: AtomicUsize =
-    AtomicUsize::new(DEFAULT_INODE_KEY_TO_PID_CACHE_CAPACITY);
-static INODE_TO_PID: OnceLock<SyncDualLayerLruMap<u32, u32>> = OnceLock::new();
-static INODE_KEY_TO_PID: OnceLock<SyncDualLayerLruMap<ConnectionOwnerCacheKey, u32>> = OnceLock::new();
-
 impl ConnectionService {
-    pub(crate) fn configure_pid_owner_cache_capacities(inode_cap: usize, inode_key_cap: usize) {
-        let inode_cap = inode_cap.max(1);
-        let inode_key_cap = inode_key_cap.max(1);
-        INODE_TO_PID_CACHE_CAPACITY.store(inode_cap, Ordering::Relaxed);
-        INODE_KEY_TO_PID_CACHE_CAPACITY.store(inode_key_cap, Ordering::Relaxed);
-
-        if let Some(cache) = INODE_TO_PID.get() {
-            cache.set_capacity(inode_cap);
-        }
-        if let Some(cache) = INODE_KEY_TO_PID.get() {
-            cache.set_capacity(inode_key_cap);
-        }
-    }
-
     pub(crate) fn resolve_pid_by_inode(inode: u32) -> Option<u32> {
         Self::resolve_pid_by_inode_with_key(inode, None)
     }
@@ -60,22 +19,6 @@ impl ConnectionService {
             .await
             .ok()
             .flatten()
-    }
-
-    pub(super) fn cache() -> &'static SyncDualLayerLruMap<u32, u32> {
-        INODE_TO_PID.get_or_init(|| {
-            SyncDualLayerLruMap::new(INODE_TO_PID_CACHE_CAPACITY.load(Ordering::Relaxed).max(1))
-        })
-    }
-
-    pub(super) fn key_cache() -> &'static SyncDualLayerLruMap<ConnectionOwnerCacheKey, u32> {
-        INODE_KEY_TO_PID.get_or_init(|| {
-            SyncDualLayerLruMap::new(
-                INODE_KEY_TO_PID_CACHE_CAPACITY
-                    .load(Ordering::Relaxed)
-                    .max(1),
-            )
-        })
     }
 
     fn pid_owns_inode(pid: u32, inode: u32) -> bool {

@@ -16,7 +16,7 @@ impl Daemon {
 
             loop {
                 tokio::select! {
-                    _ = self.inner.shutdown.cancelled() => {
+                    _ = self.runtime.shutdown.cancelled() => {
                         info!("shutdown requested");
                         notify(NotifyState::Status("Shutdown requested by runtime command"));
                         break;
@@ -56,7 +56,7 @@ impl Daemon {
                 _ = tokio::signal::ctrl_c() => {
                     info!("ctrl-c received");
                 }
-                _ = self.inner.shutdown.cancelled() => {
+                _ = self.runtime.shutdown.cancelled() => {
                     info!("shutdown requested");
                 }
             }

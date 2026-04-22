@@ -5,27 +5,31 @@ use opensnitch_proto::pb;
 
 use crate::{
     models::firewall_state::FirewallBackend,
+    services::lifecycle::ServiceState,
     platform::ports::firewall_port::{
         FirewallPlatformPort, IptablesFirewallPort, NftablesFirewallPort,
     },
 };
 
-use super::{FirewallService, state::FirewallRuntime};
+use super::{FirewallService, runtime_store::FirewallRuntime};
 
 impl FirewallService {
     pub(super) fn runtime_snapshot(&self) -> Arc<FirewallRuntime> {
-        self.intent.snapshot()
+        self.runtime.snapshot()
     }
 
     pub(super) fn publish_runtime_snapshot(&self, next: FirewallRuntime) {
-        self.intent.publish_snapshot(next);
+        self.runtime.publish(next);
+        self.lifecycle.clear_error_and_transition(ServiceState::Running);
     }
 
     pub(super) fn build_and_publish_runtime<F>(&self, build: F) -> Arc<FirewallRuntime>
     where
         F: FnOnce(&FirewallRuntime) -> FirewallRuntime,
     {
-        self.intent.build_and_publish(build)
+        let next = self.runtime.build_and_publish(build);
+        self.lifecycle.clear_error_and_transition(ServiceState::Running);
+        next
     }
 
     pub(super) fn emit_error(&self, message: String) {

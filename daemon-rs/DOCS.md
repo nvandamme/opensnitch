@@ -132,6 +132,34 @@ Common examples:
 - `OPENSNITCH_TUNE_NETLINK_RECOVERY_POLL_INTERVAL_MS`
 - `OPENSNITCH_TUNE_NFQUEUE_OVERLOAD_POLICY`
 
+### Policy fallback fields
+
+The daemon runtime config includes these policy-related fields:
+
+- `DefaultAction`
+- `DefaultDuration`
+- `InterceptUnknown`
+- `AskTimeoutPolicy`
+
+`AskTimeoutPolicy` values:
+
+- `allow`
+- `drop`
+- `default` (explicit keyword for daemon default behavior)
+- missing/null field: default daemon behavior (same as not specifying `AskTimeoutPolicy`)
+
+Important behavior:
+
+- `AskTimeoutPolicy` is a daemon safeguard for UI-miss conditions only (UI connect failure, AskRule RPC failure, stale/discarded decision).
+- If the UI returns a concrete rule, that UI rule remains authoritative.
+- In mixed Rust-daemon + Python-UI deployments, Python UI timeout behavior may still default to deny unless UI default action is explicitly changed.
+
+### Multi-user and mutation safety
+
+- Connected-session precedence is deterministic: control session first, otherwise principal-rank ordering.
+- Rule/firewall/control mutations run through a shared transactional coordinator with rollback and idempotency dedup.
+- Verdict flow uses per-connection decision arbitration and async rule persistence so packet verdict latency stays low while durable policy writes remain transactional.
+
 ## Optional eBPF Build Helper
 
 To build eBPF artifacts via the project helper:

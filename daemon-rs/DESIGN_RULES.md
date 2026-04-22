@@ -21,7 +21,23 @@ This section restores the richer architectural policy that previously lived inli
 - `intent` is an architectural term for ownership/responsibility, not a symbol naming convention: do not encode it into type names, method names, or module names unless it adds concrete semantic value beyond the domain/service role itself.
 - Domain behavior should stay where it is clearest (often in `services/<service>/<service>.rs`), and should not force a dedicated `intent.rs` file or `*Intent*` symbols.
 - Boundaries should be trait-first where polymorphism is needed: stateful runtime/domain structs implement explicit traits/ports instead of relying on closure aliases.
+- Trait-object erasure helpers belong on the owning trait/type surface; avoid root-wiring helpers that only box a concrete type into its trait object.
 - Long-lived service runtime control must use a trait-based lifecycle surface (`init/start/pause/resume/stop/reload/quiesce/drain/health_check/status/reset`) instead of global mutable singleton functions.
+- Every service façade must expose a uniform runtime control contract with `start`/`stop`/`reload` semantics via shared lifecycle traits; `reload` must be the canonical hot-reload verb across services.
+- Service construction must use shared factory traits (instead of ad-hoc constructor-only contracts) so lifecycle orchestration and dependency wiring can remain generic and testable; prefer `ServiceFactory::init` as the canonical initialization entrypoint name.
+- Public lifecycle entrypoints on daemon/service/worker boundaries should use lifecycle semantics such as `start`/`stop`/`reload`; reserve `run` for inner execution loops and `shutdown` for lower-level cancellation plumbing or external protocol vocabulary.
+- Stateful daemon/service boundaries should own a single explicit runtime struct and expose clonable handles to that runtime when shared access is required; prefer names such as `*Runtime` over vague wrappers such as `*Inner`.
+- Keep service façade, runtime data, and lifecycle tracking conceptually distinct: the service handle composes them, runtime structs own domain snapshot/cache/worker state, and lifecycle surfaces own `ServiceState`, status/event channels, and subscriber accounting.
+- When a boundary exposes both a shared runtime snapshot/store and lifecycle observability as separate concerns, model them as separate holders behind the service façade rather than collapsing snapshot transport and lifecycle bookkeeping into one hybrid type.
+- For boundaries with non-trivial lifecycle behavior, keep lifecycle implementation in a dedicated `runtime_lifecycle.rs` module so service façade and runtime-state files stay focused on domain/runtime concerns.
+- Every concrete `services/<service>/` directory must include a `runtime_lifecycle.rs` module as the canonical lifecycle/reload split point (even when current runtime hooks are lightweight), so hot-reload capacity remains explicit and uniform across services.
+- Service-level process-singleton holders (when unavoidable) must be managed behind `runtime_lifecycle.rs` and expose explicit replace/reload entrypoints so singleton state can be hot-reloaded without process restart.
+- Enforcement rule: in `src/services/**`, process-wide singleton statics (for example `OnceLock`/`LazyLock`) are only allowed in `runtime_lifecycle.rs` files. CI tests must fail when singleton statics appear in other service files.
+- Distinguish runtime ownership from singleton enforcement: avoid hidden process-global mutable singletons, but when exclusivity is required, enforce it explicitly at the boundary bootstrap layer (for example daemon-instance guards), not through ambient static state.
+- In-process service handles are not OS/process singletons: they may be cheaply cloned as façades over one owned runtime, and should not maintain their own competing runtime instances.
+- Process-wide exclusivity belongs only to boundaries that actually require it. For the daemon entrypoint, enforce single-process startup explicitly in bootstrap/launch code; for ordinary services, prefer one runtime per daemon instance rather than global registries or ambient statics.
+- If a future service truly needs exclusivity, define the ownership scope first (per call, per daemon runtime, per machine, or per external resource) and enforce it with an explicit guard/lease at that boundary rather than by naming or by hidden mutable globals.
+- Current audit outcome: the existing non-daemon services in this crate (`connection`, `process`, `dns`, `firewall`, `tasks`, `rules`, `stats`, `config`, `subscription`) do not require extra process-wide exclusivity guards beyond daemon bootstrap; they should remain scoped to one runtime per daemon instance.
 - Service observability should use lifecycle-provided subscriptions (`subscribe_status` via watch channel + `subscribe_events` via broadcast channel), not dedicated per-service monitor threads hidden inside trait internals.
 - Subscription lifecycle should support explicit subscribe/unsubscribe hooks through scoped subscription handles (drop-based unsubscribe) and expose active subscriber counters via lifecycle monitor stats.
 - Avoid top-level module free functions for stateful boundary behavior; prefer methods on domain/runtime structs.
@@ -342,3 +358,111 @@ When behavior changes affect parity:
 2. Update [daemon-rs/COMPATIBILITY.md](COMPATIBILITY.md) tables.
 3. Add concise dated tracker entry in [daemon-rs/TODO.md](TODO.md).
 4. If release-facing, add corresponding note in [daemon-rs/CHANGELOG.md](CHANGELOG.md).
+
+---
+
+## Violation Tracker
+
+Open violations found during the 2026-03-24 crate-wide audit. Each entry includes the rule violated, the file(s) affected, a description, and current status.
+
+> **Status key**: `OPEN` — not yet addressed · `IN-PROGRESS` — work started · `RESOLVED` — fixed and verified.
+
+---
+
+### Rule 2 — Trait-First Integration Boundaries
+
+#### V-01 · `workers/runtime/nfqueue/worker.rs` — direct adapter import
+- **Rule**: Application/services/flows/workers must depend on ports, not concrete adapters/ffi.
+- **Location**: `src/workers/runtime/nfqueue/worker.rs:14` — `use crate::platform::adapters::nfqueue_netlink;`
+- **Detail**: `NfqueueWorker` directly calls `nfqueue_netlink::nfqueue_netlink_experiment_enabled()`, `NfqueueNetlinkAdapter::run()`, and `NfqueueNetlinkAdapter::preflight()` — all concrete adapter methods with no port trait in front. This couples the nfqueue worker to the adapter implementation.
+- **Fix direction**: Extract a `NfqueueNetlinkPort` (or extend an existing port) for `preflight`/`run`/`experiment_enabled`, inject it into `NfqueueWorker`.
+- **Status**: `RESOLVED`
+
+#### V-02 · `workers/network/netlink_addr_worker.rs` — direct adapter import
+- **Rule**: Application/services/flows/workers must depend on ports, not concrete adapters/ffi.
+- **Location**: `src/workers/network/netlink_addr_worker.rs:12` — `use crate::platform::adapters::net_iface::NetIfaceAdapter;`
+- **Detail**: `NetlinkAddrWorkerControl::fetch_local_addrs()` calls `NetIfaceAdapter` directly, bypassing any port abstraction.
+- **Fix direction**: Introduce a `LocalAddrPort` trait for address enumeration, inject into the worker. Or — if the worker's callers only consume the published `Arc<Vec<String>>` snapshot — keep the FFI call internal but gate it behind a thin port-backed helper in `platform/`.
+- **Status**: `RESOLVED`
+
+---
+
+### Rule 1 — Domain Boundaries Own Behavior And Runtime State
+
+#### V-03 · `workers/dns/dns_worker.rs` — global mutable DNS monitor state
+- **Rule**: Long-lived service runtime control must use a trait-based lifecycle surface, not global mutable singleton functions. Avoid top-level module free functions/globals for stateful boundary behavior.
+- **Location**: `src/workers/dns/dns_worker.rs:40` — `static DNS_MONITOR_STATE: AtomicU8`
+- **Detail**: DNS monitor FSM state (`IDLE → VARLINK_CONNECTING → SUBSCRIBED → DISCONNECTED → STOPPED`) is stored in a crate-global `AtomicU8`. This mutable runtime state is invisible to the lifecycle/subscription observe surface and cannot be queried or reset without reading global.
+- **Fix direction**: Move monitor FSM state into the worker runtime struct (or a `DnsMonitorRuntime` struct). Expose state via the `WorkerControl::state()` or a `subscribe_status` watch channel.
+- **Status**: `RESOLVED`
+
+#### V-04 · `workers/network/netlink_addr_worker.rs` — global mutable address store
+- **Rule**: Domain runtime state must not be hidden in crate-global singletons; prefer lifecycle-managed runtime structs.
+- **Location**: `src/workers/network/netlink_addr_worker.rs:17` — `static LOCAL_ADDRS: OnceLock<RwLock<Arc<Vec<String>>>>`
+- **Detail**: Local network address state is held in a module-level global `RwLock<Arc<Vec<String>>>`. Callers retrieve it via a free function `NetlinkAddrWorkerControl::local_addrs()`. Neither the state nor the readership is accounted for in any service lifecycle.
+- **Fix direction**: Lift the address store into a runtime struct owned by the worker and returned on `spawn()`. Callers receive an `Arc<RwLock<...>>` (or a `watch::Receiver`) from the spawn return value rather than from a global.
+- **Status**: `RESOLVED`
+
+#### V-05 · `services/connection/ebpf.rs` — global BPF map id cache
+- **Rule**: Domain state must not be hidden behind global mutable singletons.
+- **Location**: `src/services/connection/ebpf.rs:13` — `static BPF_MAP_IDS: OnceLock<Mutex<BpfMapIdCache>>`
+- **Detail**: BPF map id resolution is backed by a TTL-refresh cache stored in a crate-global `OnceLock<Mutex<...>>`. The cache is never surfaced through the `ConnectionService` API or any lifecycle mechanism; it is silently shared across all call sites.
+- **Fix direction**: Move `BpfMapIdCache` into `ConnectionService` state; expose it through the existing service struct rather than a global. Allows capacity tuning and test isolation.
+- **Status**: `RESOLVED`
+
+#### V-06 · `services/client/alerts.rs` — global alert overflow ring
+- **Rule**: Domain runtime state must live in the owning domain/service boundary, not global mutable singletons.
+- **Location**: `src/services/client/alerts.rs:14-15` — `static ALERT_OVERFLOW: OnceLock<Mutex<RingBuffer<UiAlert>>>`, `configure_alert_overflow_ring_capacity()` free function
+- **Detail**: The alert overflow ring is a global `OnceLock<Mutex<...>>` configured via a free function out-of-band from `ClientService` lifecycle. Capacity is likewise stored in a global `AtomicUsize`. This prevents test isolation and hides runtime state from the service boundary.
+- **Fix direction**: Move the overflow ring into `ClientService` (or `AlertsState`) state; configure capacity at construction time via the lifecycle API.
+- **Status**: `RESOLVED`
+
+#### V-07 · `services/task/reply.rs` — global alert sender singleton
+- **Rule**: Domain state must not be configured via top-level free functions outside the lifecycle surface.
+- **Location**: `src/services/task/reply.rs:12` — `static ALERT_TX: OnceLock<tokio::sync::mpsc::Sender<UiAlert>>`, `configure_alert_sender()` free function
+- **Detail**: The task-reply module sets a global `OnceLock` channel sender via `configure_alert_sender()` called from startup wiring. This couples task reply to a side-channel global rather than an explicit dependency on the service struct.
+- **Fix direction**: Pass `alert_tx` as an explicit argument to the task reply constructor or inject it into the `TaskService` (or `TaskRuntimeService`), eliminating the global configure call.
+- **Status**: `RESOLVED`
+
+#### V-08 · `daemon/kernel_pipeline.rs` — global drop/ingress counter singletons
+- **Rule**: Domain counters belonging to on a pipeline boundary must live in a named runtime struct, not module-level `static OnceLock<...>`.
+- **Location**: `src/daemon/kernel_pipeline.rs:79,88` — `static KERNEL_PIPELINE_DROP_COUNTERS` and `static KERNEL_PIPELINE_INGRESS_COUNTERS`
+- **Detail**: Pipeline-level drop and ingress counters are stored as `static OnceLock<...>` in the daemon root. These global statics initialise on first use and cannot be reset or inspected through a lifecycle surface.
+- **Fix direction**: Elevate the counters into a `KernelPipelineCounters` struct held by the `Daemon` (or `KernelPipeline` runtime struct) and pass them through the relevant pipeline paths rather than reading from globals.
+- **Status**: `RESOLVED`
+
+---
+
+### Rule 3 — Module Structure Follows Architecture
+
+#### V-09 · `workers/runtime/ebpf/mod.rs` — macro defined in mod.rs (linker-only violation)
+- **Rule**: `mod.rs` files are module wiring surfaces only; functional code belongs in dedicated sibling files.
+- **Location**: `src/workers/runtime/ebpf/mod.rs`
+- **Detail**: `mod.rs` contains a `#[macro_export] macro_rules! ebpf_worker_newtype! { ... }` — a 60-line functional macro. Macros are functional code and their definitions should live in a dedicated sibling file (e.g. `macros.rs` or `newtype.rs`), not in `mod.rs`.
+- **Fix direction**: Move `ebpf_worker_newtype!` to `src/workers/runtime/ebpf/newtype.rs` (or `macros.rs`); `mod.rs` becomes a pure `pub mod control; pub use newtype::*;`.
+- **Status**: `RESOLVED`
+
+#### V-10 · `workers/runtime/control/control.rs` — top-level free functions for state derivation
+- **Rule**: Avoid top-level module free functions for boundary behavior; prefer methods on domain/runtime structs.
+- **Location**: `src/workers/runtime/control/control.rs:17-51` — four `pub fn` free functions: `worker_state_from_thread_handle`, `worker_join_status_from_thread_result`, `restartable_worker_state_from_runtime`, `restartable_worker_is_finished_from_runtime`
+- **Detail**: These are pure derivation helpers called inside the `impl_restartable_thread_worker_control!` macro. They are stateless and individually simple, but exposing them as free public functions rather than internal helpers or associated functions leaks implementation detail and invites unguarded call sites.
+- **Fix direction**: Make these `pub(crate)` or `pub(super)` helpers, or pull them inline into the macro body / an internal trait helper, depending on what reduces public surface most cleanly.
+- **Status**: `RESOLVED`
+
+#### V-11 · `services/lifecycle.rs` — flat file outside subfolder convention
+- **Rule**: Service-internal split parts live in service submodules/files; `services/<service>/mod.rs` stays thin.
+- **Location**: `src/services/lifecycle.rs` (207 lines)
+- **Detail**: `lifecycle.rs` sits as a flat file under `services/` rather than in a `services/lifecycle/` subfolder. It contains shared subscription/lifecycle primitives (`StatusSubscription`, `EventSubscription`) used by multiple services. It does not represent a runnable service, so a full subfolder conversion may be overkill — but if this file grows it should migrate to `services/lifecycle/` for consistency.
+- **Fix direction**: Low priority. If the file grows beyond ~300 lines or gains submodules, migrate to `services/lifecycle/lifecycle.rs` pattern. Otherwise tolerated.
+- **Status**: `RESOLVED`
+
+---
+
+### Rule 5 — Privileged Control Boundary
+
+#### V-12 · Notification flow — no privilege classification at ingress
+- **Rule**: Privileged mutations must be separated from unprivileged commands at ingress; domain services must assume already-authorized calls.
+- **Location**: `src/flows/notification/notification.rs` (and `src/commands/*/`)
+- **Detail**: `UPDATE_RULE`, `DELETE_RULE`, `UPDATE_CONFIG`, `ENABLE_FIREWALL`, `DISABLE_FIREWALL`, `RELOAD_FW_RULES` and daemon control commands arrive on the notification stream and are dispatched without any caller identity check or command classification. The entire notification stream is implicitly trusted.
+- **Fix direction**: See §5 Privileged Control Boundary Rule and Ingress Enforcement Matrix. This is a known architectural risk tracked as an open work item in [daemon-rs/TODO.md](TODO.md). Adding the entry here as a cross-reference.
+- **Status**: `OPEN` (tracked in TODO.md → Privileged Control Boundary backlog)

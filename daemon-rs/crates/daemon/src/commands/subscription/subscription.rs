@@ -2,7 +2,7 @@ use opensnitch_proto::pb;
 
 use super::wire::{encode_subscription_reply_data, parse_subscription_request_data};
 use crate::{
-    services::{client::Client, stats::StatsService, subscription::SubscriptionService},
+    services::{client::ClientService, stats::StatsService, subscription::SubscriptionService},
     utils::notification_reply::build_notification_reply,
 };
 
@@ -12,7 +12,7 @@ pub(crate) struct SubscriptionCommandService;
 impl SubscriptionCommandService {
     pub(crate) async fn handle_notification_rpc_first(
         &self,
-        client: &mut Client,
+        client: &mut ClientService,
         id: u64,
         request_json: &str,
         subscriptions: &SubscriptionService,

@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result};
 
 pub use crate::models::config_runtime::{
-    ClientAuthConfig, ClientAuthType, ClientTlsOptions, Config, DefaultAction, DefaultDuration,
+    AskFallbackPolicy, ClientAuthConfig, ClientAuthType, ClientTlsOptions, Config, DefaultAction, DefaultDuration,
     LoggerSinkConfig, ProcMonitorMethod, StatsConfig,
 };
 use crate::models::{
@@ -103,6 +103,21 @@ impl DefaultAction {
     }
 }
 
+impl AskFallbackPolicy {
+    fn parse_from_name(name: &str) -> Self {
+        match normalized_name(name).as_str() {
+            "allow" => Self::Allow,
+            "deny" | "drop" => Self::Drop,
+            "default" => Self::DefaultAction,
+            _ => Self::DefaultAction,
+        }
+    }
+
+    pub fn from_name(name: &str) -> Self {
+        Self::parse_from_name(name)
+    }
+}
+
 impl DefaultDuration {
     fn parse_from_name(name: &str) -> Self {
         match normalized_name(name).as_str() {
@@ -148,6 +163,7 @@ impl Default for Config {
             client_auth: ClientAuthConfig::default(),
             rules_enable_checksums: false,
             default_action: DefaultAction::Allow,
+            ask_timeout_policy: AskFallbackPolicy::DefaultAction,
             default_duration: DefaultDuration::Once,
             intercept_unknown: false,
             proc_monitor_method: ProcMonitorMethod::Ebpf,
@@ -178,6 +194,7 @@ impl Config {
             "logutc" => Some("LogUTC"),
             "logmicro" => Some("LogMicro"),
             "defaultaction" => Some("DefaultAction"),
+            "asktimeoutpolicy" => Some("AskTimeoutPolicy"),
             "defaultduration" => Some("DefaultDuration"),
             "interceptunknown" => Some("InterceptUnknown"),
             "procmonitormethod" => Some("ProcMonitorMethod"),
@@ -342,6 +359,9 @@ impl Config {
             },
             rules_enable_checksums: raw.rules.enable_checksums.unwrap_or(false),
             default_action: DefaultAction::from_name(&raw.default_action),
+            ask_timeout_policy: AskFallbackPolicy::from_name(
+                raw.ask_timeout_policy.as_deref().unwrap_or_default(),
+            ),
             default_duration: DefaultDuration::from_name(&raw.default_duration),
             intercept_unknown: raw.intercept_unknown.unwrap_or(false),
             proc_monitor_method: ProcMonitorMethod::from_name(&raw.proc_monitor_method),

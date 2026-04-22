@@ -4,11 +4,11 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use super::{Daemon, DaemonInner, ProcWorkersRuntime};
+use super::{Daemon, DaemonRuntime, ProcWorkersRuntime};
 use crate::{
     bus::{BusCaps, BusRx, BusState},
     services::{
-        client::{self, UiSessionService},
+        client::{self, ClientService},
         config::ConfigService,
         connection::ConnectionService,
         dns::DnsService,
@@ -80,9 +80,9 @@ impl Daemon {
             tunables.pid_inode_key_cache_capacity,
         );
         StatsService::configure_event_ring_capacity(tunables.stats_event_ring_capacity);
-        client::configure_alert_overflow_ring_capacity(tunables.alert_overflow_ring_capacity);
         let config_service = ConfigService::new(config.clone());
-        let ui_session = UiSessionService::default();
+        let client_service = ClientService::default();
+        let alert_buffer = client::AlertBuffer::with_capacity(tunables.alert_overflow_ring_capacity);
         let rules = RuleService::default();
         rules.load_path(&config.rules_path).await?;
         info!(path = %config.rules_path.display(), "daemon bootstrap: initial rules loaded");
@@ -105,9 +105,9 @@ impl Daemon {
         let subscriptions = SubscriptionService::with_system_defaults();
 
         let daemon = Self {
-            inner: Arc::new(DaemonInner {
+            runtime: Arc::new(DaemonRuntime {
                 config: config_service,
-                ui_session,
+                client: client_service,
                 nfqueue_num: config.firewall_queue_num,
                 default_action: config.default_action,
                 audit_socket_path: config.audit_socket_path.clone(),
@@ -117,6 +117,8 @@ impl Daemon {
                     handles: Vec::new(),
                 })),
                 bus,
+                alert_buffer,
+                kernel_pipeline_counters: Arc::new(crate::daemon::KernelPipelineCounters::default()),
                 rules,
                 connections,
                 process,
@@ -124,19 +126,19 @@ impl Daemon {
                 stats: StatsService::default(),
                 firewall,
                 subscriptions,
-                task_runtime: task::TaskRuntimeService,
+                tasks: task::TaskService,
                 tunables,
                 shutdown: CancellationToken::new(),
             }),
         };
 
-        let (sub_total, sub_ready, sub_error) = daemon.inner.subscriptions.counts();
+        let (sub_total, sub_ready, sub_error) = daemon.runtime.subscriptions.counts();
         daemon
-            .inner
+            .runtime
             .stats
             .update_subscription_counts(sub_total, sub_ready, sub_error);
 
-        daemon.inner.stats.apply_config(config.stats);
+        daemon.runtime.stats.apply_config(config.stats);
 
         Ok((daemon, rx))
     }

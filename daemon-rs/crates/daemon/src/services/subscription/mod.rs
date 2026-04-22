@@ -34,6 +34,7 @@ mod refresh_state;
 pub(crate) mod refresh_targets;
 #[cfg(feature = "subscriptions")]
 mod refresh_timing;
+mod runtime_lifecycle;
 #[cfg(feature = "subscriptions")]
 pub(crate) mod storage;
 #[cfg(feature = "subscriptions")]

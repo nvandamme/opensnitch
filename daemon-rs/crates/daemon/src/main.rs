@@ -21,5 +21,5 @@ async fn main() -> Result<()> {
 
     let client_addr = std::env::var("OPENSNITCH_CLIENT_ADDR").ok();
 
-    daemon::Daemon::run(client_addr.as_deref()).await
+    daemon::Daemon::start(client_addr.as_deref()).await
 }

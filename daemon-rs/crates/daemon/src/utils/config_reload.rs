@@ -8,9 +8,24 @@ pub(crate) fn apply_runtime_core(
     updated: &crate::config::Config,
     stats: &crate::services::stats::StatsService,
 ) {
+    refresh_runtime_reloadable_singletons();
     crate::platform::ffi::nfqueue::NfqueueRuntimeState::set_default_action(updated.default_action);
     stats.apply_config(updated.stats);
     apply_gc_percent(updated.gc_percent);
+}
+
+fn refresh_runtime_reloadable_singletons() {
+    let (_, tunables_source) = crate::tunables::RuntimeTunables::reload_global();
+    tracing::debug!(
+        source = %tunables_source,
+        "reloaded runtime tunables singleton"
+    );
+
+    crate::services::stats::StatsService::reload_daemon_version_from_env();
+    crate::platform::adapters::net_iface::NetIfaceAdapter::clear_interface_name_cache();
+    crate::services::connection::ConnectionService::reset_pid_owner_caches();
+    let _ = crate::services::storage::StorageService::reload_global();
+    tracing::debug!("reloaded storage runtime singleton");
 }
 
 pub(crate) fn runtime_apply_stage_messages(
@@ -84,17 +99,19 @@ pub(crate) async fn apply_runtime_config_services(
     rules: &crate::services::rule::RuleService,
     firewall: &crate::services::firewall::FirewallService,
     policy: RuntimeApplyPolicy,
+    reload_firewall: bool,
 ) -> RuntimeApplyReport {
     let logging_error = crate::logging::LoggingState::apply_config(updated).err();
 
     let rules_error = rules.load_path(&updated.rules_path).await.err();
 
-    let firewall_error =
-        if matches!(policy, RuntimeApplyPolicy::StopAfterRulesError) && rules_error.is_some() {
-            None
-        } else {
-            firewall.reconcile_from_config(updated).await.err()
-        };
+    let firewall_error = if !reload_firewall {
+        None
+    } else if matches!(policy, RuntimeApplyPolicy::StopAfterRulesError) && rules_error.is_some() {
+        None
+    } else {
+        firewall.reconcile_from_config(updated).await.err()
+    };
 
     RuntimeApplyReport {
         logging_error,
