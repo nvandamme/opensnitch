@@ -57,6 +57,7 @@ pub(crate) fn help_text() -> &'static str {
         "  build                                Build daemon crate (release)\n",
         "  build-all                            Build full daemon-rs workspace (release)\n",
         "  build-ebpf                           Build eBPF crate (root required; privilege via TEST_GUARD)\n",
+        "  check-kernel-caps                    Run kernel capability check (in-process, no build required)\n",
         "\n",
         "Test commands:\n",
         "  test                                 Run parity test suites (config, firewall, client)\n",
@@ -97,6 +98,7 @@ pub(crate) fn help_text() -> &'static str {
         "  --profile=PROFILE     Cargo build profile                  [OPENSNITCH_BUILD_PROFILE] (default: release; use release-embedded for OpenWrt)\n",
         "  --target=TRIPLE       Cross-compile target triple          [OPENSNITCH_BUILD_TARGET] (e.g. aarch64-unknown-linux-musl)\n",
         "  --all-features        Pass --all-features to cargo build   [OPENSNITCH_BUILD_ALL_FEATURES=1]\n",
+        "  --check-caps          Run kernel cap check after build     [OPENSNITCH_CHECK_KERNEL_CAPS_ON_BUILD=1]\n",
         "\n",
         "Test flags:\n",
         "  --test-log=LEVEL      RUST_LOG for test runs              [OPENSNITCH_TEST_LOG_LEVEL] (default: info,opensnitchd_rs=debug)\n",
@@ -236,6 +238,7 @@ fn apply_bool_flag(key: &str) -> Result<(), DynError> {
 
         // build / test booleans
         "all-features" => set("OPENSNITCH_BUILD_ALL_FEATURES", "1"),
+        "check-caps" => set("OPENSNITCH_CHECK_KERNEL_CAPS_ON_BUILD", "1"),
         "privileged" => set("OPENSNITCH_RUN_PRIVILEGED_TESTS", "1"),
         "kernel-it-strict" => set("OPENSNITCH_KERNEL_IT_STRICT", "1"),
         "release" => set("OPENSNITCH_TEST_RELEASE", "1"),

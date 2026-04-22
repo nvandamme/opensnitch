@@ -1,7 +1,8 @@
 [package]
 name = "opensnitchd-rs"
 version = "0.5.1"
-edition = "2024"
+edition.workspace = true
+license.workspace = true
 
 [features]
 default = ["native-ebpf-ringbuf", "aya-ebpf"]
@@ -9,10 +10,9 @@ native-ebpf-ringbuf = []
 libbpf-ebpf = ["dep:libbpf-rs"]
 aya-ebpf = ["dep:aya"]
 subscriptions = []
-metrics-export = []
+metrics-export = ["dep:hyper", "dep:http-body-util", "dep:flate2", "dep:prost"]
 
 [dependencies]
-async-trait = "0.1"
 tokio = { version = "1.50", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "process", "net", "io-util", "fs"] }
 tokio-stream = "0.1"
 tokio-util = "0.7"
@@ -46,9 +46,17 @@ rustix = { version = "1.1", features = ["net", "event", "thread", "system"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
 hyper-rustls = { version = "0.27", default-features = true, features = ["http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+hyper = { version = "1", features = ["http1", "server"], optional = true }
+http-body-util = { version = "0.1", optional = true }
+flate2 = { version = "1", optional = true }
+prost = { version = "0.14", optional = true }
 rustls = "0.23"
 rustls-pki-types = "1.14"
 tower = { version = "0.5", features = ["util"] }
+opensnitch-kernel-caps = { path = "../kernel-caps" }
 
 [dev-dependencies]
+# async-trait is needed only to implement the tonic-generated `Ui` server trait in
+# flow tests; tonic-prost still desugars server traits via #[async_trait].
+async-trait = "0.1"
 ctor = "0.6"

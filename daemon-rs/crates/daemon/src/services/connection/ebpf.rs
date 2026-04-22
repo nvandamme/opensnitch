@@ -126,70 +126,21 @@ impl ConnectionService {
         }
     }
 
-    /// Look up the eBPF map entry for `key` in the map identified by `map_id` and
+    /// Decode a 16-byte eBPF map value into `(pid, uid)`.
+    /// Layout: `pid: u64` at bytes [0..8], `uid: u64` at bytes [8..16].
+    fn decode_pid_uid(bytes: &[u8; 16]) -> (u32, u32) {
+        let pid = u64::from_ne_bytes(bytes[0..8].try_into().unwrap()) as u32;
+        let uid = u64::from_ne_bytes(bytes[8..16].try_into().unwrap()) as u32;
+        (pid, uid)
+    }
+
+    /// Look up a 16-byte eBPF map value by key using a pre-opened map handle and
     /// return `(pid, uid)` if found.
     ///
-    /// Priority order: aya (`MapData::from_id` + typed [`HashMap`] lookup) →
-    /// libbpf-rs (`MapHandle::from_map_id` + `MapCore::lookup`).
-    /// Returns `None` when both eBPF crates are disabled.
-    fn lookup_bpf_owner(map_id: u32, key: &[u8]) -> Option<(u32, u32)> {
-        #[cfg(feature = "aya-ebpf")]
-        if let Some(result) = Self::aya_lookup_bpf_owner(map_id, key) {
-            return Some(result);
-        }
-
-        #[cfg(feature = "libbpf-ebpf")]
-        {
-            use libbpf_rs::{MapCore, MapFlags, MapHandle};
-            let map = MapHandle::from_map_id(map_id).ok()?;
-            let value_bytes = map.lookup(key, MapFlags::empty()).ok()??;
-            if value_bytes.len() < 16 {
-                return None;
-            }
-            let pid = u64::from_ne_bytes(value_bytes[0..8].try_into().ok()?) as u32;
-            let uid = u64::from_ne_bytes(value_bytes[8..16].try_into().ok()?) as u32;
-            return Some((pid, uid));
-        }
-
-        // Both eBPF crates disabled: owner unknown.
-        None
-    }
-
-    /// Direct eBPF map lookup via aya typed [`HashMap`] API.
-    ///
-    /// Dispatches on key length: 12 bytes (IPv4) or 36 bytes (IPv6).  The value layout
-    /// is always 16 bytes: `pid: u64` at bytes [0..8], `uid: u64` at bytes [8..16].
-    #[cfg(feature = "aya-ebpf")]
-    fn aya_lookup_bpf_owner(map_id: u32, key: &[u8]) -> Option<(u32, u32)> {
-        use aya::maps::{HashMap as AyaHashMap, Map, MapData};
-
-        fn decode_pid_uid(bytes: &[u8; 16]) -> (u32, u32) {
-            let pid = u64::from_ne_bytes(bytes[0..8].try_into().unwrap()) as u32;
-            let uid = u64::from_ne_bytes(bytes[8..16].try_into().unwrap()) as u32;
-            (pid, uid)
-        }
-
-        match key.len() {
-            12 => {
-                let key_arr: [u8; 12] = key.try_into().ok()?;
-                let map_data = MapData::from_id(map_id).ok()?;
-                let map: AyaHashMap<_, [u8; 12], [u8; 16]> =
-                    Map::HashMap(map_data).try_into().ok()?;
-                let value = map.get(&key_arr, 0).ok()?;
-                Some(decode_pid_uid(&value))
-            }
-            36 => {
-                let key_arr: [u8; 36] = key.try_into().ok()?;
-                let map_data = MapData::from_id(map_id).ok()?;
-                let map: AyaHashMap<_, [u8; 36], [u8; 16]> =
-                    Map::HashMap(map_data).try_into().ok()?;
-                let value = map.get(&key_arr, 0).ok()?;
-                Some(decode_pid_uid(&value))
-            }
-            _ => None,
-        }
-    }
-
+    /// Opens the map file descriptor **once** per [`resolve_owner_by_ebpf_map`]
+    /// call and reuses it for all three key variants (exact, wildcard dst, swapped),
+    /// saving 2 × `bpf_map_get_fd_by_id` syscalls and 2 × BTF-type validations
+    /// compared to the previous triple-call pattern.
     pub(super) fn resolve_owner_by_ebpf_map(
         &self,
         protocol: TransportProtocol,
@@ -200,41 +151,142 @@ impl ConnectionService {
     ) -> Option<ConnectionOwner> {
         let map_name = Self::bpf_map_name(protocol, src_ip, dst_ip)?;
         let map_id = self.bpf_map_snapshot().load().get(map_name).copied()?;
-
         let mut key = Self::build_bpf_key(protocol, src_ip, src_port, dst_ip, dst_port)?;
-        if let Some((pid, uid)) = Self::lookup_bpf_owner(map_id, &key) {
-            return Some(ConnectionOwner { uid, pid });
-        }
 
-        match &mut key {
-            BpfKey::V4(arr) => arr[8..12].fill(0),
-            BpfKey::V6(arr) => arr[20..36].fill(0),
-        }
-        if let Some((pid, uid)) = Self::lookup_bpf_owner(map_id, &key) {
-            return Some(ConnectionOwner { uid, pid });
-        }
-
-        let mut swapped = Self::build_bpf_key(protocol, src_ip, src_port, dst_ip, dst_port)?;
-        match &mut swapped {
-            BpfKey::V4(arr) => {
-                let daddr = [arr[2], arr[3], arr[4], arr[5]];
-                let saddr = [arr[8], arr[9], arr[10], arr[11]];
-                arr[2..6].copy_from_slice(&saddr);
-                arr[8..12].copy_from_slice(&daddr);
+        // aya path: open one MapData fd, convert to a typed HashMap once, then call
+        // .get() for all three key variants — no fd-reopen between retries.
+        #[cfg(feature = "aya-ebpf")]
+        {
+            use aya::maps::{HashMap as AyaHashMap, Map, MapData};
+            let map_data = MapData::from_id(map_id).ok()?;
+            match &mut key {
+                BpfKey::V4(arr) => {
+                    let typed: AyaHashMap<_, [u8; 12], [u8; 16]> =
+                        Map::HashMap(map_data).try_into().ok()?;
+                    // exact key
+                    if let Ok(v) = typed.get(arr, 0) {
+                        let (pid, uid) = Self::decode_pid_uid(&v);
+                        return Some(ConnectionOwner { uid, pid });
+                    }
+                    // wildcard dst (zero src-address bytes)
+                    arr[8..12].fill(0);
+                    if let Ok(v) = typed.get(arr, 0) {
+                        let (pid, uid) = Self::decode_pid_uid(&v);
+                        return Some(ConnectionOwner { uid, pid });
+                    }
+                    // swapped src/dst
+                    let mut swapped =
+                        Self::build_bpf_key(protocol, src_ip, src_port, dst_ip, dst_port)?;
+                    if let BpfKey::V4(s) = &mut swapped {
+                        let daddr = [s[2], s[3], s[4], s[5]];
+                        let saddr = [s[8], s[9], s[10], s[11]];
+                        s[2..6].copy_from_slice(&saddr);
+                        s[8..12].copy_from_slice(&daddr);
+                        if let Ok(v) = typed.get(s, 0) {
+                            let (pid, uid) = Self::decode_pid_uid(&v);
+                            return Some(ConnectionOwner { uid, pid });
+                        }
+                    }
+                }
+                BpfKey::V6(arr) => {
+                    let typed: AyaHashMap<_, [u8; 36], [u8; 16]> =
+                        Map::HashMap(map_data).try_into().ok()?;
+                    // exact key
+                    if let Ok(v) = typed.get(arr, 0) {
+                        let (pid, uid) = Self::decode_pid_uid(&v);
+                        return Some(ConnectionOwner { uid, pid });
+                    }
+                    // wildcard dst (zero src-address bytes)
+                    arr[20..36].fill(0);
+                    if let Ok(v) = typed.get(arr, 0) {
+                        let (pid, uid) = Self::decode_pid_uid(&v);
+                        return Some(ConnectionOwner { uid, pid });
+                    }
+                    // swapped src/dst
+                    let mut swapped =
+                        Self::build_bpf_key(protocol, src_ip, src_port, dst_ip, dst_port)?;
+                    if let BpfKey::V6(s) = &mut swapped {
+                        let mut daddr = [0_u8; 16];
+                        daddr.copy_from_slice(&s[2..18]);
+                        let mut saddr = [0_u8; 16];
+                        saddr.copy_from_slice(&s[20..36]);
+                        s[2..18].copy_from_slice(&saddr);
+                        s[20..36].copy_from_slice(&daddr);
+                        if let Ok(v) = typed.get(s, 0) {
+                            let (pid, uid) = Self::decode_pid_uid(&v);
+                            return Some(ConnectionOwner { uid, pid });
+                        }
+                    }
+                }
             }
-            BpfKey::V6(arr) => {
-                let mut daddr = [0_u8; 16];
-                daddr.copy_from_slice(&arr[2..18]);
-                let mut saddr = [0_u8; 16];
-                saddr.copy_from_slice(&arr[20..36]);
-                arr[2..18].copy_from_slice(&saddr);
-                arr[20..36].copy_from_slice(&daddr);
-            }
-        }
-        if let Some((pid, uid)) = Self::lookup_bpf_owner(map_id, &swapped) {
-            return Some(ConnectionOwner { uid, pid });
+            return None;
         }
 
+        // libbpf-rs fallback: open the map handle once and reuse for all three retries.
+        #[cfg(feature = "libbpf-ebpf")]
+        {
+            use libbpf_rs::{MapCore, MapFlags, MapHandle};
+            let map = MapHandle::from_map_id(map_id).ok()?;
+            let decode_value = |bytes: &[u8]| -> Option<(u32, u32)> {
+                if bytes.len() < 16 {
+                    return None;
+                }
+                let pid = u64::from_ne_bytes(bytes[0..8].try_into().ok()?) as u32;
+                let uid = u64::from_ne_bytes(bytes[8..16].try_into().ok()?) as u32;
+                Some((pid, uid))
+            };
+            // exact key
+            if let Some((pid, uid)) = map
+                .lookup(&*key, MapFlags::empty())
+                .ok()
+                .flatten()
+                .and_then(|b| decode_value(&b))
+            {
+                return Some(ConnectionOwner { uid, pid });
+            }
+            // wildcard dst
+            match &mut key {
+                BpfKey::V4(arr) => arr[8..12].fill(0),
+                BpfKey::V6(arr) => arr[20..36].fill(0),
+            }
+            if let Some((pid, uid)) = map
+                .lookup(&*key, MapFlags::empty())
+                .ok()
+                .flatten()
+                .and_then(|b| decode_value(&b))
+            {
+                return Some(ConnectionOwner { uid, pid });
+            }
+            // swapped src/dst
+            let mut swapped = Self::build_bpf_key(protocol, src_ip, src_port, dst_ip, dst_port)?;
+            match &mut swapped {
+                BpfKey::V4(arr) => {
+                    let daddr = [arr[2], arr[3], arr[4], arr[5]];
+                    let saddr = [arr[8], arr[9], arr[10], arr[11]];
+                    arr[2..6].copy_from_slice(&saddr);
+                    arr[8..12].copy_from_slice(&daddr);
+                }
+                BpfKey::V6(arr) => {
+                    let mut daddr = [0_u8; 16];
+                    daddr.copy_from_slice(&arr[2..18]);
+                    let mut saddr = [0_u8; 16];
+                    saddr.copy_from_slice(&arr[20..36]);
+                    arr[2..18].copy_from_slice(&saddr);
+                    arr[20..36].copy_from_slice(&daddr);
+                }
+            }
+            if let Some((pid, uid)) = map
+                .lookup(&*swapped, MapFlags::empty())
+                .ok()
+                .flatten()
+                .and_then(|b| decode_value(&b))
+            {
+                return Some(ConnectionOwner { uid, pid });
+            }
+        }
+
+        // Both eBPF crates disabled: owner unknown.
+        #[allow(unreachable_code)]
         None
     }
 }

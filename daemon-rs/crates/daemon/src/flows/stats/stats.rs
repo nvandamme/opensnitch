@@ -130,6 +130,7 @@ impl StatsFlow {
             });
 
             let mut ping_id = 2_u64;
+            let grpc_cache = crate::services::client::GrpcChannelCache::default();
             let mut last_ingress_snapshot = ingress_stats_snapshot();
             let mut last_drop_snapshot = drop_stats_snapshot();
             let mut last_fast_allow = stats.fast_allow_count();
@@ -226,7 +227,7 @@ impl StatsFlow {
 
                             debug!(
                                 worker = worker_name,
-                                connected_client_sessions = client_service.connected_sessions().len(),
+                                connected_client_sessions = client_service.connected_sessions_count(),
                                 "client session telemetry snapshot"
                             );
 
@@ -276,10 +277,11 @@ impl StatsFlow {
 
                         let config_snapshot = config.get_snapshot();
                         let client_addr = config_snapshot.client_addr.as_str();
-                        let mut client = match ClientService::connect_with_config(&config_snapshot).await {
+                        let mut client = match ClientService::connect_or_reuse(&config_snapshot, &grpc_cache).await {
                             Ok(client) => client,
                             Err(err) => {
                                 debug!(addr = %client_addr, "periodic ping connect failed: {err}");
+                                grpc_cache.invalidate();
                                 ping_id = ping_id.saturating_add(1);
                                 continue;
                             }
@@ -287,6 +289,7 @@ impl StatsFlow {
 
                         if let Err(err) = client.ping(req).await {
                             debug!(addr = %client_addr, "periodic ping failed: {err}");
+                            grpc_cache.invalidate();
                         }
                         ping_id = ping_id.saturating_add(1);
                     }

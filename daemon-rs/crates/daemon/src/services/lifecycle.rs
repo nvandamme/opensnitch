@@ -115,7 +115,6 @@ pub(crate) fn monitor_stats_from_counters(
 }
 
 #[allow(dead_code)]
-#[async_trait::async_trait]
 pub(crate) trait ServiceFactory: Sized {
     type FactoryInput: Send;
 
@@ -123,7 +122,6 @@ pub(crate) trait ServiceFactory: Sized {
 }
 
 #[allow(dead_code)]
-#[async_trait::async_trait]
 pub(crate) trait ServiceRuntimeControl {
     type ReloadInput: Send;
 
@@ -139,7 +137,6 @@ pub(crate) trait ServiceRuntimeControl {
 }
 
 #[allow(dead_code)]
-#[async_trait::async_trait]
 pub(crate) trait ServiceLifecycle {
     async fn init(&mut self) -> anyhow::Result<()> {
         Ok(())

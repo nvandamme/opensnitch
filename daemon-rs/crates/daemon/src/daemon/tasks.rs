@@ -72,6 +72,14 @@ impl Daemon {
         debug!("process-cache-cleanup task started");
 
         handles.push_task(
+            "hash-cache-flush",
+            self.runtime
+                .process
+                .spawn_hash_cache_flush_task(self.runtime.shutdown.clone()),
+        );
+        debug!("hash-cache-flush task started");
+
+        handles.push_task(
             "client-commands",
             CommandFlow::new(
                 self.runtime.shutdown.clone(),
@@ -264,7 +272,7 @@ impl Daemon {
             }
         });
 
-        StatsFlow::new(
+        let flow = StatsFlow::new(
             self.runtime.shutdown.clone(),
             config,
             self.runtime.client.clone(),
@@ -281,7 +289,161 @@ impl Daemon {
             worker_name,
             worker_snapshot,
             dns,
-        )
-        .spawn()
+        );
+
+        #[cfg(feature = "metrics-export")]
+        let flow = {
+            use crate::platform::adapters::stats_exporter_prometheus::{
+                PrometheusStatsExporter, PROMETHEUS_ADDR_ENV,
+            };
+            use crate::platform::adapters::stats_exporter_push::{
+                MultiStatsExporter, PushConfig, PushFormat, PushStatsExporter, PUSH_BUCKET_ENV,
+                PUSH_FORMAT_ENV, PUSH_GZIP_ENV, PUSH_JOB_ENV, PUSH_ORG_ENV, PUSH_TOKEN_ENV,
+                PUSH_URL_ENV,
+            };
+            use crate::platform::ports::stats_exporter_port::StatsExporterPort;
+
+            let mc = &self.runtime.metrics_config;
+            let cli = &self.runtime.metrics_cli;
+
+            // §7 resolution: CLI (highest) → env var → JSON config (baseline).
+
+            // ── Prometheus scrape endpoint ───────────────────────────────────────────────
+            let prom_addr_str: Option<String> = cli
+                .prometheus_addr
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    std::env::var(PROMETHEUS_ADDR_ENV)
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                })
+                .or_else(|| mc.prometheus.addr.clone().filter(|s| !s.is_empty()));
+
+            let prom_addr: Option<std::net::SocketAddr> = prom_addr_str.and_then(|s| {
+                s.parse::<std::net::SocketAddr>()
+                    .map_err(|e| tracing::warn!(addr = %s, "metrics: invalid prometheus addr: {e}"))
+                    .ok()
+            });
+
+            // Always create the Prometheus exporter so that a SIGHUP hot-reload can
+            // attach a new server without needing to restart the stats flow.
+            let prom_exp = PrometheusStatsExporter::new();
+
+            let server_ct = prom_addr.map(|addr| {
+                let ct = self.runtime.shutdown.child_token();
+                prom_exp.clone().spawn_metrics_server(addr, ct.clone());
+                ct
+            });
+
+            // Store the hot-reload handle so SIGHUP can cancel/rebind as needed.
+            *self.runtime.metrics_server.lock().unwrap() = Some(super::MetricsServerSlot {
+                exporter: prom_exp.clone(),
+                effective_addr: prom_addr,
+                server_ct,
+            });
+
+            let prom: Option<Arc<dyn StatsExporterPort>> =
+                Some(prom_exp as Arc<dyn StatsExporterPort>);
+
+            // ── Push exporter ────────────────────────────────────────────────────────────
+            let push_url: Option<String> = cli
+                .push_url
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    std::env::var(PUSH_URL_ENV)
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                })
+                .or_else(|| mc.push.url.clone().filter(|s| !s.is_empty()));
+
+            let push: Option<Arc<dyn StatsExporterPort>> = push_url.map(|url| {
+                // Format: CLI → env var → JSON (non-default).
+                let format_str: Option<String> = cli
+                    .push_format
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        std::env::var(PUSH_FORMAT_ENV)
+                            .ok()
+                            .filter(|s| !s.is_empty())
+                    })
+                    .or_else(|| {
+                        if !mc.push.format.is_default() {
+                            Some(mc.push.format.as_str().to_string())
+                        } else {
+                            None
+                        }
+                    });
+                let format = match format_str
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .as_str()
+                {
+                    "influxdb" | "influx" => PushFormat::InfluxDb,
+                    "pushgateway-proto" | "proto" => PushFormat::PushgatewayProto,
+                    _ => PushFormat::Pushgateway,
+                };
+                // Job label: CLI → env var → JSON.
+                let job = cli
+                    .push_job
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        std::env::var(PUSH_JOB_ENV)
+                            .ok()
+                            .filter(|s| !s.is_empty())
+                    })
+                    .or_else(|| mc.push.job.clone().filter(|s| !s.is_empty()))
+                    .unwrap_or_else(|| "opensnitchd".to_string());
+                // Auth token: CLI → env var → JSON.
+                let token = cli
+                    .push_token
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        std::env::var(PUSH_TOKEN_ENV)
+                            .ok()
+                            .filter(|s| !s.is_empty())
+                    })
+                    .or_else(|| mc.push.token.clone().filter(|s| !s.is_empty()));
+                // Gzip: CLI flag (highest) → env var → JSON config.
+                let gzip = cli.push_gzip.unwrap_or(false)
+                    || std::env::var(PUSH_GZIP_ENV)
+                        .ok()
+                        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
+                        .unwrap_or(false)
+                    || mc.push.gzip;
+                // InfluxDB-specific: env var → JSON.
+                let bucket = std::env::var(PUSH_BUCKET_ENV)
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| mc.push.bucket.clone().filter(|s| !s.is_empty()))
+                    .unwrap_or_else(|| "opensnitch".to_string());
+                let org = std::env::var(PUSH_ORG_ENV)
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| mc.push.org.clone().filter(|s| !s.is_empty()))
+                    .unwrap_or_default();
+                PushStatsExporter::new(
+                    PushConfig { url, format, job, token, gzip, bucket, org },
+                    self.runtime.shutdown.clone(),
+                ) as Arc<dyn StatsExporterPort>
+            });
+
+            match (prom, push) {
+                (Some(p), Some(q)) => flow.with_stats_exporter(MultiStatsExporter::new(vec![p, q])),
+                (Some(p), None) => flow.with_stats_exporter(p),
+                (None, Some(q)) => flow.with_stats_exporter(q),
+                (None, None) => flow,
+            }
+        };
+
+        flow.spawn()
     }
 }

@@ -5,8 +5,13 @@ pub mod firewall_nft_netlink;
 pub mod firewall_nft;
 pub mod net_iface;
 pub(crate) mod netlink_rt;
+pub(crate) mod nft_monitor;
 pub(crate) mod nfqueue_netlink;
 pub mod proc_connector;
 pub mod proto_mapper;
+#[cfg(feature = "metrics-export")]
+pub mod stats_exporter_prometheus;
+#[cfg(feature = "metrics-export")]
+pub mod stats_exporter_push;
 pub mod socket_diag;
 pub mod socket_diag_bindings;

@@ -109,7 +109,11 @@ impl RuleService {
         lines
             .filter_map(|line| {
                 let normalized = line.strip_suffix('\r').unwrap_or(line);
-                if normalized.is_empty() || normalized.starts_with('#') {
+                // '#' = hosts/plain-list comment; '!' = AdBlock/AdGuard comment.
+                if normalized.is_empty()
+                    || normalized.starts_with('#')
+                    || normalized.starts_with('!')
+                {
                     return None;
                 }
                 Some(normalized.to_string())
@@ -339,9 +343,13 @@ impl WatchWorkerControl for RuleWatchControl {
             let known_list_dirs = RuleService::snapshot_list_dirs(&snapshot.rules);
             let state =
                 RuleService::read_rules_dir_file_state_with_hint(path, &known_list_dirs).await;
-            let mut previous_guard = last_state.lock().await;
 
-            let changed = match (&*previous_guard, &state) {
+            // Clone previous state under a short lock, then drop the lock before
+            // the expensive rules.reload() call — prevents holding the async mutex
+            // across I/O work.
+            let previous = last_state.lock().await.clone();
+
+            let changed = match (&previous, &state) {
                 (Some(prev), Some(cur)) => prev != cur,
                 (None, Some(_)) => false,
                 (Some(_), None) => true,
@@ -351,7 +359,7 @@ impl WatchWorkerControl for RuleWatchControl {
             if changed {
                 let previous_default = BTreeMap::new();
                 let current_default = BTreeMap::new();
-                let previous_files = previous_guard.as_ref().unwrap_or(&previous_default);
+                let previous_files = previous.as_ref().unwrap_or(&previous_default);
                 let current_files = state.as_ref().unwrap_or(&current_default);
                 for file_name in RuleService::diff_rule_files(previous_files, current_files) {
                     tracing::info!("Ruleset changed due to {}, reloading ...", file_name);
@@ -375,7 +383,7 @@ impl WatchWorkerControl for RuleWatchControl {
                 }
             }
 
-            *previous_guard = state;
+            *last_state.lock().await = state;
         })
     }
 }

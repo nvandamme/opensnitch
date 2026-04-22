@@ -31,14 +31,21 @@ pub(crate) use kernel_pipeline::{
 
 /// CLI overrides parallel to the Go daemon's flag package:
 ///
-///   --config-file <path>   Config JSON file (highest priority, above OPENSNITCH_CONFIG_FILE).
-///   --rules-path  <path>   Rules directory override applied after config is loaded.
-///   --ui-socket   <addr>   UI gRPC address (same as OPENSNITCH_CLIENT_ADDR env var).
+///   --config-file              <path>       Config JSON file (highest priority).
+///   --rules-path               <path>       Rules directory override.
+///   --ui-socket                <addr>       UI gRPC address.
+///   --metrics-prometheus-addr  <host:port>  Prometheus /metrics listen address.
+///   --metrics-push-url         <url>        Push exporter endpoint.
+///   --metrics-push-format      <fmt>        Push format (pushgateway|pushgateway-proto|influxdb).
+///   --metrics-push-job         <name>       Push-gateway job label.
+///   --metrics-push-token       <token>      Push auth token.
+///   --metrics-push-gzip                     Enable gzip compression on push bodies.
 #[derive(Debug, Default)]
 pub struct CliOverrides {
     pub config_file: Option<std::path::PathBuf>,
     pub rules_path:  Option<std::path::PathBuf>,
     pub ui_socket:   Option<String>,
+    pub metrics:     crate::models::metrics_config::MetricsCliOverrides,
 }
 pub(crate) use proc_workers::ProcWorkersRuntime;
 
@@ -67,6 +74,38 @@ pub(crate) struct DaemonRuntime {
     pub(crate) tasks: task::TaskService,
     pub(crate) tunables: RuntimeTunables,
     pub(crate) shutdown: CancellationToken,
+    /// Metrics export config loaded from `metrics.json` at startup (§7 baseline JSON layer).
+    pub(crate) metrics_config: crate::models::metrics_config::MetricsConfig,
+    /// Metrics CLI overrides supplied via `--metrics-*` flags (§7 highest tier; overrides env vars and JSON).
+    pub(crate) metrics_cli: crate::models::metrics_config::MetricsCliOverrides,
+    /// Hot-reload handle for the Prometheus scrape HTTP server.
+    ///
+    /// Written once by `spawn_stats_flow` and updated on SIGHUP via
+    /// `reload_metrics_server`.  The exporter inside is kept alive across
+    /// server restarts so the stats flow can continue feeding snapshots even
+    /// when the listen address changes.
+    #[cfg(feature = "metrics-export")]
+    pub(crate) metrics_server: std::sync::Mutex<Option<MetricsServerSlot>>,
+}
+
+/// Hot-reload state for the Prometheus scrape HTTP server.
+///
+/// Stored inside `DaemonRuntime` and updated by `reload_metrics_server` on SIGHUP.
+/// The `exporter` field is long-lived and shared with the running `StatsFlow`; only
+/// the TCP listener is cancelled and restarted when the listen address changes.
+#[cfg(feature = "metrics-export")]
+pub(crate) struct MetricsServerSlot {
+    /// Shared exporter — survives server address changes.  The `StatsFlow` holds
+    /// another `Arc` clone and keeps calling `export_snapshot` regardless of
+    /// whether the HTTP server is running.
+    pub(crate) exporter: std::sync::Arc<
+        crate::platform::adapters::stats_exporter_prometheus::PrometheusStatsExporter,
+    >,
+    /// Currently bound address, or `None` when the server is not running.
+    pub(crate) effective_addr: Option<std::net::SocketAddr>,
+    /// Cancellation token for the current HTTP server task.
+    /// `None` when the server is not running (addr not configured).
+    pub(crate) server_ct: Option<CancellationToken>,
 }
 
 impl Daemon {

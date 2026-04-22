@@ -7,7 +7,7 @@ It supersedes:
 - `daemon-rs/FEATURE_PARITY.md`
 - `daemon-rs/SERVICE_ASYNC_AND_MODEL_SCAN_2026-03-15.md`
 
-Last update: 2026-03-26 (full parity/design-rules/optimization rescan)
+Last update: 2026-03-27 (full codebase optimization rescan)
 
 ## Scope
 
@@ -94,7 +94,7 @@ eBPF library policy:
 - [x] **[HIGH]** Harden process hashing strategy for verdict safety.
   - **Done (v0.5.1)**: `SimpleHashOptional` dispatch in both `operator_matches_against_compiled` and `operator_matches_against_with_derived` now returns `false` (not `match`) when hash is `None` — falls through to default action.
   - **Done (v0.5.1)**: IMA fast-path added in `compute_process_hashes`: `read_ima_sha256_xattr` checks `security.ima` xattr (type=0x03, algo=4=SHA-256) before falling back to full file read; `compute_md5_sha1` reads file once for md5+sha1 when IMA provides sha256.
-  - Disk-persisted hash cache (sled/redb keyed on path+inode+mtime+size) remains future work for daemon-restart durability.
+  - **Done**: Persistent file-based hash cache implemented (`services/process/hash_cache.rs` + `models/hash_cache.rs`). `DashMap`-backed in-memory cache with periodic JSON flush to `/var/cache/opensnitchd/hash_cache.json` (falls back to `$TMPDIR/opensnitchd/`). Key: `(exe_path, inode, mtime_secs, file_size)` — any binary change (package update, recompile, manual edit) automatically invalidates the cached entry. `spawn_hash_update` checks persistent cache before computing hashes from file I/O, stores results on cache miss. Background flush task (60 s interval) + stale-entry GC (10 min interval) run via `spawn_hash_cache_flush_task`. Atomic write (tmp+rename) for crash safety. Shutdown hook performs final flush. 4 new tests: insert/lookup, flush+reload survive restart, invalidation on size change, GC removes deleted files.
 - [x] **[MEDIUM]** Evaluate `DashMap` as concurrent map replacement.
   - **Done (v0.5.1)**: Evaluated and resolved all 6 candidate surfaces:
     - `pending_decisions` → **migrated** to `Arc<DashMap<String, u64>>`; epoch helpers converted to sync.
@@ -112,24 +112,70 @@ eBPF library policy:
 
 ### Future enhancements
 
-- [ ] Add kernel capability self-check diagnostic (Go parity gap).
+- [x] Add kernel capability self-check diagnostic (Go parity gap).
   - Go `daemon/core/system.go` runs consolidated kprobe/uprobe/nfqueue/netlink/tracefs probes at startup and surfaces results to the user.
   - Rust currently performs implicit capability checks at each subsystem init but has no user-facing diagnostic summary.
-  - Implement a startup diagnostic routine that probes all required kernel capabilities and reports a consolidated status.
+  - **Done**: `utils/kernel_caps.rs` — reads kernel config (`/boot/config-{kver}`, `/proc/config.gz`, `/usr/lib/modules/{kver}/config`), checks the same 7 feature groups (kprobes, uprobes, ftrace, syscalls, nfqueue, netlink, net diagnostics) via `regex::bytes::Regex`, checks tracefs mount via `/proc/mounts`; results emitted as structured `tracing` events. Wired in `daemon/bootstrap.rs` immediately after config load. Non-fatal, degrades gracefully when config file absent. 425 tests green.
 
-- [ ] **[LOW]** Split oversized API-surface files (§3 borderline, split when next touching).
+- [x] **[LOW]** Split oversized API-surface files (§3 borderline, split when next touching).
   - `services/storage/storage.rs` (557 lines): extensive low-level I/O helper surface beyond API/orchestration scope.
   - `services/client/client.rs` (477 lines): mixes API with session-state internals, ranking logic, transport internals.
   - `flows/verdict/verdict.rs` (674 lines): many private helper/control functions and deep runtime logic.
   - Fix: extract internal helpers into sibling modules (e.g. `storage/ops.rs`, `client/session.rs`, `verdict/helpers.rs`).
+  - **Done**: `storage/ops.rs` (3 I/O helpers), `client/session.rs` (session types + `SessionState`), `verdict/helpers.rs` (17 private helpers). 425 tests green.
 
-- [ ] Add concrete stats-snapshot exporter implementations for `StatsExporterPort`.
+- [x] Add concrete stats-snapshot exporter implementations for `StatsExporterPort`.
   - Current state: extension point exists in `platform/ports/stats_exporter_port.rs`, and `StatsFlow` hook is wired (`with_stats_exporter()`).
   - Gating policy: only `/metrics`-style export remains feature-gated (`metrics-export`) to preserve baseline Go parity by default.
-  - Implement first-party adapters:
-    - Prometheus `/metrics` scrape endpoint (preferred first target for Grafana dashboards).
-    - Optional push-style adapter (Mimir/InfluxDB/push-gateway) for non-scrape environments.
-  - Keep stats flow non-blocking: exporter implementations must run via internal async channel/background task and fail-open (no ping-loop stalls).
+  - **Done**: `platform/adapters/stats_exporter_prometheus.rs` — `PrometheusStatsExporter` implementing `StatsExporterPort`:
+    - `export_snapshot()` stores a compact snapshot (counters + breakdown maps, no Events slice) atomically via `ArcSwap<Option<CompactStats>>` — zero blocking, zero I/O on the hot path.
+    - `spawn_metrics_server(addr, shutdown)` starts a minimal `hyper` 1.x HTTP/1.1 server; `/metrics` returns Prometheus text format 0.0.4; any other path returns 404. Fail-open: bind failure logs a warning and disables the endpoint without affecting daemon operation.
+    - Activated via `OPENSNITCH_PROMETHEUS_ADDR` env var (e.g. `127.0.0.1:9100`); absent/empty = no-op.
+    - 12 counter/gauge metrics + 6 labeled gauges (by_proto, by_address, by_host, by_port, by_uid, by_executable).
+    - Wired into `daemon/tasks.rs:spawn_stats_flow()` under `#[cfg(feature = "metrics-export")]`.
+    - Push-style adapter (Mimir/InfluxDB/push-gateway): `platform/adapters/stats_exporter_push.rs` — `PushStatsExporter` implementing `StatsExporterPort`:
+      - `export_snapshot()` enqueues a compact snapshot via bounded `tokio::sync::mpsc` channel (capacity 4) — zero blocking, zero I/O on the hot path; drops snapshot if channel full (fail-open).
+      - Background `push_worker` task reads from the channel and POSTs to the remote endpoint via `reqwest::Client` (5 s timeout, fail-open on HTTP errors).
+      - Two output formats — `OPENSNITCH_PUSH_FORMAT`:
+        - `pushgateway` (default): Prometheus text format 0.0.4 POSTed to `{url}/metrics/job/{job}`. Same metric set as the scrape endpoint. Compatible with Prometheus push-gateway, Grafana Mimir, and Grafana Cloud remote-write (set `OPENSNITCH_PUSH_JOB` for job label).
+        - `influxdb`: InfluxDB line protocol (integer fields, seconds precision) POSTed to the URL verbatim. Scalar counters/gauges in `opensnitch_stats` measurement; breakdown maps as tagged `opensnitch_by_{key}` measurements. URL is used as-is (user provides full write endpoint, e.g. `/api/v2/write?bucket=...` or `/write?db=...`); `OPENSNITCH_PUSH_BUCKET` / `OPENSNITCH_PUSH_ORG` auto-appended only when `bucket=` is absent from the URL.
+      - `OPENSNITCH_PUSH_TOKEN`: bearer (push-gateway) / `Token` (InfluxDB) auth header — optional.
+      - `MultiStatsExporter`: fan-out adapter dispatching to multiple inner exporters; used in `tasks.rs` when both Prometheus addr and push URL are set simultaneously.
+
+- [x] Add `PrometheusText1.0.0` scrape format support.
+  - Current `negotiate_format()` correctly falls back to `PrometheusText0.0.4` when a client
+    requests higher versions (spec-compliant), but some Prometheus 3.x configurations prefer
+    version 1.0.0 with UTF-8 escaping.
+  - Requires rendering escaped UTF-8 label values + `Content-Type: text/plain; version=1.0.0;
+    escaping=allow-utf-8` response header.
+  - **Done**: `negotiate_format()` now tracks `best_text100_q`; `ResponseFormat::Text100` added.
+    Output body is identical to 0.0.4 (label values already pass UTF-8 through); only
+    `Content-Type` differs.
+- [x] Add `OpenMetricsText1.0.0` scrape format support.
+  - The current Prometheus default `Accept` header prefers `application/openmetrics-text;version=1.0.0`
+    (q=0.5) over protobuf and text/plain; implementing it removes the format-downgrade penalty.
+  - Requires `# UNIT` lines, `_created` timestamp metrics, and `# EOF` terminator per OpenMetrics 1.0.0 spec.
+  - **Done**: `ResponseFormat::OpenMetrics` added; `render_openmetrics_text()` emits base-name
+    HELP/TYPE for counters, `_total`/`_created` samples, `# UNIT` for gauges with known units,
+    and `# EOF\n` terminator.
+- [x] Hot-reload `metrics.json` without daemon restart.
+  - Currently `MetricsConfig` is loaded once at bootstrap via `load_sibling()`.
+  - A SIGHUP-triggered reload could pick up changes to `metrics.json` and re-wire the
+    `StatsFlow` exporter without interrupting inflight connections.
+  - **Done**: `DaemonRuntime::metrics_server: Mutex<Option<MetricsServerSlot>>` stores the
+    exporter + server CT.  `spawn_stats_flow()` always creates the exporter (hot-reload ready).
+    `Daemon::reload_metrics_server()` (called from SIGHUP handler) re-reads `metrics.json`,
+    resolves addr via §7, and cancels/restarts the HTTP server as needed.  Push config
+    changes still require a daemon restart.
+- [x] Migrate `metrics-export` env-var configuration to JSON config + CLI switches (DESIGN_RULES §7).
+  - **Done**: `models/metrics_config.rs` — pure serde model (`MetricsConfig`, `PrometheusConfig`,
+    `PushExportConfig`, `PushFormatConfig`, `MetricsCliOverrides`, `metrics_json_sibling()`).
+  - **Done**: `metrics.json` co-located with daemon config; loaded via `MetricsConfig::load_sibling()`
+    in bootstrap (fail-open: absent file → defaults).
+  - **Done**: `CliOverrides.metrics: MetricsCliOverrides` + 6 new `--metrics-*` flags in `parse_cli_overrides()`.
+  - **Done**: `spawn_stats_flow()` does full §7 resolution (CLI → env var → JSON config baseline).
+  - **Done**: `prometheus_addr_from_env()` and `PushConfig::from_env()` removed (dead code after migration).
+  - CLI switches (`--metrics-*`) have highest precedence per DESIGN_RULES §7; env vars (`OPENSNITCH_PROMETHEUS_ADDR`, `OPENSNITCH_PUSH_*`) are mid-tier (typically used for CI/testing).
 
 - [ ] Implement Privileged Control Boundary Rule (local + remote).
   - Classify incoming UI commands into unprivileged vs privileged.
@@ -143,21 +189,34 @@ eBPF library policy:
 
 - [ ] Add optional `scope` field to gRPC/proto `Operator` in a dedicated compatibility PR (default dst semantics, backward-compatible wire evolution, Go/Rust/Python client alignment).
   - Note: deferred for now to stay aligned with base opensnitch implementation; revisit in a future dedicated compatibility PR.
-- [ ] Support AdBlock/AdGuard list format in rule list operators and subscriptions.
-  - AdBlock/AdGuard `||domain^` syntax is common in community blocklists.
-  - Requires parser normalization and compatibility-safe operator wiring.
-  - Note: deferred for now to stay aligned with base opensnitch implementation; revisit in a future dedicated compatibility PR.
+
+- [x] Support AdBlock/AdGuard list format in rule list operators and subscriptions.
+  - **Done**: `normalize_domain_list_entry` in `services/rule/utilities.rs` now parses `||domain^` (AdBlock/AdGuard domain anchor) by stripping `||` and terminating at the first `^`, `$`, or `/`. Exception rules (`@@||domain^`) are skipped; cosmetic filters (`##`, `#@#`), header lines (`[Adblock Plus…]`), and `!` comments return `None`. `parse_list_lines` in `services/rule/storage.rs` also skips `!`-prefixed lines for all list types. Wildcard entries (`||*.tracker.net^`) are handled by the existing `wildcard_suffix` + `DomainWildcardTrie` path. Options suffix (e.g. `$third-party`) and URL paths are stripped before domain extraction. Mixed files (hosts + AdBlock) are transparently accepted.
+  - `DomainWildcardTrie::insert_domain_and_subdomains`: `required = labels.len()` (not `+1`) so `||example.org^` matches both `example.org` AND `www.example.org` per spec. `is_adblock_domain_anchor` helper routes these to the trie; no separate HashSet entry needed.
+  - Additional skip rules per spec: inline `# comments` stripped from plain-domain lines; `/REGEX/` lines routed to `domains_regex` cascade (see below); `|single-anchor|` lines and `*$modifier` wildcard-only rules skipped.
+  - **Unified `lists.domains` cascade** (mirrors AdGuard `urlfilter` engine design): `ListPathSlotCache` gains a `domains_regex: Option<ListRegexCache>` sub-cache populated from `/pattern/` lines in the same file. `extract_domain_list_regex_pattern` extracts patterns from AdBlock-style regex entries. Matching cascades: `HashSet` (O(1)) → `DomainWildcardTrie` → `GlobMatcher` → `domains_regex` (Aho/regex, only when all fast-path lookups miss). A single `lists.domains` operator now handles plain domains, `||anchor^` rules, wildcard/glob entries, and `/regex/` patterns from the same mixed file. `lists.domains_regexp` is retained for backward compat (pure-regex list files).
+  - Integration tests: `match_attempt_domain_lists_parses_adblock_adguard_format` and `match_attempt_domain_lists_regex_cascade_in_domains_operand` in `tests/rules/rule_service.rs`.
+
 - [ ] Python UI client explicit disconnect on quit/CTRL-C (graceful stream shutdown before process exit).
   - Goal: avoid daemon-side noisy transport warnings during intentional UI termination.
   - Note: future work only; separate PR branch once related Python-client PR is accepted upstream.
 
-### Design Rule Violations (rescan 2026-03-26)
+### Design Rule Violations (rescan 2026-03-27)
 
 - [x] **[LOW]** `services/lifecycle/` missing `runtime_lifecycle.rs` module (§3 violation).
   - **Done**: `services/lifecycle/` directory collapsed into flat `services/lifecycle.rs` — `lifecycle` is a shared trait/helper layer with no runtime state, so the subdirectory and `runtime_lifecycle.rs` rule both become moot; all `crate::services::lifecycle::*` import paths are unchanged.
 
 - [x] **[MEDIUM]** `flows/verdict/verdict.rs` — Arc value clone on proto snapshot (§1 hot-path violation).
   - **Done**: `get_proto_snapshot().as_ref().clone()` replaced with `get_proto_snapshot()` — keeps `Arc<Vec<pb::Rule>>`; downstream `previous_rules.clone()` is now a cheap Arc clone; `&snapshot` still coerces to `&[pb::Rule]` via two deref hops.
+
+- [x] **[MEDIUM]** §7 precedence order revised to CLI > env var > JSON config baseline.
+  - **Done**: `config.rs::load_from_default_locations_with_override()` now resolves CLI `--config-file` first, then `OPENSNITCH_CONFIG_FILE` env var, then system/dev defaults.
+  - **Done**: `main.rs` now sets `overrides.ui_socket = client_addr` only when CLI `--ui-socket` is absent (CLI wins when present).
+  - **Done**: all `spawn_stats_flow()` and `reload_metrics_server()` resolution chains use CLI → env var → JSON order.
+
+- [ ] **[LOW]** §2 trait-first integration boundary violations — 11 files in `services/`, `flows/`, and `workers/` directly import from `platform/adapters/` or `platform/ffi/` instead of consuming through `platform/ports/` traits.
+  - Affected files: `services/rule/matching.rs`, `services/task/runtime_handlers.rs`, `flows/verdict/helpers.rs`, `flows/verdict/submit.rs`, `flows/verdict/verdict.rs`, `workers/firewall/watch_worker.rs`, `workers/process/audit_worker.rs`, `workers/runtime/nfqueue/worker.rs`.
+  - These are pre-existing and require introducing port traits for each adapter consumed. Track as incremental refactor — not blocking current work.
 
 ### Hot-Path Optimization Backlog (rescan 2026-03-26)
 
@@ -190,13 +249,103 @@ Prioritized by estimated impact on per-connection/per-packet latency. Detailed a
 - [x] **[LOW]** Cold-path improvements: parallel shutdown awaits in `workers/runtime/control/control.rs` L327; `Arc<StorageEvent>` broadcasting in `services/storage/event_bus.rs` L64.
   - **Done**: `join_all()` now uses `tokio::task::JoinSet` for concurrent task awaiting; broadcast channel carries `Arc<StorageEvent>` (one pointer clone per receiver instead of a full struct clone including PathBuf).
 
-- [ ] **[MEDIUM]** Replace firewall drift-heal polling with event-driven triggers.
-  - Current state: firewall watch worker `targets()` returns empty; drift detection relies on 20s timer loop in `workers/firewall/firewall_worker.rs` + config mtime polling in `services/config/storage.rs`.
-  - Two complementary improvements:
-    1. **Netlink nft event subscription**: subscribe to `NFNLGRP_NFTABLES` multicast group via `netlink-socket2` `MulticastSocketRaw.listen(7)` for near-instant drift detection when external tools modify nftables rules. No new deps needed (`libc::NFNLGRP_NFTABLES` + existing `netlink-socket2`). This would be a Rust extension beyond Go (Go uses ticker-based drift polling only).
-    2. **Inotify on firewall config file**: wire firewall watch worker `targets()` to return the system firewall config path, using the existing generic inotify+epoll watch infra in `workers/runtime/watch/control.rs`. This matches Go's fsnotify behavior for config-file-driven reload.
-  - Keep 20s drift-heal timer as a safety-net fallback even after event-driven triggers are added.
-  - Adapter boundary: netlink event listener belongs in `platform/adapters/`; firewall watch worker consumes events via existing watch control surfaces.
+- [x] **[MEDIUM]** Replace firewall drift-heal polling with event-driven triggers.
+  - **Done (v0.5.1)**:
+    1. **Inotify on firewall config file**: `FirewallWatchControl::targets()` now returns `WatchWorkerControl::path_targets(&config.firewall_config_path)` — the existing inotify+epoll watch infrastructure wakes immediately on config-file writes. `empty_targets_behavior` changed to `WarnPollFallback`.
+    2. **Netlink NFNLGRP_NFTABLES subscription**: new `platform/adapters/nft_monitor.rs` (`spawn_nft_drift_listener`) opens a `MulticastSocketRaw` on `NETLINK_NETFILTER` (12) and subscribes to group 7 (`NFNLGRP_NFTABLES`). On each kernel nftables event, calls `firewall.heal_if_drifted()`. The adapter's `drift_recovery_blocked_until_epoch_ms` atomic provides burst rate-limiting. Gracefully degrades to a log warning if the socket cannot be opened (the 20 s timer loop remains the safety-net fallback). Wired in `workers/firewall/watch_worker.rs::start()`.
+  - Go parity note: Go uses ticker-based drift polling only; NFNLGRP_NFTABLES subscription is a Rust-only extension beyond Go baseline.
+
+### Hot-Path Optimization Backlog (rescan 2026-03-27)
+
+New findings from systematic hot/cold-path audit. Prioritised by per-connection/per-packet impact.
+
+- [x] **[HIGH]** Cache typed eBPF map handles in `services/connection/ebpf.rs`.
+  - `MapData::from_id` + `HashMap::try_from` called per `lookup_bpf_owner` invocation, up to 3× per connection (exact key, wildcard dst, swapped). Each call re-opens the map fd and re-validates the BTF type.
+  - **Done**: `lookup_bpf_owner` and `aya_lookup_bpf_owner` removed; `resolve_owner_by_ebpf_map` opens one `MapData` fd via `MapData::from_id(map_id)`, converts to a typed `AyaHashMap` once (dispatching on `BpfKey::V4`/`V6`), then calls `.get()` for all three key variants (exact, wildcard dst, swapped) — 2 fd-open syscalls and 2 BTF validations saved per connection. libbpf fallback path similarly opens `MapHandle::from_map_id` once. Free `decode_pid_uid` helper extracted for shared use.
+
+- [x] **[HIGH]** Use `BufReader` for `/proc/net/*` fallback in `services/connection/owner.rs`.
+  - `resolve_owner_by_connection_fallback` (L132-178) calls `read_to_string(path)` which reads the entire `/proc/net/{tcp,tcp6,udp,udp6,udplite,udp6lite}` file into a heap-allocated `String`, then iterates lines. These files can be large on busy systems with many sockets.
+  - **Done**: replaced `std::fs::read_to_string` with `BufReader::new(File::open(path)?)` + `.lines()` iterator; header skipped via `lines.next()`; loop returns on first inode match. Eliminates full-file heap allocation; I/O stops at first match.
+
+- [x] **[HIGH]** Eliminate Vec allocation in ICMP packet-socket fallback in `services/connection/owner.rs`.
+  - `resolve_owner_from_packet_sockets` (L108-129) builds a `Vec<ConnectionOwner>` just to check `len() == 1`. Under normal operation the vector has 0 or 1 elements.
+  - **Done**: replaced `Vec<ConnectionOwner>` + push + `len() == 1` with `Option<ConnectionOwner>` single-slot tracking; on a second different match the function returns `None` immediately — zero heap allocation.
+
+- [x] **[MEDIUM]** Bound kernel ingress channels in `flows/kernel/kernel.rs`.
+  - `dns_ingress_tx`, `process_ingress_tx`, `firewall_ingress_tx` (L157-165) are `unbounded_channel`. Under sustained producer > consumer rate, memory can grow without bound.
+  - **Done**: all three ingress channels changed to bounded `channel(capacity)` reusing the existing downstream tunables (`kernel_dns_queue_capacity`, `kernel_process_queue_capacity`, `kernel_firewall_queue_capacity`). `fanout_kernel_ingress_event` in `dispatch.rs` migrated to `try_send` with `counters.increment_drop` on full (consistent with `dispatch_kernel_pipeline_event` policy). `spawn_pipeline_dispatch_task` switches from `UnboundedReceiver` + `drain_try_recv_burst_unbounded` to `Receiver` + `drain_try_recv_burst`. `probe_fanout_kernel_ingress_event` and two smoke tests updated for new bounded-channel signature.
+
+- [x] **[MEDIUM]** Narrow rules-watch mutex scope in `services/rule/storage.rs`.
+  - `RuleWatchControl::scan` (L346-380) holds `last_state.lock().await` across diff logging AND `rules.reload().await`. The async mutex blocks other callers during the entire reload I/O.
+  - **Done**: clone previous state under a short `last_state.lock().await` (immediately dropped), then perform diff logging and `rules.reload().await` with no lock held; reacquire with `*last_state.lock().await = state` only to write the new state. Lock contention window reduced from the full reload duration to two short clones.
+
+- [x] **[MEDIUM]** Parallelise cold-path list file I/O in `services/rule/cache_builder.rs`.
+  - `list_path_needs` loop (L61-145) awaits each `load_list_entries_async_plain(&path)` serially. Also performs multiple `collect::<Vec<_>>()` passes over the same entry set for different cache needs.
+  - **Done**: two-phase approach — phase 1 spawns one `tokio::task::JoinSet` task per list-path (all reads run concurrently); phase 2 processes results serially for deterministic slot-index assignment. Intermediate `Vec::collect` eliminated for `trimmed_values` and `networks` passes: `trimmed_non_empty` now called directly on the `entries.iter().map(String::as_str)` iterator.
+
+- [x] **[MEDIUM]** Avoid per-event `String` allocation in `services/stats/snapshot_ops.rs`.
+  - `format_event_time` (L13-24) calls `dt.format(EVENT_TIME_FORMAT)` which allocates a new `String` on every `on_event` call (per-verdict hot path).
+  - **Done**: replaced `time::format_description` dispatch with a direct `write!` into a 19-byte stack `[u8; 19]` buffer, then `String::from_utf8_unchecked(buf.to_vec())` — one exact-sized heap allocation, no format-description machinery. `format_description!` macro and `EVENT_TIME_FORMAT` constant removed.
+
+### Codebase Optimization Backlog (rescan 2026-03-27)
+
+New findings from systematic full-codebase audit (services, flows, workers, platform, utils). Prioritised by per-connection impact; cross-referenced against PERF.md deferred items and DESIGN_RULES.md.
+
+- [x] **[HIGH]** Avoid double `/proc/{pid}/stat` read on process cache hits in `services/process/inspection.rs`.
+  - `inspect()` calls `read_proc_starttime(pid)` at L61 (peek branch) AND L74 (get branch) — two `fs::read_to_string(format!("/proc/{pid}/stat"))` + field-22 parse per cache hit.
+  - **Done**: read starttime once at top of `inspect()` before the peek/get branches; both branches reuse the pre-read value. One filesystem read eliminated per cache-hit path.
+
+- [x] **[HIGH]** Pool gRPC client connections for UI miss/stats paths (`flows/verdict/verdict.rs` + `flows/stats/stats.rs` + `flows/notification/notification.rs`).
+  - `ClientService::connect_with_config(&config_snapshot).await` creates a fresh gRPC connection per `ask_rule` miss (verdict.rs L353), per notification dispatch (notification.rs L270), and per 1-second stats ping (stats.rs L279). Each call incurs TCP+HTTP/2 handshake overhead.
+  - **Done**: `GrpcChannelCache` (`ArcSwap<Option<CachedChannel>>`) stores a reusable `tonic::Channel` keyed on config fingerprint (addr + auth type hash). `connect_or_reuse(config, cache)` checks cache first, falls back to fresh connect on miss. Verdict flow and stats flow use `connect_or_reuse` with cache invalidation on transport errors. `connect_with_config` refactored via `connect_channel` + `from_channel` helpers.
+
+- [x] **[HIGH]** Reduce proto mapper allocation overhead in `platform/adapters/proto_mapper.rs`.
+  - `to_proto_connection` deep-clones `proc_info.env_map`, builds `HashMap` for checksums with `"md5"/"sha1"/"sha256".to_string()`, clones `parent_chain` paths Vec, and calls `attempt.src_addr.to_string()` + `attempt.dst_addr.to_string()`. Called on every UI-miss/ask_rule path.
+  - **Done**: extracted shared `build_checksums` (pre-sized `HashMap::with_capacity`, filters empty hashes) and `build_env_map` helpers; both `to_proto_process` and `to_proto_connection` now share the same compact code paths. HashMap growth eliminated.
+
+- [x] **[MEDIUM]** Bound proc connector netlink dispatch channels in `workers/process/netlink_worker.rs`.
+  - `mpsc::channel()` (unbounded `std::sync::mpsc`) at L29 for 4 round-robin dispatch workers. Under process churn, queues grow without bound.
+  - **Done**: `sync_channel(PROC_EVENT_CHANNEL_CAPACITY)` (512) replaces unbounded `channel()`; sender changed from `Sender` to `SyncSender`; dispatch uses `try_send` with silent drop on `TrySendError::Full` (fail-open, consistent with kernel pipeline backpressure policy).
+
+- [x] **[MEDIUM]** Reduce DNS dedup O(n) sweep + String allocation in `services/dns/parsing.rs`.
+  - `should_emit_at()` calls `recent_events.retain(...)` (O(n) sweep) on every DNS event, plus creates `(ip.to_string(), host.to_string())` as HashMap key.
+  - **Done**: `retain()` moved from per-call to overflow-only path (triggered only when `len >= MAX_RECENT_EVENTS`). Under normal operation, the O(n) sweep never runs. Key allocation still needed for inserts (stable Rust lacks `raw_entry`), but dedup hits avoid the retain cost.
+
+- [x] **[MEDIUM]** Narrow task-watch mutex scope in `services/task/storage.rs`.
+  - `TaskWatchControl::scan` holds `task_handles.lock().await` across entire `sync_storage_tasks()` which does async file reads and task spawn/stop — same pattern as the rules-watch fix from the 2026-03-27 backlog.
+  - **Done**: split `sync_storage_tasks` into `load_storage_tasks` (pub, async file I/O, no lock) + `apply_storage_task_diff` (sync mutation). `TaskWatchControl::scan` calls load first (no lock), then acquires mutex only for the short diff-apply phase.
+
+- [x] **[MEDIUM]** Store SIEM logger sinks behind `Arc` in `platform/adapters/connection_event_logger.rs`.
+  - `on_connection_event()` clones the entire `Vec<SinkHandle>` (including owned `format: String` and `tag: String` per sink) on every connection event before dispatching.
+  - **Done**: `LoggerState.sinks` changed from `Vec<SinkHandle>` to `Arc<[SinkHandle]>`; `on_connection_event` does `Arc::clone` (pointer-sized) instead of deep Vec clone. `SinkHandle.tag` changed from `String` to `Arc<str>`.
+
+- [x] **[MEDIUM]** Precompute SIEM format as enum in `platform/adapters/connection_event_logger.rs`.
+  - `format_message` normalises the format string via `case_folded(format)` on every event (~L319/L321), despite format being static per sink.
+  - **Done**: `SinkFormat` enum (`Json`/`Csv`/`Rfc3164`/`Rfc5424`) with `from_str` constructor. Format parsed once at sink build time; hot path dispatches via `format_message_enum` (match on enum). Per-event `case_folded()` + string allocation eliminated.
+
+- [x] **[MEDIUM]** Single-pass socket candidate selection in `platform/adapters/socket_diag.rs`.
+  - `select_socket_candidates` iterates `sockets` three times with three separate filter conditions, cloning each matched `SocketInfo`.
+  - **Done**: single pass with three priority-tiered output buckets (`exact`, `wildcard_dst`, `relaxed_dst`). All sockets pre-filtered on `src_port + src` check. Buckets merged in priority order at the end. 2 redundant iterations eliminated.
+
+- [x] **[LOW]** Coalesce inotify watch triggers in `workers/runtime/watch/control.rs`.
+  - `tokio::sync::mpsc::unbounded_channel()` at L277 for `()` trigger tokens. Memory risk is minimal (unit-value signals), but semantically these should coalesce.
+  - **Done**: `channel(1)` with `try_send(())` replaces unbounded channel. Receiver type updated from `UnboundedReceiver<()>` to `Receiver<()>`.
+
+- [x] **[LOW]** Add `connected_sessions_count()` to avoid cloning all sessions for `.len()` in `services/client/client.rs`.
+  - `connected_sessions()` returns `Vec<ClientSession>` via `.cloned().collect()`. Stats flow (stats.rs L229) immediately calls `.len()` — unnecessary clone+collect.
+  - **Done**: `connected_sessions_count() -> usize` reads `sessions.len()` directly from snapshot. Stats flow telemetry updated to call `connected_sessions_count()` instead of `connected_sessions().len()`.
+
+- [x] **[LOW]** Session snapshot full-map clone on mutation in `services/client/client.rs`.
+  - `upsert_session` / `disconnect_session` call `owned_snapshot()` which clones the entire `ClientSessionSnapshot` (including `BTreeMap<String, ClientSession>`), mutate, then `publish_snapshot`. Low-frequency path (connect/disconnect events), but violates Arc-read-is-cheap principle for writes.
+  - **Done**: replaced `owned_snapshot()` + mutate + `publish_snapshot()` with `modify_snapshot(|s| { ... })` using `watch::Sender::send_modify()` + `Arc::make_mut()`. Copy-on-write: when no reader holds the Arc (common case), mutation is in-place with zero allocation; under contention `Arc::make_mut` clones — the minimum necessary for concurrent correctness. All 4 mutation methods (`upsert_session`, `disconnect_session`, `set_session_default_action`, `set_connected_default_action`) converted. Multi-user concurrent access safe.
+
+- [x] **[LOW]** BufReader for `/proc/net/packet` and `/proc/net/xdp` in `utils/proc_net.rs`.
+  - `std::fs::read_to_string` reads entire file into heap `String`. Cold/diagnostic path (sockets monitor task).
+  - **Done**: `BufReader::new(File::open(...))` + `.lines()` replaces `read_to_string`. Eliminates single large heap allocation; reads line-by-line.
+
+- [x] **[LOW]** Stack buffer for autotune `/proc/stat` parse in `tunables.rs`.
+  - `read_cpu_stat_snapshot()` (L591) reads `/proc/stat` via `read_to_string`, then `.collect::<Vec<_>>()` for CPU field values. Called twice per autotune sample (startup only).
+  - **Done**: fixed-size `[u64; 8]` stack array replaces `Vec` + `resize(8, 0)`. Zero heap allocation for CPU field parsing.
 
 ## Completed In v0.5.0 (Condensed)
 
@@ -238,6 +387,8 @@ Prioritized by estimated impact on per-connection/per-packet latency. Detailed a
 
 - 2026-03-26: Full codebase rescan: Go/Rust parity audit (COMPATIBILITY.md updated with kernel self-check gap and firewall reload trigger model delta), DESIGN_RULES.md violation scan (3 items: lifecycle/runtime_lifecycle.rs missing, verdict Arc value-clone, API-surface density), hot/cold path optimization analysis (5 HIGH, 6 MEDIUM, 4 LOW items prioritized in PERF.md optimization backlog).  All findings tracked as actionable backlog items.
 - 2026-03-26: Complete bpftool subprocess removal (db8970e follow-up): all bpftool-only code (`bpftool_list_maps`, `bpftool_lookup_owner`, `bpftool_lookup_owner`, `try_load_object_with_bpftool`, `is_already_pinned_error`, bpftool supervisor block, 9 `#[cfg(not(aya-ebpf))]`-gated helpers) deleted outright rather than left behind cfg gates.  `BpfProgram` struct removed from `models/ebpf_state.rs`.  `conn_pin_root`/`proc_pin_root`/`dns_pin_root` removed from `services/ebpf/ebpf.rs` (sole caller was bpftool loader).  `bpftool` removed from firewall preflight and smoke test fallback blocks.  623 lines deleted, 0 warnings, 425 passed.
+- (post-v0.5.1): `async-trait` removed as a production dependency — all `#[async_trait::async_trait]` attributes stripped from service runtime traits (`ServiceLifecycle`, `ServiceFactory`, `ServiceRuntimeControl`) and their per-service impls; native AFIT used throughout. `async-trait` retained as a `[dev-dependencies]` entry only (required for the three tonic Ui test-server impls, because `tonic-prost-build 0.14` still desugars server traits via `#[async_trait]`). Rustc 1.93.1 / edition 2024. 34 annotations removed.
+- (post-v0.5.1): Event-driven firewall drift detection: inotify on firewall config file + NFNLGRP_NFTABLES netlink subscription (`platform/adapters/nft_monitor.rs`). 20 s timer loop retained as safety-net fallback. 0 warnings, 425 passed.
 - 2026-03-26: `quick_cache::Weighter` tuning applied to process cache: `ConcurrentLruCache<K,V>` made generic over `W: Weighter<K,V>` (default `UnitWeighter`); `with_weighter(weight_capacity, estimated_items, weighter)` constructor added.  `ProcessInfoWeighter` (O(1) env_map/args/chain len heuristics, ≈ 4 096 B/entry estimate) applied to `ProcessCache`; process cache now budgets by bytes not item count, preventing memory blow-up from processes with oversized env maps.  DNS/connection/inode caches retain `UnitWeighter` (uniform value sizes).  Two new tests added: `with_weighter_respects_byte_budget` and `with_weighter_stores_and_retrieves_entries`.  425 passed, 0 failed.
 - 2026-03-26: Replaced `lru` crate with `quick_cache = "0.6"`; rewritten `utils/lru_cache.rs` as `ConcurrentLruCache` wrapping `quick_cache::sync::Cache`; eliminated dual-layer async/snapshot machinery; 8 policy_tx/rule_command test isolation failures fixed via `PolicyTxCoordinator::new(PathBuf)` + `RuleCommandService` restructure.  Enforced DESIGN_RULES §3 test-placement rule: removed inline `mod tests` from `lru_cache.rs`; fixed eviction algorithm description; added `Weighter`/`Lifecycle` extension-point docs.  All Cargo.toml version strings normalized to proper semver ranges; lockfile updated to latest compatible patches (aho-corasick 1.1.4, globset 0.4.18, hyper-util 0.1.20, regex 1.12.3, rustix 1.1.4, tower 0.5.3, zerocopy 0.8.47, etc.).
 - 2026-03-26: Added `--rules-path`, `--config-file`, `--ui-socket` flags to `cargo ost` CLI; `launch_daemon_live_logs` forwards them as daemon flags; `--ui-socket` also sets `OPENSNITCH_MOCK_UI_SOCKET`.

@@ -229,3 +229,110 @@ async fn process_cache_is_bounded_with_lru_eviction() {
             .await
     );
 }
+
+// ---------------------------------------------------------------------------
+// Persistent hash cache tests
+// ---------------------------------------------------------------------------
+
+fn temp_hash_cache_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir()
+        .join("opensnitchd_test_hash_cache")
+        .join(tag)
+        .join(format!("{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+#[test]
+fn persistent_hash_cache_insert_and_lookup() {
+    let dir = temp_hash_cache_dir("insert_lookup");
+    let path = dir.join("hash_cache.json");
+    let cache = crate::services::process::hash_cache::PersistentHashCache::load_or_new(path);
+
+    // Current binary as a real file to stat against.
+    let exe = std::env::current_exe().unwrap();
+    assert!(cache.get(&exe).is_none(), "cache starts empty");
+
+    cache.insert(&exe, "aaa", "bbb", "ccc");
+    let (md5, sha1, sha256) = cache.get(&exe).expect("should hit after insert");
+    assert_eq!(md5, "aaa");
+    assert_eq!(sha1, "bbb");
+    assert_eq!(sha256, "ccc");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn persistent_hash_cache_survives_flush_and_reload() {
+    let dir = temp_hash_cache_dir("flush_reload");
+    let path = dir.join("hash_cache.json");
+
+    let exe = std::env::current_exe().unwrap();
+
+    // Populate and flush.
+    {
+        let cache = crate::services::process::hash_cache::PersistentHashCache::load_or_new(
+            path.clone(),
+        );
+        cache.insert(&exe, "md5val", "sha1val", "sha256val");
+        cache.flush();
+    }
+
+    // Reload from disk — entries whose stat still matches should survive.
+    {
+        let cache =
+            crate::services::process::hash_cache::PersistentHashCache::load_or_new(path);
+        let hit = cache.get(&exe);
+        assert!(hit.is_some(), "cache should survive reload");
+        let (md5, sha1, sha256) = hit.unwrap();
+        assert_eq!(md5, "md5val");
+        assert_eq!(sha1, "sha1val");
+        assert_eq!(sha256, "sha256val");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn persistent_hash_cache_invalidates_on_size_change() {
+    let dir = temp_hash_cache_dir("invalidate_size");
+    let path = dir.join("hash_cache.json");
+    let target = dir.join("fake_binary");
+
+    // Create a file, insert hash, flush.
+    std::fs::write(&target, b"hello").unwrap();
+    let cache =
+        crate::services::process::hash_cache::PersistentHashCache::load_or_new(path.clone());
+    cache.insert(&target, "m", "s", "h");
+    cache.flush();
+
+    // Modify file (size changes) — simulates a package update.
+    std::fs::write(&target, b"hello world, updated binary!").unwrap();
+
+    // Reload: old entry should NOT match (size/mtime differ).
+    let cache = crate::services::process::hash_cache::PersistentHashCache::load_or_new(path);
+    assert!(
+        cache.get(&target).is_none(),
+        "stale entry should be invalidated after binary update"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn persistent_hash_cache_gc_removes_deleted_files() {
+    let dir = temp_hash_cache_dir("gc_deleted");
+    let path = dir.join("hash_cache.json");
+    let target = dir.join("ephemeral");
+
+    std::fs::write(&target, b"temp").unwrap();
+    let cache = crate::services::process::hash_cache::PersistentHashCache::load_or_new(path);
+    cache.insert(&target, "m", "s", "h");
+    assert!(cache.get(&target).is_some());
+
+    // Delete file — gc_stale should remove the entry.
+    std::fs::remove_file(&target).unwrap();
+    cache.gc_stale();
+    assert!(
+        cache.get(&target).is_none(),
+        "gc_stale should remove entries for deleted files"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

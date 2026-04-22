@@ -13,15 +13,39 @@ use quick_cache::Weighter;
 use crate::models::process_state::ProcessInfo;
 use crate::utils::lru_cache::ConcurrentLruCache;
 
+use super::hash_cache::PersistentHashCache;
 use super::ProcessService;
 
 pub(super) struct ProcessCache {
     pub(super) entries: Arc<ConcurrentLruCache<u32, CachedProcessEntry, ProcessInfoWeighter>>,
     pub(super) exit_deadlines: tokio::sync::Mutex<HashMap<u32, Instant>>,
+    pub(super) hash_cache: Arc<PersistentHashCache>,
 }
 
 impl Default for ProcessCache {
     fn default() -> Self {
+        Self::with_hash_cache_path(Self::default_hash_cache_path())
+    }
+}
+
+impl ProcessCache {
+    /// Resolve the default on-disk hash-cache path.
+    ///
+    /// Placed in `/var/cache/opensnitchd/` for production installs, falling back
+    /// to a temp directory when that path is not writable (e.g. dev/test).
+    fn default_hash_cache_path() -> std::path::PathBuf {
+        use super::hash_cache::HASH_CACHE_FILENAME;
+        let prod = std::path::PathBuf::from("/var/cache/opensnitchd");
+        if prod.exists() || std::fs::create_dir_all(&prod).is_ok() {
+            prod.join(HASH_CACHE_FILENAME)
+        } else {
+            std::env::temp_dir()
+                .join("opensnitchd")
+                .join(HASH_CACHE_FILENAME)
+        }
+    }
+
+    pub(super) fn with_hash_cache_path(path: std::path::PathBuf) -> Self {
         let capacity = PROCESS_INFO_CACHE_CAPACITY.load(Ordering::Relaxed).max(1);
         let weight_capacity = capacity as u64 * ProcessInfoWeighter::ESTIMATED_BYTES_PER_ENTRY;
         Self {
@@ -31,6 +55,7 @@ impl Default for ProcessCache {
                 ProcessInfoWeighter,
             )),
             exit_deadlines: tokio::sync::Mutex::new(HashMap::new()),
+            hash_cache: Arc::new(PersistentHashCache::load_or_new(path)),
         }
     }
 }
@@ -103,6 +128,17 @@ impl ProcessService {
 
     pub fn spawn_cleanup_task(&self, shutdown: CancellationToken) -> JoinHandle<()> {
         self.spawn_cleanup_task_with_interval(shutdown, EXIT_CACHE_CLEANUP_INTERVAL)
+    }
+
+    /// Spawn the background task that periodically flushes the persistent hash
+    /// cache to disk and garbage-collects stale entries.
+    pub fn spawn_hash_cache_flush_task(&self, shutdown: CancellationToken) -> JoinHandle<()> {
+        use super::hash_cache::{HASH_CACHE_FLUSH_INTERVAL, HASH_CACHE_GC_INTERVAL};
+        self.cache.hash_cache.spawn_flush_task(
+            shutdown,
+            HASH_CACHE_FLUSH_INTERVAL,
+            HASH_CACHE_GC_INTERVAL,
+        )
     }
 
     pub(crate) fn spawn_cleanup_task_with_interval(

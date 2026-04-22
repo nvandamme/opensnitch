@@ -273,27 +273,110 @@ This section restores the richer architectural policy that previously lived inli
 
 ### 6. Cache Selection Rule
 
-- Dual-layer cache (`DualLayerLruMap` / `SyncDualLayerLruMap`) is preferred by default for read-dominant, shared runtime caches where lock-free immutable snapshot reads are important and eventual recency convergence is acceptable.
-- Dual-layer is not mandatory for every cache: choose plain `LruCache` or plain map-based cache when caller profile is write-heavy/high-churn, strict mutation/recency semantics are required, or ownership is local/ephemeral.
-- Not every immutable snapshot is a cache. For small whole-runtime state that is rebuilt only on explicit control/config transitions, prefer build-once/publish-once `Arc<...>` snapshots over dual-layer cache machinery.
-- Capacity and rollout guidance for dual-layer-backed caches:
-	- tune capacity with publish cost in mind,
-	- avoid broad dual-layer rollout to high-churn writers until publish-path optimization and metrics instrumentation are in place,
-	- keep domain-level capacity tunables explicit and documented when dual-layer is selected.
-- Required observability for dual-layer evolution:
-	- expose touch-drop rate / touch-queue pressure signals,
-	- expose publish-path cost signals (latency and allocation/churn-oriented counters) for regression tracking.
+The codebase uses three concurrency primitives for caches and shared state.  Choose
+based on caller profile and access pattern:
 
-#### Cache Caller Matrix
+#### `ConcurrentLruCache<K, V>` (`utils/lru_cache.rs`)
 
-| Cache caller class | Read/Write profile | Concurrency/ownership | Semantics tolerance | Preferred implementation |
-|---|---|---|---|---|
-| DNS shared lookup cache | read-heavy with periodic writes | shared across runtime paths | eventual recency acceptable | dual-layer |
-| Process inspection cache | read-heavy with mutation side bookkeeping | shared service cache | eventual recency acceptable; strict coherence guarded by service checks | dual-layer + dedicated mutable side-state |
-| Connection owner PID caches | read-heavy with moderate writes | shared sync runtime access | eventual recency acceptable | sync dual-layer |
-| Firewall runtime snapshot | low-churn control/config writes; frequent reads | shared service/runtime readers | strict whole-state replacement on publish; no recency queue needed | whole-runtime Arc snapshot via watch publish |
-| Write-heavy churn cache | write-heavy/high churn | any | strict recency/mutation visibility required | plain LRU or plain map |
-| Local ephemeral cache | mixed/local | single owner or short-lived scope | no shared snapshot requirement | plain LRU or plain map |
+A thin `Arc<quick_cache::sync::Cache<K, V>>` wrapper.  Internally sharded; `get`,
+`peek`, `insert`, `remove_by`, and capacity operations are all synchronous and
+lock-free at the entry level.  Eviction uses Hot/Cold approximation (bounded-capacity
+guarantees preserved; strict oldest-item eviction not guaranteed — tests must not
+assert a specific evicted item, only `len ≤ capacity`).
+
+**Use when**: a shared runtime LRU cache is needed by multiple async tasks with
+read-dominant access and bounded-size requirements (DNS lookups, process inspection,
+connection owner PID trie). `ConcurrentLruCache` replaces the former
+`DualLayerLruMap` / `SyncDualLayerLruMap` dual-layer design (removed in v0.5.1).
+
+Size guidance:
+- tune capacity through a named `RuntimeTunables` field — keep capacity limits explicit
+  and documented;
+- use `ProcessInfoWeighter` pattern (byte-budget via `quick_cache::Weighter`) when
+  individual entries have variable heap footprint;
+- DNS, connection, and inode caches retain `UnitWeighter` — their value types are
+  uniformly bounded.
+
+#### `DashMap<K, V>` (`dashmap` crate)
+
+A sharded concurrent `HashMap` with per-shard `RwLock`.  `insert`, `remove`,
+`entry`, and `get` are O(1) and do not require the caller to hold any external lock.
+Iteration acquires one shard lock at a time and should be avoided on hot paths.
+
+**Use when**: a shared map requires concurrent insertions, removals, or atomic
+check-and-insert (e.g. verdict epoch tracking, subscription per-id locks, nfqueue
+requeue aliases, StorageEventBus path/prefix dispatch maps).  Do **not** use when
+whole-map snapshot reads are frequent — prefer `ArcSwap<HashMap<K, V>>` instead.
+
+#### `ArcSwap<T>` (`arc-swap` crate)
+
+Wraps an `Arc<T>` behind an atomic pointer that supports wait-free loads.
+`.load()` / `load_full()` never block; `.store(Arc::new(new_value))` replaces the
+whole snapshot atomically.  Using `load_full()` → clone → mutate → `store(Arc::new(next))`
+on the write path is intentional — it is the correct pattern for low-churn immutable
+snapshot replacement.
+
+**Use when**: state is written infrequently (config refresh, 30 s background cycles,
+reconnect) but read on every connection, packet, or per-tick path (eBPF map snapshot,
+interface-name cache, Prometheus stats snapshot).  Not suitable for write-heavy / high-
+churn paths.
+
+#### Caller Matrix
+
+| Cache caller class | Read/write profile | Preferred implementation |
+|---|---|---|
+| DNS shared lookup cache | read-heavy with periodic writes | `ConcurrentLruCache` |
+| Process inspection cache | read-heavy + mutation side-bookkeeping | `ConcurrentLruCache` with `ProcessInfoWeighter` |
+| Connection owner PID caches | read-heavy with moderate writes | `ConcurrentLruCache` |
+| Verdict epoch map | write-per-connection, remove-per-verdict | `DashMap` |
+| Subscription per-id locks | occasional insert/check | `DashMap` |
+| nfqueue requeue aliases | hot O(1) remove on packet path | `DashMap` (lazy TTL prune on write) |
+| StorageEventBus path/prefix tables | concurrent event dispatch | `DashMap` (per-shard lock, released before send) |
+| eBPF map catalogue | read every connection, refresh every 30 s | `ArcSwap<HashMap>` |
+| Interface-name lookup | read on every packet, miss refresh | `ArcSwap<HashMap>` |
+| Prometheus stats snapshot | read on every scrape, written every tick | `ArcSwap<Option<CompactStats>>` |
+| Firewall runtime snapshot | low-churn control writes; frequent reads | whole-runtime `Arc` snapshot via `watch` publish |
+| Write-heavy / high-churn map | write-heavy, any | plain `HashMap` behind `Mutex` or single-writer pattern |
+
+### 7. Configuration Surface Precedence Rule
+
+Any parameter that must be set externally — by an operator, integrator, or end-user — **must follow this precedence order** (highest → lowest):
+
+1. **CLI switches / daemon flags** — highest precedence; explicit per-invocation override.
+   - When a switch is passed on the command line, it overrides any env var or config file value for that run.
+   - Must be forwarded to the relevant subsystem through structured `*Overrides` / `*Flags` structs, not as ad-hoc ambient globals.
+   - Names must mirror the JSON field hierarchy when there is a one-to-one mapping (e.g. `--metrics-addr` ↔ `metrics.addr`).
+2. **Environment variables** — mid-tier override; typically used for testing, CI orchestration, and ephemeral deployment injection.
+   - When an env var is set and non-empty, it overrides the corresponding JSON config file value.
+   - Acceptable primary uses: automated test setups, CI pipelines, container/pod bootstrapping where a config file cannot be bind-mounted, one-shot secret injection.
+   - Env vars are a valid configuration surface, but for production deployments operators should prefer JSON config files for auditability and reproducibility.
+3. **Dedicated JSON config file** — the baseline config provider.
+   - Per-crate or per-subsystem files are preferred over a single monolithic config: `metrics.json`, `tunables.json`, `push.json`, etc.
+   - Field names must be stable, versioned, and documented.
+   - Config files are loaded at startup (and on `reload` when the subsystem supports hot-reload).
+   - If no CLI switch or env var overrides a parameter, the JSON config file value is used.
+
+#### Applicability
+
+- The rule applies to all crates under `daemon-rs/` that expose externally settable parameters.
+- It does not apply to internal compile-time constants or parameters that are exclusively set by other crates at a defined API boundary.
+
+#### Migration Policy For Legacy Parameters
+
+- Parameters that exist only in code (no config file field, no CLI switch, no env var) should be migrated to at least a JSON config field before the owning feature is considered stable.
+- Every config-surface parameter should have a JSON config field as the baseline.  CLI switches and env var overrides are optional but recommended for parameters that operators commonly tweak per-invocation or in CI.
+
+#### Precedence Merge Semantics
+
+- A parameter value from a higher-precedence source completely overrides the lower-precedence value for that key (last-writer-wins, no merging of partial objects across sources).
+- Resolution order in code: check CLI switch first → check env var → fall back to JSON config value.
+- Exception: array/list fields in JSON may be *extended* (not replaced) by a CLI switch when the switch is explicitly documented as additive.
+- CLI switches and env vars never extend JSON arrays; they always replace the field value.
+
+#### Config File Location Policy
+
+- Config files must be locatable via the daemon's `--config-file` override and its standard search path (`/etc/opensnitchd/`, `~/.config/opensnitchd/`, and the running binary's directory in that order).
+- Subsystem-specific files (e.g. `metrics.json`) must be co-located with the primary daemon config file or in a well-known sibling directory; their path may be overridden by a dedicated CLI switch.
 
 ## Tracker Retention Rules
 

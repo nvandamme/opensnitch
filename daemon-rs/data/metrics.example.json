@@ -1,0 +1,14 @@
+{
+  "prometheus": {
+    "addr": "127.0.0.1:9100"
+  },
+  "push": {
+    "url": "http://pushgateway.example.com:9091",
+    "format": "pushgateway",
+    "job": "opensnitchd",
+    "token": "",
+    "gzip": false,
+    "bucket": "opensnitch",
+    "org": ""
+  }
+}

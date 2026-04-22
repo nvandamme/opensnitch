@@ -153,6 +153,7 @@ impl ConnectionService {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn parse_value_hex_bytes(value: &str) -> Option<Vec<u8>> {
         let mut collect = false;
         let mut out = Vec::new();

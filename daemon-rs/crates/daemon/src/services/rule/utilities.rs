@@ -21,18 +21,70 @@ impl RuleService {
 
     pub(super) fn normalize_domain_list_entry(entry: &str) -> Option<String> {
         let line = entry.strip_suffix('\r').unwrap_or(entry).trim();
-        if line.is_empty() || line.starts_with('#') {
+        // '#' = hosts/plain-list comment; '!' = AdBlock/AdGuard comment.
+        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
             return None;
         }
 
-        let host = if let Some(value) = line.strip_prefix("0.0.0.0") {
+        // AdBlock/AdGuard: '[Adblock Plus …]' version/header lines.
+        if line.starts_with('[') {
+            return None;
+        }
+
+        // AdBlock/AdGuard: exception rules (@@||…^) are allowlist entries.
+        // In a blocklist context, skip them — they are not entries to block.
+        if line.starts_with("@@") {
+            return None;
+        }
+
+        // AdBlock/AdGuard: cosmetic / element-hiding rules such as
+        // "example.com##.ad-banner" or "example.com#@#.ad" — not network-level.
+        if line.contains("##") || line.contains("#@#") {
+            return None;
+        }
+
+        // AdBlock/AdGuard: regex rules enclosed in slashes (/REGEX/).
+        // These are JavaScript/browser-level URL patterns, not hostname rules.
+        if line.starts_with('/') {
+            return None;
+        }
+
+        // AdBlock-style single `|` anchors (`|http://example.com/|`) are full URI
+        // anchors, not hostname rules.  Skip anything starting with `|` that is NOT
+        // the domain-anchor `||` prefix.
+        if line.starts_with('|') && !line.starts_with("||") {
+            return None;
+        }
+
+        let host = if let Some(remainder) = line.strip_prefix("||") {
+            // AdBlock/AdGuard domain anchor: ||hostname^[options]
+            // The hostname ends at the first '^', '$', or '/' character.
+            let domain_end = remainder
+                .find(|c| matches!(c, '^' | '$' | '/'))
+                .unwrap_or(remainder.len());
+            remainder[..domain_end].trim()
+        } else if let Some(value) = line.strip_prefix("0.0.0.0") {
             value.trim()
         } else if let Some(value) = line.strip_prefix("127.0.0.1") {
             value.trim()
         } else {
             // Plain domain line; wildcard/glob handling is done by callers.
-            line
+            // Strip inline comment (`# remark` at end of line — valid per
+            // AdGuard domains-only and hosts-file syntax).
+            let comment_start = line.find('#').unwrap_or(line.len());
+            line[..comment_start].trim()
         };
+
+        if host.is_empty() {
+            return None;
+        }
+
+        // AdBlock/AdGuard: skip modifier-only wildcard rules such as
+        // `*$denyallow=com|net` — after option stripping above these collapse to
+        // `*` which is not a meaningful hostname.
+        if host == "*" {
+            return None;
+        }
 
         if matches!(
             host,
@@ -44,6 +96,46 @@ impl RuleService {
         // DNS hostnames are case-insensitive (RFC 4343); normalise to lower-case
         // so set/trie lookups work regardless of capitalisation in the list file.
         Some(host.to_lowercase())
+    }
+
+    /// Returns `true` when `entry` is an AdBlock/AdGuard `||domain^` anchor for
+    /// a concrete (non-wildcard) hostname.
+    ///
+    /// Such entries must block the domain itself **and** all its subdomains
+    /// (per the AdGuard Home spec and Adblock Plus cheatsheet).  The cache builder
+    /// dispatches them to [`DomainWildcardTrie::insert_domain_and_subdomains`]
+    /// rather than the plain exact-match `HashSet`.
+    pub(super) fn is_adblock_domain_anchor(entry: &str) -> bool {
+        let Some(remainder) = entry.strip_prefix("||") else {
+            return false;
+        };
+        // Exclude exception rules (@@) — already skipped by normalize, but be safe.
+        // Exclude explicit wildcard anchors (||*.foo^) — those use insert_suffix.
+        !remainder.starts_with('@') && !remainder.starts_with('*')
+    }
+
+    /// Extract the raw regex pattern from an AdBlock/AdGuard `/pattern/[flags]` line.
+    ///
+    /// Returns `Some(pattern)` (the text between the delimiters) when the line is a
+    /// regex rule, `None` otherwise.  Flags after the closing `/` are ignored — domain
+    /// matching is always case-insensitive per RFC 4343.
+    ///
+    /// The returned pattern is suitable for passing directly to
+    /// [`RuleService::build_list_regex_cache`].
+    pub(super) fn extract_domain_list_regex_pattern(entry: &str) -> Option<String> {
+        let line = entry.strip_suffix('\r').unwrap_or(entry).trim();
+        // Must start with '/' but not '//' (URL-scheme prefix, not a regex delimiter).
+        if !line.starts_with('/') || line.starts_with("//") {
+            return None;
+        }
+        // Skip the leading '/' and find the closing delimiter.
+        let rest = &line[1..];
+        let close = rest.rfind('/')?;
+        let pattern = &rest[..close];
+        if pattern.is_empty() {
+            return None;
+        }
+        Some(pattern.to_string())
     }
 
     pub(super) fn wildcard_suffix(host: &str) -> Option<&str> {

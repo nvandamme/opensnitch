@@ -288,14 +288,14 @@ impl Config {
 
     /// Load config from the standard search order, with an optional CLI override.
     ///
-    /// Resolution priority (highest first):
+    /// Resolution priority (highest first, DESIGN_RULES §7):
     ///   1. `cli_path` — explicit `--config-file` flag
     ///   2. `OPENSNITCH_CONFIG_FILE` env var
     ///   3. `/etc/opensnitchd/default-config.json` if it exists
     ///   4. Dev-tree fallback `daemon/data/default-config.json`
     pub fn load_from_default_locations_with_override(cli_path: Option<&std::path::Path>) -> Result<Self> {
-        let cli_path = cli_path.and_then(|p| p.exists().then(|| p.to_path_buf()));
         let env_path = std::env::var_os("OPENSNITCH_CONFIG_FILE").map(PathBuf::from);
+        let cli_path = cli_path.and_then(|p| p.exists().then(|| p.to_path_buf()));
         let default_path = PathBuf::from("/etc/opensnitchd/default-config.json");
         let config_path = cli_path
             .or_else(|| env_path.filter(|path| path.exists()))

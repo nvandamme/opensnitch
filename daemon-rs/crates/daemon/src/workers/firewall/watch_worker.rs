@@ -56,11 +56,11 @@ impl WatchWorkerControl for FirewallWatchControl {
     }
 
     fn targets(&self) -> Vec<PathBuf> {
-        Vec::new()
+        Self::path_targets(&self.config.get_snapshot().firewall_config_path)
     }
 
     fn empty_targets_behavior(&self) -> EmptyWatchTargetsBehavior {
-        EmptyWatchTargetsBehavior::InfoPollFallback
+        EmptyWatchTargetsBehavior::WarnPollFallback
     }
 
     fn scan<'a>(
@@ -87,5 +87,9 @@ pub(crate) fn start(
     config: ConfigService,
     shutdown: CancellationToken,
 ) -> Box<dyn WorkerControl> {
+    crate::platform::adapters::nft_monitor::spawn_nft_drift_listener(
+        firewall.clone(),
+        shutdown.clone(),
+    );
     FirewallWatchControl { firewall, config }.build(shutdown)
 }

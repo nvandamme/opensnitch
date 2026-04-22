@@ -587,12 +587,19 @@ impl RuleService {
                 else {
                     return false;
                 };
+                let host = host.as_ref();
+                // Fast-path cascade: HashSet (O(1)) → trie (O(labels)) → globs → regex.
+                // The regex sub-cache is reached only when all structural lookups miss,
+                // so the hot path for plain/AdBlock domain lists is unaffected.
                 Self::match_domain_list(
-                    host.as_ref(),
+                    host,
                     Some(&slot.domains),
                     Some(&slot.domain_wildcards),
                     Some(&slot.domain_globs),
-                )
+                ) || slot
+                    .domains_regex
+                    .as_ref()
+                    .is_some_and(|cache| cache.matches(host))
             }
             CompiledListOperand::DomainsRegexp => {
                 Self::match_domain_regexp_slot(dst_host, operator.sensitive, slot)

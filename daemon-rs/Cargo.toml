@@ -3,12 +3,14 @@ resolver = "3"
 members = [
     "crates/ebpf",
     "crates/ebpf-common",
+    "crates/kernel-caps",
     "crates/proto",
     "crates/daemon",
     "crates/tools"
 ]
 default-members = [
     "crates/ebpf-common",
+    "crates/kernel-caps",
     "crates/proto",
     "crates/daemon",
     "crates/tools"
@@ -20,6 +22,7 @@ license = "GPL-3.0"
 
 [profile.release]
 lto = "thin"
+opt-level = 3
 
 # Size-optimised profile for embedded/constrained targets (e.g. OpenWrt).
 # Use: cargo build --profile release-embedded -p opensnitchd-rs
@@ -27,7 +30,7 @@ lto = "thin"
 # Trades hot-path throughput for ~30-40% smaller binary vs release.
 [profile.release-embedded]
 inherits = "release"
-opt-level = "z"     # size-first; disables loop unrolling and some vectorisation
+opt-level = "s"     # size-first; keep vectors inlined, but not necessarily loops; see https://doc.rust-lang.org/reference/profiling.html#codegen-options
 lto = true          # fat LTO: maximum dead-code elimination across all crates
 codegen-units = 1   # single CGU required for fat LTO; no parallel codegen
 strip = "symbols"   # strip debug symbols from the final binary

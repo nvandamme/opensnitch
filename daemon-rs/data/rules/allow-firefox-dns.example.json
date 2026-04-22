@@ -1,0 +1,33 @@
+{
+  "created": "2026-03-27T00:00:00Z",
+  "updated": "2026-03-27T00:00:00Z",
+  "name": "allow-firefox-dns",
+  "description": "Allow Firefox DNS queries",
+  "enabled": true,
+  "precedence": false,
+  "nolog": false,
+  "action": "allow",
+  "duration": "always",
+  "operator": {
+    "type": "list",
+    "operand": "list",
+    "sensitive": false,
+    "data": "",
+    "list": [
+      {
+        "type": "simple",
+        "operand": "process.path",
+        "sensitive": false,
+        "data": "/usr/lib/firefox/firefox",
+        "list": null
+      },
+      {
+        "type": "simple",
+        "operand": "dest.port",
+        "sensitive": false,
+        "data": "53",
+        "list": null
+      }
+    ]
+  }
+}

@@ -10,6 +10,7 @@ pub mod duration_parse;
 pub mod hex_parse;
 pub mod http_response;
 pub mod json_value;
+pub mod kernel_caps;
 pub mod list_shape;
 pub mod lru_cache;
 pub mod netlink_recovery;

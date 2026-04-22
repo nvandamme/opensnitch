@@ -276,8 +276,106 @@ impl Daemon {
             return;
         }
 
+        // Reload metrics.json and re-wire the Prometheus scrape server if the
+        // listen address has changed (or was newly added / removed).
+        #[cfg(feature = "metrics-export")]
+        self.reload_metrics_server();
+
         info!("SIGHUP reload completed");
         notify(NotifyState::Ready(Some("SIGHUP reload complete")));
+    }
+
+    /// Re-read `metrics.json` and reconcile the Prometheus scrape HTTP server.
+    ///
+    /// - If the effective listen address is unchanged, nothing happens.
+    /// - If the address changed (or was added): the old server is cancelled and a
+    ///   new one is spawned on the new address, reusing the same
+    ///   [`PrometheusStatsExporter`] so the running `StatsFlow` continues
+    ///   delivering snapshots without interruption.
+    /// - If the address was removed: the server is cancelled.
+    ///
+    /// Push exporter configuration is not hot-reloaded; a daemon restart is
+    /// required for push URL / format / credential changes.
+    #[cfg(feature = "metrics-export")]
+    pub(super) fn reload_metrics_server(&self) {
+        use crate::models::metrics_config::MetricsConfig;
+        use crate::platform::adapters::stats_exporter_prometheus::{
+            PrometheusStatsExporter, PROMETHEUS_ADDR_ENV,
+        };
+
+        let config_path = self.runtime.config.get_snapshot().config_path.clone();
+
+        let new_mc = match MetricsConfig::load_sibling(&config_path) {
+            Ok(mc) => mc,
+            Err(err) => {
+                tracing::warn!("metrics SIGHUP reload: failed to load metrics.json: {err}");
+                return;
+            }
+        };
+
+        let cli = &self.runtime.metrics_cli;
+
+        // §7 resolution (same as spawn_stats_flow): CLI > env var > JSON config.
+        let new_addr_str: Option<String> = cli
+            .prometheus_addr
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                std::env::var(PROMETHEUS_ADDR_ENV)
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            })
+            .or_else(|| new_mc.prometheus.addr.clone().filter(|s| !s.is_empty()));
+
+        let new_addr: Option<std::net::SocketAddr> = new_addr_str.and_then(|s| {
+            s.parse().map_err(|e| {
+                tracing::warn!(addr = %s, "metrics SIGHUP reload: invalid prometheus addr: {e}");
+            }).ok()
+        });
+
+        let mut slot = self.runtime.metrics_server.lock().unwrap();
+
+        let old_addr = slot.as_ref().and_then(|s| s.effective_addr);
+
+        match (old_addr, new_addr) {
+            (Some(old), Some(new)) if old == new => {
+                tracing::debug!(addr = %old, "metrics SIGHUP reload: addr unchanged, skipping");
+            }
+            (_, Some(new_addr)) => {
+                // Cancel old server (if any) while preserving the exporter Arc.
+                let old_exporter = slot.as_ref().map(|s| s.exporter.clone());
+                if let Some(old_slot) = slot.take() {
+                    if let Some(ct) = old_slot.server_ct {
+                        ct.cancel();
+                    }
+                }
+                let exp = old_exporter.unwrap_or_else(PrometheusStatsExporter::new);
+                let server_ct = self.runtime.shutdown.child_token();
+                exp.clone().spawn_metrics_server(new_addr, server_ct.clone());
+                *slot = Some(super::MetricsServerSlot {
+                    exporter: exp,
+                    effective_addr: Some(new_addr),
+                    server_ct: Some(server_ct),
+                });
+                tracing::info!(
+                    addr = %new_addr,
+                    "metrics SIGHUP reload: prometheus scrape server restarted"
+                );
+            }
+            (Some(_), None) => {
+                // Address was removed — shut down the server.
+                if let Some(old_slot) = slot.take() {
+                    if let Some(ct) = old_slot.server_ct {
+                        ct.cancel();
+                    }
+                }
+                tracing::info!("metrics SIGHUP reload: prometheus scrape server disabled");
+            }
+            (None, None) => {
+                // Was disabled, still disabled — nothing to do.
+            }
+        }
     }
 
     pub(super) fn parse_default_action_from_client_config(

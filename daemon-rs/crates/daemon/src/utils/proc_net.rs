@@ -3,16 +3,30 @@ use crate::utils::hex_parse::parse_hex_token;
 use crate::utils::name_parsing::normalized_name;
 
 pub(crate) fn read_proc_net_packet_rows() -> Vec<ProcNetPacketRow> {
-    let Ok(contents) = std::fs::read_to_string("/proc/net/packet") else {
+    use std::io::{BufRead, BufReader};
+    let Ok(file) = std::fs::File::open("/proc/net/packet") else {
         return Vec::new();
     };
+    let mut contents = String::new();
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else { break };
+        contents.push_str(&line);
+        contents.push('\n');
+    }
     parse_proc_net_packet_rows(&contents)
 }
 
 pub(crate) fn read_proc_net_xdp_rows() -> Vec<ProcNetXdpRow> {
-    let Ok(contents) = std::fs::read_to_string("/proc/net/xdp") else {
+    use std::io::{BufRead, BufReader};
+    let Ok(file) = std::fs::File::open("/proc/net/xdp") else {
         return Vec::new();
     };
+    let mut contents = String::new();
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else { break };
+        contents.push_str(&line);
+        contents.push('\n');
+    }
 
     let mut lines = contents.lines();
     let Some(header_line) = lines.next() else {

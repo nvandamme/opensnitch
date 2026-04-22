@@ -18,7 +18,6 @@ impl SubscriptionService {
 }
 
 #[cfg(feature = "subscriptions")]
-#[async_trait::async_trait]
 impl ServiceFactory for SubscriptionService {
     type FactoryInput = ();
 
@@ -28,7 +27,6 @@ impl ServiceFactory for SubscriptionService {
 }
 
 #[cfg(feature = "subscriptions")]
-#[async_trait::async_trait]
 impl ServiceRuntimeControl for SubscriptionService {
     type ReloadInput = ();
 
@@ -46,7 +44,6 @@ impl SubscriptionService {
 }
 
 #[cfg(not(feature = "subscriptions"))]
-#[async_trait::async_trait]
 impl ServiceFactory for SubscriptionService {
     type FactoryInput = ();
 
@@ -56,7 +53,6 @@ impl ServiceFactory for SubscriptionService {
 }
 
 #[cfg(not(feature = "subscriptions"))]
-#[async_trait::async_trait]
 impl ServiceRuntimeControl for SubscriptionService {
     type ReloadInput = ();
 

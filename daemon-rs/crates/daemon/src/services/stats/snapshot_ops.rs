@@ -1,25 +1,39 @@
 use std::sync::atomic::Ordering;
 
 use opensnitch_proto::pb;
-use time::macros::format_description;
 
 use crate::models::connection_state::ConnectionAttempt;
 
 use super::{internal::{BreakdownCounters, EventsState}, stats::StatsService};
-const EVENT_TIME_FORMAT: &[time::format_description::FormatItem<'static>] =
-    format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
 
 impl StatsService {
+    /// Format `unix_nano` as `"yyyy-mm-dd hh:mm:ss"` without allocating an
+    /// intermediate `fmt::write` buffer.  Writes directly into a 19-byte stack
+    /// array, then converts to `String` with a single exact-sized allocation
+    /// — avoids the `time::format_description` dispatch overhead of the
+    /// previous `dt.format(EVENT_TIME_FORMAT)` call.
     pub(super) fn format_event_time(unix_nano: i64) -> String {
+        use std::io::Write;
         let secs = unix_nano.div_euclid(1_000_000_000);
-        let nanos = unix_nano.rem_euclid(1_000_000_000) as u32;
         let Ok(dt) = time::OffsetDateTime::from_unix_timestamp(secs) else {
             return "1970-01-01 00:00:00".to_string();
         };
-        let dt = dt.replace_nanosecond(nanos).unwrap_or(dt);
-
-        dt.format(EVENT_TIME_FORMAT)
-            .unwrap_or_else(|_| "1970-01-01 00:00:00".to_string())
+        let dt = dt
+            .replace_nanosecond(unix_nano.rem_euclid(1_000_000_000) as u32)
+            .unwrap_or(dt);
+        let mut buf = [0u8; 19];
+        let _ = write!(
+            &mut buf[..],
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            dt.year(),
+            dt.month() as u8,
+            dt.day(),
+            dt.hour(),
+            dt.minute(),
+            dt.second(),
+        );
+        // SAFETY: buf contains only ASCII digits, hyphens, colons, and spaces.
+        unsafe { String::from_utf8_unchecked(buf.to_vec()) }
     }
 
     pub(super) fn protocol_name(attempt: &ConnectionAttempt) -> &'static str {

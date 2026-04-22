@@ -1,4 +1,5 @@
 mod event_bus;
+mod ops;
 mod runtime_lifecycle;
 mod storage;
 

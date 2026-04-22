@@ -127,6 +127,7 @@ impl Daemon {
         self.runtime.kernel_pipeline_counters.drop_stats()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn increment_kernel_pipeline_drop(&self, pipeline: KernelPipeline) -> u64 {
         self.runtime.kernel_pipeline_counters.increment_drop(pipeline)
     }

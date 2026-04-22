@@ -57,6 +57,7 @@ fn run() -> Result<(), DynError> {
         Some("build") => build_cmds::run_build(),
         Some("build-all") => build_cmds::run_build_all(),
         Some("build-ebpf") => build_cmds::run_build_ebpf(),
+        Some("check-kernel-caps") => build_cmds::run_check_kernel_caps(),
         // ── test ──────────────────────────────────────────────────────────
         Some("test") => build_cmds::run_parity_tests(),
         Some("test-kernel-it") => build_cmds::run_kernel_it(),

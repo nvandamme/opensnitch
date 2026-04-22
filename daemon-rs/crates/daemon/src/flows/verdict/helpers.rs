@@ -1,0 +1,253 @@
+/// Private helper methods for `VerdictFlow`.
+///
+/// Extracted from `verdict.rs` per DESIGN_RULES §3: internal decision-engine
+/// helpers are a separate concern from the public-API entry points
+/// (`handle_connect_attempt`, `process_connect_attempt`, constructor) that
+/// stay in `verdict.rs`.
+use opensnitch_proto::pb;
+
+use crate::{
+    models::connection_state::ConnectionAttempt,
+    models::config_runtime::{AskFallbackPolicy, DefaultAction},
+    platform::adapters::proto_mapper::ProtoMapperAdapter,
+    platform::ffi::nfqueue::NfqueueRuntimeState,
+    models::effective_tunables::NfqueueOverloadPolicy,
+    services::client::enqueue_alert,
+    services::client::{warning_connection_alert, warning_process_alert},
+    services::policy_tx::PolicyOwner,
+};
+
+use super::verdict::{VerdictFlow, VerdictRulePersistRequest};
+
+impl VerdictFlow {
+    pub(super) async fn restore_rules_snapshot(
+        rules: &crate::services::rule::RuleService,
+        snapshot: &[pb::Rule],
+    ) -> Result<(), String> {
+        use std::collections::BTreeSet;
+        let target_names = snapshot
+            .iter()
+            .map(|rule| rule.name.clone())
+            .collect::<BTreeSet<_>>();
+        let current = rules.get_proto_snapshot();
+
+        for rule in current.as_ref() {
+            if !target_names.contains(&rule.name) {
+                rules
+                    .delete_by_name(&rule.name)
+                    .await
+                    .map_err(|err| format!("rollback delete {}: {err}", rule.name))?;
+            }
+        }
+
+        for rule in snapshot {
+            rules
+                .upsert_from_proto(rule)
+                .await
+                .map_err(|err| format!("rollback upsert {}: {err}", rule.name))?;
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn enqueue_rule_persist(
+        &self,
+        request_id: u64,
+        rule: pb::Rule,
+        idempotency_key: String,
+    ) {
+        let owner = self
+            .client_service
+            .primary_owner()
+            .map(PolicyOwner::from)
+            .unwrap_or(PolicyOwner::System);
+        let request = VerdictRulePersistRequest {
+            rule,
+            owner,
+            idempotency_key,
+        };
+        if let Err(err) = self.rule_persist_tx.try_send(request) {
+            tracing::warn!(request_id, "dropping async verdict rule persist request: {err}");
+        }
+    }
+
+    pub(super) fn decision_key_hash(
+        attempt: &ConnectionAttempt,
+        proc_info: &crate::models::process_state::ProcessInfo,
+        dst_host: Option<&str>,
+    ) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        proc_info.path.hash(&mut h);
+        attempt.uid.hash(&mut h);
+        attempt.pid.hash(&mut h);
+        attempt.src_addr.hash(&mut h);
+        attempt.dst_addr.hash(&mut h);
+        attempt.dst_port.hash(&mut h);
+        attempt.protocol.hash(&mut h);
+        dst_host.unwrap_or_default().hash(&mut h);
+        h.finish()
+    }
+
+    pub(super) fn begin_decision_epoch(&self, key: u64) -> Option<u64> {
+        match self.pending_decisions.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(_) => None,
+            dashmap::mapref::entry::Entry::Vacant(e) => {
+                e.insert(1);
+                Some(1)
+            }
+        }
+    }
+
+    pub(super) fn is_decision_epoch_current(&self, key: u64, epoch: u64) -> bool {
+        self.pending_decisions
+            .get(&key)
+            .is_some_and(|current| *current == epoch)
+    }
+
+    pub(super) fn end_decision_epoch(&self, key: u64, epoch: u64) {
+        if let dashmap::mapref::entry::Entry::Occupied(e) = self.pending_decisions.entry(key) {
+            if *e.get() == epoch {
+                e.remove();
+            }
+        }
+    }
+
+    pub(super) fn emit_connection_event(&self, conn: pb::Connection, rule: Option<pb::Rule>) {
+        if let Some(ref exporter) = self.event_exporter {
+            let config = self.config.get_snapshot();
+            exporter.refresh_loggers(&config.loggers);
+            exporter.on_connection_event(&conn, rule.as_ref());
+        }
+        self.stats.on_event(conn, rule);
+    }
+
+    pub(super) fn is_self_connection(attempt: &ConnectionAttempt) -> bool {
+        attempt.pid == std::process::id()
+    }
+
+    pub(super) fn should_apply_unknown_default(
+        attempt: &ConnectionAttempt,
+        intercept_unknown: bool,
+    ) -> bool {
+        attempt.pid == 0 && !intercept_unknown
+    }
+
+    pub(super) fn strict_miss_accounting_enabled(&self) -> bool {
+        matches!(
+            NfqueueRuntimeState::overload_policy(),
+            NfqueueOverloadPolicy::DropFast
+        )
+    }
+
+    pub(super) async fn account_miss_and_apply_default(&self, request_id: u64) {
+        if self.strict_miss_accounting_enabled() {
+            self.stats.on_rule_miss();
+            self.apply_default_action(request_id, true).await;
+        } else {
+            self.stats.on_missed_default_action();
+            self.apply_default_action(request_id, false).await;
+        }
+    }
+
+    pub(super) fn enqueue_connection_warning_alert(&self, conn: pb::Connection) {
+        enqueue_alert(
+            &self.alert_buffer,
+            &self.bus.alert_tx,
+            warning_connection_alert(conn),
+        );
+    }
+
+    pub(super) fn enqueue_process_warning_alert(
+        &self,
+        proc_info: &crate::models::process_state::ProcessInfo,
+    ) {
+        enqueue_alert(
+            &self.alert_buffer,
+            &self.bus.alert_tx,
+            warning_process_alert(ProtoMapperAdapter::to_proto_process(proc_info)),
+        );
+    }
+
+    pub(super) async fn apply_default_action_on_ui_miss(
+        &self,
+        request_id: u64,
+        proc_info: &crate::models::process_state::ProcessInfo,
+        conn: pb::Connection,
+    ) {
+        self.emit_connection_event(conn.clone(), None);
+        self.enqueue_connection_warning_alert(conn);
+        self.enqueue_process_warning_alert(proc_info);
+        self.account_miss_and_apply_ask_timeout_policy(request_id).await;
+    }
+
+    pub(super) async fn apply_action(
+        &self,
+        request_id: u64,
+        action: DefaultAction,
+        count_stats: bool,
+        source: &'static str,
+    ) {
+        if action.allows() {
+            if count_stats {
+                if let Some(verdict) = self.fast_allow_with_stats_try_send(request_id, source) {
+                    self.send_verdict_when_full(verdict).await;
+                }
+            } else if let Some(verdict) =
+                self.try_send_verdict(request_id, true, false, false, source, None)
+            {
+                self.send_verdict_when_full(verdict).await;
+            }
+            return;
+        }
+
+        if count_stats {
+            if let Some(verdict) =
+                self.fast_deny_with_stats_try_send(request_id, action.rejects(), source, None)
+            {
+                self.send_verdict_when_full(verdict).await;
+            }
+        } else if let Some(verdict) =
+            self.try_send_verdict(request_id, false, action.rejects(), false, source, None)
+        {
+            self.send_verdict_when_full(verdict).await;
+        }
+    }
+
+    pub(super) async fn apply_ask_timeout_policy(&self, request_id: u64, count_stats: bool) {
+        let ask_timeout_policy = self.config.get_snapshot().ask_timeout_policy;
+        match ask_timeout_policy {
+            AskFallbackPolicy::DefaultAction => {
+                self.apply_default_action(request_id, count_stats).await
+            }
+            AskFallbackPolicy::Allow => {
+                self.apply_action(
+                    request_id,
+                    DefaultAction::Allow,
+                    count_stats,
+                    "ask-timeout-allow",
+                )
+                .await;
+            }
+            AskFallbackPolicy::Drop => {
+                self.apply_action(
+                    request_id,
+                    DefaultAction::Deny,
+                    count_stats,
+                    "ask-timeout-drop",
+                )
+                .await;
+            }
+        }
+    }
+
+    pub(super) async fn account_miss_and_apply_ask_timeout_policy(&self, request_id: u64) {
+        if self.strict_miss_accounting_enabled() {
+            self.stats.on_rule_miss();
+            self.apply_ask_timeout_policy(request_id, true).await;
+        } else {
+            self.stats.on_missed_default_action();
+            self.apply_ask_timeout_policy(request_id, false).await;
+        }
+    }
+}

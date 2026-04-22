@@ -40,9 +40,17 @@ fn parse_cli_overrides() -> CliOverrides {
             continue;
         };
         match flag.as_str() {
+            // Core daemon flags
             "rules-path"  => overrides.rules_path  = value.map(std::path::PathBuf::from),
             "config-file" => overrides.config_file = value.map(std::path::PathBuf::from),
             "ui-socket"   => overrides.ui_socket   = value,
+            // Metrics flags (§7: CLI overrides env vars and metrics.json baseline)
+            "metrics-prometheus-addr" => overrides.metrics.prometheus_addr = value,
+            "metrics-push-url"        => overrides.metrics.push_url        = value,
+            "metrics-push-format"     => overrides.metrics.push_format     = value,
+            "metrics-push-job"        => overrides.metrics.push_job        = value,
+            "metrics-push-token"      => overrides.metrics.push_token      = value,
+            "metrics-push-gzip"       => overrides.metrics.push_gzip       = Some(true),
             _ => {}
         }
     }
@@ -51,11 +59,19 @@ fn parse_cli_overrides() -> CliOverrides {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // --check-caps: run kernel capability diagnostic and exit.
+    // Handled before logging init so output goes cleanly to stdout/stderr.
+    if std::env::args().any(|a| a == "--check-caps") {
+        let diag = crate::utils::kernel_caps::run();
+        diag.print_report();
+        std::process::exit(if diag.all_pass { 0 } else { 1 });
+    }
+
     logging::LoggingState::init();
 
     let client_addr = std::env::var("OPENSNITCH_CLIENT_ADDR").ok();
     let mut overrides = parse_cli_overrides();
-    // OPENSNITCH_CLIENT_ADDR env var takes lower precedence than --ui-socket flag.
+    // §7: --ui-socket CLI has highest precedence; env var fills when CLI absent.
     if overrides.ui_socket.is_none() {
         overrides.ui_socket = client_addr;
     }

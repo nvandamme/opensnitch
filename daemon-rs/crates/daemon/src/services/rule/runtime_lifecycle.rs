@@ -11,7 +11,6 @@ impl RuleService {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceFactory for RuleService {
     type FactoryInput = ();
 
@@ -20,7 +19,6 @@ impl ServiceFactory for RuleService {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceRuntimeControl for RuleService {
     type ReloadInput = ();
 

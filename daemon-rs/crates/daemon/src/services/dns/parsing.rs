@@ -96,17 +96,19 @@ impl DnsEbpfEventDeduper {
         const DEDUP_WINDOW: Duration = Duration::from_secs(5);
         const MAX_RECENT_EVENTS: usize = 4096;
 
-        recent_events.retain(|_, seen_at| now.duration_since(*seen_at) <= DEDUP_WINDOW);
-
-        if recent_events.len() > MAX_RECENT_EVENTS {
-            recent_events.clear();
-        }
-
         let key = (ip.to_string(), host.to_string());
         if let Some(seen_at) = recent_events.get(&key)
             && now.duration_since(*seen_at) <= DEDUP_WINDOW
         {
             return false;
+        }
+
+        // Evict stale entries only when near capacity, not on every call.
+        if recent_events.len() >= MAX_RECENT_EVENTS {
+            recent_events.retain(|_, seen_at| now.duration_since(*seen_at) <= DEDUP_WINDOW);
+            if recent_events.len() >= MAX_RECENT_EVENTS {
+                recent_events.clear();
+            }
         }
 
         recent_events.insert(key, now);

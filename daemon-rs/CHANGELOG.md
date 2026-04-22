@@ -14,8 +14,153 @@ Versioning baseline:
 ## [v0.5.1] - unreleased
 
 ### Added
+- **Prometheus `/metrics` scrape endpoint** (`platform/adapters/stats_exporter_prometheus.rs`,
+  feature-gated `metrics-export`):
+  - `PrometheusStatsExporter` implements `StatsExporterPort` — stores a stats snapshot
+    atomically via `ArcSwap`; the snapshot is never written on the hot-path request handler.
+  - `spawn_metrics_server(addr, shutdown)` starts a minimal `hyper` 1.x HTTP/1.1 listener;
+    `/metrics` serves the snapshot; any other path returns 404; bind failure logs a warning
+    and disables the endpoint without affecting daemon operation (fail-open).
+  - **Content negotiation** per the [Prometheus scrape protocol spec](https://prometheus.io/docs/instrumenting/content_negotiation/):
+    - `negotiate_format(accept)` parses `Accept` q-values; selects the richest supported
+      format at the highest q-value; tie-breaks: OpenMetrics > Text1.0.0 > Text0.0.4 > Proto.
+    - Supported formats:
+      - `PrometheusText0.0.4` (`text/plain; version=0.0.4; charset=utf-8`) — default fallback.
+      - `PrometheusText1.0.0` (`text/plain; version=1.0.0; charset=utf-8; escaping=allow-utf-8`)
+        — identical output to 0.0.4; label values already pass UTF-8 through.
+      - `OpenMetricsText1.0.0` (`application/openmetrics-text; version=1.0.0; charset=utf-8`)
+        — counter MetricFamilies use base names (no `_total`) for HELP/TYPE; samples include
+        `<base>_total` and `<base>_created` (Unix float); gauges with a known unit get a
+        `# UNIT` line; output terminates with `# EOF\n`.
+      - `PrometheusProto` (`application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited`).
+    - `PrometheusProto` wins only when its weight strictly exceeds text;
+      among text formats, richest wins on ties.
+  - **Gzip compression**: `Accept-Encoding: gzip` (or `*`) triggers `flate2` gzip
+    compression; `Content-Encoding: gzip` is set on the response.  Falls back silently to
+    uncompressed body on compression failure.
+  - **Metric set**: 7 counters (`_total` suffix), 5 gauges, 6 labeled gauges
+    (breakdown by protocol, address, host, port, uid, executable).  All prefixed `opensnitch_`.
+  - Wired in `daemon/tasks.rs:spawn_stats_flow()` under `#[cfg(feature = "metrics-export")]`.
+
+- **Push-style stats exporter** (`platform/adapters/stats_exporter_push.rs`,
+  feature-gated `metrics-export`):
+  - `PushStatsExporter` implements `StatsExporterPort` — non-blocking `export_snapshot`
+    enqueues a compact snapshot onto a bounded channel (capacity 4); drops silently on full
+    (fail-open).
+  - Background `push_worker` task drains the channel and POSTs to the remote endpoint via
+    `reqwest::Client` with 5 s timeout; HTTP errors are logged at DEBUG — never fatal.
+  - Three push formats:
+    - `pushgateway` (default): Prometheus text 0.0.4 POSTed to `{url}/metrics/job/{job}`.
+      Compatible with Prometheus Pushgateway, Grafana Mimir, and Grafana Cloud remote-write.
+    - `pushgateway-proto`: Prometheus protobuf (`io.prometheus.client.MetricFamily`, delimited)
+      — preferred by Prometheus-native backends.
+    - `influxdb`: InfluxDB line protocol POSTed to the URL verbatim per the
+      [InfluxDB v2 write API](https://docs.influxdata.com/influxdb/v2/get-started/write/):
+      - integer field suffix `i` on all fields,
+      - tag values escaped (comma, space, equals, backslash),
+      - `?precision=s` appended when absent,
+      - `Authorization: Token <token>` header for InfluxDB v2 auth.
+  - `MultiStatsExporter`: fan-out adapter that routes each snapshot to an ordered
+    `Vec<Arc<dyn StatsExporterPort>>`; used when both Prometheus and push are enabled.
+  - Gzip push bodies optional (`Content-Encoding: gzip`); shared `gzip_compress()` helper
+    from the scrape adapter.
+
+  - **`metrics.json` hot-reload on SIGHUP** (`daemon/reload.rs`, `daemon.rs`, `daemon/tasks.rs`):
+    - `DaemonRuntime` gains a `metrics_server: Mutex<Option<MetricsServerSlot>>` field
+      (feature-gated `metrics-export`).  `MetricsServerSlot` stores the long-lived
+      `PrometheusStatsExporter` Arc, the current bound address, and the server's
+      `CancellationToken`.
+    - `spawn_stats_flow()` always creates the `PrometheusStatsExporter` (even when no
+      address is configured) so that a subsequent SIGHUP that adds an address does not
+      require a flow restart.  The scrape HTTP server is only started when an address
+      is resolved.  A child `CancellationToken` (not `daemon.shutdown`) is used for the
+      server so it can be independently cancelled on reload.
+    - `Daemon::reload_metrics_server()` (called from `reload_runtime_after_sighup`):
+      re-reads `metrics.json`, performs §7 resolution, and compares the resolved address
+      to the current one:
+      - **Addr unchanged** → no-op.
+      - **Addr added or changed** → cancel old server (if any), spawn new listener,
+        store new `MetricsServerSlot`; the existing exporter Arc is reused so the
+        `StatsFlow` continues delivering snapshots uninterrupted.
+      - **Addr removed** → cancel server; exporter remains wired (snapshots continue
+        accumulating, server-less).
+    - Push exporter configuration is not hot-reloaded; a daemon restart is required
+      for push URL / format / credential changes.
+
+- **DESIGN_RULES §7 — Configuration Surface Precedence Rule** (`DESIGN_RULES.md`):
+  - Mandates CLI switches → env vars → JSON config file (baseline) precedence for any
+    externally-settable parameter.  CLI switches have highest precedence; env vars
+    are mid-tier (typically used for testing, CI, and ephemeral deployment injection).
+
+- **`metrics.json` config file + CLI switches for metrics-export** (`models/metrics_config.rs`):
+  - New `MetricsConfig` serde model (`PrometheusConfig.addr`, `PushExportConfig.{url,format,
+    job,token,gzip,bucket,org}`); loaded from `metrics.json` co-located with the daemon
+    config at startup via `MetricsConfig::load_sibling()` (fail-open: absent file → defaults).
+  - `CliOverrides.metrics: MetricsCliOverrides` + 6 new `--metrics-*` flags parsed in
+    `parse_cli_overrides()`.
+  - `spawn_stats_flow()` performs full §7 resolution: CLI → env var → JSON config
+    baseline.
+  - `prometheus_addr_from_env()` and `PushConfig::from_env()` removed — dead code after
+    migration.  CLI switches (`--metrics-*`) have highest precedence; env vars
+    (`OPENSNITCH_PROMETHEUS_ADDR`, `OPENSNITCH_PUSH_*`) are mid-tier.
 
 ### Changed
+- **Kernel capability self-check diagnostic** (`utils/kernel_caps.rs`, Go parity gap closed):
+  - Reads kernel config from `/boot/config-{kver}`, `/proc/config.gz` (gzip-decoded via
+    `flate2`), or `/usr/lib/modules/{kver}/config` — same search order as Go daemon.
+  - Checks 7 feature groups (kprobes, uprobes, ftrace, syscalls, nfqueue, netlink,
+    net diagnostics) via `regex::bytes::Regex` against the raw config bytes; checks
+    tracefs mount via `/proc/mounts`.
+  - Results emitted as `tracing` structured events (`info` on pass, `warn` on miss);
+    non-fatal and gracefully degrades when config file is absent.
+  - Wired in `daemon/bootstrap.rs` immediately after config load, mirroring Go's
+    `core.CheckSysRequirements()` call position.
+  - `flate2 = "1"` added as a direct dependency.
+- **Refactor: split oversized API-surface files** (DESIGN_RULES §3):
+  - `services/storage/ops.rs` (new) — 3 free-function I/O helpers (`option_if_not_found`,
+    `bool_if_not_found`, `exists_if_not_found`) extracted from `StorageService` private methods.
+  - `services/client/session.rs` (new) — session types (`ClientPrincipal`, `ClientSession`,
+    `ClientSessionSnapshot`) + `SessionState` (watch channel wrapper + principal-ranking logic)
+    extracted from `client.rs`.  `ClientService` now holds `session: Arc<SessionState>`.
+  - `flows/verdict/helpers.rs` (new) — 17 private `VerdictFlow` helper methods extracted from
+    `verdict.rs` (decision-epoch bookkeeping, miss accounting, alert enqueuing, action
+    application, ask-timeout policy).  Methods remain `impl VerdictFlow` in a sibling module;
+    accessed fields/methods are `pub(super)`.
+  - 425 tests green; no API surface change.
+
+### Added
+- **Event-driven firewall drift detection** (`workers/firewall/watch_worker.rs` +
+  new `platform/adapters/nft_monitor.rs`):
+  - `FirewallWatchControl::targets()` now returns `WatchWorkerControl::path_targets`
+    for the firewall config file (+ parent directory), enabling the existing
+    inotify+epoll watch infrastructure to wake immediately on config-file writes.
+    `empty_targets_behavior` changed to `WarnPollFallback` (empty target list is now
+    anomalous rather than expected).
+  - `platform/adapters/nft_monitor.rs` — new `spawn_nft_drift_listener(firewall,
+    shutdown)` opens a `MulticastSocketRaw` on `NETLINK_NETFILTER` (12) and subscribes
+    to `NFNLGRP_NFTABLES` (group 7).  On each kernel nftables rule-change event the
+    adapter calls `firewall.heal_if_drifted()`.  The service's existing
+    `drift_recovery_blocked_until_epoch_ms` atomic provides burst rate-limiting; rapid
+    bursts collapse to a single heal call.  Socket-open or listen failure degrades
+    gracefully (warning log) — the 20 s timer loop remains the safety-net fallback.
+    Wired in `workers/firewall/watch_worker.rs::start()`.
+  - Go parity note: Go uses ticker-based drift polling only; NFNLGRP_NFTABLES
+    subscription is a Rust extension beyond the Go baseline.
+
+### Changed
+- **`async-trait` removed as a production dependency** (`crates/daemon/Cargo.toml` +
+  13 service runtime files):
+  - All 34 `#[async_trait::async_trait]` attributes removed from
+    `services/lifecycle.rs` (trait definitions for `ServiceLifecycle`,
+    `ServiceFactory`, `ServiceRuntimeControl`) and every `services/*/runtime_lifecycle.rs`
+    impl file.  Native AFIT (`async fn` in traits, stable since Rust 1.75) handles these
+    traits without any proc-macro.
+  - `async-trait = "0.1"` removed from `[dependencies]` and moved to
+    `[dev-dependencies]`.  It remains there solely because `tonic-prost-build 0.14`
+    still desugars `#[async_trait]` on generated server traits; the three tonic Ui
+    test-server impls in `tests/flows/` therefore still require the attribute.  The
+    production binary carries zero async-trait overhead.
+  - Tested against: Rustc 1.93.1, edition = "2024".
 - **[CRITICAL] eBPF map owner lookup — aya-first**: `services/connection/ebpf.rs` fully
   migrated.  `list_bpf_maps()` uses `aya::maps::loaded_maps()` first; `lookup_bpf_owner()`
   uses a new `aya_lookup_bpf_owner()` helper that dispatches on key length (12 → v4,

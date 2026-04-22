@@ -17,6 +17,7 @@ use crate::workers::runtime::control::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EmptyWatchTargetsBehavior {
     WarnPollFallback,
+    #[allow(dead_code)]
     InfoPollFallback,
 }
 
@@ -271,9 +272,9 @@ fn setup_fs_trigger(
 ) -> (
     Option<InotifyTrigger>,
     bool,
-    tokio::sync::mpsc::UnboundedReceiver<()>,
+    tokio::sync::mpsc::Receiver<()>,
 ) {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
 
     let fd = {
         let flags = nix::libc::IN_NONBLOCK | nix::libc::IN_CLOEXEC;
@@ -430,7 +431,7 @@ fn setup_fs_trigger(
             }
 
             if emit {
-                let _ = tx.send(());
+                let _ = tx.try_send(());
             }
         }
 

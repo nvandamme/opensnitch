@@ -5,6 +5,7 @@ use crate::models::{
 use crate::platform::ports::socket_diag_port::{NativeSocketDiagPort, SocketDiagPlatformPort};
 use crate::utils::proc_fs::proc_pid_exists;
 use crate::utils::proc_net::read_proc_net_packet_rows;
+use std::io::{BufRead, BufReader};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
@@ -110,23 +111,22 @@ impl ConnectionService {
         }
         let hint = uid_hint.filter(|v| *v != 0)?;
         let entries = read_proc_net_packet_rows();
-        let mut candidates = Vec::new();
+        // Single-slot tracking: return Some only when exactly one owner matches.
+        // On a second *different* entry we return None immediately — no Vec needed.
+        let mut found: Option<ConnectionOwner> = None;
         for entry in entries {
             if entry.inode == 0 || entry.uid != hint {
                 continue;
             }
-            if let Some(pid) = Self::resolve_pid_by_inode(entry.inode) {
-                candidates.push(ConnectionOwner {
-                    uid: entry.uid,
-                    pid,
-                });
+            let Some(pid) = Self::resolve_pid_by_inode(entry.inode) else {
+                continue;
+            };
+            match &found {
+                None => found = Some(ConnectionOwner { uid: entry.uid, pid }),
+                Some(_) => return None, // ambiguous: more than one socket owner
             }
         }
-        if candidates.len() == 1 {
-            candidates.into_iter().next()
-        } else {
-            None
-        }
+        found
     }
 
     fn resolve_owner_by_connection_fallback(
@@ -138,12 +138,16 @@ impl ConnectionService {
         uid_hint: Option<u32>,
     ) -> Option<ConnectionOwner> {
         for path in Self::proc_net_paths(protocol) {
-            let Ok(contents) = std::fs::read_to_string(path) else {
+            let Ok(file) = std::fs::File::open(path) else {
                 continue;
             };
-            for line in contents.lines().skip(1) {
+            // BufReader: iterate line-by-line without loading the entire
+            // /proc/net/{tcp,tcp6,…} file into a heap String; return early on match.
+            let mut lines = BufReader::new(file).lines();
+            lines.next(); // skip header
+            for line in lines.filter_map(|r| r.ok()) {
                 let Some(((local_ip, local_port), (remote_ip, remote_port), uid, inode)) =
-                    Self::parse_proc_net_row(line)
+                    Self::parse_proc_net_row(&line)
                 else {
                     continue;
                 };

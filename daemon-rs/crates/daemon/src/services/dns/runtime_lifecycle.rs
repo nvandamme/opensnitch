@@ -97,7 +97,6 @@ impl DnsLifecycle {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceLifecycle for DnsLifecycle {
     async fn init(&mut self) -> anyhow::Result<()> {
         self.clear_error_and_transition(ServiceState::Stopped);
@@ -147,7 +146,6 @@ impl ServiceLifecycle for DnsLifecycle {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceFactory for DnsService {
     type FactoryInput = ();
 
@@ -156,7 +154,6 @@ impl ServiceFactory for DnsService {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceRuntimeControl for DnsService {
     type ReloadInput = ();
 

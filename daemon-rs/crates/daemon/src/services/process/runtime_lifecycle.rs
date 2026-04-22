@@ -97,7 +97,6 @@ impl ProcessLifecycle {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceLifecycle for ProcessLifecycle {
     async fn init(&mut self) -> anyhow::Result<()> {
         self.clear_error_and_transition(ServiceState::Stopped);
@@ -147,7 +146,6 @@ impl ServiceLifecycle for ProcessLifecycle {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceFactory for ProcessService {
     type FactoryInput = ();
 
@@ -156,7 +154,6 @@ impl ServiceFactory for ProcessService {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceRuntimeControl for ProcessService {
     type ReloadInput = ();
 

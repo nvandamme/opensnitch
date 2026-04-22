@@ -2011,3 +2011,283 @@ async fn temporary_rule_duration_change_prevents_old_timer_deletion() -> Result<
     assert_eq!(listed[0].name, "temp-change");
     Ok(())
 }
+
+#[tokio::test]
+async fn match_attempt_domain_lists_parses_adblock_adguard_format() -> Result<()> {
+    // Verify conformance with the AdGuard Home Hosts-Blocklists spec and the
+    // Adblock Plus filter cheatsheet:
+    //   https://github.com/AdguardTeam/AdGuardHome/wiki/Hosts-Blocklists
+    //   https://adblockplus.org/filter-cheatsheet
+    let rules_dir = TestDir::new("rule-service-adblock-rules");
+    let list_dir = TestDir::new("rule-service-adblock-lists");
+
+    tokio::fs::write(
+        list_dir.path.join("adblock.txt"),
+        concat!(
+            "[Adblock Plus 2.0]\n",
+            "! AdBlock comment — header metadata\n",
+            "# hosts-style comment\n",
+            "@@||allowlisted.example.com^\n",          // exception rule: skip
+            "||ads.example.com^\n",                    // plain anchor: exact + subdomains
+            "||*.tracker.net^\n",                      // explicit wildcard: subdomains only
+            "||CAPITAL.example.org^\n",                // case: must normalise
+            "||blocked.com^$third-party\n",            // anchor + options: strip options
+            "||path.example.net/resource^\n",          // URL-style: strip path
+            "example.com##.ad-banner\n",               // cosmetic filter: skip
+            "example.com#@#.ad\n",                     // cosmetic exception: skip
+            "/regex-blocked\\.test\\.example/\n",      // regex: applied via domains_regex cascade
+            "|http://single-anchor.example|\n",        // single-| URL anchor: skip
+            "*$denyallow=com|net\n",                   // modifier-only wildcard: skip
+            "plain-domain.example\n",                  // plain domain: exact only
+            "inline.example # this is a comment\n",   // inline comment: strip
+            "0.0.0.0 hosts-format.example\n",          // hosts format: exact only
+        ),
+    )
+    .await?;
+
+    write_rule_file(
+        &rules_dir.path,
+        "adblock-rule",
+        "deny",
+        true,
+        false,
+        RuleFileOperator {
+            r#type: "lists".to_string(),
+            operand: "lists.domains".to_string(),
+            data: path_string(&list_dir.path),
+            sensitive: false,
+            scope: None,
+            list: Vec::new(),
+        },
+    )
+    .await?;
+
+    let service = RuleService::default();
+    service.load_path(&rules_dir.path).await?;
+
+    // ||domain^ spec: blocks the domain AND all subdomains.
+    // — exact domain match
+    let hit = service
+        .match_attempt(&probe_attempt("10.0.0.1"), &probe_process(), Some("ads.example.com"))
+        .await?;
+    assert_eq!(hit, Some(RuleMatchDecision { allow: false, reject: false, nolog: false }),
+        "||ads.example.com^ must match the domain itself");
+
+    // — subdomain match (the key spec requirement)
+    let hit = service
+        .match_attempt(&probe_attempt("10.0.0.11"), &probe_process(), Some("sub.ads.example.com"))
+        .await?;
+    assert_eq!(hit, Some(RuleMatchDecision { allow: false, reject: false, nolog: false }),
+        "||ads.example.com^ must match sub.ads.example.com");
+
+    // Explicit wildcard ||*.tracker.net^: matches subdomains only, NOT the domain itself.
+    let hit = service
+        .match_attempt(&probe_attempt("10.0.0.2"), &probe_process(), Some("sub.tracker.net"))
+        .await?;
+    assert_eq!(hit, Some(RuleMatchDecision { allow: false, reject: false, nolog: false }),
+        "||*.tracker.net^ must match subdomain");
+
+    let miss_exact = service
+        .match_attempt(&probe_attempt("10.0.0.12"), &probe_process(), Some("tracker.net"))
+        .await?;
+    assert_eq!(miss_exact, None,
+        "||*.tracker.net^ must NOT match exact tracker.net (no wildcard-only subdomain rule)");
+
+    // Case normalisation: CAPITAL.example.org → capital.example.org
+    let hit = service
+        .match_attempt(&probe_attempt("10.0.0.3"), &probe_process(), Some("capital.example.org"))
+        .await?;
+    assert_eq!(hit, Some(RuleMatchDecision { allow: false, reject: false, nolog: false }),
+        "||CAPITAL.example.org^ must normalise to lowercase");
+
+    // Options stripped: blocked.com (with $third-party in list) must still match
+    let hit = service
+        .match_attempt(&probe_attempt("10.0.0.4"), &probe_process(), Some("blocked.com"))
+        .await?;
+    assert_eq!(hit, Some(RuleMatchDecision { allow: false, reject: false, nolog: false }),
+        "||blocked.com^$third-party options must be stripped");
+
+    // Subdomain of options-stripped domain must also match
+    let hit = service
+        .match_attempt(&probe_attempt("10.0.0.14"), &probe_process(), Some("sub.blocked.com"))
+        .await?;
+    assert_eq!(hit, Some(RuleMatchDecision { allow: false, reject: false, nolog: false }),
+        "subdomain of ||blocked.com^$third-party must match");
+
+    // URL path stripped: ||path.example.net/resource^ → path.example.net
+    let hit = service
+        .match_attempt(&probe_attempt("10.0.0.5"), &probe_process(), Some("path.example.net"))
+        .await?;
+    assert_eq!(hit, Some(RuleMatchDecision { allow: false, reject: false, nolog: false }),
+        "||path.example.net/resource^ path must be stripped");
+
+    // Exception rule (@@) must NOT produce a block match
+    let miss = service
+        .match_attempt(&probe_attempt("10.0.0.6"), &probe_process(), Some("allowlisted.example.com"))
+        .await?;
+    assert_eq!(miss, None, "@@||allowlisted.example.com^ exception must be skipped");
+
+    // Cosmetic filter lines must NOT be added as domain entries
+    let miss = service
+        .match_attempt(&probe_attempt("10.0.0.7"), &probe_process(), Some("example.com"))
+        .await?;
+    assert_eq!(miss, None, "example.com##.ad-banner cosmetic filter must be skipped");
+
+    // Regex rules are now applied via the domains_regex cascade (not skipped).
+    // /regex-blocked\.test\.example/ matches the precise host only.
+    let hit = service
+        .match_attempt(&probe_attempt("10.0.0.8"), &probe_process(), Some("regex-blocked.test.example"))
+        .await?;
+    assert_eq!(hit, Some(RuleMatchDecision { allow: false, reject: false, nolog: false }),
+        "/regex-blocked\\.test\\.example/ must match via domains_regex cascade");
+
+    let miss = service
+        .match_attempt(&probe_attempt("10.0.0.81"), &probe_process(), Some("other.test.example"))
+        .await?;
+    assert_eq!(miss, None, "host not matching the precise regex must miss");
+
+    // Single-| URL anchors must be skipped
+    let miss = service
+        .match_attempt(&probe_attempt("10.0.0.9"), &probe_process(), Some("single-anchor.example"))
+        .await?;
+    assert_eq!(miss, None, "|http://...| single-anchor rule must be skipped");
+
+    // Modifier-only wildcard (*$denyallow=...) must be skipped (would match everything)
+    // We verify this indirectly: an unrelated host should NOT match.
+    let miss = service
+        .match_attempt(&probe_attempt("10.0.0.10"), &probe_process(), Some("unrelated.tld"))
+        .await?;
+    assert_eq!(miss, None, "*$denyallow modifier-only rule must be skipped");
+
+    // Plain domain: exact only (no subdomains)
+    let hit = service
+        .match_attempt(&probe_attempt("10.0.0.11"), &probe_process(), Some("plain-domain.example"))
+        .await?;
+    assert_eq!(hit, Some(RuleMatchDecision { allow: false, reject: false, nolog: false }),
+        "plain domain must match exactly");
+
+    let miss = service
+        .match_attempt(&probe_attempt("10.0.0.21"), &probe_process(), Some("sub.plain-domain.example"))
+        .await?;
+    assert_eq!(miss, None, "plain domain entry must not match subdomains");
+
+    // Inline comment stripping: `inline.example # this is a comment` → `inline.example`
+    let hit = service
+        .match_attempt(&probe_attempt("10.0.0.12"), &probe_process(), Some("inline.example"))
+        .await?;
+    assert_eq!(hit, Some(RuleMatchDecision { allow: false, reject: false, nolog: false }),
+        "inline # comment must be stripped from plain domain line");
+
+    // Hosts format: exact only
+    let hit = service
+        .match_attempt(&probe_attempt("10.0.0.13"), &probe_process(), Some("hosts-format.example"))
+        .await?;
+    assert_eq!(hit, Some(RuleMatchDecision { allow: false, reject: false, nolog: false }),
+        "0.0.0.0 hosts-format must still work");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn match_attempt_domain_lists_regex_cascade_in_domains_operand() -> Result<()> {
+    // Verify that `lists.domains` transparently handles AdBlock-style `/pattern/`
+    // regex entries found in mixed list files, mirroring the AdGuard urlfilter engine
+    // design (single operand, cascaded dedicated caches).
+    //
+    // Cascade under test:
+    //   HashSet (exact, O(1)) → DomainWildcardTrie → GlobMatcher → domains_regex
+    //
+    // The regex path is reached only when all structural lookups miss, so hosts that
+    // match earlier layers remain unaffected.
+    let rules_dir = TestDir::new("rule-service-domains-regex-cascade-rules");
+    let list_dir = TestDir::new("rule-service-domains-regex-cascade-lists");
+
+    tokio::fs::write(
+        list_dir.path.join("mixed.txt"),
+        concat!(
+            "! comment line\n",
+            "plain.example\n",                 // exact domain → HashSet
+            "||anchor.example^\n",             // AdBlock anchor → trie (domain+subdomains)
+            "||*.wildcard.example^\n",         // explicit wildcard anchor → trie (subdomains only)
+            "/tracker\\.[a-z]+/\n",            // regex: matches e.g. tracker.net, tracker.io
+            "/^ads\\./\n",                     // regex: matches any host starting with "ads."
+        ),
+    )
+    .await?;
+
+    write_rule_file(
+        &rules_dir.path,
+        "domains-regex-cascade-rule",
+        "deny",
+        true,
+        false,
+        RuleFileOperator {
+            r#type: "lists".to_string(),
+            operand: "lists.domains".to_string(),
+            data: path_string(&list_dir.path),
+            sensitive: false,
+            scope: None,
+            list: Vec::new(),
+        },
+    )
+    .await?;
+
+    let service = RuleService::default();
+    service.load_path(&rules_dir.path).await?;
+
+    // — fast path: exact HashSet hit
+    let hit = service
+        .match_attempt(&probe_attempt("10.1.0.1"), &probe_process(), Some("plain.example"))
+        .await?;
+    assert_eq!(hit, Some(RuleMatchDecision { allow: false, reject: false, nolog: false }),
+        "plain domain must hit via HashSet");
+
+    // — fast path: trie hit (AdBlock anchor — exact domain)
+    let hit = service
+        .match_attempt(&probe_attempt("10.1.0.2"), &probe_process(), Some("anchor.example"))
+        .await?;
+    assert_eq!(hit, Some(RuleMatchDecision { allow: false, reject: false, nolog: false }),
+        "||anchor.example^ must match the domain itself via trie");
+
+    // — fast path: trie hit (AdBlock anchor — subdomain)
+    let hit = service
+        .match_attempt(&probe_attempt("10.1.0.3"), &probe_process(), Some("sub.anchor.example"))
+        .await?;
+    assert_eq!(hit, Some(RuleMatchDecision { allow: false, reject: false, nolog: false }),
+        "||anchor.example^ must match sub.anchor.example via trie");
+
+    // — fast path: trie hit (explicit wildcard — subdomain only)
+    let hit = service
+        .match_attempt(&probe_attempt("10.1.0.4"), &probe_process(), Some("sub.wildcard.example"))
+        .await?;
+    assert_eq!(hit, Some(RuleMatchDecision { allow: false, reject: false, nolog: false }),
+        "||*.wildcard.example^ must match subdomain via trie");
+
+    // — fall-through to domains_regex: /tracker\.[a-z]+/
+    let hit = service
+        .match_attempt(&probe_attempt("10.1.0.5"), &probe_process(), Some("tracker.net"))
+        .await?;
+    assert_eq!(hit, Some(RuleMatchDecision { allow: false, reject: false, nolog: false }),
+        "/tracker\\.[a-z]+/ must match tracker.net via domains_regex cascade");
+
+    let hit = service
+        .match_attempt(&probe_attempt("10.1.0.6"), &probe_process(), Some("tracker.io"))
+        .await?;
+    assert_eq!(hit, Some(RuleMatchDecision { allow: false, reject: false, nolog: false }),
+        "/tracker\\.[a-z]+/ must match tracker.io via domains_regex cascade");
+
+    // — fall-through to domains_regex: /^ads\./
+    let hit = service
+        .match_attempt(&probe_attempt("10.1.0.7"), &probe_process(), Some("ads.example.com"))
+        .await?;
+    assert_eq!(hit, Some(RuleMatchDecision { allow: false, reject: false, nolog: false }),
+        "/^ads\\// must match ads.example.com via domains_regex cascade");
+
+    // — miss: a host that matches no layer
+    let miss = service
+        .match_attempt(&probe_attempt("10.1.0.8"), &probe_process(), Some("safe.example.org"))
+        .await?;
+    assert_eq!(miss, None, "unmatched host must produce no verdict");
+
+    Ok(())
+}

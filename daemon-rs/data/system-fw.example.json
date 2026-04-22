@@ -1,0 +1,108 @@
+{
+  "Enabled": true,
+  "Version": 1,
+  "SystemRules": [
+    {
+      "Rule": {
+        "Table": "mangle",
+        "Chain": "OUTPUT",
+        "Enabled": false,
+        "Position": "0",
+        "Description": "Allow icmp (iptables example — set Enabled:true to activate)",
+        "Parameters": "-p icmp",
+        "Expressions": [],
+        "Target": "ACCEPT",
+        "TargetParameters": ""
+      },
+      "Chains": []
+    },
+    {
+      "Rule": {},
+      "Chains": [
+        {
+          "Name": "filter_forward",
+          "Table": "opensnitch",
+          "Family": "inet",
+          "Priority": "",
+          "Type": "filter",
+          "Hook": "forward",
+          "Policy": "accept",
+          "Rules": []
+        },
+        {
+          "Name": "filter_output",
+          "Table": "opensnitch",
+          "Family": "inet",
+          "Priority": "",
+          "Type": "filter",
+          "Hook": "output",
+          "Policy": "accept",
+          "Rules": []
+        },
+        {
+          "Name": "filter_input",
+          "Table": "opensnitch",
+          "Family": "inet",
+          "Priority": "",
+          "Type": "filter",
+          "Hook": "input",
+          "Policy": "accept",
+          "Rules": [
+            {
+              "Enabled": false,
+              "Position": "0",
+              "Description": "Allow SSH when input policy is DROP (nftables example — set Enabled:true to activate)",
+              "Parameters": "",
+              "Expressions": [
+                {
+                  "Statement": {
+                    "Op": "",
+                    "Name": "tcp",
+                    "Values": [
+                      {
+                        "Key": "dport",
+                        "Value": "22"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "Target": "accept",
+              "TargetParameters": ""
+            }
+          ]
+        },
+        {
+          "Name": "filter_prerouting",
+          "Table": "opensnitch",
+          "Family": "inet",
+          "Priority": "",
+          "Type": "filter",
+          "Hook": "prerouting",
+          "Policy": "accept",
+          "Rules": []
+        },
+        {
+          "Name": "mangle_prerouting",
+          "Table": "opensnitch",
+          "Family": "inet",
+          "Priority": "",
+          "Type": "mangle",
+          "Hook": "prerouting",
+          "Policy": "accept",
+          "Rules": []
+        },
+        {
+          "Name": "mangle_postrouting",
+          "Table": "opensnitch",
+          "Family": "inet",
+          "Priority": "",
+          "Type": "mangle",
+          "Hook": "postrouting",
+          "Policy": "accept",
+          "Rules": []
+        }
+      ]
+    }
+  ]
+}

@@ -31,6 +31,9 @@ use crate::{DynError, env_flag, perf_repeats, perf_rust_log_level};
 /// Crate defaults to `opensnitchd-rs`; override with `--crate=NAME` [`OPENSNITCH_BUILD_CRATE`].
 /// Profile defaults to `release`; override with `--profile=PROFILE` [`OPENSNITCH_BUILD_PROFILE`].
 /// Cross-compile with `--target=TRIPLE` [`OPENSNITCH_BUILD_TARGET`].
+///
+/// If `OPENSNITCH_CHECK_KERNEL_CAPS_ON_BUILD=1` is set, runs the kernel capability
+/// check against the freshly built binary after a successful build.
 pub(crate) fn run_build() -> Result<(), DynError> {
     let (daemon_rs, crate_name, target) = common_params()?;
     let profile = build_profile();
@@ -50,7 +53,28 @@ pub(crate) fn run_build() -> Result<(), DynError> {
     if let Some(ref t) = triple {
         args.extend(["--target", t.as_str()]);
     }
-    run_live(&daemon_rs, &args, &[("CARGO_TARGET_DIR", &target)])
+    run_live(&daemon_rs, &args, &[("CARGO_TARGET_DIR", &target)])?;
+
+    if check_bool_flag("OPENSNITCH_CHECK_KERNEL_CAPS_ON_BUILD") {
+        eprintln!("\n[check-kernel-caps] running post-build kernel capability check...");
+        let _ = run_check_kernel_caps();
+    }
+    Ok(())
+}
+
+/// `check-kernel-caps`: run the kernel capability diagnostic via the library crate.
+///
+/// Exits with code 1 when any kernel capability check fails; 0 when all pass.
+/// No built binary is required — the check runs in-process.
+pub(crate) fn run_check_kernel_caps() -> Result<(), DynError> {
+    let diag = opensnitch_kernel_caps::run();
+    diag.print_report();
+    if !diag.all_pass {
+        return Err(
+            "kernel capability check reported missing features (see output above)".into(),
+        );
+    }
+    Ok(())
 }
 
 /// `aya-smoke-proc`: run `aya_proc_trace_smoke_reports_explicit_runtime_active`

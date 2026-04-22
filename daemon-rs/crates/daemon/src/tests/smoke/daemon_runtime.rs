@@ -69,6 +69,10 @@ fn build_test_daemon_with_tunables(bus: Bus, tunables: RuntimeTunables) -> Daemo
             tasks: crate::services::task::TaskService::default(),
             tunables,
             shutdown: CancellationToken::new(),
+            metrics_config: crate::models::metrics_config::MetricsConfig::default(),
+            metrics_cli: crate::models::metrics_config::MetricsCliOverrides::default(),
+            #[cfg(feature = "metrics-export")]
+            metrics_server: std::sync::Mutex::new(None),
         }),
     }
 }
@@ -120,9 +124,10 @@ async fn dispatch_kernel_pipeline_event_drops_after_bounded_backoff_when_full() 
 
 #[test]
 fn fanout_kernel_ingress_event_routes_dns_event() {
-    let (dns_tx, mut dns_rx) = mpsc::unbounded_channel::<DnsPayload>();
-    let (process_tx, mut process_rx) = mpsc::unbounded_channel::<ProcessKernelEvent>();
-    let (firewall_tx, mut firewall_rx) = mpsc::unbounded_channel::<FirewallState>();
+    let (dns_tx, mut dns_rx) = mpsc::channel::<DnsPayload>(16);
+    let (process_tx, mut process_rx) = mpsc::channel::<ProcessKernelEvent>(16);
+    let (firewall_tx, mut firewall_rx) = mpsc::channel::<FirewallState>(16);
+    let counters = crate::daemon::KernelPipelineCounters::default();
 
     let routed = Daemon::probe_fanout_kernel_ingress_event(
         KernelEvent::DnsUpdate(DnsPayload::answer(
@@ -132,6 +137,7 @@ fn fanout_kernel_ingress_event_routes_dns_event() {
         &dns_tx,
         &process_tx,
         &firewall_tx,
+        &counters,
     );
 
     assert!(routed);
@@ -148,10 +154,11 @@ fn fanout_kernel_ingress_event_routes_dns_event() {
 
 #[test]
 fn fanout_kernel_ingress_event_returns_false_when_target_receiver_is_closed() {
-    let (dns_tx, dns_rx) = mpsc::unbounded_channel::<DnsPayload>();
-    let (process_tx, _process_rx) = mpsc::unbounded_channel::<ProcessKernelEvent>();
-    let (firewall_tx, _firewall_rx) = mpsc::unbounded_channel::<FirewallState>();
+    let (dns_tx, dns_rx) = mpsc::channel::<DnsPayload>(16);
+    let (process_tx, _process_rx) = mpsc::channel::<ProcessKernelEvent>(16);
+    let (firewall_tx, _firewall_rx) = mpsc::channel::<FirewallState>(16);
     drop(dns_rx);
+    let counters = crate::daemon::KernelPipelineCounters::default();
 
     let routed = Daemon::probe_fanout_kernel_ingress_event(
         KernelEvent::DnsUpdate(DnsPayload::answer(
@@ -161,6 +168,7 @@ fn fanout_kernel_ingress_event_returns_false_when_target_receiver_is_closed() {
         &dns_tx,
         &process_tx,
         &firewall_tx,
+        &counters,
     );
 
     assert!(!routed);

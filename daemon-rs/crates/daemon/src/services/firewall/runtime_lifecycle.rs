@@ -90,7 +90,6 @@ impl FirewallLifecycle {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceLifecycle for FirewallLifecycle {
     async fn init(&mut self) -> anyhow::Result<()> {
         self.clear_error_and_transition(ServiceState::Stopped);
@@ -140,7 +139,6 @@ impl ServiceLifecycle for FirewallLifecycle {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceFactory for FirewallService {
     type FactoryInput = crate::config::Config;
 
@@ -149,7 +147,6 @@ impl ServiceFactory for FirewallService {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceRuntimeControl for FirewallService {
     type ReloadInput = ();
 

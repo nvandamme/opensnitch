@@ -29,36 +29,36 @@ impl SocketDiagAdapter {
         dst: IpAddr,
         dst_port: u16,
     ) -> Vec<SocketInfo> {
-        let mut out = Vec::new();
+        let mut exact = Vec::new();
+        let mut wildcard_dst = Vec::new();
+        let mut relaxed_dst = Vec::new();
         let mut seen = HashSet::new();
 
         for s in sockets {
-            if s.src_port == src_port && s.dst_port == dst_port && s.src == src && s.dst == dst {
-                if seen.insert((s.inode, s.uid, s.src_port, s.dst_port)) {
-                    out.push(s.clone());
+            if s.src_port != src_port || s.src != src {
+                continue;
+            }
+
+            let dedup_key = (s.inode, s.uid, s.src_port, s.dst_port);
+
+            if s.dst_port == dst_port && s.dst == dst {
+                if seen.insert(dedup_key) {
+                    exact.push(s.clone());
+                }
+            } else if s.dst_port == 0 && s.dst.is_unspecified() {
+                if seen.insert(dedup_key) {
+                    wildcard_dst.push(s.clone());
+                }
+            } else if s.dst_port == dst_port {
+                if seen.insert(dedup_key) {
+                    relaxed_dst.push(s.clone());
                 }
             }
         }
 
-        // Go parity fallback: include wildcard destination rows as potential matches.
-        for s in sockets {
-            if s.src_port == src_port && s.src == src && s.dst_port == 0 && s.dst.is_unspecified() {
-                if seen.insert((s.inode, s.uid, s.src_port, s.dst_port)) {
-                    out.push(s.clone());
-                }
-            }
-        }
-
-        // Go parity fallback: include same src/src-port/dst-port rows even when destination IP differs.
-        for s in sockets {
-            if s.src_port == src_port && s.src == src && s.dst_port == dst_port {
-                if seen.insert((s.inode, s.uid, s.src_port, s.dst_port)) {
-                    out.push(s.clone());
-                }
-            }
-        }
-
-        out
+        exact.extend(wildcard_dst);
+        exact.extend(relaxed_dst);
+        exact
     }
 
     #[allow(dead_code)]

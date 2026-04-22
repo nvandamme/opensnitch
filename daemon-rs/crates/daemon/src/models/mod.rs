@@ -15,6 +15,7 @@ pub mod effective_tunables;
 pub mod firewall_runtime;
 pub mod firewall_state;
 pub mod firewall_storage;
+pub mod hash_cache;
 pub mod kernel_event;
 pub mod kernel_pipeline;
 pub mod lifecycle_contract;
@@ -33,6 +34,7 @@ pub mod socket_state;
 pub mod storage_dir_entry;
 pub mod storage_event;
 pub mod storage_event_counters;
+pub mod metrics_config;
 pub mod subscription_refresh;
 pub mod subscription_storage;
 pub mod subscription_wire;
@@ -40,6 +42,10 @@ pub mod task_config;
 pub mod task_lifecycle_event;
 pub mod task_payload;
 pub mod task_storage;
+/// Prometheus `io.prometheus.client` wire-format types (prost-derived).
+/// Only compiled under the `metrics-export` feature (prost is optional).
+#[cfg(feature = "metrics-export")]
+pub mod prometheus_wire;
 pub mod ui_alert;
 pub mod verdict_rpc;
 pub mod worker_runtime_control;

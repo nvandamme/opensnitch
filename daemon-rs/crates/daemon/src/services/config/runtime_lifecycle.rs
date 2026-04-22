@@ -12,7 +12,6 @@ impl ConfigService {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceFactory for ConfigService {
     type FactoryInput = Config;
 
@@ -21,7 +20,6 @@ impl ServiceFactory for ConfigService {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceRuntimeControl for ConfigService {
     type ReloadInput = Config;
 

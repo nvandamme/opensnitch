@@ -1,155 +1,111 @@
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use opensnitch_proto::pb;
 use pb::subscriptions_client::SubscriptionsClient;
 use pb::ui_client::UiClient;
-use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::Arc;
-use tokio::sync::watch;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 
+use super::session::{
+    ClientPrincipal, ClientSession, ClientSessionSnapshot, SessionState, CONTROL_SESSION_ID,
+};
 use super::transport::{
     SocketTarget, build_tls_config, classify_socket_target, connect_unix_abstract_channel,
     connect_unix_channel, connect_with_skip_verify, endpoint_with_keepalive,
 };
 use crate::config::{ClientAuthType, Config};
 
+/// Shared cache for a gRPC `Channel` keyed on a config fingerprint.
+///
+/// Reusing an existing channel avoids TCP+TLS handshake overhead on every
+/// RPC call. The cache is lock-free (`ArcSwap`) and safe to share across
+/// concurrent tasks.
+#[derive(Clone)]
+pub struct GrpcChannelCache {
+    inner: Arc<ArcSwap<Option<CachedChannel>>>,
+}
+
+struct CachedChannel {
+    fingerprint: u64,
+    channel: Channel,
+}
+
+impl Default for GrpcChannelCache {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(ArcSwap::from_pointee(None)),
+        }
+    }
+}
+
+impl GrpcChannelCache {
+    fn fingerprint(config: &Config) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        config.client_addr.hash(&mut h);
+        config.client_auth.auth_type.as_name().hash(&mut h);
+        h.finish()
+    }
+
+    fn load(&self, fp: u64) -> Option<Channel> {
+        let guard = self.inner.load();
+        guard
+            .as_ref()
+            .as_ref()
+            .filter(|c| c.fingerprint == fp)
+            .map(|c| c.channel.clone())
+    }
+
+    fn store(&self, fp: u64, channel: Channel) {
+        self.inner.store(Arc::new(Some(CachedChannel {
+            fingerprint: fp,
+            channel,
+        })));
+    }
+
+    pub fn invalidate(&self) {
+        self.inner.store(Arc::new(None));
+    }
+}
+
 #[derive(Clone)]
 pub struct ClientService {
     grpc: Option<UiClient<Channel>>,
     subscriptions_grpc: Option<SubscriptionsClient<Channel>>,
-    snapshot_tx: watch::Sender<Arc<ClientSessionSnapshot>>,
-    snapshot_rx: watch::Receiver<Arc<ClientSessionSnapshot>>,
+    session: Arc<SessionState>,
 }
 
-impl From<ClientPrincipal> for crate::models::policy_tx::PolicyOwner {
-    fn from(value: ClientPrincipal) -> Self {
-        match value {
-            ClientPrincipal::LocalUid(uid) => Self::LocalUid(uid),
-            ClientPrincipal::UnixAbstractName(name) => Self::UnixAbstractName(name),
-            ClientPrincipal::NetworkIdentity(identity) => Self::NetworkIdentity(identity),
-            ClientPrincipal::IpFallback(ip) => Self::IpFallback(ip.to_string()),
-        }
-    }
-}
-
-const CONTROL_SESSION_ID: &str = "control-plane";
-
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum ClientPrincipal {
-    LocalUid(u32),
-    UnixAbstractName(String),
-    NetworkIdentity(String),
-    IpFallback(IpAddr),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClientSession {
-    pub id: String,
-    pub owner: ClientPrincipal,
-    pub default_action: crate::config::DefaultAction,
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-impl ClientSession {
-    pub fn for_local_uid(
-        uid: u32,
-        default_action: crate::config::DefaultAction,
-    ) -> Self {
-        Self {
-            id: format!("uid:{uid}"),
-            owner: ClientPrincipal::LocalUid(uid),
-            default_action,
-        }
-    }
-
-    pub fn for_network_identity(
-        identity: impl Into<String>,
-        default_action: crate::config::DefaultAction,
-    ) -> Self {
-        let identity = identity.into();
-        Self {
-            id: format!("net:{identity}"),
-            owner: ClientPrincipal::NetworkIdentity(identity),
-            default_action,
-        }
-    }
-
-    pub fn for_unix_abstract_name(
-        name: impl Into<String>,
-        default_action: crate::config::DefaultAction,
-    ) -> Self {
-        let name = name.into();
-        Self {
-            id: format!("abs:{name}"),
-            owner: ClientPrincipal::UnixAbstractName(name),
-            default_action,
-        }
-    }
-
-    pub fn for_ip_fallback(
-        ip: IpAddr,
-        default_action: crate::config::DefaultAction,
-    ) -> Self {
-        Self {
-            id: format!("ip:{ip}"),
-            owner: ClientPrincipal::IpFallback(ip),
-            default_action,
-        }
-    }
-}
-
-#[derive(Clone)]
-struct ClientSessionSnapshot {
-    sessions: BTreeMap<String, ClientSession>,
-    connected_default_action: crate::config::DefaultAction,
-}
+// ---------------------------------------------------------------------------
+// Session management — delegates to SessionState
+// ---------------------------------------------------------------------------
 
 impl Default for ClientService {
     fn default() -> Self {
-        let (snapshot_tx, snapshot_rx) = watch::channel(Arc::new(ClientSessionSnapshot {
-            sessions: BTreeMap::new(),
-            connected_default_action: crate::config::DefaultAction::Deny,
-        }));
         Self {
             grpc: None,
             subscriptions_grpc: None,
-            snapshot_tx,
-            snapshot_rx,
+            session: Arc::new(SessionState::new()),
         }
     }
 }
 
 impl ClientService {
-    fn owned_snapshot(&self) -> ClientSessionSnapshot {
-        self.snapshot_rx.borrow().as_ref().clone()
-    }
-
-    fn principal_rank(owner: &ClientPrincipal) -> u8 {
-        match owner {
-            ClientPrincipal::LocalUid(_) => 0,
-            ClientPrincipal::UnixAbstractName(_) => 1,
-            ClientPrincipal::NetworkIdentity(_) => 2,
-            ClientPrincipal::IpFallback(_) => 3,
-        }
-    }
-
-    fn publish_snapshot(&self, next: ClientSessionSnapshot) {
-        let _ = self.snapshot_tx.send_replace(Arc::new(next));
+    fn modify_snapshot(&self, f: impl FnOnce(&mut ClientSessionSnapshot)) {
+        self.session.modify_snapshot(f);
     }
 
     pub fn upsert_session(&self, session: ClientSession) {
-        let mut next = self.owned_snapshot();
-        next.sessions.insert(session.id.clone(), session);
-        self.publish_snapshot(next);
+        self.modify_snapshot(|s| {
+            s.sessions.insert(session.id.clone(), session);
+        });
     }
 
     #[allow(dead_code)]
     pub fn connect_session(&self, session_id: impl Into<String>) {
         let session_id = session_id.into();
-        let default_action = self.snapshot_rx.borrow().connected_default_action;
+        let default_action = self.session.snapshot_rx.borrow().connected_default_action;
         self.upsert_session(ClientSession {
             id: session_id,
             owner: ClientPrincipal::NetworkIdentity("legacy-session".to_string()),
@@ -159,30 +115,32 @@ impl ClientService {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn connect_local_uid_session(&self, uid: u32) {
-        let default_action = self.snapshot_rx.borrow().connected_default_action;
+        let default_action = self.session.snapshot_rx.borrow().connected_default_action;
         self.upsert_session(ClientSession::for_local_uid(uid, default_action));
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn connect_network_identity_session(&self, identity: impl Into<String>) {
-        let default_action = self.snapshot_rx.borrow().connected_default_action;
+        let default_action = self.session.snapshot_rx.borrow().connected_default_action;
         self.upsert_session(ClientSession::for_network_identity(identity, default_action));
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn connect_ip_fallback_session(&self, ip: IpAddr) {
-        let default_action = self.snapshot_rx.borrow().connected_default_action;
+        let default_action = self.session.snapshot_rx.borrow().connected_default_action;
         self.upsert_session(ClientSession::for_ip_fallback(ip, default_action));
     }
 
     pub fn disconnect_session(&self, session_id: &str) {
-        let mut next = self.owned_snapshot();
-        next.sessions.remove(session_id);
-        self.publish_snapshot(next);
+        self.modify_snapshot(|s| {
+            s.sessions.remove(session_id);
+        });
     }
 
+    #[allow(dead_code)]
     pub fn connected_sessions(&self) -> Vec<ClientSession> {
-        self.snapshot_rx
+        self.session
+            .snapshot_rx
             .borrow()
             .sessions
             .values()
@@ -190,8 +148,12 @@ impl ClientService {
             .collect()
     }
 
+    pub fn connected_sessions_count(&self) -> usize {
+        self.session.snapshot_rx.borrow().sessions.len()
+    }
+
     pub fn primary_owner(&self) -> Option<ClientPrincipal> {
-        let snapshot = self.snapshot_rx.borrow();
+        let snapshot = self.session.snapshot_rx.borrow();
         if let Some(control_session) = snapshot.sessions.get(CONTROL_SESSION_ID) {
             return Some(control_session.owner.clone());
         }
@@ -199,8 +161,8 @@ impl ClientService {
             .sessions
             .values()
             .min_by(|left, right| {
-                let left_rank = Self::principal_rank(&left.owner);
-                let right_rank = Self::principal_rank(&right.owner);
+                let left_rank = SessionState::principal_rank(&left.owner);
+                let right_rank = SessionState::principal_rank(&right.owner);
                 left_rank
                     .cmp(&right_rank)
                     .then_with(|| left.id.cmp(&right.id))
@@ -214,17 +176,17 @@ impl ClientService {
         session_id: &str,
         action: crate::config::DefaultAction,
     ) {
-        let mut next = self.owned_snapshot();
-        if let Some(session) = next.sessions.get_mut(session_id) {
-            session.default_action = action;
-        }
-        self.publish_snapshot(next);
+        self.modify_snapshot(|s| {
+            if let Some(session) = s.sessions.get_mut(session_id) {
+                session.default_action = action;
+            }
+        });
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_connected(&self, connected: bool) {
         if connected {
-            let default_action = self.snapshot_rx.borrow().connected_default_action;
+            let default_action = self.session.snapshot_rx.borrow().connected_default_action;
             self.upsert_session(ClientSession {
                 id: CONTROL_SESSION_ID.to_string(),
                 owner: ClientPrincipal::NetworkIdentity(CONTROL_SESSION_ID.to_string()),
@@ -237,37 +199,36 @@ impl ClientService {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_connected(&self) -> bool {
-        !self.snapshot_rx.borrow().sessions.is_empty()
+        !self.session.snapshot_rx.borrow().sessions.is_empty()
     }
 
     pub fn set_connected_default_action(&self, action: crate::config::DefaultAction) {
-        let mut next = self.owned_snapshot();
-        if let Some(control_session) = next.sessions.get_mut(CONTROL_SESSION_ID) {
-            control_session.default_action = action;
-        }
-        next.connected_default_action = action;
-        self.publish_snapshot(next);
+        self.modify_snapshot(|s| {
+            if let Some(control_session) = s.sessions.get_mut(CONTROL_SESSION_ID) {
+                control_session.default_action = action;
+            }
+            s.connected_default_action = action;
+        });
     }
 
     pub fn connected_default_action(&self) -> crate::config::DefaultAction {
-        self.snapshot_rx.borrow().connected_default_action
+        self.session.snapshot_rx.borrow().connected_default_action
     }
 
     pub fn effective_default_action(
         &self,
         disconnected_default_action: crate::config::DefaultAction,
     ) -> crate::config::DefaultAction {
-        let snapshot = self.snapshot_rx.borrow();
+        let snapshot = self.session.snapshot_rx.borrow();
         if let Some(control_session) = snapshot.sessions.get(CONTROL_SESSION_ID) {
             return control_session.default_action;
         }
-
         snapshot
             .sessions
             .values()
             .min_by(|left, right| {
-                let left_rank = Self::principal_rank(&left.owner);
-                let right_rank = Self::principal_rank(&right.owner);
+                let left_rank = SessionState::principal_rank(&left.owner);
+                let right_rank = SessionState::principal_rank(&right.owner);
                 left_rank
                     .cmp(&right_rank)
                     .then_with(|| left.id.cmp(&right.id))
@@ -294,7 +255,12 @@ impl ClientService {
     }
 }
 
+// ---------------------------------------------------------------------------
+// gRPC transport — connection and RPC methods
+// ---------------------------------------------------------------------------
+
 impl ClientService {
+    #[allow(dead_code)]
     pub async fn connect(addr: &str) -> Result<Self> {
         let channel = match classify_socket_target(addr) {
             SocketTarget::Tcp(target) => endpoint_with_keepalive(target)?.connect().await?,
@@ -303,17 +269,48 @@ impl ClientService {
                 connect_unix_abstract_channel(name.to_string()).await?
             }
         };
+        Ok(Self::from_channel(channel))
+    }
+
+    pub async fn connect_with_config(config: &Config) -> Result<Self> {
+        let channel = Self::connect_channel(config).await?;
+        Ok(Self::from_channel(channel))
+    }
+
+    /// Reuse a cached gRPC channel when the config fingerprint matches,
+    /// falling back to a fresh connection on cache miss or config change.
+    pub async fn connect_or_reuse(
+        config: &Config,
+        cache: &GrpcChannelCache,
+    ) -> Result<Self> {
+        let fp = GrpcChannelCache::fingerprint(config);
+        if let Some(channel) = cache.load(fp) {
+            return Ok(Self::from_channel(channel));
+        }
+        let channel = Self::connect_channel(config).await?;
+        cache.store(fp, channel.clone());
+        Ok(Self::from_channel(channel))
+    }
+
+    fn from_channel(channel: Channel) -> Self {
         let grpc = UiClient::new(channel.clone());
         let subscriptions_grpc = SubscriptionsClient::new(channel);
         let mut service = Self::default();
         service.grpc = Some(grpc);
         service.subscriptions_grpc = Some(subscriptions_grpc);
-        Ok(service)
+        service
     }
 
-    pub async fn connect_with_config(config: &Config) -> Result<Self> {
+    async fn connect_channel(config: &Config) -> Result<Channel> {
         if matches!(config.client_auth.auth_type, ClientAuthType::Simple) {
-            return Self::connect(&config.client_addr).await;
+            let channel = match classify_socket_target(&config.client_addr) {
+                SocketTarget::Tcp(target) => endpoint_with_keepalive(target)?.connect().await?,
+                SocketTarget::UnixPath(path) => connect_unix_channel(path.to_string()).await?,
+                SocketTarget::UnixAbstract(name) => {
+                    connect_unix_abstract_channel(name.to_string()).await?
+                }
+            };
+            return Ok(channel);
         }
 
         let addr = if config.client_addr.starts_with("http://") {
@@ -334,12 +331,7 @@ impl ClientService {
                 .await?
         };
 
-        let grpc = UiClient::new(channel.clone());
-        let subscriptions_grpc = SubscriptionsClient::new(channel);
-        let mut service = Self::default();
-        service.grpc = Some(grpc);
-        service.subscriptions_grpc = Some(subscriptions_grpc);
-        Ok(service)
+        Ok(channel)
     }
 
     pub(crate) fn runtime_identity() -> (String, String) {
@@ -373,7 +365,6 @@ impl ClientService {
             system_firewall: system_firewall.as_ref().clone(),
         }
     }
-
 
     pub async fn subscribe(&mut self, cfg: pb::ClientConfig) -> Result<pb::ClientConfig> {
         Ok(self.grpc_mut().subscribe(cfg).await?.into_inner())

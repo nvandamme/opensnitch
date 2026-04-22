@@ -1,0 +1,14 @@
+{
+  "tasks": [
+    {
+      "name": "downloader",
+      "configfile": "/etc/opensnitchd/tasks/downloader/downloader.json",
+      "enabled": false
+    },
+    {
+      "name": "ioc-scanner",
+      "configfile": "/etc/opensnitchd/tasks/iocscanner/iocscanner.json",
+      "enabled": false
+    }
+  ]
+}

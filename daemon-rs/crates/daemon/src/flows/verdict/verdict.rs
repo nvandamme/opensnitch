@@ -5,16 +5,11 @@ use tokio::sync::mpsc;
 
 use crate::{
     bus::Bus,
-    models::effective_tunables::NfqueueOverloadPolicy,
     models::{connection_state::ConnectionAttempt, verdict_rpc::VerdictReply},
-    platform::ffi::nfqueue::NfqueueRuntimeState,
     platform::adapters::proto_mapper::ProtoMapperAdapter,
     platform::ports::connection_event_exporter_port::ConnectionEventExporterPort,
     services::{
-        client::{
-            AlertBuffer, ClientService, enqueue_alert, warning_connection_alert,
-            warning_process_alert,
-        },
+        client::{AlertBuffer, ClientService, GrpcChannelCache},
         config::ConfigService,
         connection::ConnectionService,
         policy_tx::{PolicyOwner, PolicyTxRequest, global_policy_tx},
@@ -22,250 +17,39 @@ use crate::{
         stats::StatsService,
     },
 };
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
 use crate::models::{
-    config_runtime::{AskFallbackPolicy, DefaultAction},
     rule_match_decision::RuleMatchDecision,
     rule_record::RuleAction,
 };
 
 #[derive(Debug)]
-struct VerdictRulePersistRequest {
-    rule: pb::Rule,
-    owner: PolicyOwner,
-    idempotency_key: String,
+pub(super) struct VerdictRulePersistRequest {
+    pub(super) rule: pb::Rule,
+    pub(super) owner: PolicyOwner,
+    pub(super) idempotency_key: String,
 }
 
 #[derive(Clone)]
 pub struct VerdictFlow {
-    bus: Bus,
-    alert_buffer: AlertBuffer,
-    config: ConfigService,
-    client_service: ClientService,
-    rules: RuleService,
-    connections: ConnectionService,
-    stats: StatsService,
-    pending_decisions: Arc<DashMap<u64, u64>>,
-    rule_persist_tx: mpsc::Sender<VerdictRulePersistRequest>,
+    pub(super) bus: Bus,
+    pub(super) alert_buffer: AlertBuffer,
+    pub(super) config: ConfigService,
+    pub(super) client_service: ClientService,
+    pub(super) rules: RuleService,
+    pub(super) connections: ConnectionService,
+    pub(super) stats: StatsService,
+    pub(super) pending_decisions: Arc<DashMap<u64, u64>>,
+    pub(super) rule_persist_tx: mpsc::Sender<VerdictRulePersistRequest>,
+    /// Cached gRPC channel for UI miss/ask_rule calls.
+    pub(super) grpc_cache: GrpcChannelCache,
     /// Optional per-connection event exporter (Loki, remote syslog, JSON sink, etc.)
-    event_exporter: Option<Arc<dyn ConnectionEventExporterPort>>,
+    pub(super) event_exporter: Option<Arc<dyn ConnectionEventExporterPort>>,
 }
 
 impl VerdictFlow {
-    async fn restore_rules_snapshot(rules: &RuleService, snapshot: &[pb::Rule]) -> Result<(), String> {
-        let target_names = snapshot
-            .iter()
-            .map(|rule| rule.name.clone())
-            .collect::<BTreeSet<_>>();
-        let current = rules.get_proto_snapshot();
-
-        for rule in current.as_ref() {
-            if !target_names.contains(&rule.name) {
-                rules
-                    .delete_by_name(&rule.name)
-                    .await
-                    .map_err(|err| format!("rollback delete {}: {err}", rule.name))?;
-            }
-        }
-
-        for rule in snapshot {
-            rules
-                .upsert_from_proto(rule)
-                .await
-                .map_err(|err| format!("rollback upsert {}: {err}", rule.name))?;
-        }
-
-        Ok(())
-    }
-
-    fn enqueue_rule_persist(
-        &self,
-        request_id: u64,
-        rule: pb::Rule,
-        idempotency_key: String,
-    ) {
-        let owner = self
-            .client_service
-            .primary_owner()
-            .map(PolicyOwner::from)
-            .unwrap_or(PolicyOwner::System);
-        let request = VerdictRulePersistRequest {
-            rule,
-            owner,
-            idempotency_key,
-        };
-        if let Err(err) = self.rule_persist_tx.try_send(request) {
-            warn!(request_id, "dropping async verdict rule persist request: {err}");
-        }
-    }
-
-    fn decision_key_hash(
-        attempt: &ConnectionAttempt,
-        proc_info: &crate::models::process_state::ProcessInfo,
-        dst_host: Option<&str>,
-    ) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        proc_info.path.hash(&mut h);
-        attempt.uid.hash(&mut h);
-        attempt.pid.hash(&mut h);
-        attempt.src_addr.hash(&mut h);
-        attempt.dst_addr.hash(&mut h);
-        attempt.dst_port.hash(&mut h);
-        attempt.protocol.hash(&mut h);
-        dst_host.unwrap_or_default().hash(&mut h);
-        h.finish()
-    }
-
-    fn begin_decision_epoch(&self, key: u64) -> Option<u64> {
-        match self.pending_decisions.entry(key) {
-            dashmap::mapref::entry::Entry::Occupied(_) => None,
-            dashmap::mapref::entry::Entry::Vacant(e) => {
-                e.insert(1);
-                Some(1)
-            }
-        }
-    }
-
-    fn is_decision_epoch_current(&self, key: u64, epoch: u64) -> bool {
-        self.pending_decisions
-            .get(&key)
-            .is_some_and(|current| *current == epoch)
-    }
-
-    fn end_decision_epoch(&self, key: u64, epoch: u64) {
-        if let dashmap::mapref::entry::Entry::Occupied(e) =
-            self.pending_decisions.entry(key)
-        {
-            if *e.get() == epoch {
-                e.remove();
-            }
-        }
-    }
-
-    fn emit_connection_event(&self, conn: pb::Connection, rule: Option<pb::Rule>) {
-        if let Some(ref exporter) = self.event_exporter {
-            let config = self.config.get_snapshot();
-            exporter.refresh_loggers(&config.loggers);
-            exporter.on_connection_event(&conn, rule.as_ref());
-        }
-        self.stats.on_event(conn, rule);
-    }
-
-    fn is_self_connection(attempt: &ConnectionAttempt) -> bool {
-        attempt.pid == std::process::id()
-    }
-
-    fn should_apply_unknown_default(attempt: &ConnectionAttempt, intercept_unknown: bool) -> bool {
-        attempt.pid == 0 && !intercept_unknown
-    }
-
-    fn strict_miss_accounting_enabled(&self) -> bool {
-        matches!(
-            NfqueueRuntimeState::overload_policy(),
-            NfqueueOverloadPolicy::DropFast
-        )
-    }
-
-    async fn account_miss_and_apply_default(&self, request_id: u64) {
-        if self.strict_miss_accounting_enabled() {
-            // Strict accounting mode: miss and final verdict are counted separately.
-            self.stats.on_rule_miss();
-            self.apply_default_action(request_id, true).await;
-        } else {
-            // Go parity mode: misses are pessimistically counted as dropped.
-            self.stats.on_missed_default_action();
-            self.apply_default_action(request_id, false).await;
-        }
-    }
-
-    fn enqueue_connection_warning_alert(&self, conn: pb::Connection) {
-        enqueue_alert(
-            &self.alert_buffer,
-            &self.bus.alert_tx,
-            warning_connection_alert(conn),
-        );
-    }
-
-    fn enqueue_process_warning_alert(&self, proc_info: &crate::models::process_state::ProcessInfo) {
-        enqueue_alert(
-            &self.alert_buffer,
-            &self.bus.alert_tx,
-            warning_process_alert(ProtoMapperAdapter::to_proto_process(proc_info)),
-        );
-    }
-
-    async fn apply_default_action_on_ui_miss(
-        &self,
-        request_id: u64,
-        proc_info: &crate::models::process_state::ProcessInfo,
-        conn: pb::Connection,
-    ) {
-        self.emit_connection_event(conn.clone(), None);
-        self.enqueue_connection_warning_alert(conn);
-        self.enqueue_process_warning_alert(proc_info);
-        self.account_miss_and_apply_ask_timeout_policy(request_id).await;
-    }
-
-    async fn apply_action(&self, request_id: u64, action: DefaultAction, count_stats: bool, source: &'static str) {
-        if action.allows() {
-            if count_stats {
-                if let Some(verdict) = self.fast_allow_with_stats_try_send(request_id, source) {
-                    self.send_verdict_when_full(verdict).await;
-                }
-            } else {
-                if let Some(verdict) = self.try_send_verdict(request_id, true, false, false, source, None) {
-                    self.send_verdict_when_full(verdict).await;
-                }
-            }
-            return;
-        }
-
-        if count_stats {
-            if let Some(verdict) =
-                self.fast_deny_with_stats_try_send(request_id, action.rejects(), source, None)
-            {
-                self.send_verdict_when_full(verdict).await;
-            }
-        } else {
-            if let Some(verdict) =
-                self.try_send_verdict(request_id, false, action.rejects(), false, source, None)
-            {
-                self.send_verdict_when_full(verdict).await;
-            }
-        }
-    }
-
-    async fn apply_ask_timeout_policy(&self, request_id: u64, count_stats: bool) {
-        let ask_timeout_policy = self.config.get_snapshot().ask_timeout_policy;
-        match ask_timeout_policy {
-            AskFallbackPolicy::DefaultAction => self.apply_default_action(request_id, count_stats).await,
-            AskFallbackPolicy::Allow => {
-                self.apply_action(request_id, DefaultAction::Allow, count_stats, "ask-timeout-allow")
-                    .await;
-            }
-            AskFallbackPolicy::Drop => {
-                self.apply_action(request_id, DefaultAction::Deny, count_stats, "ask-timeout-drop")
-                    .await;
-            }
-        }
-    }
-
-    async fn account_miss_and_apply_ask_timeout_policy(&self, request_id: u64) {
-        if self.strict_miss_accounting_enabled() {
-            // Strict accounting mode: miss and final verdict are counted separately.
-            self.stats.on_rule_miss();
-            self.apply_ask_timeout_policy(request_id, true).await;
-        } else {
-            // Go parity mode: misses are pessimistically counted as dropped.
-            self.stats.on_missed_default_action();
-            self.apply_ask_timeout_policy(request_id, false).await;
-        }
-    }
-
     pub fn new(
         bus: Bus,
         alert_buffer: AlertBuffer,
@@ -325,6 +109,7 @@ impl VerdictFlow {
             stats,
             pending_decisions: Arc::new(DashMap::new()),
             rule_persist_tx,
+            grpc_cache: GrpcChannelCache::default(),
             event_exporter: None,
         }
     }
@@ -343,7 +128,7 @@ impl VerdictFlow {
         self
     }
 
-    fn try_send_verdict(
+    pub(super) fn try_send_verdict(
         &self,
         request_id: u64,
         allow: bool,
@@ -421,7 +206,7 @@ impl VerdictFlow {
         }
     }
 
-    async fn apply_default_action(&self, request_id: u64, count_stats: bool) {
+    pub(super) async fn apply_default_action(&self, request_id: u64, count_stats: bool) {
         let config_snapshot = self.config.get_snapshot();
         let disconnected_default_action = config_snapshot.default_action;
         let disconnected_default_duration = config_snapshot.default_duration;
@@ -568,10 +353,11 @@ impl VerdictFlow {
         };
 
         let client_addr = config_snapshot.client_addr.as_str();
-        let mut client = match ClientService::connect_with_config(&config_snapshot).await {
+        let mut client = match ClientService::connect_or_reuse(&config_snapshot, &self.grpc_cache).await {
             Ok(client) => client,
             Err(err) => {
                 debug!(request_id = attempt.request_id, addr = %client_addr, "ui connect failed while handling miss; applying default action: {err}");
+                self.grpc_cache.invalidate();
                 let conn = pb_conn.take().unwrap_or_else(|| {
                     ProtoMapperAdapter::to_proto_connection(
                         &attempt,
@@ -592,6 +378,7 @@ impl VerdictFlow {
             Ok(rule) => rule,
             Err(err) => {
                 debug!(request_id = attempt.request_id, addr = %client_addr, "ui ask_rule failed while handling miss; applying default action: {err}");
+                self.grpc_cache.invalidate();
                 let conn = pb_conn.take().unwrap_or_else(|| {
                     ProtoMapperAdapter::to_proto_connection(
                         &attempt,

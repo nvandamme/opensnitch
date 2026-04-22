@@ -36,7 +36,7 @@ impl KernelFlow {
     }
 
     fn spawn_pipeline_dispatch_task<T: Send + 'static>(
-        mut ingress_rx: tokio::sync::mpsc::UnboundedReceiver<T>,
+        mut ingress_rx: tokio::sync::mpsc::Receiver<T>,
         dispatch_tx: tokio::sync::mpsc::Sender<T>,
         shutdown: CancellationToken,
         counters: std::sync::Arc<KernelPipelineCounters>,
@@ -67,7 +67,7 @@ impl KernelFlow {
                     break;
                 }
 
-                let burst = support::drain_try_recv_burst_unbounded(
+                let burst = support::drain_try_recv_burst(
                     &mut ingress_rx,
                     batch_size.saturating_sub(1),
                     || !shutdown.is_cancelled(),
@@ -153,13 +153,18 @@ impl KernelFlow {
                 crate::models::firewall_state::FirewallState,
             >(tunables.kernel_firewall_queue_capacity);
 
+            // Bounded ingress channels: the fan-out task uses try_send so it never
+            // blocks; events are dropped (counted) rather than accumulating without
+            // bound when consumers fall behind.
             let (dns_ingress_tx, dns_ingress_rx) =
-                tokio::sync::mpsc::unbounded_channel::<DnsPayload>();
+                tokio::sync::mpsc::channel::<DnsPayload>(tunables.kernel_dns_queue_capacity);
             let (process_ingress_tx, process_ingress_rx) =
-                tokio::sync::mpsc::unbounded_channel::<ProcessKernelEvent>();
-            let (firewall_ingress_tx, firewall_ingress_rx) = tokio::sync::mpsc::unbounded_channel::<
+                tokio::sync::mpsc::channel::<ProcessKernelEvent>(
+                    tunables.kernel_process_queue_capacity,
+                );
+            let (firewall_ingress_tx, firewall_ingress_rx) = tokio::sync::mpsc::channel::<
                 crate::models::firewall_state::FirewallState,
-            >();
+            >(tunables.kernel_firewall_queue_capacity);
 
             let dns_service = dns.clone();
             let dns_stats = stats.clone();
@@ -242,6 +247,7 @@ impl KernelFlow {
                                     &dns_ingress_tx,
                                     &process_ingress_tx,
                                     &firewall_ingress_tx,
+                                    &counters,
                                 ) {
                                     break;
                                 }
@@ -260,6 +266,7 @@ impl KernelFlow {
                                         &dns_ingress_tx,
                                         &process_ingress_tx,
                                         &firewall_ingress_tx,
+                                        &counters,
                                     ) {
                                         break;
                                     }

@@ -77,7 +77,6 @@ impl TaskLifecycle {
 
 }
 
-#[async_trait::async_trait]
 impl ServiceLifecycle for TaskRuntime {
     async fn init(&mut self) -> anyhow::Result<()> {
         self.lifecycle.clear_error_and_transition(ServiceState::Stopped);
@@ -213,7 +212,6 @@ impl ServiceLifecycle for TaskRuntime {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceFactory for TaskService {
     type FactoryInput = ();
 
@@ -222,7 +220,6 @@ impl ServiceFactory for TaskService {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceRuntimeControl for TaskService {
     type ReloadInput = ();
 

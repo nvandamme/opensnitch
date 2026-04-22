@@ -33,7 +33,6 @@ impl StatsService {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceFactory for StatsService {
     type FactoryInput = ();
 
@@ -42,7 +41,6 @@ impl ServiceFactory for StatsService {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceRuntimeControl for StatsService {
     type ReloadInput = ();
 

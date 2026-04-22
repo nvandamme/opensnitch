@@ -1,5 +1,5 @@
 use std::{
-    io::{self, ErrorKind},
+    io,
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 
 use super::event_bus::StorageEventBus;
+use super::ops::{bool_if_not_found, exists_if_not_found, option_if_not_found};
 use super::runtime_lifecycle::{
     global_storage_service, reload_global_storage_service, subscribe_global_storage_reload,
 };
@@ -25,22 +26,6 @@ pub(crate) struct StorageService {
 
 #[allow(dead_code)]
 impl StorageService {
-    fn option_if_not_found<T>(result: io::Result<T>) -> io::Result<Option<T>> {
-        match result {
-            Ok(value) => Ok(Some(value)),
-            Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err),
-        }
-    }
-
-    fn bool_if_not_found(result: io::Result<()>) -> io::Result<bool> {
-        Self::option_if_not_found(result).map(|maybe| maybe.is_some())
-    }
-
-    fn exists_if_not_found<T>(result: io::Result<T>) -> io::Result<bool> {
-        Self::option_if_not_found(result).map(|maybe| maybe.is_some())
-    }
-
     pub(crate) fn new() -> Self {
         Self {
             events: StorageEventBus::new(),
@@ -100,7 +85,7 @@ impl StorageService {
         _domain: &'static str,
         path: &Path,
     ) -> io::Result<Option<String>> {
-        Self::option_if_not_found(tokio::fs::read_to_string(path).await)
+        option_if_not_found(tokio::fs::read_to_string(path).await)
     }
 
     pub(crate) async fn read_to_string_if_exists_and_notify(
@@ -108,7 +93,7 @@ impl StorageService {
         domain: &'static str,
         path: &Path,
     ) -> io::Result<Option<String>> {
-        let maybe_contents = Self::option_if_not_found(tokio::fs::read_to_string(path).await)?;
+        let maybe_contents = option_if_not_found(tokio::fs::read_to_string(path).await)?;
         if maybe_contents.is_some() {
             self.events.emit_read(domain, path);
         }
@@ -238,7 +223,7 @@ impl StorageService {
         _domain: &'static str,
         path: &Path,
     ) -> io::Result<bool> {
-        Self::bool_if_not_found(tokio::fs::remove_file(path).await)
+        bool_if_not_found(tokio::fs::remove_file(path).await)
     }
 
     pub(crate) async fn remove_file_if_exists_and_notify(
@@ -246,7 +231,7 @@ impl StorageService {
         domain: &'static str,
         path: &Path,
     ) -> io::Result<bool> {
-        let deleted = Self::bool_if_not_found(tokio::fs::remove_file(path).await)?;
+        let deleted = bool_if_not_found(tokio::fs::remove_file(path).await)?;
         if deleted {
             self.events.emit_delete(domain, path);
         }
@@ -259,7 +244,7 @@ impl StorageService {
         _domain: &'static str,
         path: &Path,
     ) -> io::Result<bool> {
-        let Some(metadata) = Self::option_if_not_found(tokio::fs::metadata(path).await)? else {
+        let Some(metadata) = option_if_not_found(tokio::fs::metadata(path).await)? else {
             return Ok(false);
         };
 
@@ -276,7 +261,7 @@ impl StorageService {
         domain: &'static str,
         path: &Path,
     ) -> io::Result<bool> {
-        let Some(metadata) = Self::option_if_not_found(tokio::fs::metadata(path).await)? else {
+        let Some(metadata) = option_if_not_found(tokio::fs::metadata(path).await)? else {
             return Ok(false);
         };
 
@@ -324,7 +309,7 @@ impl StorageService {
     }
 
     pub(crate) async fn path_exists(&self, _domain: &'static str, path: &Path) -> io::Result<bool> {
-        Self::exists_if_not_found(tokio::fs::metadata(path).await)
+        exists_if_not_found(tokio::fs::metadata(path).await)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -333,7 +318,7 @@ impl StorageService {
         domain: &'static str,
         path: &Path,
     ) -> io::Result<bool> {
-        let exists = Self::exists_if_not_found(tokio::fs::metadata(path).await)?;
+        let exists = exists_if_not_found(tokio::fs::metadata(path).await)?;
         if exists {
             self.events.emit_read(domain, path);
         }
@@ -341,7 +326,7 @@ impl StorageService {
     }
 
     pub(crate) fn path_exists_sync(&self, _domain: &'static str, path: &Path) -> io::Result<bool> {
-        Self::exists_if_not_found(std::fs::metadata(path))
+        exists_if_not_found(std::fs::metadata(path))
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -350,7 +335,7 @@ impl StorageService {
         domain: &'static str,
         path: &Path,
     ) -> io::Result<bool> {
-        let exists = Self::exists_if_not_found(std::fs::metadata(path))?;
+        let exists = exists_if_not_found(std::fs::metadata(path))?;
         if exists {
             self.events.emit_read(domain, path);
         }
@@ -362,7 +347,7 @@ impl StorageService {
         _domain: &'static str,
         path: &Path,
     ) -> io::Result<Option<SystemTime>> {
-        let maybe_metadata = Self::option_if_not_found(tokio::fs::metadata(path).await)?;
+        let maybe_metadata = option_if_not_found(tokio::fs::metadata(path).await)?;
         Ok(maybe_metadata.and_then(|metadata| metadata.modified().ok()))
     }
 
@@ -372,7 +357,7 @@ impl StorageService {
         domain: &'static str,
         path: &Path,
     ) -> io::Result<Option<SystemTime>> {
-        let maybe_metadata = Self::option_if_not_found(tokio::fs::metadata(path).await)?;
+        let maybe_metadata = option_if_not_found(tokio::fs::metadata(path).await)?;
         if let Some(metadata) = maybe_metadata {
             self.events.emit_read(domain, path);
             return Ok(metadata.modified().ok());
@@ -438,7 +423,7 @@ impl StorageService {
         _domain: &'static str,
         path: &Path,
     ) -> io::Result<Option<PathBuf>> {
-        Self::option_if_not_found(tokio::fs::read_link(path).await)
+        option_if_not_found(tokio::fs::read_link(path).await)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -447,7 +432,7 @@ impl StorageService {
         domain: &'static str,
         path: &Path,
     ) -> io::Result<Option<PathBuf>> {
-        let maybe_target = Self::option_if_not_found(tokio::fs::read_link(path).await)?;
+        let maybe_target = option_if_not_found(tokio::fs::read_link(path).await)?;
         if maybe_target.is_some() {
             self.events.emit_read(domain, path);
         }

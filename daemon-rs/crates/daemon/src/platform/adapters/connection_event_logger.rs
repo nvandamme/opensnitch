@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::net::{TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -19,29 +19,57 @@ const DEFAULT_WORKERS: usize = 1;
 const DEFAULT_QUEUE_CAPACITY: usize = 2048;
 const DEFAULT_REOPEN_INTERVAL: Duration = Duration::from_secs(5);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SinkFormat {
+    Json,
+    Csv,
+    Rfc3164,
+    Rfc5424,
+}
+
+impl SinkFormat {
+    fn from_str(raw: &str) -> Self {
+        match case_folded(raw).as_str() {
+            "json" => Self::Json,
+            "csv" => Self::Csv,
+            "rfc3164" => Self::Rfc3164,
+            _ => Self::Rfc5424,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct SinkHandle {
     sender: SyncSender<String>,
-    format: String,
-    tag: String,
+    format: SinkFormat,
+    tag: Arc<str>,
 }
 
 pub struct ConnectionEventLoggerAdapter {
     state: RwLock<LoggerState>,
 }
 
-#[derive(Default)]
 struct LoggerState {
     loggers: Vec<LoggerSinkConfig>,
-    sinks: Vec<SinkHandle>,
+    sinks: Arc<[SinkHandle]>,
+}
+
+impl Default for LoggerState {
+    fn default() -> Self {
+        Self {
+            loggers: Vec::new(),
+            sinks: Arc::from([]),
+        }
+    }
 }
 
 impl ConnectionEventLoggerAdapter {
     pub fn new(loggers: &[LoggerSinkConfig]) -> Self {
+        let sinks: Arc<[SinkHandle]> = build_sinks(loggers).into();
         Self {
             state: RwLock::new(LoggerState {
                 loggers: loggers.to_vec(),
-                sinks: build_sinks(loggers),
+                sinks,
             }),
         }
     }
@@ -76,7 +104,7 @@ impl ConnectionEventLoggerAdapter {
         }
 
         state.loggers = loggers.to_vec();
-        state.sinks = new_sinks;
+        state.sinks = new_sinks.into();
     }
 }
 
@@ -86,19 +114,20 @@ impl ConnectionEventExporterPort for ConnectionEventLoggerAdapter {
     }
 
     fn on_connection_event(&self, connection: &pb::Connection, rule: Option<&pb::Rule>) {
-        let sinks = self
-            .state
-            .read()
-            .expect("connection-event-logger state poisoned")
-            .sinks
-            .clone();
+        let sinks = Arc::clone(
+            &self
+                .state
+                .read()
+                .expect("connection-event-logger state poisoned")
+                .sinks,
+        );
 
         if sinks.is_empty() {
             return;
         }
 
-        for sink in &sinks {
-            let payload = format_message(&sink.format, &sink.tag, connection, rule);
+        for sink in sinks.iter() {
+            let payload = format_message_enum(sink.format, &sink.tag, connection, rule);
             match sink.sender.try_send(payload) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
@@ -128,11 +157,11 @@ fn build_sinks(loggers: &[LoggerSinkConfig]) -> Vec<SinkHandle> {
 
             sinks.push(SinkHandle {
                 sender: tx,
-                format: logger.format.clone(),
+                format: SinkFormat::from_str(&logger.format),
                 tag: if logger.tag.trim().is_empty() {
-                    DEFAULT_TAG.to_string()
+                    Arc::from(DEFAULT_TAG)
                 } else {
-                    logger.tag.clone()
+                    Arc::from(logger.tag.as_str())
                 },
             });
         }
@@ -316,15 +345,20 @@ fn connect_tcp(server: &str, timeout: Duration) -> std::io::Result<TcpStream> {
     }))
 }
 
-fn format_message(format: &str, tag: &str, connection: &pb::Connection, rule: Option<&pb::Rule>) -> String {
+fn format_message_enum(format: SinkFormat, tag: &str, connection: &pb::Connection, rule: Option<&pb::Rule>) -> String {
     let ts = now_unix_seconds();
-    let lower = case_folded(format);
-    match lower.as_str() {
-        "json" => format_json(ts, tag, connection, rule),
-        "csv" => format_csv(ts, connection, rule),
-        "rfc3164" => format_rfc3164(ts, tag, connection, rule),
-        _ => format_rfc5424(ts, tag, connection, rule),
+    match format {
+        SinkFormat::Json => format_json(ts, tag, connection, rule),
+        SinkFormat::Csv => format_csv(ts, connection, rule),
+        SinkFormat::Rfc3164 => format_rfc3164(ts, tag, connection, rule),
+        SinkFormat::Rfc5424 => format_rfc5424(ts, tag, connection, rule),
     }
+}
+
+/// Convenience wrapper for tests: accepts a format string and dispatches via [`SinkFormat`].
+#[cfg(test)]
+pub(crate) fn format_message(format: &str, tag: &str, connection: &pb::Connection, rule: Option<&pb::Rule>) -> String {
+    format_message_enum(SinkFormat::from_str(format), tag, connection, rule)
 }
 
 fn format_json(ts: u64, tag: &str, connection: &pb::Connection, rule: Option<&pb::Rule>) -> String {

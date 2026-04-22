@@ -139,7 +139,7 @@ export DAEMON_RS_EBPF_SMOKE_TIMEOUT_SECS
 export DAEMON_RS_EBPF_SMOKE_TIMEOUT_KILL_AFTER_SECS
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: protocol go-protocol go-proto-tools go-test-full go-stress-profile go-kernel-profile-harness rust-parity-tests rust-kernel-it go-rust-parity-full parity-hot-path-harness parity-hot-path-harness-once parity-cold-path-harness parity-hot-cold-delta parity-hot-cold-delta-once daemon-rs-kernel-profile-harness update-run-perf parity-gate quick-pressure-sweep-tunables auto-tune-kernel-pressure-tunables microbench-connect-dispatch daemon-rs-build daemon-rs-live-logs daemon-rs-live-stop daemon-rs-mock-ui-session daemon-rs-async-send-audit daemon-rs-snapshot-clone-audit daemon-rs-design-rule-audit daemon-rs-design-rule-helper-contract-audit daemon-rs-immutable-state-audit daemon-rs-policy-audit daemon-rs-ebpf-build daemon-rs-ebpf-build-runtime daemon-rs-aya-proc-smoke daemon-rs-aya-dns-smoke daemon-rs-aya-conn-smoke daemon-rs-aya-tunnel-smoke daemon-rs-tools daemon-rs-tool-% install install-rs
+.PHONY: protocol go-protocol go-proto-tools go-test-full go-stress-profile go-kernel-profile-harness rust-parity-tests rust-kernel-it go-rust-parity-full parity-hot-path-harness parity-hot-path-harness-once parity-cold-path-harness parity-hot-cold-delta parity-hot-cold-delta-once daemon-rs-kernel-profile-harness update-run-perf parity-gate quick-pressure-sweep-tunables auto-tune-kernel-pressure-tunables microbench-connect-dispatch daemon-rs-build daemon-rs-check-caps daemon-rs-live-logs daemon-rs-live-stop daemon-rs-mock-ui-session daemon-rs-async-send-audit daemon-rs-snapshot-clone-audit daemon-rs-design-rule-audit daemon-rs-design-rule-helper-contract-audit daemon-rs-immutable-state-audit daemon-rs-policy-audit daemon-rs-ebpf-build daemon-rs-ebpf-build-runtime daemon-rs-aya-proc-smoke daemon-rs-aya-dns-smoke daemon-rs-aya-conn-smoke daemon-rs-aya-tunnel-smoke daemon-rs-tools daemon-rs-tool-% install install-rs
 
 install:
 	@cd daemon && make install
@@ -188,6 +188,8 @@ install-rs:
 	@mkdir -p $(DESTDIR)$(SYSCONFDIR)/opensnitchd/rules
 	@install -Dm755 $(DAEMON_RS_INSTALL_BIN) \
 		$(DESTDIR)$(PREFIX)/$(BINDIR)/opensnitchd-rs
+	@echo "install-rs: checking kernel capabilities..."
+	@$(DAEMON_RS_INSTALL_BIN) --check-caps || true
 	@install -Dm644 daemon/data/default-config.json \
 		-t $(DESTDIR)$(SYSCONFDIR)/opensnitchd/
 	@install -Dm644 daemon/data/system-fw.json \
@@ -303,6 +305,10 @@ adblocker:
 daemon-rs-build:
 	@OPENSNITCH_BUILD_PROFILE=$(CARGO_PROFILE) OPENSNITCH_BUILD_TARGET=$(CARGO_TARGET_TRIPLE) \
 	  $(DAEMON_RS_TOOLS_RUN) build
+
+daemon-rs-check-caps: daemon-rs-build
+	@OPENSNITCH_BUILD_PROFILE=$(CARGO_PROFILE) OPENSNITCH_BUILD_TARGET=$(CARGO_TARGET_TRIPLE) \
+	  $(DAEMON_RS_TOOLS_RUN) check-kernel-caps
 
 daemon-rs-ebpf-build:
 	@OPENSNITCH_TEST_GUARD_RESTART_SERVICES=0 $(DAEMON_RS_TOOLS_RUN) build-ebpf

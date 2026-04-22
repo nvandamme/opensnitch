@@ -9,26 +9,71 @@ use crate::{
 const KERNEL_PIPELINE_SEND_RETRIES: usize = 8;
 const KERNEL_PIPELINE_SEND_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
 
+/// Fan-out a kernel event to the appropriate typed ingress channel.
+///
+/// Uses [`Sender::try_send`] so this function remains synchronous and
+/// lock-free on the hot path.  When the ingress channel is full the event is
+/// dropped (counted via `counters.increment_drop`) rather than blocking the
+/// fan-out task.  Returns `false` only when the target receiver has been
+/// dropped (daemon shutdown), signalling the caller to break its event loop.
 pub(crate) fn fanout_kernel_ingress_event(
     event: KernelEvent,
-    dns_ingress_tx: &tokio::sync::mpsc::UnboundedSender<DnsPayload>,
-    process_ingress_tx: &tokio::sync::mpsc::UnboundedSender<ProcessKernelEvent>,
-    firewall_ingress_tx: &tokio::sync::mpsc::UnboundedSender<
+    dns_ingress_tx: &tokio::sync::mpsc::Sender<DnsPayload>,
+    process_ingress_tx: &tokio::sync::mpsc::Sender<ProcessKernelEvent>,
+    firewall_ingress_tx: &tokio::sync::mpsc::Sender<
         crate::models::firewall_state::FirewallState,
     >,
+    counters: &KernelPipelineCounters,
 ) -> bool {
     match event {
-        KernelEvent::DnsUpdate(payload) => dns_ingress_tx.send(payload).is_ok(),
-        KernelEvent::ProcStateChanged { pid, kind } => process_ingress_tx
-            .send(ProcessKernelEvent::ProcStateChanged { pid, kind })
-            .is_ok(),
-        KernelEvent::EbpfProcStateChanged(payload) => process_ingress_tx
-            .send(ProcessKernelEvent::EbpfProcStateChanged(payload))
-            .is_ok(),
-        KernelEvent::EbpfProcessMapHit { pid, uid, note } => process_ingress_tx
-            .send(ProcessKernelEvent::EbpfProcessMapHit { pid, uid, note })
-            .is_ok(),
-        KernelEvent::FirewallState(state) => firewall_ingress_tx.send(state).is_ok(),
+        KernelEvent::DnsUpdate(payload) => match dns_ingress_tx.try_send(payload) {
+            Ok(()) => true,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                counters.increment_drop(KernelPipeline::Dns);
+                true
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+        },
+        KernelEvent::ProcStateChanged { pid, kind } => {
+            match process_ingress_tx
+                .try_send(ProcessKernelEvent::ProcStateChanged { pid, kind })
+            {
+                Ok(()) => true,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    counters.increment_drop(KernelPipeline::Process);
+                    true
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+            }
+        }
+        KernelEvent::EbpfProcStateChanged(payload) => {
+            match process_ingress_tx.try_send(ProcessKernelEvent::EbpfProcStateChanged(payload)) {
+                Ok(()) => true,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    counters.increment_drop(KernelPipeline::Process);
+                    true
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+            }
+        }
+        KernelEvent::EbpfProcessMapHit { pid, uid, note } => match process_ingress_tx
+            .try_send(ProcessKernelEvent::EbpfProcessMapHit { pid, uid, note })
+        {
+            Ok(()) => true,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                counters.increment_drop(KernelPipeline::Process);
+                true
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+        },
+        KernelEvent::FirewallState(state) => match firewall_ingress_tx.try_send(state) {
+            Ok(()) => true,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                counters.increment_drop(KernelPipeline::Firewall);
+                true
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+        },
     }
 }
 

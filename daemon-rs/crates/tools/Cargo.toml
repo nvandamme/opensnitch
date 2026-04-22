@@ -1,7 +1,8 @@
 [package]
 name = "tools"
 version = "0.5.1"
-edition = "2024"
+edition.workspace = true
+license.workspace = true
 publish = false
 
 [features]
@@ -9,3 +10,4 @@ subscriptions = []
 
 [dependencies]
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
+opensnitch-kernel-caps = { path = "../kernel-caps" }

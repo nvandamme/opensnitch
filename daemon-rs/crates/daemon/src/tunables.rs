@@ -593,15 +593,18 @@ impl RuntimeTunables {
             .lines()
             .find(|line| line.starts_with("cpu "))
             .ok_or_else(|| "cpu aggregate line not found".to_string())?;
-        let mut values = cpu
-            .split_whitespace()
-            .skip(1)
-            .filter_map(|value| value.parse::<u64>().ok())
-            .collect::<Vec<_>>();
-        if values.len() < 5 {
+        let mut values = [0_u64; 8];
+        let mut count = 0_usize;
+        for token in cpu.split_whitespace().skip(1) {
+            if count >= 8 { break; }
+            if let Ok(v) = token.parse::<u64>() {
+                values[count] = v;
+                count += 1;
+            }
+        }
+        if count < 5 {
             return Err("cpu aggregate line missing fields".to_string());
         }
-        values.resize(8, 0);
         let idle = values[3].saturating_add(values[4]);
         let total = values.iter().sum::<u64>();
         Ok((idle, total))

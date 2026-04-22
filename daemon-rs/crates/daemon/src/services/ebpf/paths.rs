@@ -2,10 +2,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 use opensnitch_ebpf_common::pinning::{
-    AYA_CONN_ROOT, AYA_CONN_TCP_MAP_PATH, AYA_DNS_EVENTS_PATH, AYA_DNS_ROOT, AYA_PROC_EVENTS_PATH,
+    AYA_CONN_ROOT, AYA_CONN_TCP_MAP_PATH, AYA_DNS_EVENTS_PATH, AYA_PROC_EVENTS_PATH,
     AYA_PROC_ROOT, LEGACY_CONN_ROOT, LEGACY_CONN_TCP_MAP_PATH, LEGACY_DNS_EVENTS_PATH,
-    LEGACY_DNS_ROOT, LEGACY_PROC_EVENTS_PATH, LEGACY_PROC_ROOT,
+    LEGACY_PROC_EVENTS_PATH, LEGACY_PROC_ROOT,
 };
+#[cfg(test)]
+use opensnitch_ebpf_common::pinning::{AYA_DNS_ROOT, LEGACY_DNS_ROOT};
 
 use super::EbpfService;
 
@@ -32,6 +34,7 @@ impl EbpfPinDomain {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn dns_root(self) -> &'static str {
         match self {
             Self::Legacy => LEGACY_DNS_ROOT,

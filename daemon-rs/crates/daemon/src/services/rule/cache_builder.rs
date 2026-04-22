@@ -5,6 +5,7 @@ use std::{
 
 use anyhow::Result;
 use globset::Glob;
+use tokio::task::JoinSet;
 
 use crate::models::rule_record::{RuleOperator, RuleRecord};
 use crate::utils::string_iter::trimmed_non_empty;
@@ -48,20 +49,37 @@ impl RuleService {
 
         let mut caches = RuleMatchCaches::default();
 
+        // Phase 1: load all list files in parallel — each path is read concurrently
+        // via a JoinSet, eliminating serial I/O on the cold (cache-build) path.
+        let mut load_tasks: JoinSet<Result<(PathBuf, ListPathNeeds, Option<Vec<String>>)>> =
+            JoinSet::new();
         for (path, needs) in list_path_needs {
-            let slot_idx = caches.list_slots.len();
-            caches.list_slot_by_path.insert(path.clone(), slot_idx);
-            caches.list_slots.push(ListPathSlotCache::default());
-
             let needs_text_entries = needs.domains
                 || needs.trimmed_values
                 || needs.networks
                 || !needs.regex_sensitivities.is_empty();
-            let entries = if needs_text_entries {
-                Some(Self::load_list_entries_async_plain(&path).await?)
-            } else {
-                None
-            };
+            load_tasks.spawn(async move {
+                let entries = if needs_text_entries {
+                    Some(Self::load_list_entries_async_plain(&path).await?)
+                } else {
+                    None
+                };
+                Ok((path, needs, entries))
+            });
+        }
+
+        // Phase 2: collect parallel results, then build per-slot caches serially.
+        // Serial processing preserves deterministic slot-index assignment while all
+        // file I/O has already completed concurrently in phase 1.
+        let mut loaded: Vec<(PathBuf, ListPathNeeds, Option<Vec<String>>)> = Vec::new();
+        while let Some(result) = load_tasks.join_next().await {
+            loaded.push(result.map_err(|e| anyhow::anyhow!("list load task join: {e}"))??);
+        }
+
+        for (path, needs, entries) in loaded {
+            let slot_idx = caches.list_slots.len();
+            caches.list_slot_by_path.insert(path.clone(), slot_idx);
+            caches.list_slots.push(ListPathSlotCache::default());
 
             if needs.domains {
                 let mut wildcard_trie = DomainWildcardTrie::default();
@@ -72,6 +90,14 @@ impl RuleService {
                     .iter()
                     .filter_map(|entry| {
                         let host = RuleService::normalize_domain_list_entry(entry)?;
+                        // AdBlock/AdGuard ||domain^ anchor: must block the domain AND
+                        // all its subdomains (per spec).  Use insert_domain_and_subdomains
+                        // (required = labels.len()) so both example.org and www.example.org
+                        // match; no separate exact-HashSet entry is needed.
+                        if RuleService::is_adblock_domain_anchor(entry) {
+                            wildcard_trie.insert_domain_and_subdomains(&host);
+                            return None;
+                        }
                         if let Some(suffix) = RuleService::wildcard_suffix(&host) {
                             wildcard_trie.insert_suffix(suffix);
                             return None;
@@ -89,32 +115,50 @@ impl RuleService {
                 slot.domains = domains;
                 slot.domain_wildcards = wildcard_trie;
                 slot.domain_globs = glob_matchers;
+
+                // Cascaded regex sub-cache: extract `/pattern/` lines from the same
+                // file and build a dedicated ListRegexCache (always case-insensitive —
+                // DNS is case-insensitive per RFC 4343).  This allows a single
+                // `lists.domains` operator to handle mixed files that contain both
+                // plain/AdBlock domain entries and AdBlock-style regex network rules,
+                // mirroring AdGuard's urlfilter unified engine approach.
+                // The regex path is reached only when all fast-path lookups miss.
+                let regex_patterns = entries
+                    .as_ref()
+                    .expect("entries loaded when domains are required")
+                    .iter()
+                    .filter_map(|entry| RuleService::extract_domain_list_regex_pattern(entry))
+                    .collect::<Vec<_>>();
+                if !regex_patterns.is_empty() {
+                    caches.list_slots[slot_idx].domains_regex =
+                        Some(RuleService::build_list_regex_cache(regex_patterns.iter(), false));
+                }
             }
 
             if needs.trimmed_values {
-                let trimmed_values = entries
-                    .as_ref()
-                    .expect("entries loaded when trimmed_values are required")
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>();
-                let trimmed_values = trimmed_non_empty(trimmed_values.into_iter())
-                    .map(ToOwned::to_owned)
-                    .collect::<HashSet<_>>();
+                let trimmed_values = trimmed_non_empty(
+                    entries
+                        .as_ref()
+                        .expect("entries loaded when trimmed_values are required")
+                        .iter()
+                        .map(String::as_str),
+                )
+                .map(ToOwned::to_owned)
+                .collect::<HashSet<_>>();
                 caches.list_slots[slot_idx].trimmed_values = trimmed_values;
             }
 
             if needs.networks {
                 let mut index = CidrTrieIndex::default();
-                let network_entries = entries
-                    .as_ref()
-                    .expect("entries loaded when networks are required")
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>();
-                for (network, prefix) in trimmed_non_empty(network_entries.into_iter())
-                    .filter(|entry| entry.contains('/'))
-                    .filter_map(RuleService::parse_network_spec)
+                for (network, prefix) in trimmed_non_empty(
+                    entries
+                        .as_ref()
+                        .expect("entries loaded when networks are required")
+                        .iter()
+                        .map(String::as_str),
+                )
+                .filter(|entry| entry.contains('/'))
+                .filter_map(RuleService::parse_network_spec)
                 {
                     index.insert(network, prefix);
                 }

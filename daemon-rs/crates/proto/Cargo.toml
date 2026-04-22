@@ -1,7 +1,8 @@
 [package]
 name = "opensnitch-proto"
 version = "0.5.1"
-edition = "2024"
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
 tonic = "0.14"

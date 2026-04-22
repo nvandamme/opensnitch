@@ -76,7 +76,6 @@ pub(super) fn reload_global_storage_service() -> StorageService {
     replace_global_storage_service(StorageService::new())
 }
 
-#[async_trait::async_trait]
 impl ServiceFactory for StorageService {
     type FactoryInput = ();
 
@@ -85,7 +84,6 @@ impl ServiceFactory for StorageService {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceRuntimeControl for StorageService {
     type ReloadInput = ();
 

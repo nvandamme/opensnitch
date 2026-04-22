@@ -28,6 +28,7 @@ use crate::{
 };
 
 impl TaskService {
+    #[allow(dead_code)]
     pub(crate) async fn sync_storage_tasks(
         &self,
         tasks_file: &std::path::Path,
@@ -36,7 +37,19 @@ impl TaskService {
         task_reply_tx: tokio::sync::mpsc::Sender<pb::NotificationReply>,
     ) -> Result<()> {
         let desired = Self::load_storage_tasks(tasks_file).await?;
+        self.apply_storage_task_diff(desired, task_handles, process, task_reply_tx)
+    }
 
+    /// Apply the diff between desired storage tasks and current runtime handles.
+    /// This is the mutation-only half — call `load_storage_tasks` separately for
+    /// the I/O phase so the caller can narrow mutex scope.
+    pub(crate) fn apply_storage_task_diff(
+        &self,
+        desired: HashMap<String, (String, Arc<Value>, String)>,
+        task_handles: &mut RuntimeTaskHandles,
+        process: ProcessService,
+        task_reply_tx: tokio::sync::mpsc::Sender<pb::NotificationReply>,
+    ) -> Result<()> {
         task_handles.retain(|key, runtime| {
             if desired.contains_key(key) {
                 true
@@ -87,7 +100,7 @@ impl TaskService {
         format!("{:x}", hasher.finalize())
     }
 
-    async fn load_storage_tasks(
+    pub(crate) async fn load_storage_tasks(
         tasks_file: &std::path::Path,
     ) -> Result<HashMap<String, (String, Arc<Value>, String)>> {
         let storage = StorageService::global();
@@ -215,15 +228,30 @@ impl WatchWorkerControl for TaskWatchControl {
 
         Box::pin(async move {
             StorageService::global().emit_scan("task", tasks_config_path.as_path());
+
+            // Load desired state (file I/O) without holding the mutex.
+            let desired = match TaskService::load_storage_tasks(tasks_config_path.as_path()).await {
+                Ok(desired) => desired,
+                Err(err) => {
+                    tracing::error!(path = %tasks_config_path.display(), "failed to load disk tasks: {err}");
+                    enqueue_alert(
+                        &alert_buffer,
+                        &alert_tx,
+                        warning_alert(format!("failed to load disk tasks: {err}")),
+                    );
+                    return;
+                }
+            };
+
+            // Short lock scope: apply diff only.
             let mut task_handles = task_handles.lock().await;
             if let Err(err) = task_service
-                .sync_storage_tasks(
-                    tasks_config_path.as_path(),
+                .apply_storage_task_diff(
+                    desired,
                     &mut task_handles,
                     process.clone(),
                     task_reply_tx.clone(),
                 )
-                .await
             {
                 tracing::error!(path = %tasks_config_path.display(), "failed to sync disk tasks: {err}");
                 enqueue_alert(

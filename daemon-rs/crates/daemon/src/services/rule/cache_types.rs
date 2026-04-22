@@ -74,6 +74,40 @@ impl DomainWildcardTrie {
         );
     }
 
+    /// Insert a domain such that the domain itself AND all its subdomains match.
+    ///
+    /// Differences from [`insert_suffix`]:
+    /// - `required = labels.len()` (not `+1`) so a query for the precise domain
+    ///   (e.g. `example.org`, 2 labels) satisfies `label_count >= required` and
+    ///   returns `true` from [`matches_host`], as do all deeper subdomains.
+    ///
+    /// This is the correct semantics for AdBlock/AdGuard `||example.org^` rules,
+    /// which per the specification block `example.org` **and** all its subdomains
+    /// such as `www.example.org`.
+    pub(crate) fn insert_domain_and_subdomains(&mut self, domain: &str) {
+        let labels = domain
+            .split('.')
+            .filter(|label| !label.is_empty())
+            .collect::<Vec<_>>();
+        if labels.is_empty() {
+            return;
+        }
+
+        let mut node = &mut self.root;
+        for label in labels.iter().rev() {
+            node = node.children.entry(label.to_lowercase()).or_default();
+        }
+
+        // required = labels.len(): matches the domain itself (exact) and any deeper
+        // subdomain (which has strictly more labels).
+        let required = labels.len();
+        node.min_host_labels_required = Some(
+            node.min_host_labels_required
+                .map(|current| current.min(required))
+                .unwrap_or(required),
+        );
+    }
+
     pub(crate) fn matches_host(&self, host: &str) -> bool {
         let label_count = host.split('.').filter(|label| !label.is_empty()).count();
         if label_count == 0 {
@@ -186,6 +220,17 @@ pub(crate) struct ListPathSlotCache {
     pub(crate) domains: HashSet<String>,
     pub(crate) domain_wildcards: DomainWildcardTrie,
     pub(crate) domain_globs: Vec<GlobMatcher>,
+    /// Regex sub-cache populated from `/pattern/` lines found in a `lists.domains` file.
+    ///
+    /// This allows a single `lists.domains` operator to handle mixed list files that
+    /// contain both plain/AdBlock domain entries and AdBlock-style regex network rules
+    /// (e.g. `/tracker\.[a-z]+/`), mirroring the approach used by AdGuard's urlfilter
+    /// engine.  Domain matching is always case-insensitive (RFC 4343), so this cache
+    /// is always built with `sensitive = false`.
+    ///
+    /// Matching cascades: `HashSet` → `DomainWildcardTrie` → `GlobMatcher` → here.
+    /// The regex path is only reached when all fast-path lookups miss.
+    pub(crate) domains_regex: Option<ListRegexCache>,
     pub(crate) trimmed_values: HashSet<String>,
     pub(crate) networks: CidrTrieIndex,
     pub(crate) regex_sensitive: Option<ListRegexCache>,

@@ -24,7 +24,6 @@ impl ClientService {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceFactory for ClientService {
     type FactoryInput = Config;
 
@@ -33,7 +32,6 @@ impl ServiceFactory for ClientService {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceRuntimeControl for ClientService {
     type ReloadInput = Config;
 

@@ -56,9 +56,13 @@ impl ProcessService {
             None => false,
         };
 
+        // Read starttime once and reuse across both peek and get branches to
+        // avoid a redundant /proc/{pid}/stat filesystem read on cache hits.
+        let current_starttime = if !expired { Self::read_proc_starttime(pid) } else { None };
+
         if !expired {
             if let Some(entry) = self.cache.entries.peek(&pid) {
-                let is_same_process = match (entry.starttime, Self::read_proc_starttime(pid)) {
+                let is_same_process = match (entry.starttime, current_starttime) {
                     (Some(cached), Some(current)) => cached == current,
                     _ => true,
                 };
@@ -71,7 +75,7 @@ impl ProcessService {
 
         // Miss/stale: check hot-tier (get differs from peek in quick-cache).
         if let Some(entry) = self.cache.entries.get(&pid) {
-            let is_same_process = match (entry.starttime, Self::read_proc_starttime(pid)) {
+            let is_same_process = match (entry.starttime, current_starttime) {
                 (Some(cached), Some(current)) => cached == current,
                 _ => true,
             };
@@ -100,14 +104,40 @@ impl ProcessService {
     /// Spawn a background task that computes the exe hashes for `pid` and patches the
     /// cached [`CachedProcessEntry`] once complete.  The first verdict for the process
     /// is served with `None` hashes; subsequent lookups (from cache) get the real values.
+    ///
+    /// Checks the persistent on-disk hash cache first (keyed on path+inode+mtime+size).
+    /// On a persistent-cache hit, the hashes are applied without reading the binary at
+    /// all.  On a miss, hashes are computed and stored in both the in-memory entry and
+    /// the persistent cache for future daemon restarts.
     fn spawn_hash_update(
         cache: std::sync::Arc<super::cache::ProcessCache>,
         pid: u32,
         starttime: Option<u64>,
     ) {
         tokio::spawn(async move {
+            let hash_cache = cache.hash_cache.clone();
             let hashes = tokio::task::spawn_blocking(move || {
-                ProcessService::compute_process_hashes(pid)
+                // Resolve the exe path for persistent-cache lookup.
+                let exe_path = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+
+                // Try the persistent on-disk cache first (avoids reading the binary).
+                if let Some(ref exe) = exe_path {
+                    if let Some(hit) = hash_cache.get(exe) {
+                        return Some(hit);
+                    }
+                }
+
+                // Miss: compute hashes from the binary file.
+                let result = ProcessService::compute_process_hashes(pid);
+
+                // Store in persistent cache for future daemon restarts.
+                if let (Some(ref exe), Some((md5, sha1, sha256))) =
+                    (exe_path, &result)
+                {
+                    hash_cache.insert(exe, md5, sha1, sha256);
+                }
+
+                result
             })
             .await;
             if let Ok(Some((md5, sha1, sha256))) = hashes {

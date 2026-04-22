@@ -22,7 +22,6 @@ impl EbpfService {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceFactory for EbpfService {
     type FactoryInput = ();
 
@@ -31,7 +30,6 @@ impl ServiceFactory for EbpfService {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceRuntimeControl for EbpfService {
     type ReloadInput = ();
 

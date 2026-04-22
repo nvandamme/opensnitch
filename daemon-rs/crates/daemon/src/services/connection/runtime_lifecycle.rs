@@ -168,7 +168,6 @@ impl ConnectionService {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceFactory for ConnectionService {
     type FactoryInput = (
         crate::services::process::ProcessService,
@@ -180,7 +179,6 @@ impl ServiceFactory for ConnectionService {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceRuntimeControl for ConnectionService {
     type ReloadInput = ();
 
@@ -190,7 +188,6 @@ impl ServiceRuntimeControl for ConnectionService {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceLifecycle for ConnectionLifecycle {
     async fn init(&mut self) -> anyhow::Result<()> {
         self.clear_error_and_transition(ServiceState::Stopped);

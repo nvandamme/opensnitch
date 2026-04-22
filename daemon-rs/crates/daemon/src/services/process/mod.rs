@@ -1,5 +1,6 @@
 mod cache;
 mod details;
+pub(crate) mod hash_cache;
 mod inspection;
 mod parsing;
 mod process;

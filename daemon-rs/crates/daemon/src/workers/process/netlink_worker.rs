@@ -11,6 +11,7 @@ use crate::{
 };
 
 const PROC_EVENT_WORKERS: usize = 4;
+const PROC_EVENT_CHANNEL_CAPACITY: usize = 512;
 
 pub(crate) struct NetlinkProcWorkerControl;
 
@@ -19,14 +20,14 @@ impl NetlinkProcWorkerControl {
         bus: Bus,
         shutdown: CancellationToken,
     ) -> (
-        Vec<mpsc::Sender<crate::models::proc_event::ProcPidEvent>>,
+        Vec<mpsc::SyncSender<crate::models::proc_event::ProcPidEvent>>,
         Vec<JoinHandle<()>>,
     ) {
         let mut senders = Vec::with_capacity(PROC_EVENT_WORKERS);
         let mut handles = Vec::with_capacity(PROC_EVENT_WORKERS);
 
         for _ in 0..PROC_EVENT_WORKERS {
-            let (tx, rx) = mpsc::channel::<crate::models::proc_event::ProcPidEvent>();
+            let (tx, rx) = mpsc::sync_channel::<crate::models::proc_event::ProcPidEvent>(PROC_EVENT_CHANNEL_CAPACITY);
             let worker_bus = bus.clone();
             let worker_shutdown = shutdown.clone();
             let handle = thread::spawn(move || {
@@ -95,11 +96,17 @@ impl NetlinkProcWorkerControl {
                                 }
                                 let idx = next_dispatcher % dispatchers.len();
                                 next_dispatcher = (idx + 1) % dispatchers.len();
-                                if dispatchers[idx].send(event).is_err() {
-                                    warn!(
-                                        "proc event dispatcher channel closed, reinitializing listener"
-                                    );
-                                    break;
+                                match dispatchers[idx].try_send(event) {
+                                    Ok(()) => {}
+                                    Err(mpsc::TrySendError::Full(_)) => {
+                                        // Backpressure: drop event rather than blocking the socket reader.
+                                    }
+                                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                                        warn!(
+                                            "proc event dispatcher channel closed, reinitializing listener"
+                                        );
+                                        break;
+                                    }
                                 }
                             }
                             Ok(None) => {

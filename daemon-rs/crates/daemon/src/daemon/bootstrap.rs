@@ -36,6 +36,7 @@ impl Daemon {
         let config = crate::config::Config::load_from_default_locations_with_override(cli.config_file.as_deref())?
             .with_client_addr_override(cli.ui_socket.as_deref())
             .with_rules_path_override(cli.rules_path.as_deref());
+        crate::utils::kernel_caps::log(&crate::utils::kernel_caps::run());
         if let Some(status) = crate::tunables::RuntimeTunables::maybe_autotune_on_startup() {
             info!(status = %status, "daemon bootstrap: startup autotune");
         }
@@ -105,6 +106,15 @@ impl Daemon {
         let connections = ConnectionService::new(process.clone(), dns.clone());
         let subscriptions = SubscriptionService::with_system_defaults();
 
+        // §7: load JSON config layer for metrics export (fail-open: absent file → defaults).
+        let metrics_config =
+            crate::models::metrics_config::MetricsConfig::load_sibling(&config.config_path)
+                .unwrap_or_else(|e| {
+                    warn!("metrics.json could not be loaded, using defaults: {e}");
+                    Default::default()
+                });
+        let metrics_cli = cli.metrics;
+
         let daemon = Self {
             runtime: Arc::new(DaemonRuntime {
                 config: config_service,
@@ -130,6 +140,10 @@ impl Daemon {
                 tasks: task::TaskService,
                 tunables,
                 shutdown: CancellationToken::new(),
+                metrics_config,
+                metrics_cli,
+                #[cfg(feature = "metrics-export")]
+                metrics_server: std::sync::Mutex::new(None),
             }),
         };
 
