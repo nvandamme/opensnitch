@@ -5,11 +5,11 @@ on:
   push:
     paths:
       - 'ui/resources/*'
-      - '.github/workflows/generic.yml'
+      - '.github/workflows/generic_validations.yml'
   pull_request:
     paths:
       - 'ui/resources/*'
-      - '.github/workflows/generic.yml'
+      - '.github/workflows/generic_validations.yml'
 
   # Allow to run this workflow manually from the Actions tab
   workflow_dispatch:

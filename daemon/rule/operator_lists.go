@@ -2,8 +2,8 @@ package rule
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net"
+	"os"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
@@ -13,6 +13,61 @@ import (
 	"github.com/evilsocket/opensnitch/daemon/core"
 	"github.com/evilsocket/opensnitch/daemon/log"
 )
+
+type domainWildcardTrieNode struct {
+	terminal bool
+	children map[string]*domainWildcardTrieNode
+}
+
+type domainWildcardTrie struct {
+	root *domainWildcardTrieNode
+}
+
+func newDomainWildcardTrie() domainWildcardTrie {
+	return domainWildcardTrie{root: &domainWildcardTrieNode{children: make(map[string]*domainWildcardTrieNode)}}
+}
+
+func (t *domainWildcardTrie) insertSuffix(suffix string) {
+	if t.root == nil {
+		t.root = &domainWildcardTrieNode{children: make(map[string]*domainWildcardTrieNode)}
+	}
+	parts := strings.Split(suffix, ".")
+	node := t.root
+	for i := len(parts) - 1; i >= 0; i-- {
+		label := strings.TrimSpace(parts[i])
+		if label == "" {
+			return
+		}
+		next, found := node.children[label]
+		if !found {
+			next = &domainWildcardTrieNode{children: make(map[string]*domainWildcardTrieNode)}
+			node.children[label] = next
+		}
+		node = next
+	}
+	node.terminal = true
+}
+
+func (t *domainWildcardTrie) matchesHost(host string) bool {
+	if t.root == nil {
+		return false
+	}
+	parts := strings.Split(host, ".")
+	node := t.root
+	for i := len(parts) - 1; i >= 0; i-- {
+		label := strings.TrimSpace(parts[i])
+		next, found := node.children[label]
+		if !found {
+			return false
+		}
+		node = next
+		// wildcard suffixes should only match subdomains, not the suffix root itself
+		if node.terminal && i > 0 {
+			return true
+		}
+	}
+	return false
+}
 
 func (o *Operator) monitorLists() {
 	log.Info("monitor lists started: %s", o.Data)
@@ -92,6 +147,11 @@ func (o *Operator) ClearLists() {
 	for k := range o.lists {
 		delete(o.lists, k)
 	}
+	o.domainWildcards = newDomainWildcardTrie()
+	o.domainGlobs = nil
+	o.listExact = nil
+	o.listNets = nil
+	o.listSnapshot.Store(nil)
 	debug.FreeOSMemory()
 }
 
@@ -139,6 +199,18 @@ func (o *Operator) readTupleList(raw, fileName string, filter func(line, defValu
 			continue
 		}
 		key = core.Trim(key)
+		if suffix := wildcardSuffix(key); suffix != "" {
+			o.domainWildcards.insertSuffix(suffix)
+			continue
+		}
+		if isDomainGlobPattern(key) {
+			if err := validateDomainGlobPattern(key); err != nil {
+				log.Warning("Error validating domain glob from list: %s, (%s)", err, fileName)
+				continue
+			}
+			o.domainGlobs = append(o.domainGlobs, key)
+			continue
+		}
 		if _, found := o.lists[key]; found {
 			dups++
 			continue
@@ -163,12 +235,18 @@ func (o *Operator) readNetList(raw, fileName string) (dups uint64) {
 			dups++
 			continue
 		}
+		if ip := net.ParseIP(host); ip != nil {
+			o.lists[host] = fileName
+			o.listExact[host] = struct{}{}
+			continue
+		}
 		_, netMask, err := net.ParseCIDR(host)
 		if err != nil {
 			log.Warning("Error parsing net from list: %s, (%s)", err, fileName)
 			continue
 		}
-		o.lists[host] = netMask
+		o.lists[host] = fileName
+		o.listNets = append(o.listNets, netMask)
 	}
 	lines = nil
 	log.Info("%d nets loaded, %s", len(o.lists), fileName)
@@ -217,6 +295,13 @@ func (o *Operator) readSimpleList(raw, fileName string) (dups uint64) {
 			continue
 		}
 		o.lists[what] = fileName
+		if ip := net.ParseIP(what); ip != nil {
+			o.listExact[what] = struct{}{}
+			continue
+		}
+		if _, netMask, err := net.ParseCIDR(what); err == nil {
+			o.listNets = append(o.listNets, netMask)
+		}
 	}
 	lines = nil
 	log.Info("%d entries loaded, %s", len(o.lists), fileName)
@@ -232,6 +317,10 @@ func (o *Operator) readLists() error {
 	o.Lock()
 	defer o.Unlock()
 	o.lists = make(map[string]interface{})
+	o.domainWildcards = newDomainWildcardTrie()
+	o.domainGlobs = make([]string, 0)
+	o.listExact = make(map[string]struct{})
+	o.listNets = make([]*net.IPNet, 0)
 
 	expr := filepath.Join(o.Data, "*.*")
 	fileList, err := filepath.Glob(expr)
@@ -247,7 +336,7 @@ func (o *Operator) readLists() error {
 			continue
 		}
 
-		raw, err := ioutil.ReadFile(fileName)
+		raw, err := os.ReadFile(fileName)
 		if err != nil {
 			log.Warning("Error reading list of IPs (%s): %s", fileName, err)
 			continue
@@ -267,8 +356,87 @@ func (o *Operator) readLists() error {
 			log.Warning("Unknown lists operand type: %s", o.Operand)
 		}
 	}
+	o.listSnapshot.Store(o.buildListSnapshot())
 	log.Info("%d lists loaded, %d domains, %d duplicated", len(fileList), len(o.lists), dups)
 	return nil
+}
+
+func (o *Operator) buildListSnapshot() *listCacheSnapshot {
+	snapshot := &listCacheSnapshot{
+		lists:           o.lists,
+		domainWildcards: o.domainWildcards,
+		domainGlobs:     o.domainGlobs,
+		listExact:       o.listExact,
+		listNets:        o.listNets,
+	}
+
+	if o.Operand == OpDomainsRegexpLists {
+		snapshot.regexEntries = make([]listRegexEntry, 0, len(o.lists))
+		for file, re := range o.lists {
+			snapshot.regexEntries = append(snapshot.regexEntries, listRegexEntry{
+				file: file,
+				re:   re.(*regexp.Regexp),
+			})
+		}
+	}
+
+	return snapshot
+}
+
+func wildcardSuffix(host string) string {
+	if strings.HasPrefix(host, "*.") {
+		return strings.Trim(host[2:], ".")
+	}
+	if strings.HasPrefix(host, ".") {
+		return strings.Trim(host[1:], ".")
+	}
+	return ""
+}
+
+// isDomainGlobPattern reports whether host is a glob pattern that requires
+// matchDomainGlob evaluation (i.e. it contains *, ?, or [...] but is NOT a
+// plain wildcard suffix like *.example.org, which is handled by the trie).
+//
+// Known limitation: '{www,api}.example.org' alternation syntax is NOT
+// supported. path.Match treats '{' as a literal. Such patterns are not
+// detected here and fall through to the exact-map lookup where they will
+// never match – a silent false negative. Use separate list entries instead.
+func isDomainGlobPattern(host string) bool {
+	if wildcardSuffix(host) != "" {
+		return false
+	}
+	return strings.ContainsAny(host, "*?[]")
+}
+
+// validateDomainGlobPattern checks that every DNS label in pattern is a valid
+// filepath.Match expression (i.e. no unclosed '['). Returns non-nil on bad syntax.
+func validateDomainGlobPattern(pattern string) error {
+	for _, label := range strings.Split(pattern, ".") {
+		if _, err := filepath.Match(label, ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// matchDomainGlob reports whether host matches the DNS-aware glob pattern.
+// The pattern is split on '.' and each label is matched independently with
+// filepath.Match, so '*' and '?' are confined to a single DNS label and cannot
+// cross dot boundaries. This preserves standard blocklist glob semantics.
+// The pattern must have been validated by validateDomainGlobPattern at load
+// time; invalid patterns silently fail to match.
+func matchDomainGlob(pattern, host string) bool {
+	patLabels := strings.Split(pattern, ".")
+	hostLabels := strings.Split(host, ".")
+	if len(patLabels) != len(hostLabels) {
+		return false
+	}
+	for i, p := range patLabels {
+		if ok, _ := filepath.Match(p, hostLabels[i]); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (o *Operator) loadLists() {

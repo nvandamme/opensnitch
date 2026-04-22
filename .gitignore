@@ -30,4 +30,3 @@ daemon-rs/data/tunables.json
 .mypy_cache/
 .pytest_cache/
 __pycache__/
-
