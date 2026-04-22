@@ -1,8 +1,18 @@
-use opensnitch_proto::pb;
+use transport_wire_core::{
+    WireSubscription, WireSubscriptionAction, WireSubscriptionCommand, WireSubscriptionCommandAck,
+    WireSubscriptionRequest,
+};
 
 use crate::{
     models::command_rpc::IncomingSubscriptionNotification,
-    services::{client::ClientService, subscription::SubscriptionService},
+    models::subscription_rpc::{SubscriptionCommand, SubscriptionOperation},
+    models::subscription_storage::SubscriptionRecord,
+    services::{
+        client::ClientService,
+        subscription::{
+            SubscriptionService, operation_from_wire_action, wire_subscription_action_from_i32,
+        },
+    },
 };
 
 #[derive(Clone)]
@@ -16,14 +26,13 @@ impl SubscriptionCommandService {
     }
 
     /// Process a `SubscriptionCommand` received from the `Subscriptions.Commands`
-    /// bidi stream and return the `SubscriptionCommandAck` to send back to the UI.
+    /// bidi stream and return the `SubscriptionCommandAck` to send back to the client.
     pub(crate) async fn handle_command(
         &self,
-        cmd: pb::SubscriptionCommand,
+        cmd: WireSubscriptionCommand,
         client_service: &mut ClientService,
-    ) -> pb::SubscriptionCommandAck {
-        let action = pb::SubscriptionAction::try_from(cmd.action)
-            .unwrap_or(pb::SubscriptionAction::Unspecified);
+    ) -> WireSubscriptionCommandAck {
+        let action = wire_subscription_action_from_i32(cmd.action);
 
         let ParsedData {
             subscriptions,
@@ -31,66 +40,58 @@ impl SubscriptionCommandService {
             force,
         } = parse_command_data(&cmd.data);
 
-        let req = match action {
-            pb::SubscriptionAction::List => pb::SubscriptionRequest {
-                operation: pb::SubscriptionAction::List as i32,
-                subscriptions: self.subscriptions.list(),
-                ..Default::default()
-            },
-            pb::SubscriptionAction::Apply => pb::SubscriptionRequest {
-                operation: pb::SubscriptionAction::Apply as i32,
-                subscriptions,
-                ..Default::default()
-            },
-            pb::SubscriptionAction::Delete => pb::SubscriptionRequest {
-                operation: pb::SubscriptionAction::Delete as i32,
-                subscriptions,
-                ..Default::default()
-            },
-            pb::SubscriptionAction::Refresh => pb::SubscriptionRequest {
-                operation: pb::SubscriptionAction::Refresh as i32,
-                targets,
-                force,
-                ..Default::default()
-            },
-            pb::SubscriptionAction::Deploy => pb::SubscriptionRequest {
-                operation: pb::SubscriptionAction::Deploy as i32,
-                ..Default::default()
-            },
-            pb::SubscriptionAction::Unspecified => {
-                return pb::SubscriptionCommandAck {
-                    id: cmd.id,
-                    action: cmd.action,
-                    accepted: false,
-                    message: "unspecified action".to_string(),
-                };
-            }
+        let operation = operation_from_wire_action(action);
+
+        if matches!(operation, SubscriptionOperation::Unspecified) {
+            return WireSubscriptionCommandAck {
+                id: cmd.id,
+                action: cmd.action,
+                accepted: false,
+                message: "unspecified action".to_string(),
+            };
+        }
+
+        let command = SubscriptionCommand {
+            operation,
+            subscriptions,
+            targets,
+            force,
         };
 
-        let reply = self.subscriptions.handle_request(req.clone()).await;
+        let reply = self
+            .subscriptions
+            .handle_wire_command(command.clone())
+            .await;
 
-        // Sync the outcome back to the Python UI via the individual named RPCs.
+        // Sync the outcome back to the Python client via the individual named RPCs.
         // List always syncs (carries the full subscription set); others only sync
         // when the local operation was accepted.
-        let should_sync = reply.accepted || matches!(action, pb::SubscriptionAction::List);
+        let should_sync = reply.accepted || matches!(action, WireSubscriptionAction::List);
         if should_sync {
+            let wire_req = wire_subscription_request_from_command(command, &reply);
             let sync_result = match action {
-                pb::SubscriptionAction::List => client_service.subscription_list(req).await,
-                pb::SubscriptionAction::Apply => client_service.subscription_apply(req).await,
-                pb::SubscriptionAction::Delete => client_service.subscription_delete(req).await,
-                pb::SubscriptionAction::Refresh => client_service.subscription_refresh(req).await,
-                pb::SubscriptionAction::Deploy => client_service.subscription_deploy(req).await,
-                pb::SubscriptionAction::Unspecified => Ok(pb::SubscriptionReply::default()),
+                WireSubscriptionAction::List => client_service.subscription_list(wire_req).await,
+                WireSubscriptionAction::Apply => client_service.subscription_apply(wire_req).await,
+                WireSubscriptionAction::Delete => {
+                    client_service.subscription_delete(wire_req).await
+                }
+                WireSubscriptionAction::Refresh => {
+                    client_service.subscription_refresh(wire_req).await
+                }
+                WireSubscriptionAction::Deploy => {
+                    client_service.subscription_deploy(wire_req).await
+                }
+                WireSubscriptionAction::Unspecified => Ok(Default::default()),
             };
             if let Err(err) = sync_result {
                 tracing::debug!(
                     cmd_id = cmd.id,
-                    "subscription command: UI sync failed: {err}"
+                    "subscription command: client sync failed: {err}"
                 );
             }
         }
 
-        pb::SubscriptionCommandAck {
+        WireSubscriptionCommandAck {
             id: cmd.id,
             action: cmd.action,
             accepted: reply.accepted,
@@ -99,8 +100,39 @@ impl SubscriptionCommandService {
     }
 }
 
+fn wire_subscription_request_from_command(
+    command: SubscriptionCommand,
+    reply: &transport_wire_core::WireSubscriptionReply,
+) -> WireSubscriptionRequest {
+    let operation = match command.operation {
+        SubscriptionOperation::Unspecified => WireSubscriptionAction::Unspecified as i32,
+        SubscriptionOperation::List => WireSubscriptionAction::List as i32,
+        SubscriptionOperation::Apply => WireSubscriptionAction::Apply as i32,
+        SubscriptionOperation::Delete => WireSubscriptionAction::Delete as i32,
+        SubscriptionOperation::Refresh => WireSubscriptionAction::Refresh as i32,
+        SubscriptionOperation::Deploy => WireSubscriptionAction::Deploy as i32,
+    };
+
+    let subscriptions = if matches!(command.operation, SubscriptionOperation::List) {
+        reply.subscriptions.clone()
+    } else {
+        command
+            .subscriptions
+            .into_iter()
+            .map(subscription_record_to_wire)
+            .collect()
+    };
+
+    WireSubscriptionRequest {
+        operation,
+        subscriptions,
+        targets: command.targets,
+        force: command.force,
+    }
+}
+
 struct ParsedData {
-    subscriptions: Vec<pb::Subscription>,
+    subscriptions: Vec<SubscriptionRecord>,
     targets: Vec<String>,
     force: bool,
 }
@@ -112,7 +144,7 @@ fn parse_command_data(raw_data: &str) -> ParsedData {
         subscriptions: data
             .subscriptions
             .into_iter()
-            .map(|item| pb::Subscription {
+            .map(|item| SubscriptionRecord {
                 id: item.id,
                 name: item.name,
                 url: item.url,
@@ -122,5 +154,30 @@ fn parse_command_data(raw_data: &str) -> ParsedData {
             .collect(),
         targets: data.targets,
         force: data.force,
+    }
+}
+
+fn subscription_record_to_wire(record: SubscriptionRecord) -> WireSubscription {
+    WireSubscription {
+        id: record.id,
+        name: record.name,
+        url: record.url,
+        filename: record.filename,
+        groups: record.groups,
+        enabled: record.enabled,
+        format: record.format,
+        interval_seconds: record.interval_seconds,
+        timeout_seconds: record.timeout_seconds,
+        max_bytes: record.max_bytes,
+        node: record.node,
+        status: 0,
+        last_updated: record.last_updated,
+        last_error: record.last_error,
+        refresh_meta: Some(transport_wire_core::WireSubscriptionRefreshMetadata {
+            next_refresh_after: record.next_refresh_after,
+            consecutive_failures: record.consecutive_failures,
+            etag: record.etag,
+            last_modified: record.last_modified,
+        }),
     }
 }

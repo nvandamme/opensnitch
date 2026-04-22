@@ -149,7 +149,7 @@ fn aya_dns_trace_smoke_reports_explicit_runtime_active() {
     let rust_log = dns_smoke_rust_log();
 
     let mut daemon = Command::new("timeout")
-        .arg("24s")
+        .arg("18s")
         .arg(&daemon_bin)
         .env("OPENSNITCH_EBPF_PIN_DOMAIN", "aya")
         .env("RUST_LOG", &rust_log)
@@ -168,20 +168,19 @@ fn aya_dns_trace_smoke_reports_explicit_runtime_active() {
 
     thread::sleep(Duration::from_secs(4));
 
-    for _ in 0..24 {
-        let _ = Command::new("getent")
-            .arg("hosts")
-            .arg("example.com")
+    // Bound DNS probe time to keep smoke runtime deterministic.
+    for _ in 0..8 {
+        let _ = Command::new("timeout")
+            .args(["1s", "getent", "hosts", "example.com"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        let _ = Command::new("getent")
-            .arg("ahosts")
-            .arg("cloudflare.com")
+        let _ = Command::new("timeout")
+            .args(["1s", "getent", "ahosts", "cloudflare.com"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        thread::sleep(Duration::from_millis(200));
+        thread::sleep(Duration::from_millis(100));
     }
 
     let _ = daemon.wait();

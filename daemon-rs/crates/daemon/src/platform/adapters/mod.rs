@@ -9,6 +9,7 @@ pub(crate) mod nfqueue_netlink;
 pub(crate) mod nft_monitor;
 pub mod proc_connector;
 pub mod proto_mapper;
+pub(crate) mod rule_proto;
 pub mod socket_diag;
 pub mod socket_diag_bindings;
 #[cfg(feature = "metrics-export")]

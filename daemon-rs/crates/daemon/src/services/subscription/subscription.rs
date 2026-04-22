@@ -8,13 +8,14 @@ use std::{
 
 use dashmap::DashMap;
 
-use opensnitch_proto::pb;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, warn};
+use transport_wire_core::{
+    WireRuleSubscriptionEntry, WireSubscription, WireSubscriptionAction, WireSubscriptionEvent,
+    WireSubscriptionStatistics,
+};
 
 use super::defaults::{DEFAULT_ROOT_DIR, DEFAULT_STORE_FILE};
-use super::proto_to_record;
-use crate::models::subscription_rpc::{SubscriptionCommand, SubscriptionOperation};
 use crate::models::subscription_storage::SubscriptionRecord;
 use crate::services::subscription::storage::SubscriptionStorage;
 use crate::utils::time_nonce::unix_epoch_nanos;
@@ -42,30 +43,10 @@ pub struct SubscriptionService {
     /// Cumulative refresh errors since daemon start.
     pub(super) refresh_errors: Arc<AtomicU64>,
     /// Most recent subscription lifecycle events (newest-first ring, capacity SUB_EVENT_RING_CAPACITY).
-    pub(super) events: Arc<Mutex<Vec<pb::SubscriptionEvent>>>,
+    pub(super) events: Arc<Mutex<Vec<WireSubscriptionEvent>>>,
 }
 
 impl SubscriptionService {
-    fn command_from_request(req: pb::SubscriptionRequest) -> SubscriptionCommand {
-        let operation = match pb::SubscriptionAction::try_from(req.operation)
-            .unwrap_or(pb::SubscriptionAction::Unspecified)
-        {
-            pb::SubscriptionAction::List => SubscriptionOperation::List,
-            pb::SubscriptionAction::Apply => SubscriptionOperation::Apply,
-            pb::SubscriptionAction::Delete => SubscriptionOperation::Delete,
-            pb::SubscriptionAction::Refresh => SubscriptionOperation::Refresh,
-            pb::SubscriptionAction::Deploy => SubscriptionOperation::Deploy,
-            pb::SubscriptionAction::Unspecified => SubscriptionOperation::Unspecified,
-        };
-
-        SubscriptionCommand {
-            operation,
-            subscriptions: req.subscriptions.iter().map(proto_to_record).collect(),
-            targets: req.targets,
-            force: req.force,
-        }
-    }
-
     pub fn new(storage: Arc<SubscriptionStorage>, root_dir: impl Into<PathBuf>) -> Self {
         let http = reqwest::Client::builder()
             .http1_only()
@@ -98,11 +79,6 @@ impl SubscriptionService {
         Self::new(storage, DEFAULT_ROOT_DIR)
     }
 
-    /// Dispatch a proto `SubscriptionRequest` and return the appropriate reply.
-    pub async fn handle_request(&self, req: pb::SubscriptionRequest) -> pb::SubscriptionReply {
-        self.handle_command(Self::command_from_request(req)).await
-    }
-
     pub(super) async fn sync_layout_error(&self) -> Option<String> {
         self.sync_layout().await.err().map(|err| err.to_string())
     }
@@ -111,10 +87,10 @@ impl SubscriptionService {
         let _ = self.storage.clone().flush_async().await;
     }
 
-    pub(super) fn push_event(&self, sub: pb::Subscription, action: pb::SubscriptionAction) {
+    pub(super) fn push_event(&self, sub: WireSubscription, action: WireSubscriptionAction) {
         let unixnano = i64::try_from(unix_epoch_nanos()).unwrap_or(i64::MAX);
         let time = crate::services::stats::StatsService::format_event_time(unixnano);
-        let event = pb::SubscriptionEvent {
+        let event = WireSubscriptionEvent {
             time,
             subscription: Some(sub),
             action: action as i32,
@@ -131,8 +107,8 @@ impl SubscriptionService {
         ring.insert(0, event);
     }
 
-    /// Returns a `pb::SubscriptionStatistics` snapshot for metrics export.
-    pub fn subscription_stats(&self) -> pb::SubscriptionStatistics {
+    /// Returns a wire subscription statistics snapshot for metrics export.
+    pub fn subscription_stats(&self) -> WireSubscriptionStatistics {
         let events = self
             .events
             .lock()
@@ -145,7 +121,7 @@ impl SubscriptionService {
         )
     }
 
-    /// Returns a `pb::SubscriptionStatistics` snapshot enriched with the static
+    /// Returns a wire subscription statistics snapshot enriched with the static
     /// `rule_subscriptions` list derived by cross-referencing the supplied list of
     /// (rule_name, operator_data_path) pairs against the subscription-managed
     /// `rules.list.d/` directory tree.
@@ -157,13 +133,13 @@ impl SubscriptionService {
     pub fn subscription_stats_with_rules(
         &self,
         list_rule_paths: &[(std::sync::Arc<str>, std::path::PathBuf)],
-    ) -> pb::SubscriptionStatistics {
+    ) -> WireSubscriptionStatistics {
         let mut stats = self.subscription_stats();
         stats.rule_subscriptions = self.build_rule_subscription_entries(list_rule_paths);
         stats
     }
 
-    /// Builds a sorted `Vec<pb::RuleSubscriptionEntry>` mapping each rule that carries
+    /// Builds a sorted `Vec<WireRuleSubscriptionEntry>` mapping each rule that carries
     /// `lists.*` operators to the subscription(s) whose files those operators reference.
     ///
     /// The mapping is N:N:
@@ -176,7 +152,7 @@ impl SubscriptionService {
     pub fn build_rule_subscription_entries(
         &self,
         list_rule_paths: &[(std::sync::Arc<str>, std::path::PathBuf)],
-    ) -> Vec<pb::RuleSubscriptionEntry> {
+    ) -> Vec<WireRuleSubscriptionEntry> {
         use crate::utils::name_parsing::sanitize_ascii_name;
         use std::collections::{HashMap, HashSet};
 
@@ -226,13 +202,13 @@ impl SubscriptionService {
             }
         }
 
-        // Convert to proto entries sorted by rule name for determinism.
-        let mut entries: Vec<pb::RuleSubscriptionEntry> = rule_subs
+        // Convert to wire entries sorted by rule name for determinism.
+        let mut entries: Vec<WireRuleSubscriptionEntry> = rule_subs
             .into_iter()
             .map(|(rule, subs)| {
                 let mut subscriptions: Vec<String> = subs.into_iter().collect();
                 subscriptions.sort();
-                pb::RuleSubscriptionEntry {
+                WireRuleSubscriptionEntry {
                     rule,
                     subscriptions,
                 }
@@ -243,7 +219,8 @@ impl SubscriptionService {
     }
 
     /// Returns the current subscription list, sorted by id.
-    pub fn list(&self) -> Vec<pb::Subscription> {
+    #[allow(dead_code)] // retained for compatibility/test proto list accessors
+    pub fn list(&self) -> Vec<WireSubscription> {
         self.storage.list()
     }
 

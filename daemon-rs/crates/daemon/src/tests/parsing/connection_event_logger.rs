@@ -3,9 +3,10 @@ use std::io::Read;
 use std::net::{TcpListener, UdpSocket};
 use std::sync::mpsc;
 use std::thread;
+use transport_wire_core::{WireConnection, WireRule};
 
-fn sample_connection() -> pb::Connection {
-    pb::Connection {
+fn sample_connection() -> WireConnection {
+    WireConnection {
         protocol: "tcp".to_string(),
         src_ip: "10.0.0.2".to_string(),
         src_port: 42424,
@@ -23,8 +24,8 @@ fn sample_connection() -> pb::Connection {
     }
 }
 
-fn sample_rule() -> pb::Rule {
-    pb::Rule {
+fn sample_rule() -> WireRule {
+    WireRule {
         name: "allow-test".to_string(),
         action: "allow".to_string(),
         duration: "always".to_string(),

@@ -1,4 +1,3 @@
-use opensnitch_proto::pb;
 use serde_json::Value;
 
 use crate::models::{task_wire::LegacyTaskResultPayload, ui_alert::UiAlert};
@@ -17,12 +16,12 @@ pub(crate) fn build_legacy_downloader_task_result(data: &str) -> Value {
 }
 
 pub(crate) async fn send_task_event(
-    task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+    task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
     alert_buffer: Option<&AlertBuffer>,
     alert_tx: Option<&tokio::sync::mpsc::Sender<UiAlert>>,
     task_name: &str,
     notification_id: u64,
-    code: pb::NotificationReplyCode,
+    code: transport_wire_core::WireNotificationReplyCode,
     data: String,
 ) {
     let is_stream_notification = notification_id > 10_000;

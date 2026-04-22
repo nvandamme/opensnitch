@@ -1,5 +1,3 @@
-use opensnitch_proto::pb;
-
 use super::CommandControlService;
 use super::control::{CONTROL_COMMAND_NOTIFICATION_LABEL, DaemonReloadPort, DaemonReloadScope};
 use crate::{
@@ -17,7 +15,7 @@ impl CommandControlService {
         notification_id: u64,
         raw_json: String,
         config: &ConfigService,
-        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         daemon_reload: &dyn DaemonReloadPort,
     ) {
         tracing::debug!(notification_id, "received apply-config command");
@@ -29,7 +27,7 @@ impl CommandControlService {
                 let _ = send_notification_reply(
                     task_reply_tx,
                     notification_id,
-                    pb::NotificationReplyCode::Error,
+                    transport_wire_core::WireNotificationReplyCode::Error,
                     format!("failed to apply config update: {err}"),
                     CONTROL_COMMAND_NOTIFICATION_LABEL,
                 )
@@ -71,7 +69,7 @@ impl CommandControlService {
             let _ = send_notification_reply(
                 task_reply_tx,
                 notification_id,
-                pb::NotificationReplyCode::Error,
+                transport_wire_core::WireNotificationReplyCode::Error,
                 format!("config update failed: {err}"),
                 CONTROL_COMMAND_NOTIFICATION_LABEL,
             )
@@ -96,7 +94,7 @@ impl CommandControlService {
             let _ = send_notification_reply(
                 task_reply_tx,
                 notification_id,
-                pb::NotificationReplyCode::Error,
+                transport_wire_core::WireNotificationReplyCode::Error,
                 format!("failed to persist config payload after runtime apply: {err}"),
                 CONTROL_COMMAND_NOTIFICATION_LABEL,
             )
@@ -112,7 +110,7 @@ impl CommandControlService {
         let _ = send_notification_reply(
             task_reply_tx,
             notification_id,
-            pb::NotificationReplyCode::Ok,
+            transport_wire_core::WireNotificationReplyCode::Ok,
             status_payload("ok"),
             CONTROL_COMMAND_NOTIFICATION_LABEL,
         )
@@ -124,13 +122,13 @@ impl CommandControlService {
         notification_id: u64,
         level: i32,
         config: &ConfigService,
-        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
     ) {
         if !self.is_valid_log_level(level) {
             let _ = send_notification_reply(
                 task_reply_tx,
                 notification_id,
-                pb::NotificationReplyCode::Error,
+                transport_wire_core::WireNotificationReplyCode::Error,
                 format!("invalid log level: {level}"),
                 CONTROL_COMMAND_NOTIFICATION_LABEL,
             )
@@ -145,7 +143,7 @@ impl CommandControlService {
             let _ = send_notification_reply(
                 task_reply_tx,
                 notification_id,
-                pb::NotificationReplyCode::Error,
+                transport_wire_core::WireNotificationReplyCode::Error,
                 format!("failed to apply runtime log level: {err}"),
                 CONTROL_COMMAND_NOTIFICATION_LABEL,
             )
@@ -160,7 +158,7 @@ impl CommandControlService {
         let _ = send_notification_reply(
             task_reply_tx,
             notification_id,
-            pb::NotificationReplyCode::Ok,
+            transport_wire_core::WireNotificationReplyCode::Ok,
             serde_json::json!({
                 "status": "ok",
                 "logLevel": level,

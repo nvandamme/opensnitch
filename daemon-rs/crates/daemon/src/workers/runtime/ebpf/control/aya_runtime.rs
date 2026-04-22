@@ -1,3 +1,6 @@
+// Aya explicit-runtime helpers are retained for aya-enabled profiles.
+#![cfg_attr(not(feature = "aya-ebpf"), allow(dead_code))]
+
 use super::*;
 
 impl EbpfWorkerControl {

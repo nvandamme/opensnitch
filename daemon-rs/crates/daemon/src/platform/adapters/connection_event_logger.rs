@@ -5,10 +5,10 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use opensnitch_proto::pb;
 use serde_json::json;
 use syslog::{Facility, Formatter3164};
 use tracing::warn;
+use transport_wire_core::{WireConnection, WireRule};
 
 use crate::config::LoggerSinkConfig;
 use crate::platform::ports::connection_event_exporter_port::ConnectionEventExporterPort;
@@ -113,7 +113,7 @@ impl ConnectionEventExporterPort for ConnectionEventLoggerAdapter {
         self.reload_from_loggers(loggers);
     }
 
-    fn on_connection_event(&self, connection: &pb::Connection, rule: Option<&pb::Rule>) {
+    fn on_connection_event(&self, connection: &WireConnection, rule: Option<&WireRule>) {
         let sinks = Arc::clone(
             &self
                 .state
@@ -351,8 +351,8 @@ fn connect_tcp(server: &str, timeout: Duration) -> std::io::Result<TcpStream> {
 fn format_message_enum(
     format: SinkFormat,
     tag: &str,
-    connection: &pb::Connection,
-    rule: Option<&pb::Rule>,
+    connection: &WireConnection,
+    rule: Option<&WireRule>,
 ) -> String {
     let ts = now_unix_seconds();
     match format {
@@ -368,13 +368,13 @@ fn format_message_enum(
 pub(crate) fn format_message(
     format: &str,
     tag: &str,
-    connection: &pb::Connection,
-    rule: Option<&pb::Rule>,
+    connection: &WireConnection,
+    rule: Option<&WireRule>,
 ) -> String {
     format_message_enum(SinkFormat::from_str(format), tag, connection, rule)
 }
 
-fn format_json(ts: u64, tag: &str, connection: &pb::Connection, rule: Option<&pb::Rule>) -> String {
+fn format_json(ts: u64, tag: &str, connection: &WireConnection, rule: Option<&WireRule>) -> String {
     let process_tree = connection
         .process_tree
         .iter()
@@ -414,7 +414,7 @@ fn format_json(ts: u64, tag: &str, connection: &pb::Connection, rule: Option<&pb
     format!("{}\n", doc)
 }
 
-fn format_csv(ts: u64, connection: &pb::Connection, rule: Option<&pb::Rule>) -> String {
+fn format_csv(ts: u64, connection: &WireConnection, rule: Option<&WireRule>) -> String {
     let rule_name = rule.map(|r| r.name.as_str()).unwrap_or("");
     let rule_action = rule.map(|r| r.action.as_str()).unwrap_or("");
 
@@ -436,8 +436,8 @@ fn format_csv(ts: u64, connection: &pb::Connection, rule: Option<&pb::Rule>) -> 
 fn format_rfc5424(
     ts: u64,
     tag: &str,
-    connection: &pb::Connection,
-    rule: Option<&pb::Rule>,
+    connection: &WireConnection,
+    rule: Option<&WireRule>,
 ) -> String {
     let rule_name = rule.map(|r| r.name.as_str()).unwrap_or("");
     let rule_action = rule.map(|r| r.action.as_str()).unwrap_or("");
@@ -459,8 +459,8 @@ fn format_rfc5424(
 fn format_rfc3164(
     ts: u64,
     tag: &str,
-    connection: &pb::Connection,
-    rule: Option<&pb::Rule>,
+    connection: &WireConnection,
+    rule: Option<&WireRule>,
 ) -> String {
     let rule_name = rule.map(|r| r.name.as_str()).unwrap_or("");
     let rule_action = rule.map(|r| r.action.as_str()).unwrap_or("");

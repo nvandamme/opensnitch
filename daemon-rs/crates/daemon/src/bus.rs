@@ -1,7 +1,5 @@
 use tokio::sync::mpsc;
 
-use opensnitch_proto::pb;
-
 use crate::models::{
     command_rpc::ClientCommand, connection_state::ConnectionAttempt, kernel_event::KernelEvent,
     ui_alert::UiAlert, verdict_rpc::VerdictReply,
@@ -13,7 +11,7 @@ pub struct Bus {
     pub kernel_tx: mpsc::Sender<KernelEvent>,
     pub client_cmd_tx: mpsc::Sender<ClientCommand>,
     pub verdict_tx: mpsc::Sender<VerdictReply>,
-    pub task_reply_tx: mpsc::Sender<pb::NotificationReply>,
+    pub task_reply_tx: mpsc::Sender<transport_wire_core::WireNotificationReply>,
     pub alert_tx: mpsc::Sender<UiAlert>,
 }
 
@@ -22,7 +20,7 @@ pub struct BusRx {
     pub kernel_rx: mpsc::Receiver<KernelEvent>,
     pub client_cmd_rx: mpsc::Receiver<ClientCommand>,
     pub verdict_rx: mpsc::Receiver<VerdictReply>,
-    pub task_reply_rx: mpsc::Receiver<pb::NotificationReply>,
+    pub task_reply_rx: mpsc::Receiver<transport_wire_core::WireNotificationReply>,
     pub alert_rx: mpsc::Receiver<UiAlert>,
 }
 

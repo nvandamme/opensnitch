@@ -30,6 +30,7 @@ impl ReloadTarget {
     fn parse(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {
             "config" => Some(Self::Config),
+            // Keep `ui_session` as a legacy alias for backward compatibility.
             "client" | "client_session" | "ui_session" => Some(Self::Client),
             "rules" => Some(Self::Rules),
             "connections" => Some(Self::Connections),

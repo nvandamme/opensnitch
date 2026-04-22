@@ -1,3 +1,6 @@
+// Supervisor internals are fully exercised in aya-enabled profiles.
+#![cfg_attr(not(feature = "aya-ebpf"), allow(dead_code))]
+
 use super::*;
 
 #[derive(Debug, Default)]
@@ -30,6 +33,9 @@ impl EbpfWorkerControl {
         prune_policy: EbpfMapPrunePolicy,
     ) {
         Self::prune_seen_hits(state);
+
+        #[cfg(not(feature = "aya-ebpf"))]
+        let _ = (bus, prune_policy);
 
         #[cfg(feature = "aya-ebpf")]
         Self::supervise_runtime_aya(bus, state, prune_policy);
@@ -437,5 +443,9 @@ impl NativeRingbuf {
 
     pub(super) fn backend_kind(&self) -> &crate::services::ebpf::EbpfRingbufBackendKind {
         unreachable!("native-ebpf-ringbuf disabled")
+    }
+
+    pub(super) fn runtime_mode(&self) -> crate::services::ebpf::EbpfRuntimeMode {
+        crate::services::ebpf::EbpfRuntimeMode::UserspaceFallback
     }
 }

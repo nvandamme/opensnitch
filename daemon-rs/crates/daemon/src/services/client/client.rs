@@ -1,50 +1,68 @@
+// This service surface is shared across profiles; several fields/helpers are only
+// exercised by `client-transport` builds.
+#![cfg_attr(not(feature = "client-transport"), allow(dead_code))]
+
 use anyhow::Result;
 use arc_swap::ArcSwap;
-use opensnitch_proto::pb;
-#[cfg(feature = "subscriptions")]
-use pb::subscriptions_client::SubscriptionsClient;
-use pb::ui_client::UiClient;
-use std::net::IpAddr;
 use std::sync::Arc;
-#[cfg(feature = "grpc-ui")]
-use tonic::codec::CompressionEncoding;
-use tonic::transport::Channel;
+use tokio::sync::mpsc;
+use transport_wire_core;
+#[cfg(feature = "client-transport")]
+use transport_wire_core::{ClientTransportClientFactoryPort, ClientTransportSessionFactoryPort};
+use transport_wire_core::{
+    ClientTransportConnectorPort, ClientTransportPort, NotificationInboundPort, PortFuture,
+    WireAlert, WireConnection, WireNotificationReply, WireRule, WireSysFirewall,
+};
+#[cfg(feature = "subscriptions")]
+use transport_wire_core::{
+    WireSubscriptionAction, WireSubscriptionCommandAck, WireSubscriptionReply,
+    WireSubscriptionRequest,
+};
 
 use super::session::{
     CLIENT_SESSION_ID, ClientPrincipal, ClientSession, ClientSessionSnapshot, SessionState,
 };
-#[cfg(feature = "grpc-ui")]
+#[cfg(not(feature = "client-transport"))]
+use super::transport::CapturedServerCertIdentity;
+#[cfg(feature = "client-transport")]
 use super::transport::{
     CapturedServerCertIdentity, SocketTarget, classify_socket_target,
     connect_unix_abstract_channel, connect_unix_channel, connect_with_skip_verify,
     connect_with_verified_tls, endpoint_with_keepalive,
 };
-#[cfg(not(feature = "grpc-ui"))]
-use super::transport::CapturedServerCertIdentity;
-#[cfg(feature = "grpc-ui")]
+use super::transport::{
+    ClientAlertReply, ClientPingReply, ClientPingRequest, ClientSubscribeConfig,
+    ClientTransportSession,
+};
+#[cfg(feature = "client-transport")]
+use super::wire::{ClientTransportKind, ClientTransportRole, ClientWireCodecKind};
+use super::wire::{ClientWire, ClientWireProfile, select_wire_profile};
+#[cfg(feature = "client-transport")]
 use crate::config::ClientAuthType;
 use crate::config::Config;
 #[cfg(feature = "subscriptions")]
 use crate::models::subscription_rpc::{SubscriptionCommand, SubscriptionOperation};
 #[cfg(feature = "subscriptions")]
-use crate::services::subscription::record_to_proto;
+use transport_wire_core::SubscriptionCommandInboundPort;
+#[cfg(feature = "subscriptions")]
+use transport_wire_core::{WireSubscription, WireSubscriptionRefreshMetadata};
 
-/// Shared cache for a gRPC `Channel` keyed on a config fingerprint.
+/// Shared cache for a transport session keyed on a config fingerprint.
 ///
-/// Reusing an existing channel avoids TCP+TLS handshake overhead on every
+/// Reusing an existing session avoids setup overhead on every
 /// RPC call. The cache is lock-free (`ArcSwap`) and safe to share across
 /// concurrent tasks.
 #[derive(Clone)]
-pub struct GrpcChannelCache {
-    inner: Arc<ArcSwap<Option<CachedChannel>>>,
+pub struct WireSessionCache {
+    inner: Arc<ArcSwap<Option<CachedSession>>>,
 }
 
-struct CachedChannel {
+struct CachedSession {
     fingerprint: u64,
-    channel: Channel,
+    session: ClientTransportSession,
 }
 
-impl Default for GrpcChannelCache {
+impl Default for WireSessionCache {
     fn default() -> Self {
         Self {
             inner: Arc::new(ArcSwap::from_pointee(None)),
@@ -52,7 +70,7 @@ impl Default for GrpcChannelCache {
     }
 }
 
-impl GrpcChannelCache {
+impl WireSessionCache {
     fn fingerprint(config: &Config) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -61,19 +79,19 @@ impl GrpcChannelCache {
         h.finish()
     }
 
-    fn load(&self, fp: u64) -> Option<Channel> {
+    fn load(&self, fp: u64) -> Option<ClientTransportSession> {
         let guard = self.inner.load();
         guard
             .as_ref()
             .as_ref()
             .filter(|c| c.fingerprint == fp)
-            .map(|c| c.channel.clone())
+            .map(|c| c.session.clone())
     }
 
-    fn store(&self, fp: u64, channel: Channel) {
-        self.inner.store(Arc::new(Some(CachedChannel {
+    fn store(&self, fp: u64, session: ClientTransportSession) {
+        self.inner.store(Arc::new(Some(CachedSession {
             fingerprint: fp,
-            channel,
+            session,
         })));
     }
 
@@ -82,11 +100,65 @@ impl GrpcChannelCache {
     }
 }
 
+#[cfg(feature = "client-transport")]
+#[derive(Clone, Copy, Default)]
+struct DaemonWireSessionFactory;
+
+#[cfg(feature = "client-transport")]
+impl ClientTransportSessionFactoryPort<Config> for DaemonWireSessionFactory {
+    type Session = ClientTransportSession;
+
+    fn fingerprint(&self, config: &Config) -> u64 {
+        WireSessionCache::fingerprint(config)
+    }
+
+    fn connect_session<'a>(&'a self, config: &'a Config) -> PortFuture<'a, Self::Session> {
+        Box::pin(async move {
+            let (session, _) = ClientService::connect_session_with_identity(config).await?;
+            Ok(session)
+        })
+    }
+}
+
+#[cfg(feature = "client-transport")]
+#[derive(Clone, Copy, Default)]
+struct DaemonWireClientFactory;
+
+#[cfg(feature = "client-transport")]
+impl ClientTransportClientFactoryPort<ClientTransportSession> for DaemonWireClientFactory {
+    type Client = ClientService;
+
+    fn client_from_session(&self, session: ClientTransportSession) -> Self::Client {
+        ClientService::from_session(session)
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct ClientTransportConnector {
+    cache: WireSessionCache,
+}
+
+impl ClientTransportConnector {
+    pub fn new(cache: WireSessionCache) -> Self {
+        Self { cache }
+    }
+}
+
+impl ClientTransportConnectorPort<Config> for ClientTransportConnector {
+    type Client = ClientService;
+
+    fn connect_or_reuse<'a>(&'a self, config: &'a Config) -> PortFuture<'a, Self::Client> {
+        Box::pin(async move { ClientService::connect_or_reuse(config, &self.cache).await })
+    }
+
+    fn invalidate(&self) {
+        self.cache.invalidate();
+    }
+}
+
 #[derive(Clone)]
 pub struct ClientService {
-    grpc: Option<UiClient<Channel>>,
-    #[cfg(feature = "subscriptions")]
-    subscriptions_grpc: Option<SubscriptionsClient<Channel>>,
+    wire: ClientWire,
     session: Arc<SessionState>,
 }
 
@@ -97,9 +169,7 @@ pub struct ClientService {
 impl Default for ClientService {
     fn default() -> Self {
         Self {
-            grpc: None,
-            #[cfg(feature = "subscriptions")]
-            subscriptions_grpc: None,
+            wire: ClientWire::default(),
             session: Arc::new(SessionState::new()),
         }
     }
@@ -132,7 +202,7 @@ impl ClientService {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn connect_ip_fallback_session(&self, ip: IpAddr) {
+    pub fn connect_ip_fallback_session(&self, ip: std::net::IpAddr) {
         let default_action = self.session.snapshot_rx.borrow().connected_default_action;
         self.upsert_session(ClientSession::for_ip_fallback(ip, default_action));
     }
@@ -267,6 +337,10 @@ impl ClientService {
 // ---------------------------------------------------------------------------
 
 impl ClientService {
+    fn selected_wire_profile(config: &Config) -> ClientWireProfile {
+        select_wire_profile(config.client_addr.as_str())
+    }
+
     fn nonempty_server_identity(
         identity: Arc<CapturedServerCertIdentity>,
     ) -> Option<Arc<CapturedServerCertIdentity>> {
@@ -281,7 +355,7 @@ impl ClientService {
     }
 
     #[allow(dead_code)]
-    #[cfg(feature = "grpc-ui")]
+    #[cfg(feature = "client-transport")]
     pub async fn connect(addr: &str) -> Result<Self> {
         let channel = match classify_socket_target(addr) {
             SocketTarget::Tcp(target) => endpoint_with_keepalive(target)?.connect().await?,
@@ -290,86 +364,134 @@ impl ClientService {
                 connect_unix_abstract_channel(name.to_string()).await?
             }
         };
-        Ok(Self::from_channel(channel))
+        Ok(Self::from_session(channel))
     }
 
     #[allow(dead_code)]
-    #[cfg(not(feature = "grpc-ui"))]
+    #[cfg(not(feature = "client-transport"))]
     pub async fn connect(_addr: &str) -> Result<Self> {
         Ok(Self::default())
     }
 
-    #[cfg(feature = "grpc-ui")]
+    #[cfg(feature = "client-transport")]
     pub async fn connect_with_config(config: &Config) -> Result<Self> {
         let (service, _) = Self::connect_with_config_and_server_identity(config).await?;
         Ok(service)
     }
 
-    #[cfg(not(feature = "grpc-ui"))]
+    #[cfg(not(feature = "client-transport"))]
     pub async fn connect_with_config(_config: &Config) -> Result<Self> {
         Ok(Self::default())
     }
 
-    #[cfg(feature = "grpc-ui")]
+    #[cfg(feature = "client-transport")]
     pub async fn connect_with_config_and_server_identity(
         config: &Config,
     ) -> Result<(Self, Option<Arc<CapturedServerCertIdentity>>)> {
-        let (channel, server_identity) = Self::connect_channel(config).await?;
-        Ok((Self::from_channel(channel), server_identity))
+        let profile = Self::selected_wire_profile(config);
+        match (profile.role, profile.transport, profile.codec) {
+            (ClientTransportRole::Client, ClientTransportKind::Stub, ClientWireCodecKind::Stub) => {
+                return Ok((Self::from_stub_wire(), None));
+            }
+            #[cfg(feature = "client-transport")]
+            (
+                ClientTransportRole::Client,
+                ClientTransportKind::Http2,
+                ClientWireCodecKind::ProtobufGrpc,
+            ) => {}
+            #[cfg(not(feature = "client-transport"))]
+            (
+                ClientTransportRole::Client,
+                ClientTransportKind::Disabled,
+                ClientWireCodecKind::Disabled,
+            ) => {
+                return Ok((Self::default(), None));
+            }
+            _ => anyhow::bail!("invalid client transport/wire profile selection"),
+        }
+
+        let (session, server_identity) = Self::connect_session_with_identity(config).await?;
+        Ok((Self::from_session(session), server_identity))
     }
 
-    #[cfg(not(feature = "grpc-ui"))]
+    #[cfg(not(feature = "client-transport"))]
     pub async fn connect_with_config_and_server_identity(
         _config: &Config,
     ) -> Result<(Self, Option<Arc<CapturedServerCertIdentity>>)> {
         Ok((Self::default(), None))
     }
 
-    /// Reuse a cached gRPC channel when the config fingerprint matches,
+    /// Reuse a cached transport session when the config fingerprint matches,
     /// falling back to a fresh connection on cache miss or config change.
-    #[cfg(feature = "grpc-ui")]
-    pub async fn connect_or_reuse(config: &Config, cache: &GrpcChannelCache) -> Result<Self> {
-        let fp = GrpcChannelCache::fingerprint(config);
-        if let Some(channel) = cache.load(fp) {
-            return Ok(Self::from_channel(channel));
+    #[cfg(feature = "client-transport")]
+    pub async fn connect_or_reuse(config: &Config, cache: &WireSessionCache) -> Result<Self> {
+        let profile = Self::selected_wire_profile(config);
+        match (profile.role, profile.transport, profile.codec) {
+            (ClientTransportRole::Client, ClientTransportKind::Stub, ClientWireCodecKind::Stub) => {
+                return Ok(Self::from_stub_wire());
+            }
+            (
+                ClientTransportRole::Client,
+                ClientTransportKind::Http2,
+                ClientWireCodecKind::ProtobufGrpc,
+            ) => {}
+            #[cfg(not(feature = "client-transport"))]
+            (
+                ClientTransportRole::Client,
+                ClientTransportKind::Disabled,
+                ClientWireCodecKind::Disabled,
+            ) => {
+                return Ok(Self::default());
+            }
+            _ => anyhow::bail!("invalid client transport/wire profile selection"),
         }
-        let (channel, _) = Self::connect_channel(config).await?;
-        cache.store(fp, channel.clone());
-        Ok(Self::from_channel(channel))
+
+        let session_factory = DaemonWireSessionFactory;
+        let client_factory = DaemonWireClientFactory;
+
+        let fp = session_factory.fingerprint(config);
+        if let Some(session) = cache.load(fp) {
+            return Ok(client_factory.client_from_session(session));
+        }
+        let session = session_factory.connect_session(config).await?;
+        cache.store(fp, session.clone());
+        Ok(client_factory.client_from_session(session))
     }
 
-    #[cfg(not(feature = "grpc-ui"))]
-    pub async fn connect_or_reuse(_config: &Config, _cache: &GrpcChannelCache) -> Result<Self> {
+    #[cfg(not(feature = "client-transport"))]
+    pub async fn connect_or_reuse(_config: &Config, _cache: &WireSessionCache) -> Result<Self> {
         Ok(Self::default())
     }
 
-    #[cfg(feature = "grpc-ui")]
-    fn from_channel(channel: Channel) -> Self {
-        let grpc = UiClient::new(channel.clone());
-        #[cfg(feature = "subscriptions")]
-        let subscriptions_grpc = SubscriptionsClient::new(channel);
+    #[cfg(feature = "client-transport")]
+    fn from_session(session: ClientTransportSession) -> Self {
         let mut service = Self::default();
-        service.grpc = Some(grpc);
-        #[cfg(feature = "subscriptions")]
-        {
-            service.subscriptions_grpc = Some(subscriptions_grpc);
-        }
+        service.wire = ClientWire::from_session(session);
         service
     }
 
-    #[cfg(feature = "grpc-ui")]
-    async fn connect_channel(
+    fn from_stub_wire() -> Self {
+        let mut service = Self::default();
+        service.wire = ClientWire::from_stub();
+        service
+    }
+
+    #[cfg(feature = "client-transport")]
+    async fn connect_session_with_identity(
         config: &Config,
-    ) -> Result<(Channel, Option<Arc<CapturedServerCertIdentity>>)> {
+    ) -> Result<(
+        ClientTransportSession,
+        Option<Arc<CapturedServerCertIdentity>>,
+    )> {
         if matches!(config.client_auth.auth_type, ClientAuthType::Simple) {
-            let channel = match classify_socket_target(&config.client_addr) {
+            let session = match classify_socket_target(&config.client_addr) {
                 SocketTarget::Tcp(target) => endpoint_with_keepalive(target)?.connect().await?,
                 SocketTarget::UnixPath(path) => connect_unix_channel(path.to_string()).await?,
                 SocketTarget::UnixAbstract(name) => {
                     connect_unix_abstract_channel(name.to_string()).await?
                 }
             };
-            return Ok((channel, None));
+            return Ok((session, None));
         }
 
         let addr = if config.client_addr.starts_with("http://") {
@@ -380,13 +502,13 @@ impl ClientService {
 
         let endpoint = endpoint_with_keepalive(&addr)?;
 
-        let (channel, server_identity) = if config.client_auth.tls_options.skip_verify {
+        let (session, server_identity) = if config.client_auth.tls_options.skip_verify {
             connect_with_skip_verify(&endpoint, config).await?
         } else {
             connect_with_verified_tls(&endpoint, config).await?
         };
 
-        Ok((channel, Self::nonempty_server_identity(server_identity)))
+        Ok((session, Self::nonempty_server_identity(server_identity)))
     }
 
     pub(crate) fn runtime_identity() -> (String, String) {
@@ -401,102 +523,86 @@ impl ClientService {
 
     pub(crate) fn build_subscribe_config_from_snapshots(
         config: &Config,
-        rules: &Arc<Vec<pb::Rule>>,
+        rules: &[WireRule],
         is_firewall_running: bool,
         system_firewall: &Arc<Option<crate::models::firewall_config::FirewallConfig>>,
-    ) -> pb::ClientConfig {
+    ) -> ClientSubscribeConfig {
         let (name, version) = Self::runtime_identity();
 
         // Protobuf request messages are owned values. At the gRPC boundary,
         // clone once from Arc snapshots to preserve immutable runtime snapshots.
-        // Convert domain FirewallConfig → pb::SysFirewall here at the gRPC egress boundary.
-        pb::ClientConfig {
+        // Convert domain FirewallConfig -> WireSysFirewall here at the transport egress boundary.
+        ClientSubscribeConfig {
             id: 1,
             name,
             version,
             is_firewall_running,
             config: config.raw_json.clone(),
             log_level: config.log_level,
-            rules: rules.as_ref().clone(),
-            system_firewall: system_firewall.as_ref().as_ref().map(pb::SysFirewall::from),
+            rules: rules.to_vec(),
+            system_firewall: system_firewall
+                .as_ref()
+                .as_ref()
+                .map(|firewall| WireSysFirewall::from(firewall)),
         }
     }
 
-    pub async fn subscribe(&mut self, cfg: pb::ClientConfig) -> Result<pb::ClientConfig> {
-        #[cfg(not(feature = "grpc-ui"))]
-        {
-            let _ = cfg;
-            anyhow::bail!("grpc-ui feature disabled: subscribe transport is not available")
-        }
-        #[cfg(feature = "grpc-ui")]
-        Ok(self.grpc_mut().subscribe(cfg).await?.into_inner())
+    pub async fn subscribe(&mut self, cfg: ClientSubscribeConfig) -> Result<ClientSubscribeConfig> {
+        self.wire.subscribe(cfg).await
     }
 
-    pub async fn ping(&mut self, req: pb::PingRequest) -> Result<pb::PingReply> {
-        #[cfg(not(feature = "grpc-ui"))]
-        {
-            let _ = req;
-            anyhow::bail!("grpc-ui feature disabled: ping transport is not available")
-        }
-        #[cfg(feature = "grpc-ui")]
-        Ok(self.grpc_mut().ping(req).await?.into_inner())
+    pub async fn ping(&mut self, req: ClientPingRequest) -> Result<ClientPingReply> {
+        self.wire.ping(req).await
     }
 
-    pub async fn ask_rule(&mut self, conn: pb::Connection) -> Result<pb::Rule> {
-        #[cfg(not(feature = "grpc-ui"))]
-        {
-            let _ = conn;
-            anyhow::bail!("grpc-ui feature disabled: ask_rule transport is not available")
-        }
-        #[cfg(feature = "grpc-ui")]
-        Ok(self.grpc_mut().ask_rule(conn).await?.into_inner())
+    pub async fn ask_rule(&mut self, conn: WireConnection) -> Result<WireRule> {
+        self.wire.ask_rule(conn).await
     }
 
-    pub async fn post_alert(&mut self, alert: pb::Alert) -> Result<pb::MsgResponse> {
-        #[cfg(not(feature = "grpc-ui"))]
-        {
-            let _ = alert;
-            anyhow::bail!("grpc-ui feature disabled: alert transport is not available")
-        }
-        #[cfg(feature = "grpc-ui")]
-        Ok(self
-            .grpc_mut()
-            .clone()
-            .send_compressed(CompressionEncoding::Gzip)
-            .post_alert(alert)
-            .await?
-            .into_inner())
+    pub async fn post_alert(&mut self, alert: WireAlert) -> Result<ClientAlertReply> {
+        self.wire.post_alert(alert).await
     }
 
-    #[cfg(feature = "grpc-ui")]
-    pub fn grpc_mut(&mut self) -> &mut UiClient<Channel> {
-        self.grpc
-            .as_mut()
-            .expect("ClientService transport not initialized; connect first")
+    pub async fn notification_stream_channels(
+        &mut self,
+    ) -> Result<(
+        Box<dyn NotificationInboundPort>,
+        mpsc::Sender<WireNotificationReply>,
+    )> {
+        self.wire.open_notifications().await
     }
 }
 
-/// Outbound gRPC client methods for the `Subscriptions` service hosted by the
-/// Python UI on the same socket as the UI service.  All calls go through
-/// `SubscriptionFlow` which owns its own `GrpcChannelCache` and reconnect loop.
+/// Outbound transport client methods for the `Subscriptions` service hosted by the
+/// Python client on the same socket as the client service.  All calls go through
+/// `SubscriptionFlow` which owns its own `WireSessionCache` and reconnect loop.
 #[cfg(feature = "subscriptions")]
 impl ClientService {
-    fn subscription_request_from_command(command: SubscriptionCommand) -> pb::SubscriptionRequest {
+    pub async fn subscription_commands_open(
+        &mut self,
+    ) -> Result<(
+        Box<dyn SubscriptionCommandInboundPort>,
+        mpsc::Sender<WireSubscriptionCommandAck>,
+    )> {
+        self.wire.subscription_commands_open().await
+    }
+
+    fn subscription_request_from_command(command: SubscriptionCommand) -> WireSubscriptionRequest {
         let operation = match command.operation {
-            SubscriptionOperation::List => pb::SubscriptionAction::List,
-            SubscriptionOperation::Apply => pb::SubscriptionAction::Apply,
-            SubscriptionOperation::Delete => pb::SubscriptionAction::Delete,
-            SubscriptionOperation::Refresh => pb::SubscriptionAction::Refresh,
-            SubscriptionOperation::Deploy => pb::SubscriptionAction::Deploy,
-            SubscriptionOperation::Unspecified => pb::SubscriptionAction::Unspecified,
+            SubscriptionOperation::List => WireSubscriptionAction::List,
+            SubscriptionOperation::Apply => WireSubscriptionAction::Apply,
+            SubscriptionOperation::Delete => WireSubscriptionAction::Delete,
+            SubscriptionOperation::Refresh => WireSubscriptionAction::Refresh,
+            SubscriptionOperation::Deploy => WireSubscriptionAction::Deploy,
+            SubscriptionOperation::Unspecified => WireSubscriptionAction::Unspecified,
         };
 
-        pb::SubscriptionRequest {
+        WireSubscriptionRequest {
             operation: operation as i32,
             subscriptions: command
                 .subscriptions
                 .iter()
-                .map(record_to_proto)
+                .map(wire_subscription_from_record)
                 .collect(),
             targets: command.targets,
             force: command.force,
@@ -506,133 +612,150 @@ impl ClientService {
     pub async fn subscription_execute(
         &mut self,
         command: SubscriptionCommand,
-    ) -> Result<pb::SubscriptionReply> {
+    ) -> Result<WireSubscriptionReply> {
         let req = Self::subscription_request_from_command(command);
         self.subscription_list(req).await
     }
 
-    #[cfg(feature = "grpc-ui")]
+    #[cfg(feature = "client-transport")]
     pub async fn subscription_list(
         &mut self,
-        req: pb::SubscriptionRequest,
-    ) -> Result<pb::SubscriptionReply> {
-        Ok(self.subscriptions_grpc_mut().list(req).await?.into_inner())
+        req: WireSubscriptionRequest,
+    ) -> Result<WireSubscriptionReply> {
+        self.wire.subscription_list(req).await
     }
 
-    #[cfg(not(feature = "grpc-ui"))]
+    #[cfg(not(feature = "client-transport"))]
     pub async fn subscription_list(
         &mut self,
-        req: pb::SubscriptionRequest,
-    ) -> Result<pb::SubscriptionReply> {
-        let _ = req;
-        anyhow::bail!("grpc-ui feature disabled: subscriptions transport is not available")
+        req: WireSubscriptionRequest,
+    ) -> Result<WireSubscriptionReply> {
+        self.wire.subscription_list(req).await
     }
 
-    #[cfg(feature = "grpc-ui")]
+    #[cfg(feature = "client-transport")]
     pub async fn subscription_apply(
         &mut self,
-        req: pb::SubscriptionRequest,
-    ) -> Result<pb::SubscriptionReply> {
-        Ok(self.subscriptions_grpc_mut().apply(req).await?.into_inner())
+        req: WireSubscriptionRequest,
+    ) -> Result<WireSubscriptionReply> {
+        self.wire.subscription_apply(req).await
     }
 
-    #[cfg(not(feature = "grpc-ui"))]
+    #[cfg(not(feature = "client-transport"))]
     pub async fn subscription_apply(
         &mut self,
-        req: pb::SubscriptionRequest,
-    ) -> Result<pb::SubscriptionReply> {
-        let _ = req;
-        anyhow::bail!("grpc-ui feature disabled: subscriptions transport is not available")
+        req: WireSubscriptionRequest,
+    ) -> Result<WireSubscriptionReply> {
+        self.wire.subscription_apply(req).await
     }
 
-    #[cfg(feature = "grpc-ui")]
+    #[cfg(feature = "client-transport")]
     pub async fn subscription_delete(
         &mut self,
-        req: pb::SubscriptionRequest,
-    ) -> Result<pb::SubscriptionReply> {
-        Ok(self
-            .subscriptions_grpc_mut()
-            .delete(req)
-            .await?
-            .into_inner())
+        req: WireSubscriptionRequest,
+    ) -> Result<WireSubscriptionReply> {
+        self.wire.subscription_delete(req).await
     }
 
-    #[cfg(not(feature = "grpc-ui"))]
+    #[cfg(not(feature = "client-transport"))]
     pub async fn subscription_delete(
         &mut self,
-        req: pb::SubscriptionRequest,
-    ) -> Result<pb::SubscriptionReply> {
-        let _ = req;
-        anyhow::bail!("grpc-ui feature disabled: subscriptions transport is not available")
+        req: WireSubscriptionRequest,
+    ) -> Result<WireSubscriptionReply> {
+        self.wire.subscription_delete(req).await
     }
 
-    #[cfg(feature = "grpc-ui")]
+    #[cfg(feature = "client-transport")]
     pub async fn subscription_refresh(
         &mut self,
-        req: pb::SubscriptionRequest,
-    ) -> Result<pb::SubscriptionReply> {
-        Ok(self
-            .subscriptions_grpc_mut()
-            .refresh(req)
-            .await?
-            .into_inner())
+        req: WireSubscriptionRequest,
+    ) -> Result<WireSubscriptionReply> {
+        self.wire.subscription_refresh(req).await
     }
 
-    #[cfg(not(feature = "grpc-ui"))]
+    #[cfg(not(feature = "client-transport"))]
     pub async fn subscription_refresh(
         &mut self,
-        req: pb::SubscriptionRequest,
-    ) -> Result<pb::SubscriptionReply> {
-        let _ = req;
-        anyhow::bail!("grpc-ui feature disabled: subscriptions transport is not available")
+        req: WireSubscriptionRequest,
+    ) -> Result<WireSubscriptionReply> {
+        self.wire.subscription_refresh(req).await
     }
 
-    #[cfg(feature = "grpc-ui")]
+    #[cfg(feature = "client-transport")]
     pub async fn subscription_deploy(
         &mut self,
-        req: pb::SubscriptionRequest,
-    ) -> Result<pb::SubscriptionReply> {
-        Ok(self
-            .subscriptions_grpc_mut()
-            .deploy(req)
-            .await?
-            .into_inner())
+        req: WireSubscriptionRequest,
+    ) -> Result<WireSubscriptionReply> {
+        self.wire.subscription_deploy(req).await
     }
 
-    #[cfg(not(feature = "grpc-ui"))]
+    #[cfg(not(feature = "client-transport"))]
     pub async fn subscription_deploy(
         &mut self,
-        req: pb::SubscriptionRequest,
-    ) -> Result<pb::SubscriptionReply> {
-        let _ = req;
-        anyhow::bail!("grpc-ui feature disabled: subscriptions transport is not available")
+        req: WireSubscriptionRequest,
+    ) -> Result<WireSubscriptionReply> {
+        self.wire.subscription_deploy(req).await
+    }
+}
+
+#[cfg(feature = "subscriptions")]
+fn wire_subscription_from_record(
+    sub: &crate::models::subscription_storage::SubscriptionRecord,
+) -> WireSubscription {
+    WireSubscription {
+        id: sub.id.clone(),
+        name: sub.name.clone(),
+        url: sub.url.clone(),
+        filename: sub.filename.clone(),
+        groups: sub.groups.clone(),
+        enabled: sub.enabled,
+        format: sub.format.clone(),
+        interval_seconds: sub.interval_seconds,
+        timeout_seconds: sub.timeout_seconds,
+        max_bytes: sub.max_bytes,
+        node: sub.node.clone(),
+        status: match sub.status.as_str() {
+            "pending" => 1,
+            "ready" => 2,
+            "syncing" => 3,
+            "error" => 4,
+            _ => 0,
+        },
+        last_updated: sub.last_updated.clone(),
+        last_error: sub.last_error.clone(),
+        refresh_meta: Some(WireSubscriptionRefreshMetadata {
+            next_refresh_after: sub.next_refresh_after,
+            consecutive_failures: sub.consecutive_failures,
+            etag: sub.etag.clone(),
+            last_modified: sub.last_modified.clone(),
+        }),
+    }
+}
+
+impl ClientTransportPort for ClientService {
+    type SubscribeConfig = ClientSubscribeConfig;
+    type PingRequest = ClientPingRequest;
+    type PingReply = ClientPingReply;
+    type AskRuleRequest = WireConnection;
+    type RuleReply = WireRule;
+    type AlertReply = ClientAlertReply;
+
+    fn subscribe<'a>(
+        &'a mut self,
+        cfg: Self::SubscribeConfig,
+    ) -> PortFuture<'a, Self::SubscribeConfig> {
+        Box::pin(async move { ClientService::subscribe(self, cfg).await })
     }
 
-    #[cfg(feature = "grpc-ui")]
-    pub async fn subscription_commands(
-        &mut self,
-        acks: impl tonic::IntoStreamingRequest<Message = pb::SubscriptionCommandAck>,
-    ) -> Result<tonic::Streaming<pb::SubscriptionCommand>> {
-        Ok(self
-            .subscriptions_grpc_mut()
-            .commands(acks)
-            .await?
-            .into_inner())
+    fn ping<'a>(&'a mut self, req: Self::PingRequest) -> PortFuture<'a, Self::PingReply> {
+        Box::pin(async move { ClientService::ping(self, req).await })
     }
 
-    #[cfg(not(feature = "grpc-ui"))]
-    pub async fn subscription_commands(
-        &mut self,
-        acks: impl tonic::IntoStreamingRequest<Message = pb::SubscriptionCommandAck>,
-    ) -> Result<tonic::Streaming<pb::SubscriptionCommand>> {
-        let _ = acks;
-        anyhow::bail!("grpc-ui feature disabled: subscriptions transport is not available")
+    fn ask_rule<'a>(&'a mut self, conn: Self::AskRuleRequest) -> PortFuture<'a, Self::RuleReply> {
+        Box::pin(async move { ClientService::ask_rule(self, conn).await })
     }
 
-    #[cfg(feature = "grpc-ui")]
-    fn subscriptions_grpc_mut(&mut self) -> &mut SubscriptionsClient<Channel> {
-        self.subscriptions_grpc
-            .as_mut()
-            .expect("ClientService transport not initialized; connect first")
+    fn post_alert<'a>(&'a mut self, alert: WireAlert) -> PortFuture<'a, Self::AlertReply> {
+        Box::pin(async move { ClientService::post_alert(self, alert).await })
     }
 }

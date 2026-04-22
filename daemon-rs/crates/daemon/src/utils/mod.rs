@@ -1,5 +1,6 @@
 pub mod atomic_write;
 pub mod byte_read;
+pub mod cert_gen;
 pub mod channel_send;
 pub mod command_output;
 pub mod command_path;
@@ -8,7 +9,6 @@ pub mod conntrack;
 pub mod daemon_guard;
 pub mod duration_parse;
 pub mod hex_parse;
-pub mod cert_gen;
 pub mod http_response;
 pub mod json_value;
 pub mod kernel_caps;

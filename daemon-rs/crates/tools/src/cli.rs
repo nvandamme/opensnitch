@@ -136,7 +136,7 @@ pub(crate) fn help_text() -> &'static str {
         "  --baseline=PATH       Stress baseline file path           [OPENSNITCH_STRESS_BASELINE_PATH]\n",
         "\n",
         "eBPF smoke flags:\n",
-        "  --smoke-timeout=N     aya smoke test timeout (secs)       [DAEMON_RS_EBPF_SMOKE_TIMEOUT_SECS] (default: 90)\n",
+        "  --smoke-timeout=N     aya smoke test timeout (secs)       [DAEMON_RS_EBPF_SMOKE_TIMEOUT_SECS] (default: 40)\n",
         "  --smoke-kill-after=N  aya smoke SIGKILL grace (secs)      [DAEMON_RS_EBPF_SMOKE_TIMEOUT_KILL_AFTER_SECS] (default: 3)\n",
         "\n",
         "Other:\n",

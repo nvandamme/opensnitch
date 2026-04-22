@@ -1,10 +1,9 @@
-use opensnitch_proto::pb;
 use reqwest::{StatusCode, header};
 use tracing::{info, warn};
 
+use super::SubscriptionRecord;
 use super::SubscriptionService;
 use super::refresh_timing::next_refresh_success;
-use super::{SubscriptionRecord, subscription_status_to_str};
 pub(super) use crate::models::subscription_refresh::RefreshOutcome;
 use crate::services::storage::StorageService;
 use crate::utils::http_response::{header_value, summarize_http_error};
@@ -74,7 +73,7 @@ impl SubscriptionService {
                     return Err(message);
                 }
 
-                record.status = subscription_status_to_str(pb::SubscriptionStatus::Ready);
+                record.status = "ready".to_string();
                 record.last_error.clear();
                 record.last_updated = now_rfc3339_utc();
                 record.etag = etag;
@@ -106,7 +105,7 @@ impl SubscriptionService {
                 if !last_modified.is_empty() {
                     record.last_modified = last_modified;
                 }
-                record.status = subscription_status_to_str(pb::SubscriptionStatus::Ready);
+                record.status = "ready".to_string();
                 record.last_error.clear();
                 record.last_updated = now_rfc3339_utc();
                 record.consecutive_failures = 0;

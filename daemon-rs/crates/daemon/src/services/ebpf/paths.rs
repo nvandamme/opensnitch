@@ -1,13 +1,19 @@
+// Pin-path helpers are used by ebpf-enabled profiles and retained for API parity.
+#![cfg_attr(
+    not(any(feature = "aya-ebpf", feature = "libbpf-ebpf")),
+    allow(dead_code)
+)]
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
-use opensnitch_ebpf_common::pinning::{
+use ebpf_common::pinning::{
     AYA_CONN_ROOT, AYA_CONN_TCP_MAP_PATH, AYA_DNS_EVENTS_PATH, AYA_PROC_EVENTS_PATH, AYA_PROC_ROOT,
     LEGACY_CONN_ROOT, LEGACY_CONN_TCP_MAP_PATH, LEGACY_DNS_EVENTS_PATH, LEGACY_PROC_EVENTS_PATH,
     LEGACY_PROC_ROOT,
 };
 #[cfg(test)]
-use opensnitch_ebpf_common::pinning::{AYA_DNS_ROOT, LEGACY_DNS_ROOT};
+use ebpf_common::pinning::{AYA_DNS_ROOT, LEGACY_DNS_ROOT};
 
 use super::EbpfService;
 

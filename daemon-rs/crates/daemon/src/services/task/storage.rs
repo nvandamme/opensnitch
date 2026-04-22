@@ -1,7 +1,6 @@
 use std::{collections::HashMap, io::ErrorKind, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::Result;
-use opensnitch_proto::pb;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
@@ -34,7 +33,7 @@ impl TaskService {
         tasks_file: &std::path::Path,
         task_handles: &mut RuntimeTaskHandles,
         process: ProcessService,
-        task_reply_tx: tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
     ) -> Result<()> {
         let desired = Self::load_storage_tasks(tasks_file).await?;
         self.apply_storage_task_diff(desired, task_handles, process, task_reply_tx)
@@ -48,7 +47,7 @@ impl TaskService {
         desired: HashMap<String, (String, Arc<Value>, String)>,
         task_handles: &mut RuntimeTaskHandles,
         process: ProcessService,
-        task_reply_tx: tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
     ) -> Result<()> {
         task_handles.retain(|key, runtime| {
             if desired.contains_key(key) {
@@ -109,7 +108,9 @@ impl TaskService {
             tasks_file.display()
         );
         let tasks_list = match storage
-            .read_json_if_exists_and_notify::<TasksListFile>("task", tasks_file)
+            .read_and_parse_with_storage_format_if_exists_and_notify::<TasksListFile>(
+                "task", tasks_file,
+            )
             .await
         {
             Ok(Some(tasks_list)) => tasks_list,
@@ -127,7 +128,7 @@ impl TaskService {
                     tasks_file.display(),
                     err
                 );
-                return Err(err.into());
+                return Err(err);
             }
         };
         let tasks_base_dir = tasks_file
@@ -194,7 +195,7 @@ impl TaskService {
 struct TaskWatchControl {
     task_service: TaskService,
     process: ProcessService,
-    task_reply_tx: tokio::sync::mpsc::Sender<pb::NotificationReply>,
+    task_reply_tx: tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
     alert_buffer: AlertBuffer,
     alert_tx: tokio::sync::mpsc::Sender<UiAlert>,
     tasks_config_path: PathBuf,
@@ -349,7 +350,7 @@ pub(super) fn start_task_watch_task(
     shutdown: CancellationToken,
     config: ConfigService,
     process: ProcessService,
-    task_reply_tx: tokio::sync::mpsc::Sender<pb::NotificationReply>,
+    task_reply_tx: tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
     alert_buffer: AlertBuffer,
     alert_tx: tokio::sync::mpsc::Sender<UiAlert>,
 ) -> Box<dyn WorkerControl> {

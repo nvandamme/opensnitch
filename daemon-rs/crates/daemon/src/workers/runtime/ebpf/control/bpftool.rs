@@ -1,3 +1,13 @@
+// Explicit runtime selection helpers are retained for ebpf-enabled profiles.
+#![cfg_attr(
+    not(any(
+        feature = "aya-ebpf",
+        feature = "libbpf-ebpf",
+        feature = "native-ebpf-ringbuf"
+    )),
+    allow(dead_code)
+)]
+
 use super::*;
 
 impl EbpfWorkerControl {
@@ -348,6 +358,9 @@ impl EbpfWorkerControl {
         shutdown: &CancellationToken,
         runtime: ProcExplicitRuntime<'_>,
     ) -> Result<(), String> {
+        #[cfg(not(feature = "aya-ebpf"))]
+        let _ = (bus, shutdown);
+
         match runtime.kind {
             #[cfg(feature = "aya-ebpf")]
             ProcExplicitRuntimeKind::Aya => {
@@ -360,6 +373,9 @@ impl EbpfWorkerControl {
         shutdown: &CancellationToken,
         runtime: ConnExplicitRuntime<'_>,
     ) -> Result<(), String> {
+        #[cfg(not(feature = "aya-ebpf"))]
+        let _ = shutdown;
+
         match runtime.kind {
             #[cfg(feature = "aya-ebpf")]
             ConnExplicitRuntimeKind::Aya => {

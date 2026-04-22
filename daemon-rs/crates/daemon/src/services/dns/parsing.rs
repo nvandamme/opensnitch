@@ -1,10 +1,13 @@
+// eBPF DNS sample parsing is only exercised by native ringbuf-enabled builds.
+#![cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
+
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     time::{Duration, Instant},
 };
 
-use opensnitch_ebpf_common::dns::{AF_INET, AF_INET6, AF_UNRESOLVED, DnsEvent};
+use ebpf_common::dns::{AF_INET, AF_INET6, AF_UNRESOLVED, DnsEvent};
 
 use crate::models::dns_payload::DnsPayload;
 use crate::utils::byte_read::read_ne_value_at;

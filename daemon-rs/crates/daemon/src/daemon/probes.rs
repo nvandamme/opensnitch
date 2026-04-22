@@ -1,6 +1,7 @@
 use super::Daemon;
 
 impl Daemon {
+    // Test probe — called from smoke tests to dispatch connection attempts directly into worker channels.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn probe_dispatch_connect_attempt_to_worker(
         worker_txs: &[tokio::sync::mpsc::Sender<
@@ -19,6 +20,7 @@ impl Daemon {
         .await
     }
 
+    // Test probe — called from smoke tests to inject kernel pipeline events without running the real eBPF path.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn probe_dispatch_kernel_pipeline_event<T>(
         &self,

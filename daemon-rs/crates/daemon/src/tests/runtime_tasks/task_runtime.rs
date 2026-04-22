@@ -5,11 +5,11 @@ use crate::services::{
         validation as task_runtime_validation,
     },
 };
-use opensnitch_proto::pb;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
+use transport_wire_core::{WireNotificationReply, WireNotificationReplyCode};
 
 #[test]
 fn build_task_key_normalizes_aliases_and_uses_identity_keys() {
@@ -160,7 +160,7 @@ async fn stop_runtime_tasks_cancels_all_handles() {
 async fn lifecycle_subscriptions_increment_and_decrement_monitor_counters() {
     use crate::services::process::ProcessService;
 
-    let (task_reply_tx, _task_reply_rx) = tokio::sync::mpsc::channel::<pb::NotificationReply>(8);
+    let (task_reply_tx, _task_reply_rx) = tokio::sync::mpsc::channel::<WireNotificationReply>(8);
     let shutdown = CancellationToken::new();
     let runtime = TaskRuntime::new(
         TaskService,
@@ -193,12 +193,12 @@ async fn lifecycle_subscriptions_increment_and_decrement_monitor_counters() {
 
 #[tokio::test]
 async fn send_task_reply_keeps_zero_notification_id_for_disk_tasks() {
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<pb::NotificationReply>(1);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<WireNotificationReply>(1);
 
     let _ = crate::utils::notification_reply::send_notification_reply(
         &tx,
         0,
-        pb::NotificationReplyCode::Ok,
+        WireNotificationReplyCode::Ok,
         "disk payload".to_string(),
         "task notification",
     )
@@ -206,18 +206,18 @@ async fn send_task_reply_keeps_zero_notification_id_for_disk_tasks() {
 
     let reply = rx.recv().await.expect("reply should be sent");
     assert_eq!(reply.id, 0);
-    assert_eq!(reply.code, pb::NotificationReplyCode::Ok as i32);
+    assert_eq!(reply.code, WireNotificationReplyCode::Ok as i32);
     assert_eq!(reply.data, "disk payload");
 }
 
 #[tokio::test]
 async fn send_task_reply_keeps_existing_notification_id() {
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<pb::NotificationReply>(1);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<WireNotificationReply>(1);
 
     let _ = crate::utils::notification_reply::send_notification_reply(
         &tx,
         77,
-        pb::NotificationReplyCode::Error,
+        WireNotificationReplyCode::Error,
         "oops".to_string(),
         "task notification",
     )
@@ -225,7 +225,7 @@ async fn send_task_reply_keeps_existing_notification_id() {
 
     let reply = rx.recv().await.expect("reply should be sent");
     assert_eq!(reply.id, 77);
-    assert_eq!(reply.code, pb::NotificationReplyCode::Error as i32);
+    assert_eq!(reply.code, WireNotificationReplyCode::Error as i32);
     assert_eq!(reply.data, "oops");
 }
 
@@ -234,7 +234,7 @@ async fn spawn_task_monitor_emits_adding_task_log() {
     use crate::services::process::ProcessService;
 
     crate::tests::support::init_test_logging();
-    let (tx, _rx) = tokio::sync::mpsc::channel::<pb::NotificationReply>(1);
+    let (tx, _rx) = tokio::sync::mpsc::channel::<WireNotificationReply>(1);
     let token = CancellationToken::new();
     let handle = TaskService.spawn_task_monitor_snapshot(
         "basic-task",
@@ -253,7 +253,7 @@ async fn spawn_task_monitor_emits_adding_task_log() {
 async fn pid_monitor_emits_first_sample_without_waiting_full_interval() {
     use crate::services::process::ProcessService;
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<pb::NotificationReply>(4);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<WireNotificationReply>(4);
     let token = CancellationToken::new();
     let handle = TaskService.spawn_task_monitor_snapshot(
         "pid-monitor",
@@ -272,7 +272,7 @@ async fn pid_monitor_emits_first_sample_without_waiting_full_interval() {
         .expect("pid monitor first sample timeout")
         .expect("pid monitor reply missing");
     assert_eq!(reply.id, 11_001);
-    assert_eq!(reply.code, pb::NotificationReplyCode::Error as i32);
+    assert_eq!(reply.code, WireNotificationReplyCode::Error as i32);
 
     token.cancel();
     let _ = timeout(Duration::from_secs(1), handle).await;
@@ -282,7 +282,7 @@ async fn pid_monitor_emits_first_sample_without_waiting_full_interval() {
 async fn node_monitor_emits_first_sample_without_waiting_full_interval() {
     use crate::services::process::ProcessService;
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<pb::NotificationReply>(4);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<WireNotificationReply>(4);
     let token = CancellationToken::new();
     let handle = TaskService.spawn_task_monitor_snapshot(
         "node-monitor",
@@ -301,7 +301,7 @@ async fn node_monitor_emits_first_sample_without_waiting_full_interval() {
         .expect("node monitor first sample timeout")
         .expect("node monitor reply missing");
     assert_eq!(reply.id, 12_001);
-    assert_eq!(reply.code, pb::NotificationReplyCode::Ok as i32);
+    assert_eq!(reply.code, WireNotificationReplyCode::Ok as i32);
 
     token.cancel();
     let _ = timeout(Duration::from_secs(1), handle).await;
@@ -311,7 +311,7 @@ async fn node_monitor_emits_first_sample_without_waiting_full_interval() {
 async fn looper_reply_payload_matches_go_interval_string() {
     use crate::services::process::ProcessService;
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<pb::NotificationReply>(4);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<WireNotificationReply>(4);
     let token = CancellationToken::new();
     let handle = TaskService.spawn_task_monitor_snapshot(
         "looper",
@@ -327,7 +327,7 @@ async fn looper_reply_payload_matches_go_interval_string() {
         .expect("looper first sample timeout")
         .expect("looper reply missing");
     assert_eq!(reply.id, 13_001);
-    assert_eq!(reply.code, pb::NotificationReplyCode::Ok as i32);
+    assert_eq!(reply.code, WireNotificationReplyCode::Ok as i32);
     assert_eq!(reply.data, "100ms");
 
     token.cancel();
@@ -338,7 +338,7 @@ async fn looper_reply_payload_matches_go_interval_string() {
 async fn ioc_scanner_without_schedule_emits_no_periodic_results() {
     use crate::services::process::ProcessService;
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<pb::NotificationReply>(4);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<WireNotificationReply>(4);
     let token = CancellationToken::new();
     let handle = TaskService.spawn_task_monitor_snapshot(
         "ioc-scanner",
@@ -368,7 +368,7 @@ async fn ioc_scanner_without_schedule_emits_no_periodic_results() {
 async fn downloader_notify_payload_matches_go_success_message_shape() {
     use crate::services::process::ProcessService;
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<pb::NotificationReply>(4);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<WireNotificationReply>(4);
     let token = CancellationToken::new();
     let handle = TaskService.spawn_task_monitor_snapshot(
         "downloader",
@@ -388,7 +388,7 @@ async fn downloader_notify_payload_matches_go_success_message_shape() {
         .expect("downloader first sample timeout")
         .expect("downloader reply missing");
     assert_eq!(reply.id, 15_001);
-    assert_eq!(reply.code, pb::NotificationReplyCode::Ok as i32);
+    assert_eq!(reply.code, WireNotificationReplyCode::Ok as i32);
     assert_eq!(reply.data, "[blocklists] lists updated");
 
     token.cancel();

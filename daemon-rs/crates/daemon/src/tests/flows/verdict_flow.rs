@@ -30,7 +30,7 @@ use crate::{
     },
     tests::support::TestDir,
 };
-use opensnitch_proto::pb;
+use proto::pb;
 
 async fn wait_for_server_ready(addr: std::net::SocketAddr, max_wait: Duration) {
     let start = tokio::time::Instant::now();
@@ -73,18 +73,13 @@ impl pb::ui_server::Ui for TestUiServer {
     ) -> Result<Response<pb::Rule>, Status> {
         self.ask_calls.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(Duration::from_millis(250)).await;
+        // Keep daemon flow coverage focused on in-flight gate/default-action behavior;
+        // wire/protobuf field-mapping coverage lives in transport-wire-grpc-client tests.
         Ok(Response::new(pb::Rule {
             name: "ui-allow".to_string(),
             action: "allow".to_string(),
             duration: "always".to_string(),
             enabled: true,
-            operator: Some(pb::Operator {
-                r#type: "simple".to_string(),
-                operand: "true".to_string(),
-                data: String::new(),
-                sensitive: false,
-                list: Vec::new(),
-            }),
             ..Default::default()
         }))
     }

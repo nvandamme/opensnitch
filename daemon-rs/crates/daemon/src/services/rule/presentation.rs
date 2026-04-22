@@ -1,11 +1,11 @@
 use std::{collections::BTreeMap, time::SystemTime};
 
-use opensnitch_proto::pb;
+use transport_wire_core::{WireRule, WireRuleOperator};
 
 use super::RuleService;
 
 impl RuleService {
-    pub(crate) fn format_rule_operator(operator: &pb::Operator) -> String {
+    pub(crate) fn format_rule_operator(operator: &WireRuleOperator) -> String {
         if !operator.list.is_empty() {
             let mut out = String::new();
             for (idx, item) in operator.list.iter().enumerate() {
@@ -28,7 +28,7 @@ impl RuleService {
         format!("{} is '{}'", operator.operand, operator.data)
     }
 
-    pub(crate) fn format_deleted_rule(rule: &pb::Rule) -> String {
+    pub(crate) fn format_deleted_rule(rule: &WireRule) -> String {
         let state = if rule.enabled { "Enabled" } else { "Disabled" };
         let condition = rule
             .operator

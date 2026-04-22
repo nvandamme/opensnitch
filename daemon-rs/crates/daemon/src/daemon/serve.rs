@@ -25,16 +25,15 @@ impl Daemon {
         let mut handles = RuntimeHandles::new();
         handles.push_spawn_once_thread_with_arg(
             "startup-status-notify",
-            "startup UI handshake scheduled".to_string(),
+            "startup client handshake scheduled".to_string(),
             Self::publish_startup_status_once,
         );
         handles.push_spawn_once_async_thread_with_arg(
-            "startup-ui-handshake",
+            "startup-client-handshake",
             (self.clone(), config.clone()),
-            Self::startup_ui_handshake_once,
+            Self::startup_client_handshake_once,
         );
 
-        #[allow(unused_mut)]
         let mut verdict_flow = VerdictFlow::new(
             self.runtime.bus.clone(),
             self.runtime.alert_buffer.clone(),

@@ -4,38 +4,39 @@ use tokio::time::timeout;
 use tracing::info;
 
 use super::Daemon;
+use crate::services::client::transport::ClientPingRequest;
 use crate::utils::systemd_notify::{NotifyState, notify};
 use crate::{config::Config, services::client::ClientService};
 
 impl Daemon {
-    pub(super) async fn startup_ui_handshake_once((daemon, config): (Daemon, Arc<Config>)) {
+    pub(super) async fn startup_client_handshake_once((daemon, config): (Daemon, Arc<Config>)) {
         match timeout(
-            Self::STARTUP_UI_CONNECT_TIMEOUT,
+            Self::STARTUP_CLIENT_CONNECT_TIMEOUT,
             ClientService::connect_with_config(&config),
         )
         .await
         {
             Ok(Ok(mut client)) => {
                 match timeout(
-                    Self::STARTUP_UI_HANDSHAKE_TIMEOUT,
+                    Self::STARTUP_CLIENT_HANDSHAKE_TIMEOUT,
                     daemon.startup_handshake(&mut client),
                 )
                 .await
                 {
                     Ok(Ok(())) => {}
                     Ok(Err(err)) => {
-                        info!(addr = %config.client_addr, "startup UI handshake unavailable during bootstrap (transient, non-blocking; notification flow will continue retries): {err}");
+                        info!(addr = %config.client_addr, "startup client handshake unavailable during bootstrap (transient, non-blocking; notification flow will continue retries): {err}");
                     }
                     Err(_) => {
-                        info!(addr = %config.client_addr, timeout = ?Self::STARTUP_UI_HANDSHAKE_TIMEOUT, "startup UI handshake unavailable during bootstrap (timeout, non-blocking; notification flow will continue retries)");
+                        info!(addr = %config.client_addr, timeout = ?Self::STARTUP_CLIENT_HANDSHAKE_TIMEOUT, "startup client handshake unavailable during bootstrap (timeout, non-blocking; notification flow will continue retries)");
                     }
                 }
             }
             Ok(Err(err)) => {
-                info!(addr = %config.client_addr, "startup UI connect unavailable during bootstrap (transient, non-blocking; notification flow will continue retries): {err}");
+                info!(addr = %config.client_addr, "startup client connect unavailable during bootstrap (transient, non-blocking; notification flow will continue retries): {err}");
             }
             Err(_) => {
-                info!(addr = %config.client_addr, timeout = ?Self::STARTUP_UI_CONNECT_TIMEOUT, "startup UI connect unavailable during bootstrap (timeout, non-blocking; notification flow will continue retries)");
+                info!(addr = %config.client_addr, timeout = ?Self::STARTUP_CLIENT_CONNECT_TIMEOUT, "startup client connect unavailable during bootstrap (timeout, non-blocking; notification flow will continue retries)");
             }
         }
     }
@@ -46,12 +47,12 @@ impl Daemon {
 
     pub(super) async fn startup_handshake(&self, client: &mut ClientService) -> anyhow::Result<()> {
         let config = self.runtime.config.get_snapshot();
-        let rules = self.runtime.rules.get_proto_snapshot();
+        let rules = self.runtime.rules.get_wire_snapshot();
         let rules_count = rules.len() as u64;
         let firewall = self.runtime.firewall.get_snapshot();
         let subscribe_cfg = ClientService::build_subscribe_config_from_snapshots(
             &config,
-            &rules,
+            rules.as_ref(),
             firewall.state.enabled,
             &firewall.system_firewall,
         );
@@ -76,9 +77,9 @@ impl Daemon {
         );
 
         let ping_reply = client
-            .ping(opensnitch_proto::pb::PingRequest {
+            .ping(ClientPingRequest {
                 id: 1,
-                stats: Some(self.runtime.stats.snapshot(rules_count).stats),
+                stats: Some(self.runtime.stats.snapshot(rules_count).stats.into()),
             })
             .await?;
 

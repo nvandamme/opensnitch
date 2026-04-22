@@ -190,39 +190,53 @@ impl KernelFlow {
                     match update {
                         DnsPayload::Answers(record) => {
                             dns_stats.on_dns_resolved();
+                            let cache_mutation = dns_service.track_answers(record.clone()).await;
                             if verbose_hot_path_audit {
                                 dns_audit.emit(AuditEvent::hot(AuditEventKind::DnsAction(
                                     DnsAction::ResolutionReceived {
                                         hostname: record.host.as_ref().into(),
                                     },
                                 )));
-                                let entries = record
-                                    .addresses
-                                    .iter()
-                                    .filter(|ip| !ip.is_loopback())
-                                    .count();
-                                if entries > 0 {
-                                    let entries = entries.min(u32::MAX as usize) as u32;
+                                if cache_mutation.entries > 0 {
                                     dns_audit.emit(AuditEvent::hot(AuditEventKind::DnsAction(
-                                        DnsAction::CacheUpdated { entries },
+                                        DnsAction::CacheUpdated {
+                                            entries: cache_mutation.entries,
+                                        },
+                                    )));
+                                }
+                                if cache_mutation.evicted > 0 {
+                                    dns_audit.emit(AuditEvent::hot(AuditEventKind::DnsAction(
+                                        DnsAction::CacheEvicted {
+                                            entries: cache_mutation.evicted,
+                                        },
                                     )));
                                 }
                             }
-                            dns_service.track_answers(record).await;
                         }
                         DnsPayload::Alias { alias, host } => {
                             dns_stats.on_dns_resolved();
+                            let cache_mutation = dns_service.track_alias(alias, host.clone()).await;
                             if verbose_hot_path_audit {
                                 dns_audit.emit(AuditEvent::hot(AuditEventKind::DnsAction(
                                     DnsAction::ResolutionReceived {
                                         hostname: host.as_ref().into(),
                                     },
                                 )));
-                                dns_audit.emit(AuditEvent::hot(AuditEventKind::DnsAction(
-                                    DnsAction::CacheUpdated { entries: 1 },
-                                )));
+                                if cache_mutation.entries > 0 {
+                                    dns_audit.emit(AuditEvent::hot(AuditEventKind::DnsAction(
+                                        DnsAction::CacheUpdated {
+                                            entries: cache_mutation.entries,
+                                        },
+                                    )));
+                                }
+                                if cache_mutation.evicted > 0 {
+                                    dns_audit.emit(AuditEvent::hot(AuditEventKind::DnsAction(
+                                        DnsAction::CacheEvicted {
+                                            entries: cache_mutation.evicted,
+                                        },
+                                    )));
+                                }
                             }
-                            dns_service.track_alias(alias, host).await;
                         }
                         DnsPayload::NxDomain { host, error_code } => {
                             // Emit failure unconditionally; operational tracking
@@ -259,11 +273,10 @@ impl KernelFlow {
                                             ProcessAction::ProcessEvicted { pid: *pid },
                                         ),
                                     )),
-                                    ProcEventKind::Fork | ProcEventKind::Exec => process_audit.emit(
-                                        AuditEvent::hot(AuditEventKind::ProcessAction(
+                                    ProcEventKind::Fork | ProcEventKind::Exec => process_audit
+                                        .emit(AuditEvent::hot(AuditEventKind::ProcessAction(
                                             ProcessAction::ProcessTracked { pid: *pid },
-                                        )),
-                                    ),
+                                        ))),
                                 },
                                 ProcessKernelEvent::EbpfProcStateChanged(payload) => {
                                     match payload.kind {
@@ -272,15 +285,10 @@ impl KernelFlow {
                                                 ProcessAction::ProcessEvicted { pid: payload.pid },
                                             ),
                                         )),
-                                        ProcEventKind::Fork | ProcEventKind::Exec => {
-                                            process_audit.emit(AuditEvent::hot(
-                                                AuditEventKind::ProcessAction(
-                                                    ProcessAction::ProcessTracked {
-                                                        pid: payload.pid,
-                                                    },
-                                                ),
-                                            ))
-                                        }
+                                        ProcEventKind::Fork | ProcEventKind::Exec => process_audit
+                                            .emit(AuditEvent::hot(AuditEventKind::ProcessAction(
+                                                ProcessAction::ProcessTracked { pid: payload.pid },
+                                            ))),
                                     }
                                 }
                                 ProcessKernelEvent::EbpfProcessMapHit { pid, note, .. } => {
@@ -289,14 +297,17 @@ impl KernelFlow {
                                     } else {
                                         ProcessAction::ProcessTracked { pid: *pid }
                                     };
-                                    process_audit.emit(AuditEvent::hot(
-                                        AuditEventKind::ProcessAction(kind),
-                                    ));
+                                    process_audit
+                                        .emit(AuditEvent::hot(AuditEventKind::ProcessAction(kind)));
                                 }
                             }
                         }
-
-                        kernel_process::handle_process_kernel_event(&process_service, event).await;
+                        kernel_process::handle_process_kernel_event(
+                            &process_service,
+                            &process_audit,
+                            event,
+                        )
+                        .await;
                     }
                 });
 

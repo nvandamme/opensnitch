@@ -1,0 +1,96 @@
+Enabled = true
+Version = 1
+
+[[SystemRules]]
+Chains = []
+
+[SystemRules.Rule]
+Table = "mangle"
+Chain = "OUTPUT"
+Enabled = false
+Position = "0"
+Description = "Allow icmp (iptables example — set Enabled:true to activate)"
+Parameters = "-p icmp"
+Expressions = []
+Target = "ACCEPT"
+TargetParameters = ""
+
+[[SystemRules]]
+Rule = {}
+
+[[SystemRules.Chains]]
+Name = "filter_forward"
+Table = "opensnitch"
+Family = "inet"
+Priority = ""
+Type = "filter"
+Hook = "forward"
+Policy = "accept"
+Rules = []
+
+[[SystemRules.Chains]]
+Name = "filter_output"
+Table = "opensnitch"
+Family = "inet"
+Priority = ""
+Type = "filter"
+Hook = "output"
+Policy = "accept"
+Rules = []
+
+[[SystemRules.Chains]]
+Name = "filter_input"
+Table = "opensnitch"
+Family = "inet"
+Priority = ""
+Type = "filter"
+Hook = "input"
+Policy = "accept"
+
+[[SystemRules.Chains.Rules]]
+Enabled = false
+Position = "0"
+Description = "Allow SSH when input policy is DROP (nftables example — set Enabled:true to activate)"
+Parameters = ""
+Target = "accept"
+TargetParameters = ""
+
+[[SystemRules.Chains.Rules.Expressions]]
+
+[SystemRules.Chains.Rules.Expressions.Statement]
+Op = ""
+Name = "tcp"
+
+[[SystemRules.Chains.Rules.Expressions.Statement.Values]]
+Key = "dport"
+Value = "22"
+
+[[SystemRules.Chains]]
+Name = "filter_prerouting"
+Table = "opensnitch"
+Family = "inet"
+Priority = ""
+Type = "filter"
+Hook = "prerouting"
+Policy = "accept"
+Rules = []
+
+[[SystemRules.Chains]]
+Name = "mangle_prerouting"
+Table = "opensnitch"
+Family = "inet"
+Priority = ""
+Type = "mangle"
+Hook = "prerouting"
+Policy = "accept"
+Rules = []
+
+[[SystemRules.Chains]]
+Name = "mangle_postrouting"
+Table = "opensnitch"
+Family = "inet"
+Priority = ""
+Type = "mangle"
+Hook = "postrouting"
+Policy = "accept"
+Rules = []

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
-use opensnitch_proto::pb;
 use tokio::process::Command;
 
+use crate::models::firewall_config::{FirewallChain, FirewallConfig, FirewallRule};
 use crate::utils::command_path::resolve_command_path;
 use crate::utils::conntrack::flush_conntrack_table;
 use crate::utils::name_parsing::case_folded;
@@ -31,7 +31,7 @@ impl NftInterceptionRuleCounts {
 }
 
 impl FirewallNftAdapter {
-    fn family_or_default(chain: &pb::FwChain) -> &str {
+    fn family_or_default(chain: &FirewallChain) -> &str {
         if chain.family.is_empty() {
             "inet"
         } else {
@@ -39,7 +39,7 @@ impl FirewallNftAdapter {
         }
     }
 
-    fn table_or_default(chain: &pb::FwChain) -> &str {
+    fn table_or_default(chain: &FirewallChain) -> &str {
         if chain.table.is_empty() {
             "opensnitch"
         } else {
@@ -47,7 +47,7 @@ impl FirewallNftAdapter {
         }
     }
 
-    fn chain_name_or_default(chain: &pb::FwChain) -> &str {
+    fn chain_name_or_default(chain: &FirewallChain) -> &str {
         if chain.name.is_empty() {
             "mangle_output"
         } else {
@@ -55,7 +55,7 @@ impl FirewallNftAdapter {
         }
     }
 
-    fn rule_tag(chain: &pb::FwChain, rule: &pb::FwRule) -> String {
+    fn rule_tag(chain: &FirewallChain, rule: &FirewallRule) -> String {
         let id = if !rule.uuid.is_empty() {
             rule.uuid.clone()
         } else {
@@ -70,7 +70,7 @@ impl FirewallNftAdapter {
         format!("{SYSFW_TAG_PREFIX}{id}")
     }
 
-    fn nft_expression(rule: &pb::FwRule, queue_num: u16) -> String {
+    fn nft_expression(rule: &FirewallRule, queue_num: u16) -> String {
         if !rule.parameters.is_empty() {
             let mut out = Self::normalize_nft_parameters(&rule.parameters);
             if !rule.target.is_empty() {
@@ -233,27 +233,27 @@ impl FirewallNftAdapter {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn probe_family_or_default(chain: &pb::FwChain) -> &str {
+    pub(crate) fn probe_family_or_default(chain: &FirewallChain) -> &str {
         Self::family_or_default(chain)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn probe_table_or_default(chain: &pb::FwChain) -> &str {
+    pub(crate) fn probe_table_or_default(chain: &FirewallChain) -> &str {
         Self::table_or_default(chain)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn probe_chain_name_or_default(chain: &pb::FwChain) -> &str {
+    pub(crate) fn probe_chain_name_or_default(chain: &FirewallChain) -> &str {
         Self::chain_name_or_default(chain)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn probe_rule_tag(chain: &pb::FwChain, rule: &pb::FwRule) -> String {
+    pub(crate) fn probe_rule_tag(chain: &FirewallChain, rule: &FirewallRule) -> String {
         Self::rule_tag(chain, rule)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn probe_nft_expression(rule: &pb::FwRule, queue_num: u16) -> String {
+    pub(crate) fn probe_nft_expression(rule: &FirewallRule, queue_num: u16) -> String {
         Self::nft_expression(rule, queue_num)
     }
 
@@ -374,59 +374,55 @@ impl FirewallNftAdapter {
         })
     }
 
-    pub async fn apply_system_firewall(sysfw: &pb::SysFirewall, queue_num: u16) -> Result<()> {
+    pub async fn apply_system_firewall(sysfw: &FirewallConfig, queue_num: u16) -> Result<()> {
         if !sysfw.enabled {
             tracing::info!("[nftables] AddSystemRules() fw disabled");
             return Ok(());
         }
 
-        for item in &sysfw.system_rules {
-            for chain in &item.chains {
-                Self::ensure_system_chain(chain).await?;
+        for chain in &sysfw.chains {
+            Self::ensure_system_chain(chain).await?;
 
-                for rule in &chain.rules {
-                    if !rule.enabled {
-                        continue;
-                    }
-
-                    let expr = Self::nft_expression(rule, queue_num);
-                    if expr.is_empty() {
-                        continue;
-                    }
-
-                    let tag = Self::rule_tag(chain, rule);
-                    if Self::chain_has_tag(chain, &tag).await? {
-                        continue;
-                    }
-
-                    let mut args = vec!["add", "rule"];
-                    args.push(Self::family_or_default(chain));
-                    args.push(Self::table_or_default(chain));
-                    args.push(Self::chain_name_or_default(chain));
-                    for token in expr.split_whitespace() {
-                        args.push(token);
-                    }
-                    args.push("comment");
-                    let comment = format!("\"{tag}\"");
-                    args.push(comment.as_str());
-
-                    Self::run_nft(&args).await?;
+            for rule in &chain.rules {
+                if !rule.enabled {
+                    continue;
                 }
+
+                let expr = Self::nft_expression(rule, queue_num);
+                if expr.is_empty() {
+                    continue;
+                }
+
+                let tag = Self::rule_tag(chain, rule);
+                if Self::chain_has_tag(chain, &tag).await? {
+                    continue;
+                }
+
+                let mut args = vec!["add", "rule"];
+                args.push(Self::family_or_default(chain));
+                args.push(Self::table_or_default(chain));
+                args.push(Self::chain_name_or_default(chain));
+                for token in expr.split_whitespace() {
+                    args.push(token);
+                }
+                args.push("comment");
+                let comment = format!("\"{tag}\"");
+                args.push(comment.as_str());
+
+                Self::run_nft(&args).await?;
             }
         }
 
         Ok(())
     }
 
-    pub async fn clear_system_firewall(sysfw: &pb::SysFirewall) -> Result<()> {
+    pub async fn clear_system_firewall(sysfw: &FirewallConfig) -> Result<()> {
         if resolve_command_path("nft").is_none() {
             return Ok(());
         }
 
-        for item in &sysfw.system_rules {
-            for chain in &item.chains {
-                Self::delete_tagged_rules(chain).await?;
-            }
+        for chain in &sysfw.chains {
+            Self::delete_tagged_rules(chain).await?;
         }
 
         Ok(())
@@ -573,7 +569,7 @@ impl FirewallNftAdapter {
         let _ = flush_conntrack_table().await;
     }
 
-    async fn ensure_system_chain(chain: &pb::FwChain) -> Result<()> {
+    async fn ensure_system_chain(chain: &FirewallChain) -> Result<()> {
         let family = FirewallNftAdapter::family_or_default(chain);
         let table = FirewallNftAdapter::table_or_default(chain);
         let name = FirewallNftAdapter::chain_name_or_default(chain);
@@ -652,7 +648,7 @@ impl FirewallNftAdapter {
             .unwrap_or(false)
     }
 
-    async fn chain_has_tag(chain: &pb::FwChain, tag: &str) -> Result<bool> {
+    async fn chain_has_tag(chain: &FirewallChain, tag: &str) -> Result<bool> {
         let listing = Self::list_chain(
             FirewallNftAdapter::family_or_default(chain),
             FirewallNftAdapter::table_or_default(chain),
@@ -662,7 +658,7 @@ impl FirewallNftAdapter {
         Ok(listing.map(|s| s.contains(tag)).unwrap_or(false))
     }
 
-    async fn delete_tagged_rules(chain: &pb::FwChain) -> Result<()> {
+    async fn delete_tagged_rules(chain: &FirewallChain) -> Result<()> {
         let family = FirewallNftAdapter::family_or_default(chain);
         let table = FirewallNftAdapter::table_or_default(chain);
         let chain_name = FirewallNftAdapter::chain_name_or_default(chain);

@@ -1,4 +1,3 @@
-use opensnitch_proto::pb;
 use std::collections::BTreeSet;
 
 use crate::models::{
@@ -56,7 +55,7 @@ impl RuleCommandService {
         &self,
         cmd: ClientCommand,
         rules: &RuleService,
-        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         client_service: &ClientService,
     ) -> Option<ClientCommand> {
         match cmd {
@@ -125,7 +124,7 @@ impl RuleCommandService {
         notification_id: u64,
         updated_rules: Vec<RuleRecord>,
         rules: &RuleService,
-        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         client_service: &ClientService,
     ) {
         RuleUpdateMode::Enable
@@ -146,7 +145,7 @@ impl RuleCommandService {
         notification_id: u64,
         updated_rules: Vec<RuleRecord>,
         rules: &RuleService,
-        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         client_service: &ClientService,
     ) {
         RuleUpdateMode::Disable
@@ -167,7 +166,7 @@ impl RuleCommandService {
         notification_id: u64,
         updated_rules: Vec<RuleRecord>,
         rules: &RuleService,
-        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         client_service: &ClientService,
     ) {
         RuleUpdateMode::Upsert
@@ -188,7 +187,7 @@ impl RuleCommandService {
         notification_id: u64,
         rule_names: Vec<String>,
         rules: &RuleService,
-        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         client_service: &ClientService,
     ) {
         let previous_rules = rules.get_rule_record_snapshot().as_ref().clone();
@@ -247,7 +246,7 @@ impl RuleCommandService {
             let _ = send_notification_reply(
                 task_reply_tx,
                 notification_id,
-                pb::NotificationReplyCode::Ok,
+                transport_wire_core::WireNotificationReplyCode::Ok,
                 status_payload("ok"),
                 "rule command notification",
             )
@@ -282,7 +281,7 @@ impl RuleCommandService {
             let _ = send_notification_reply(
                 task_reply_tx,
                 notification_id,
-                pb::NotificationReplyCode::Error,
+                transport_wire_core::WireNotificationReplyCode::Error,
                 message,
                 "rule command notification",
             )
@@ -369,7 +368,7 @@ impl RuleUpdateMode {
         notification_id: u64,
         updated_rules: Vec<RuleRecord>,
         rules: &RuleService,
-        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         client_service: &ClientService,
     ) {
         let previous_rules = rules.get_rule_record_snapshot().as_ref().clone();
@@ -441,7 +440,7 @@ impl RuleUpdateMode {
             let _ = send_notification_reply(
                 task_reply_tx,
                 notification_id,
-                pb::NotificationReplyCode::Ok,
+                transport_wire_core::WireNotificationReplyCode::Ok,
                 status_payload("ok"),
                 "rule command notification",
             )
@@ -476,7 +475,7 @@ impl RuleUpdateMode {
             let _ = send_notification_reply(
                 task_reply_tx,
                 notification_id,
-                pb::NotificationReplyCode::Error,
+                transport_wire_core::WireNotificationReplyCode::Error,
                 message,
                 "rule command notification",
             )

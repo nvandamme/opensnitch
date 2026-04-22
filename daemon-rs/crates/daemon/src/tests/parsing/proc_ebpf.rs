@@ -1,4 +1,4 @@
-use opensnitch_ebpf_common::process::{EV_TYPE_EXEC, EV_TYPE_FORK, EV_TYPE_SCHED_EXIT, ExecEvent};
+use ebpf_common::process::{EV_TYPE_EXEC, EV_TYPE_FORK, EV_TYPE_SCHED_EXIT, ExecEvent};
 
 use crate::{models::proc_event::ProcEventKind, services::process::ProcessService};
 

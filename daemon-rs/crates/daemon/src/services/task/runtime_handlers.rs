@@ -1,7 +1,6 @@
 use std::{collections::HashMap, fmt::Display, sync::Arc};
 
 use anyhow::Result;
-use opensnitch_proto::pb;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -179,7 +178,7 @@ impl TaskService {
 
     fn emit_legacy_downloader_typed_result(data: &str) {
         // Go parity: downloader emits a second typed TaskResults payload
-        // (Type=9999) that the default UI task-event monitor ignores.
+        // (Type=9999) that the default client task-event monitor ignores.
         let legacy = task_runtime_reply::build_legacy_downloader_task_result(data);
         tracing::debug!(target: "opensnitch.task", task = task_runtime_naming::TASK_DOWNLOADER, legacy_task_result = %legacy, "emitting legacy typed task result");
     }
@@ -194,7 +193,7 @@ impl TaskService {
     }
 
     async fn emit_task_ok(
-        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         task_name: &str,
         notification_id: u64,
         data: String,
@@ -203,14 +202,14 @@ impl TaskService {
             task_reply_tx,
             task_name,
             notification_id,
-            pb::NotificationReplyCode::Ok,
+            transport_wire_core::WireNotificationReplyCode::Ok,
             data,
         )
         .await;
     }
 
     async fn emit_task_error(
-        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         task_name: &str,
         notification_id: u64,
         data: String,
@@ -219,7 +218,7 @@ impl TaskService {
             task_reply_tx,
             task_name,
             notification_id,
-            pb::NotificationReplyCode::Error,
+            transport_wire_core::WireNotificationReplyCode::Error,
             data,
         )
         .await;
@@ -232,7 +231,7 @@ impl TaskService {
         data: Arc<Value>,
         token: CancellationToken,
         process: ProcessService,
-        task_reply_tx: tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
     ) -> tokio::task::JoinHandle<()> {
         tracing::info!("[tasks] Adding task: {task_name}");
         let raw_task_name = task_name.trim().to_string();
@@ -673,10 +672,10 @@ impl TaskService {
         }
     }
     async fn send_task_event(
-        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         task_name: &str,
         notification_id: u64,
-        code: pb::NotificationReplyCode,
+        code: transport_wire_core::WireNotificationReplyCode,
         data: String,
     ) {
         task_runtime_reply::send_task_event(
@@ -692,7 +691,7 @@ impl TaskService {
     }
 
     async fn dispatch_downloader_result(
-        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         notification_id: u64,
         notify_enabled: bool,
         run_result: Result<Value>,
@@ -732,7 +731,7 @@ impl TaskService {
     }
 
     async fn emit_ioc_scan_results(
-        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         notification_id: u64,
         run_result: Result<Vec<String>>,
     ) {

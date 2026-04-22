@@ -307,7 +307,7 @@ impl Daemon {
     pub(super) fn spawn_notification_task(
         &self,
         flow: NotificationFlow,
-        task_reply_rx: tokio::sync::mpsc::Receiver<opensnitch_proto::pb::NotificationReply>,
+        task_reply_rx: tokio::sync::mpsc::Receiver<transport_wire_core::WireNotificationReply>,
         alert_rx: tokio::sync::mpsc::Receiver<crate::models::ui_alert::UiAlert>,
     ) -> JoinHandle<()> {
         let shutdown = self.runtime.shutdown.clone();
@@ -334,7 +334,12 @@ impl Daemon {
         stats: StatsService,
         connect_rx: tokio::sync::mpsc::Receiver<ConnectionAttempt>,
     ) -> JoinHandle<()> {
-        let verbose_hot_path_audit = self.runtime.config.get_snapshot().audit_sinks.verbose_hot_path;
+        let verbose_hot_path_audit = self
+            .runtime
+            .config
+            .get_snapshot()
+            .audit_sinks
+            .verbose_hot_path;
         ConnectFlow::new(
             self.runtime.shutdown.clone(),
             self.runtime.tunables,
@@ -351,7 +356,12 @@ impl Daemon {
         stats: StatsService,
         kernel_rx: tokio::sync::mpsc::Receiver<crate::models::kernel_event::KernelEvent>,
     ) -> JoinHandle<()> {
-        let verbose_hot_path_audit = self.runtime.config.get_snapshot().audit_sinks.verbose_hot_path;
+        let verbose_hot_path_audit = self
+            .runtime
+            .config
+            .get_snapshot()
+            .audit_sinks
+            .verbose_hot_path;
         KernelFlow::new(
             self.runtime.shutdown.clone(),
             self.runtime.tunables,
@@ -361,6 +371,7 @@ impl Daemon {
         .spawn(process, dns, stats, self.runtime.audit.clone(), kernel_rx)
     }
 
+    // Test probe — called from smoke tests to inject client commands without running the full gRPC stack.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn spawn_client_command_task(
         &self,

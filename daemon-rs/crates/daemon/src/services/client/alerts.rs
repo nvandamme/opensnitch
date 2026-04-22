@@ -1,13 +1,16 @@
 use std::sync::{Arc, Mutex};
 
-use opensnitch_proto::pb;
 use tokio::sync::mpsc;
+use transport_wire_core::{
+    WireAlert, WireAlertAction, WireAlertData, WireAlertPriority, WireAlertType, WireAlertWhat,
+    WireConnection, WireProcess, WireStringInt,
+};
 
 use crate::models::ui_alert::{
     UiAlert, UiAlertConnection, UiAlertData, UiAlertProcess, UiAlertStringInt,
 };
-use crate::utils::time_nonce::unix_epoch_nanos;
 use crate::utils::ring_buffer::RingBuffer;
+use crate::utils::time_nonce::unix_epoch_nanos;
 
 const ALERT_OVERFLOW_CAP: usize = 32;
 
@@ -51,23 +54,23 @@ impl AlertBuffer {
 }
 
 pub(crate) fn info_alert(text: impl Into<String>) -> UiAlert {
-    generic_text_alert(pb::alert::Type::Info, pb::alert::Priority::Low, text)
+    generic_text_alert(WireAlertType::Info, WireAlertPriority::Low, text)
 }
 
 pub(crate) fn warning_alert(text: impl Into<String>) -> UiAlert {
-    generic_text_alert(pb::alert::Type::Warning, pb::alert::Priority::Medium, text)
+    generic_text_alert(WireAlertType::Warning, WireAlertPriority::Medium, text)
 }
 
 pub(crate) fn error_alert(text: impl Into<String>) -> UiAlert {
-    generic_text_alert(pb::alert::Type::Error, pb::alert::Priority::High, text)
+    generic_text_alert(WireAlertType::Error, WireAlertPriority::High, text)
 }
 
-pub(crate) fn warning_connection_alert(conn: pb::Connection) -> UiAlert {
+pub(crate) fn warning_connection_alert(conn: WireConnection) -> UiAlert {
     UiAlert {
-        alert_type: pb::alert::Type::Warning as i32,
-        what: pb::alert::What::Connection as i32,
-        action: pb::alert::Action::ShowAlert as i32,
-        priority: pb::alert::Priority::Medium as i32,
+        alert_type: WireAlertType::Warning as i32,
+        what: WireAlertWhat::Connection as i32,
+        action: WireAlertAction::ShowAlert as i32,
+        priority: WireAlertPriority::Medium as i32,
         data: UiAlertData::Connection(UiAlertConnection {
             protocol: conn.protocol,
             src_ip: conn.src_ip,
@@ -94,12 +97,12 @@ pub(crate) fn warning_connection_alert(conn: pb::Connection) -> UiAlert {
     }
 }
 
-pub(crate) fn warning_process_alert(proc: pb::Process) -> UiAlert {
+pub(crate) fn warning_process_alert(proc: WireProcess) -> UiAlert {
     UiAlert {
-        alert_type: pb::alert::Type::Warning as i32,
-        what: pb::alert::What::KernelEvent as i32,
-        action: pb::alert::Action::ShowAlert as i32,
-        priority: pb::alert::Priority::Medium as i32,
+        alert_type: WireAlertType::Warning as i32,
+        what: WireAlertWhat::KernelEvent as i32,
+        action: WireAlertAction::ShowAlert as i32,
+        priority: WireAlertPriority::Medium as i32,
         data: UiAlertData::Process(UiAlertProcess {
             pid: proc.pid,
             ppid: proc.ppid,
@@ -138,7 +141,7 @@ pub(crate) fn drain_overflow_alerts(alert_buffer: &AlertBuffer) -> Vec<UiAlert> 
     alert_buffer.drain_overflow_alerts()
 }
 
-pub(crate) fn build_wire_alert(alert: UiAlert) -> pb::Alert {
+pub(crate) fn build_wire_alert(alert: UiAlert) -> WireAlert {
     let UiAlert {
         alert_type,
         action,
@@ -148,8 +151,8 @@ pub(crate) fn build_wire_alert(alert: UiAlert) -> pb::Alert {
     } = alert;
 
     let data = match data {
-        UiAlertData::Text(text) => pb::alert::Data::Text(text),
-        UiAlertData::Connection(conn) => pb::alert::Data::Conn(pb::Connection {
+        UiAlertData::Text(text) => WireAlertData::Text(text),
+        UiAlertData::Connection(conn) => WireAlertData::Connection(WireConnection {
             protocol: conn.protocol,
             src_ip: conn.src_ip,
             src_port: conn.src_port,
@@ -166,13 +169,13 @@ pub(crate) fn build_wire_alert(alert: UiAlert) -> pb::Alert {
             process_tree: conn
                 .process_tree
                 .into_iter()
-                .map(|entry| pb::StringInt {
+                .map(|entry| WireStringInt {
                     key: entry.key,
                     value: entry.value,
                 })
                 .collect(),
         }),
-        UiAlertData::Process(proc_info) => pb::alert::Data::Proc(pb::Process {
+        UiAlertData::Process(proc_info) => WireAlertData::Process(WireProcess {
             pid: proc_info.pid,
             ppid: proc_info.ppid,
             uid: proc_info.uid,
@@ -189,7 +192,7 @@ pub(crate) fn build_wire_alert(alert: UiAlert) -> pb::Alert {
             process_tree: proc_info
                 .process_tree
                 .into_iter()
-                .map(|entry| pb::StringInt {
+                .map(|entry| WireStringInt {
                     key: entry.key,
                     value: entry.value,
                 })
@@ -197,9 +200,9 @@ pub(crate) fn build_wire_alert(alert: UiAlert) -> pb::Alert {
         }),
     };
 
-    pb::Alert {
+    WireAlert {
         id: u64::try_from(unix_epoch_nanos()).unwrap_or(u64::MAX),
-        r#type: alert_type,
+        alert_type,
         action,
         priority,
         what,
@@ -208,14 +211,14 @@ pub(crate) fn build_wire_alert(alert: UiAlert) -> pb::Alert {
 }
 
 fn generic_text_alert(
-    alert_type: pb::alert::Type,
-    priority: pb::alert::Priority,
+    alert_type: WireAlertType,
+    priority: WireAlertPriority,
     text: impl Into<String>,
 ) -> UiAlert {
     UiAlert {
         alert_type: alert_type as i32,
-        what: pb::alert::What::Generic as i32,
-        action: pb::alert::Action::ShowAlert as i32,
+        what: WireAlertWhat::Generic as i32,
+        action: WireAlertAction::ShowAlert as i32,
         priority: priority as i32,
         data: UiAlertData::Text(text.into()),
     }

@@ -1,8 +1,8 @@
+use crate::models::firewall_config::{FirewallChain, FirewallConfig, FirewallRule};
 use crate::platform::adapters::firewall_nft::FirewallNftAdapter;
 use crate::platform::adapters::firewall_nft_netlink::{
     FirewallNftNetlinkAdapter, NftNetlinkOperation, NftRuleChain,
 };
-use opensnitch_proto::pb;
 
 #[test]
 fn ensure_plan_contains_expected_interception_rules() {
@@ -51,25 +51,25 @@ fn ensure_plan_contains_expected_interception_rules() {
 
 #[test]
 fn apply_system_firewall_plan_skips_disabled_and_empty_rules() {
-    let chain = pb::FwChain {
+    let chain = FirewallChain {
         family: "inet".to_string(),
         table: "opensnitch".to_string(),
         name: "mangle_output".to_string(),
         rules: vec![
-            pb::FwRule {
+            FirewallRule {
                 enabled: false,
                 uuid: "disabled".to_string(),
                 parameters: "ip protocol tcp".to_string(),
                 ..Default::default()
             },
-            pb::FwRule {
+            FirewallRule {
                 enabled: true,
                 uuid: "enabled-1".to_string(),
                 parameters: "ip protocol tcp".to_string(),
                 target: "accept".to_string(),
                 ..Default::default()
             },
-            pb::FwRule {
+            FirewallRule {
                 enabled: true,
                 uuid: "empty".to_string(),
                 ..Default::default()
@@ -78,12 +78,11 @@ fn apply_system_firewall_plan_skips_disabled_and_empty_rules() {
         ..Default::default()
     };
 
-    let sysfw = pb::SysFirewall {
+    let sysfw = FirewallConfig {
         enabled: true,
-        system_rules: vec![pb::FwChains {
-            chains: vec![chain],
-            ..Default::default()
-        }],
+        version: 0,
+        rules: Vec::new(),
+        chains: vec![chain],
         ..Default::default()
     };
 
@@ -125,25 +124,24 @@ fn apply_system_firewall_plan_skips_disabled_and_empty_rules() {
 
 #[test]
 fn clear_system_firewall_plan_targets_each_chain() {
-    let sysfw = pb::SysFirewall {
+    let sysfw = FirewallConfig {
         enabled: true,
-        system_rules: vec![pb::FwChains {
-            chains: vec![
-                pb::FwChain {
-                    family: "inet".to_string(),
-                    table: "opensnitch".to_string(),
-                    name: "mangle_output".to_string(),
-                    ..Default::default()
-                },
-                pb::FwChain {
-                    family: "ip".to_string(),
-                    table: "filter".to_string(),
-                    name: "output".to_string(),
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        }],
+        version: 0,
+        rules: Vec::new(),
+        chains: vec![
+            FirewallChain {
+                family: "inet".to_string(),
+                table: "opensnitch".to_string(),
+                name: "mangle_output".to_string(),
+                ..Default::default()
+            },
+            FirewallChain {
+                family: "ip".to_string(),
+                table: "filter".to_string(),
+                name: "output".to_string(),
+                ..Default::default()
+            },
+        ],
         ..Default::default()
     };
 
@@ -245,75 +243,74 @@ fn system_rule_expression_supports_go_nftables_testdata_shapes() {
 
 #[test]
 fn apply_plan_generated_expressions_are_netlink_supported() {
-    let sysfw = pb::SysFirewall {
+    let sysfw = FirewallConfig {
         enabled: true,
-        system_rules: vec![pb::FwChains {
-            chains: vec![
-                pb::FwChain {
-                    family: "inet".to_string(),
-                    table: "opensnitch".to_string(),
-                    name: "filter_input".to_string(),
-                    hook: "input".to_string(),
-                    policy: "accept".to_string(),
-                    r#type: "filter".to_string(),
-                    rules: vec![
-                        pb::FwRule {
-                            enabled: true,
-                            uuid: "ssh-allow".to_string(),
-                            parameters: "tcp dport 22".to_string(),
-                            target: "accept".to_string(),
-                            ..Default::default()
-                        },
-                        pb::FwRule {
-                            enabled: true,
-                            uuid: "icmp-allow".to_string(),
-                            parameters:
-                                "icmp type { echo-request, echo-reply, destination-unreachable }"
-                                    .to_string(),
-                            target: "accept".to_string(),
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                },
-                pb::FwChain {
-                    family: "inet".to_string(),
-                    table: "opensnitch".to_string(),
-                    name: "mangle_output".to_string(),
-                    hook: "output".to_string(),
-                    policy: "accept".to_string(),
-                    r#type: "mangle".to_string(),
-                    rules: vec![
-                        pb::FwRule {
-                            enabled: true,
-                            uuid: "localhost-allow".to_string(),
-                            parameters: "ip daddr 127.0.0.0-127.255.255.255".to_string(),
-                            target: "accept".to_string(),
-                            ..Default::default()
-                        },
-                        pb::FwRule {
-                            enabled: true,
-                            uuid: "icmpv6-allow".to_string(),
-                            parameters:
-                                "icmpv6 type { echo-request, echo-reply, destination-unreachable }"
-                                    .to_string(),
-                            target: "accept".to_string(),
-                            ..Default::default()
-                        },
-                        pb::FwRule {
-                            enabled: true,
-                            uuid: "queue-forward-like".to_string(),
-                            parameters: "ct state new".to_string(),
-                            target: "queue".to_string(),
-                            target_parameters: "num 0".to_string(),
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        }],
+        version: 0,
+        rules: Vec::new(),
+        chains: vec![
+            FirewallChain {
+                family: "inet".to_string(),
+                table: "opensnitch".to_string(),
+                name: "filter_input".to_string(),
+                hook: "input".to_string(),
+                policy: "accept".to_string(),
+                r#type: "filter".to_string(),
+                rules: vec![
+                    FirewallRule {
+                        enabled: true,
+                        uuid: "ssh-allow".to_string(),
+                        parameters: "tcp dport 22".to_string(),
+                        target: "accept".to_string(),
+                        ..Default::default()
+                    },
+                    FirewallRule {
+                        enabled: true,
+                        uuid: "icmp-allow".to_string(),
+                        parameters:
+                            "icmp type { echo-request, echo-reply, destination-unreachable }"
+                                .to_string(),
+                        target: "accept".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            FirewallChain {
+                family: "inet".to_string(),
+                table: "opensnitch".to_string(),
+                name: "mangle_output".to_string(),
+                hook: "output".to_string(),
+                policy: "accept".to_string(),
+                r#type: "mangle".to_string(),
+                rules: vec![
+                    FirewallRule {
+                        enabled: true,
+                        uuid: "localhost-allow".to_string(),
+                        parameters: "ip daddr 127.0.0.0-127.255.255.255".to_string(),
+                        target: "accept".to_string(),
+                        ..Default::default()
+                    },
+                    FirewallRule {
+                        enabled: true,
+                        uuid: "icmpv6-allow".to_string(),
+                        parameters:
+                            "icmpv6 type { echo-request, echo-reply, destination-unreachable }"
+                                .to_string(),
+                        target: "accept".to_string(),
+                        ..Default::default()
+                    },
+                    FirewallRule {
+                        enabled: true,
+                        uuid: "queue-forward-like".to_string(),
+                        parameters: "ct state new".to_string(),
+                        target: "queue".to_string(),
+                        target_parameters: "num 0".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        ],
         ..Default::default()
     };
 
@@ -342,23 +339,22 @@ fn apply_plan_generated_expressions_are_netlink_supported() {
 #[test]
 fn apply_plan_keeps_unsupported_expression_for_fallback_path() {
     let unsupported_expr = "meta nfproto ipv4";
-    let sysfw = pb::SysFirewall {
+    let sysfw = FirewallConfig {
         enabled: true,
-        system_rules: vec![pb::FwChains {
-            chains: vec![pb::FwChain {
-                family: "inet".to_string(),
-                table: "opensnitch".to_string(),
-                name: "mangle_output".to_string(),
-                hook: "output".to_string(),
-                policy: "accept".to_string(),
-                r#type: "mangle".to_string(),
-                rules: vec![pb::FwRule {
-                    enabled: true,
-                    uuid: "unsupported-cidr".to_string(),
-                    parameters: unsupported_expr.to_string(),
-                    target: "accept".to_string(),
-                    ..Default::default()
-                }],
+        version: 0,
+        rules: Vec::new(),
+        chains: vec![FirewallChain {
+            family: "inet".to_string(),
+            table: "opensnitch".to_string(),
+            name: "mangle_output".to_string(),
+            hook: "output".to_string(),
+            policy: "accept".to_string(),
+            r#type: "mangle".to_string(),
+            rules: vec![FirewallRule {
+                enabled: true,
+                uuid: "unsupported-cidr".to_string(),
+                parameters: unsupported_expr.to_string(),
+                target: "accept".to_string(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -385,7 +381,7 @@ fn apply_plan_keeps_unsupported_expression_for_fallback_path() {
 fn cli_normalized_expression_support_matrix_stays_explicit() {
     let cases = [
         (
-            pb::FwRule {
+            FirewallRule {
                 parameters: "meta dport == 443".to_string(),
                 target: "accept".to_string(),
                 ..Default::default()
@@ -393,7 +389,7 @@ fn cli_normalized_expression_support_matrix_stays_explicit() {
             true,
         ),
         (
-            pb::FwRule {
+            FirewallRule {
                 parameters: "icmp type echo-request,echo-reply,destination-unreachable".to_string(),
                 target: "accept".to_string(),
                 ..Default::default()
@@ -401,7 +397,7 @@ fn cli_normalized_expression_support_matrix_stays_explicit() {
             true,
         ),
         (
-            pb::FwRule {
+            FirewallRule {
                 parameters: "ct state new".to_string(),
                 target: "queue".to_string(),
                 target_parameters: "num 0".to_string(),
@@ -410,7 +406,7 @@ fn cli_normalized_expression_support_matrix_stays_explicit() {
             true,
         ),
         (
-            pb::FwRule {
+            FirewallRule {
                 parameters: "ip saddr 192.168.1.0/24".to_string(),
                 target: "accept".to_string(),
                 ..Default::default()
@@ -418,7 +414,7 @@ fn cli_normalized_expression_support_matrix_stays_explicit() {
             true,
         ),
         (
-            pb::FwRule {
+            FirewallRule {
                 parameters: "ip6 daddr 2001:db8::/64".to_string(),
                 target: "accept".to_string(),
                 ..Default::default()
@@ -426,7 +422,7 @@ fn cli_normalized_expression_support_matrix_stays_explicit() {
             true,
         ),
         (
-            pb::FwRule {
+            FirewallRule {
                 parameters: "meta nfproto ipv4".to_string(),
                 target: "accept".to_string(),
                 ..Default::default()

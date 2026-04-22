@@ -1,8 +1,9 @@
 use tracing::debug;
+use transport_wire_core::WireSubscriptionAction;
 
 use super::SubscriptionService;
 use super::labels::subscription_label;
-use super::{SubscriptionRecord, record_to_proto};
+use super::{SubscriptionRecord, wire_subscription_from_record};
 pub(super) use crate::models::subscription_refresh::RefreshBatchResult;
 use crate::models::subscription_refresh::RefreshOutcome;
 
@@ -36,8 +37,8 @@ impl SubscriptionService {
                     sync_layout = true;
                     self.refresh_count
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let proto = record_to_proto(&record);
-                    self.push_event(proto, opensnitch_proto::pb::SubscriptionAction::Refresh);
+                    let wire = wire_subscription_from_record(&record);
+                    self.push_event(wire, WireSubscriptionAction::Refresh);
                 }
                 Ok(RefreshOutcome::NotModified) => {
                     unchanged += 1;
@@ -47,8 +48,8 @@ impl SubscriptionService {
                     errors.push(format!("{}: {err}", subscription_label(&record)));
                     self.refresh_errors
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let proto = record_to_proto(&record);
-                    self.push_event(proto, opensnitch_proto::pb::SubscriptionAction::Refresh);
+                    let wire = wire_subscription_from_record(&record);
+                    self.push_event(wire, WireSubscriptionAction::Refresh);
                 }
             }
 

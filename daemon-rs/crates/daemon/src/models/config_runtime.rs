@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use crate::models::firewall_state::FirewallBackend;
 use crate::models::audit::AuditSeverity;
+use crate::models::firewall_state::FirewallBackend;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LocalPrincipal {

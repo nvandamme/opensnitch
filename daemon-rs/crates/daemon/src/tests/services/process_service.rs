@@ -13,7 +13,7 @@ async fn inspect_unknown_pid_returns_error() {
 #[tokio::test]
 async fn exit_event_does_not_make_inspect_succeed_for_unknown_pid() {
     let service = ProcessService::default();
-    service.sync_from_proc_event(0, ProcEventKind::Exit).await;
+    let _ = service.sync_from_proc_event(0, ProcEventKind::Exit).await;
     let result = service.inspect(0).await;
     assert!(result.is_err());
 }
@@ -23,7 +23,10 @@ async fn exec_event_warms_cache_for_running_process() {
     let service = ProcessService::default();
     let pid = std::process::id();
 
-    service.sync_from_proc_event(pid, ProcEventKind::Exec).await;
+    service
+        .sync_from_proc_event(pid, ProcEventKind::Exec)
+        .await
+        .expect("sync exec event for running process");
     let info = service
         .inspect(pid)
         .await
@@ -89,8 +92,14 @@ async fn exec_after_exit_rehydrates_cache_entry() {
     let service = ProcessService::default();
     let pid = std::process::id();
 
-    service.sync_from_proc_event(pid, ProcEventKind::Exit).await;
-    service.sync_from_proc_event(pid, ProcEventKind::Exec).await;
+    service
+        .sync_from_proc_event(pid, ProcEventKind::Exit)
+        .await
+        .expect("sync exit event before cache refresh");
+    service
+        .sync_from_proc_event(pid, ProcEventKind::Exec)
+        .await
+        .expect("sync exec event after cache refresh");
 
     let info = service
         .inspect(pid)
@@ -118,8 +127,14 @@ async fn fork_after_exit_rehydrates_cache_entry() {
     let service = ProcessService::default();
     let pid = std::process::id();
 
-    service.sync_from_proc_event(pid, ProcEventKind::Exit).await;
-    service.sync_from_proc_event(pid, ProcEventKind::Fork).await;
+    service
+        .sync_from_proc_event(pid, ProcEventKind::Exit)
+        .await
+        .expect("sync exit event before fork refresh");
+    service
+        .sync_from_proc_event(pid, ProcEventKind::Fork)
+        .await
+        .expect("sync fork event after exit refresh");
 
     let info = service
         .inspect(pid)
@@ -149,7 +164,10 @@ async fn fork_event_warms_cache_for_running_process() {
     let service = ProcessService::default();
     let pid = std::process::id();
 
-    service.sync_from_proc_event(pid, ProcEventKind::Fork).await;
+    service
+        .sync_from_proc_event(pid, ProcEventKind::Fork)
+        .await
+        .expect("sync fork event for running process");
     let info = service
         .inspect(pid)
         .await
@@ -164,8 +182,14 @@ async fn exit_after_exec_keeps_recent_cached_entry_until_ttl() {
     let service = ProcessService::default();
     let pid = std::process::id();
 
-    service.sync_from_proc_event(pid, ProcEventKind::Exec).await;
-    service.sync_from_proc_event(pid, ProcEventKind::Exit).await;
+    service
+        .sync_from_proc_event(pid, ProcEventKind::Exec)
+        .await
+        .expect("sync exec event before exit");
+    service
+        .sync_from_proc_event(pid, ProcEventKind::Exit)
+        .await
+        .expect("sync exit event after exec");
 
     let info = service
         .inspect(pid)
@@ -178,7 +202,7 @@ async fn exit_after_exec_keeps_recent_cached_entry_until_ttl() {
 #[tokio::test]
 async fn fork_event_with_invalid_pid_does_not_make_inspect_succeed() {
     let service = ProcessService::default();
-    service.sync_from_proc_event(0, ProcEventKind::Fork).await;
+    let _ = service.sync_from_proc_event(0, ProcEventKind::Fork).await;
 
     let result = service.inspect(0).await;
     assert!(result.is_err());

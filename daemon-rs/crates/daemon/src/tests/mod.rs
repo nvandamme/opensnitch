@@ -142,6 +142,7 @@ mod task_runtime;
 #[path = "parsing/transient_files.rs"]
 mod transient_files;
 #[path = "flows/verdict_flow.rs"]
+#[cfg(feature = "transport-wire-grpc-client")]
 mod verdict_flow;
 #[path = "watch_reload/watch_workers.rs"]
 mod watch_workers;

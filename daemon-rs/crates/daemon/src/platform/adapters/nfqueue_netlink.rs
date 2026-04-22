@@ -697,13 +697,17 @@ impl NfqueueNetlinkAdapter {
     /// Run the NFQUEUE recv/verdict loop for `queue_num` until `shutdown` is cancelled.
     ///
     /// `NfqueueRuntimeState::init` must be called before this method.
-    pub(crate) fn run(queue_num: u16, shutdown: CancellationToken) -> Result<()> {
+    pub(crate) fn run<F>(queue_num: u16, shutdown: CancellationToken, on_started: F) -> Result<()>
+    where
+        F: FnOnce(u16),
+    {
         debug!(
             queue_num,
             backend = "netlink",
             "starting nfqueue netlink backend"
         );
         let socket = NfqueueNetlinkSocket::open(queue_num)?;
+        on_started(queue_num);
         socket.run(shutdown)
     }
 }

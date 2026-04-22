@@ -72,12 +72,15 @@ pub(super) fn replace_global_storage_service(next: StorageService) -> StorageSer
 
 #[allow(dead_code)]
 pub(super) fn reload_global_storage_service() -> StorageService {
-    let audit = global_storage_service().audit_handle();
-    let verbose_hot_path = global_storage_service().verbose_hot_path_audit_enabled();
+    let current = global_storage_service();
+    let audit = current.audit_handle();
+    let verbose_hot_path = current.verbose_hot_path_audit_enabled();
+    let main_storage_format = current.main_storage_format();
     replace_global_storage_service(
         StorageService::new()
             .with_optional_audit(audit)
-            .with_verbose_hot_path_audit(verbose_hot_path),
+            .with_verbose_hot_path_audit(verbose_hot_path)
+            .with_main_storage_format(main_storage_format),
     )
 }
 

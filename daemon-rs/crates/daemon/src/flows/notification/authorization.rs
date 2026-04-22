@@ -43,7 +43,7 @@ impl NotificationFlow {
     /// Read the supplementary GIDs of a peer process from `/proc/{pid}/status`.
     /// Look up the LISTEN socket at `client_addr` (must be a loopback TCP URL such as
     /// `http://127.0.0.1:50051`) in `/proc/net/tcp[6]` and return its `(uid, inode)`.
-    /// Used to identify who owns the UI gRPC server and to resolve supplementary groups.
+    /// Used to identify who owns the client gRPC server and to resolve supplementary groups.
     #[cfg(target_os = "linux")]
     pub(super) fn try_loopback_tcp_listen_socket(client_addr: &str) -> Option<(u32, u32)> {
         let endpoint = client_addr

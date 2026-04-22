@@ -23,6 +23,7 @@ use daemon::CliOverrides;
 ///   --config-file <path>   Override the config file path.
 ///   --ui-socket   <addr>   Override the UI gRPC socket address.
 ///   --auth-mode   <mode>   Override client authorization mode.
+///   --main-storage-format <format> Override main storage format (json|yaml|toml).
 ///   --migrate-ownerless-rules        Run one-shot legacy ownerless rule migration.
 ///   --migrate-owner-uid <uid>        Target owner UID for migration mode.
 ///   --migrate-write                  Persist migration changes (default is dry-run).
@@ -67,6 +68,7 @@ fn parse_cli_overrides() -> CliOverrides {
             "config-file" => overrides.config_file = value.map(std::path::PathBuf::from),
             "ui-socket" => overrides.ui_socket = value,
             "auth-mode" => overrides.auth_mode = value,
+            "main-storage-format" => overrides.main_storage_format = value,
             "migrate-ownerless-rules" => overrides.rule_migration.ownerless_rules = true,
             "migrate-owner-uid" => overrides.rule_migration.owner_uid = value,
             "migrate-write" => overrides.rule_migration.write = true,

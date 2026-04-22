@@ -1,4 +1,6 @@
-use opensnitch_proto::pb;
+use transport_wire_core::{
+    WireSubscription, WireSubscriptionAction, WireSubscriptionRefreshMetadata,
+};
 
 use super::defaults::{DEFAULT_INTERVAL_SECONDS, DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT_SECONDS};
 use super::format::normalize_format;
@@ -7,137 +9,176 @@ use crate::utils::name_parsing::sanitize_ascii_name;
 use crate::utils::stable_id::hex_id_from_pair;
 use crate::utils::time_nonce::now_rfc3339_utc;
 
-pub(crate) fn record_to_proto(r: &SubscriptionRecord) -> pb::Subscription {
-    pb::Subscription {
-        id: r.id.clone(),
-        name: r.name.clone(),
-        url: r.url.clone(),
-        filename: r.filename.clone(),
-        groups: r.groups.clone(),
-        enabled: r.enabled,
-        format: r.format.clone(),
-        interval_seconds: r.interval_seconds,
-        timeout_seconds: r.timeout_seconds,
-        max_bytes: r.max_bytes,
-        node: r.node.clone(),
-        status: subscription_status_from_str(&r.status) as i32,
-        last_updated: r.last_updated.clone(),
-        last_error: r.last_error.clone(),
-        refresh_meta: Some(pb::SubscriptionRefreshMetadata {
-            next_refresh_after: r.next_refresh_after,
-            consecutive_failures: r.consecutive_failures,
-            etag: r.etag.clone(),
-            last_modified: r.last_modified.clone(),
+const SUBSCRIPTION_STATUS_UNSPECIFIED: i32 = 0;
+const SUBSCRIPTION_STATUS_PENDING: i32 = 1;
+const SUBSCRIPTION_STATUS_READY: i32 = 2;
+const SUBSCRIPTION_STATUS_SYNCING: i32 = 3;
+const SUBSCRIPTION_STATUS_ERROR: i32 = 4;
+
+pub(crate) fn record_to_wire(record: SubscriptionRecord) -> WireSubscription {
+    WireSubscription {
+        id: record.id,
+        name: record.name,
+        url: record.url,
+        filename: record.filename,
+        groups: record.groups,
+        enabled: record.enabled,
+        format: record.format,
+        interval_seconds: record.interval_seconds,
+        timeout_seconds: record.timeout_seconds,
+        max_bytes: record.max_bytes,
+        node: record.node,
+        status: subscription_status_code_from_str(&record.status),
+        last_updated: record.last_updated,
+        last_error: record.last_error,
+        refresh_meta: Some(WireSubscriptionRefreshMetadata {
+            next_refresh_after: record.next_refresh_after,
+            consecutive_failures: record.consecutive_failures,
+            etag: record.etag,
+            last_modified: record.last_modified,
         }),
     }
 }
 
-pub(crate) fn proto_to_record(p: &pb::Subscription) -> SubscriptionRecord {
-    let status =
-        pb::SubscriptionStatus::try_from(p.status).unwrap_or(pb::SubscriptionStatus::Unspecified);
+pub(crate) fn wire_subscription_from_record(record: &SubscriptionRecord) -> WireSubscription {
+    record_to_wire(record.clone())
+}
+
+pub(crate) fn record_from_wire(subscription: WireSubscription) -> SubscriptionRecord {
+    let id = ensure_id(&subscription);
+    let filename = ensure_filename(&subscription);
+    let WireSubscription {
+        id: _,
+        name,
+        url,
+        filename: _,
+        groups,
+        enabled,
+        format,
+        interval_seconds,
+        timeout_seconds,
+        max_bytes,
+        node,
+        status,
+        last_updated,
+        last_error,
+        refresh_meta,
+    } = subscription;
+    let refresh_meta = refresh_meta.unwrap_or_default();
+
     SubscriptionRecord {
-        id: ensure_id(p),
-        name: p.name.clone(),
-        url: p.url.clone(),
-        filename: ensure_filename(p),
-        groups: p.groups.clone(),
-        enabled: p.enabled,
-        format: normalize_format(&p.format),
-        interval_seconds: if p.interval_seconds == 0 {
+        id,
+        name,
+        url,
+        filename,
+        groups,
+        enabled,
+        format: normalize_format(&format),
+        interval_seconds: if interval_seconds == 0 {
             DEFAULT_INTERVAL_SECONDS
         } else {
-            p.interval_seconds
+            interval_seconds
         },
-        timeout_seconds: if p.timeout_seconds == 0 {
+        timeout_seconds: if timeout_seconds == 0 {
             DEFAULT_TIMEOUT_SECONDS
         } else {
-            p.timeout_seconds
+            timeout_seconds
         },
-        max_bytes: if p.max_bytes == 0 {
+        max_bytes: if max_bytes == 0 {
             DEFAULT_MAX_BYTES
         } else {
-            p.max_bytes
+            max_bytes
         },
-        node: p.node.clone(),
+        node,
         status: subscription_status_to_str(status),
-        last_updated: if p.last_updated.is_empty() {
+        last_updated: if last_updated.is_empty() {
             now_rfc3339_utc()
         } else {
-            p.last_updated.clone()
+            last_updated
         },
-        last_error: p.last_error.clone(),
-        etag: p
-            .refresh_meta
-            .as_ref()
-            .map(|m| m.etag.clone())
-            .unwrap_or_default(),
-        last_modified: p
-            .refresh_meta
-            .as_ref()
-            .map(|m| m.last_modified.clone())
-            .unwrap_or_default(),
-        next_refresh_after: p
-            .refresh_meta
-            .as_ref()
-            .map(|m| m.next_refresh_after)
-            .unwrap_or_default(),
-        consecutive_failures: p
-            .refresh_meta
-            .as_ref()
-            .map(|m| m.consecutive_failures)
-            .unwrap_or_default(),
+        last_error,
+        etag: refresh_meta.etag,
+        last_modified: refresh_meta.last_modified,
+        next_refresh_after: refresh_meta.next_refresh_after,
+        consecutive_failures: refresh_meta.consecutive_failures,
     }
 }
 
-pub(crate) fn subscription_status_to_str(status: pb::SubscriptionStatus) -> String {
+pub(crate) fn subscription_status_to_str(status: i32) -> String {
     match status {
-        pb::SubscriptionStatus::Pending => "pending",
-        pb::SubscriptionStatus::Ready => "ready",
-        pb::SubscriptionStatus::Syncing => "syncing",
-        pb::SubscriptionStatus::Error => "error",
-        pb::SubscriptionStatus::Unspecified => "unspecified",
+        SUBSCRIPTION_STATUS_PENDING => "pending",
+        SUBSCRIPTION_STATUS_READY => "ready",
+        SUBSCRIPTION_STATUS_SYNCING => "syncing",
+        SUBSCRIPTION_STATUS_ERROR => "error",
+        _ => "unspecified",
     }
     .to_string()
 }
 
-pub(crate) fn subscription_status_from_str(s: &str) -> pb::SubscriptionStatus {
-    match s {
-        "pending" => pb::SubscriptionStatus::Pending,
-        "ready" => pb::SubscriptionStatus::Ready,
-        "syncing" => pb::SubscriptionStatus::Syncing,
-        "error" => pb::SubscriptionStatus::Error,
-        _ => pb::SubscriptionStatus::Unspecified,
+pub(crate) fn subscription_status_code_from_str(status: &str) -> i32 {
+    match status {
+        "pending" => SUBSCRIPTION_STATUS_PENDING,
+        "ready" => SUBSCRIPTION_STATUS_READY,
+        "syncing" => SUBSCRIPTION_STATUS_SYNCING,
+        "error" => SUBSCRIPTION_STATUS_ERROR,
+        _ => SUBSCRIPTION_STATUS_UNSPECIFIED,
     }
 }
 
-fn ensure_id(p: &pb::Subscription) -> String {
-    if !p.id.is_empty() {
-        p.id.clone()
+pub(crate) fn wire_subscription_action_from_i32(value: i32) -> WireSubscriptionAction {
+    match value {
+        x if x == WireSubscriptionAction::List as i32 => WireSubscriptionAction::List,
+        x if x == WireSubscriptionAction::Apply as i32 => WireSubscriptionAction::Apply,
+        x if x == WireSubscriptionAction::Delete as i32 => WireSubscriptionAction::Delete,
+        x if x == WireSubscriptionAction::Refresh as i32 => WireSubscriptionAction::Refresh,
+        x if x == WireSubscriptionAction::Deploy as i32 => WireSubscriptionAction::Deploy,
+        _ => WireSubscriptionAction::Unspecified,
+    }
+}
+
+pub(crate) fn operation_from_wire_action(
+    action: WireSubscriptionAction,
+) -> crate::models::subscription_rpc::SubscriptionOperation {
+    use crate::models::subscription_rpc::SubscriptionOperation;
+
+    match action {
+        WireSubscriptionAction::Unspecified => SubscriptionOperation::Unspecified,
+        WireSubscriptionAction::List => SubscriptionOperation::List,
+        WireSubscriptionAction::Apply => SubscriptionOperation::Apply,
+        WireSubscriptionAction::Delete => SubscriptionOperation::Delete,
+        WireSubscriptionAction::Refresh => SubscriptionOperation::Refresh,
+        WireSubscriptionAction::Deploy => SubscriptionOperation::Deploy,
+    }
+}
+
+fn ensure_id(subscription: &WireSubscription) -> String {
+    if !subscription.id.is_empty() {
+        subscription.id.clone()
     } else {
-        hex_id_from_pair(&p.url, &p.name)
+        hex_id_from_pair(&subscription.url, &subscription.name)
     }
 }
 
-fn ensure_filename(p: &pb::Subscription) -> String {
-    if !p.filename.is_empty() {
-        return p.filename.clone();
+fn ensure_filename(subscription: &WireSubscription) -> String {
+    if !subscription.filename.is_empty() {
+        return subscription.filename.clone();
     }
-    derive_filename(p)
+    derive_filename(subscription)
 }
 
-fn derive_filename(p: &pb::Subscription) -> String {
-    if !p.name.is_empty() {
-        return sanitize_ascii_name(&p.name);
+fn derive_filename(subscription: &WireSubscription) -> String {
+    if !subscription.name.is_empty() {
+        return sanitize_ascii_name(&subscription.name);
     }
-    let path = p
+    let path = subscription
         .url
         .split('?')
         .next()
-        .unwrap_or(&p.url)
+        .unwrap_or(&subscription.url)
         .trim_end_matches('/');
     let last = path.rsplit('/').next().unwrap_or(path);
     if !last.is_empty() {
         return sanitize_ascii_name(last);
     }
-    hex_id_from_pair(&p.url, &p.name)
+    hex_id_from_pair(&subscription.url, &subscription.name)
 }

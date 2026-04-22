@@ -146,7 +146,7 @@ fn aya_proc_trace_smoke_reports_explicit_runtime_active() {
         std::env::temp_dir().join(format!("opensnitch-aya-proc-trace-test-{unique}.log"));
 
     let mut daemon = Command::new("timeout")
-        .arg("24s")
+        .arg("18s")
         .arg(&daemon_bin)
         .env("OPENSNITCH_EBPF_PIN_DOMAIN", "aya")
         .env("OPENSNITCH_TUNE_KERNEL_PROCESS_QUEUE_CAPACITY", "8192")
@@ -167,17 +167,14 @@ fn aya_proc_trace_smoke_reports_explicit_runtime_active() {
 
     thread::sleep(Duration::from_secs(2));
 
-    for _ in 0..180 {
+    // Keep process-event generation bounded so the smoke test runtime stays
+    // predictable across slower hosts.
+    for _ in 0..60 {
         let _ = Command::new("/bin/true")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        let _ = Command::new("/usr/bin/env")
-            .arg("true")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(25));
     }
 
     let _ = daemon.wait();

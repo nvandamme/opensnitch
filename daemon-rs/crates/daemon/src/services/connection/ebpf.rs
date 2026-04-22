@@ -1,3 +1,10 @@
+// Connection eBPF lookup helpers are intentionally compiled even when eBPF backends
+// are disabled; they become active as soon as aya/libbpf features are enabled.
+#![cfg_attr(
+    not(any(feature = "aya-ebpf", feature = "libbpf-ebpf")),
+    allow(dead_code)
+)]
+
 use crate::models::{connection_owner::ConnectionOwner, connection_state::TransportProtocol};
 use std::{
     collections::HashMap,
@@ -149,8 +156,14 @@ impl ConnectionService {
         dst_ip: IpAddr,
         dst_port: u16,
     ) -> Option<ConnectionOwner> {
+        #[cfg(not(any(feature = "aya-ebpf", feature = "libbpf-ebpf")))]
+        let _ = (protocol, src_ip, src_port, dst_ip, dst_port);
+
+        #[cfg(any(feature = "aya-ebpf", feature = "libbpf-ebpf"))]
         let map_name = Self::bpf_map_name(protocol, src_ip, dst_ip)?;
+        #[cfg(any(feature = "aya-ebpf", feature = "libbpf-ebpf"))]
         let map_id = self.bpf_map_snapshot().load().get(map_name).copied()?;
+        #[cfg(any(feature = "aya-ebpf", feature = "libbpf-ebpf"))]
         let mut key = Self::build_bpf_key(protocol, src_ip, src_port, dst_ip, dst_port)?;
 
         // aya path: open one MapData fd, convert to a typed HashMap once, then call
@@ -219,7 +232,6 @@ impl ConnectionService {
                     }
                 }
             }
-            return None;
         }
 
         // libbpf-rs fallback: open the map handle once and reuse for all three retries.
@@ -286,7 +298,6 @@ impl ConnectionService {
         }
 
         // Both eBPF crates disabled: owner unknown.
-        #[allow(unreachable_code)]
         None
     }
 }

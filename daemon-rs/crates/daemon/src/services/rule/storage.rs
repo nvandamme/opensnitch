@@ -40,12 +40,12 @@ impl RuleService {
         };
 
         for file_path in entries {
-            if file_path.extension().and_then(|value| value.to_str()) != Some("json") {
+            if !storage.path_matches_main_storage_format(&file_path) {
                 continue;
             }
 
             let rule_file: RuleFile = storage
-                .read_json_and_notify("rule", &file_path)
+                .read_and_parse_with_storage_format_and_notify("rule", &file_path)
                 .await
                 .with_context(|| format!("failed to load rule file {}", file_path.display()))?;
             let record = RuleRecord::from(rule_file);
@@ -83,24 +83,28 @@ impl RuleService {
         let entries = std::fs::read_dir(path)
             .with_context(|| format!("failed to read rules directory {}", path.display()))?;
 
-        let mut json_paths: Vec<PathBuf> = entries
+        let storage = StorageService::global();
+        let mut rule_paths: Vec<PathBuf> = entries
             .filter_map(|entry| {
                 let entry = entry.ok()?;
                 let path = entry.path();
-                if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+                if storage.path_matches_main_storage_format(&path) {
                     Some(path)
                 } else {
                     None
                 }
             })
             .collect();
-        json_paths.sort();
+        rule_paths.sort();
 
-        for file_path in json_paths {
+        for file_path in rule_paths {
             let contents = std::fs::read_to_string(&file_path)
                 .with_context(|| format!("failed to read rule file {}", file_path.display()))?;
-            let rule_file: RuleFile = serde_json::from_str(&contents)
-                .with_context(|| format!("failed to parse rule file {}", file_path.display()))?;
+            let rule_file: RuleFile =
+                StorageService::parse_with_storage_format_for_path(&file_path, &contents)
+                    .with_context(|| {
+                        format!("failed to parse rule file {}", file_path.display())
+                    })?;
             let record = RuleRecord::from(rule_file);
             if record.enabled
                 && let Err(err) = Self::validate_operator(&record.operator)
@@ -179,7 +183,7 @@ impl RuleService {
             return HashMap::new();
         }
         let Ok(Some(map)) = StorageService::global()
-            .read_json_if_exists_and_notify::<HashMap<String, Vec<String>>>("rule", path)
+            .read_and_parse_with_storage_format_if_exists_and_notify("rule", path)
             .await
         else {
             return HashMap::new();
@@ -248,7 +252,7 @@ impl RuleService {
 
         for entry in entries {
             let file_path = entry.path;
-            if file_path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            if !storage.path_matches_main_storage_format(&file_path) {
                 continue;
             }
             let name = file_name_lossy(&file_path)?;
@@ -293,13 +297,16 @@ impl RuleService {
 
         for entry in entries {
             let file_path = entry.path;
-            if file_path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            if !storage.path_matches_main_storage_format(&file_path) {
                 continue;
             }
             let name = file_name_lossy(&file_path)?;
             state.insert(name, entry.modified);
 
-            let Ok(rule_file) = storage.read_json::<RuleFile>("rule", &file_path).await else {
+            let Ok(rule_file) = storage
+                .read_and_parse_with_storage_format::<RuleFile>("rule", &file_path)
+                .await
+            else {
                 continue;
             };
 
@@ -381,7 +388,7 @@ impl WatchWorkerControl for RuleWatchControl {
                 // Uses reload_inline to avoid the spawn_blocking scheduling
                 // overhead (~3-5 ms) — the rules directory holds a handful of
                 // tiny JSON files whose sync I/O completes in microseconds.
-                let previous_rules = rules.get_proto_snapshot();
+                let previous_rules = rules.get_wire_snapshot();
                 if let Err(err) = rules.reload_inline().await {
                     tracing::error!(path = %path.display(), "failed to reload rules after inotify event: {err}");
                 } else {
@@ -395,7 +402,8 @@ impl WatchWorkerControl for RuleWatchControl {
                 for rule in previous_rules.iter() {
                     if !new_names.contains(rule.name.as_str()) {
                         tracing::info!("{}", RuleService::format_deleted_rule(rule));
-                        tracing::info!("Rule deleted {}.json", rule.name);
+                        let extension = StorageService::global().main_storage_extension();
+                        tracing::info!("Rule deleted {}.{}", rule.name, extension);
                     }
                 }
 
@@ -429,7 +437,7 @@ impl WatchWorkerControl for RuleWatchControl {
                 for file_name in RuleService::diff_rule_files(previous_files, current_files) {
                     tracing::info!("Ruleset changed due to {}, reloading ...", file_name);
                 }
-                let previous_rules = rules.get_proto_snapshot();
+                let previous_rules = rules.get_wire_snapshot();
                 if let Err(err) = rules.reload().await {
                     tracing::error!(path = %path.display(), "failed to reload rules after directory change: {err}");
                 } else {

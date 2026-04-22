@@ -72,7 +72,9 @@ impl SubscriptionService {
 
                 let list_rule_paths = rules.list_rule_data_paths();
                 stats.update_subscription_stats(
-                    service.subscription_stats_with_rules(&list_rule_paths),
+                    service
+                        .subscription_stats_with_rules(&list_rule_paths)
+                        .into(),
                 );
             }
             debug!("subscription scheduler: stopped");

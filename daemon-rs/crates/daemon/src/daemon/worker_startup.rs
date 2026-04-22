@@ -39,6 +39,7 @@ impl Daemon {
                 self.runtime.nfqueue_num,
                 self.runtime.default_action,
                 self.runtime.tunables.nfqueue_overload_policy,
+                self.runtime.audit.clone(),
                 self.runtime.shutdown.clone(),
             ),
         );

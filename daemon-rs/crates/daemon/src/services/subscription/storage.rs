@@ -5,12 +5,11 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use opensnitch_proto::pb;
+use transport_wire_core::{WireSubscription, WireSubscriptionEvent, WireSubscriptionStatistics};
 
-use super::{SubscriptionRecord, proto_to_record, record_to_proto};
+use super::{SubscriptionRecord, record_from_wire, record_to_wire};
 use crate::models::subscription_storage::SubscriptionStorageDocument;
 use crate::services::storage::StorageService;
-use crate::utils::atomic_write::sibling_temp_path_with_suffix;
 use crate::utils::sort_key::sort_by_string_key;
 
 struct StoreInner {
@@ -32,7 +31,9 @@ impl SubscriptionStorage {
             let data = storage
                 .read_to_string_sync_and_notify("subscription", &path)
                 .with_context(|| format!("reading subscription store: {}", path.display()))?;
-            let doc: SubscriptionStorageDocument = serde_json::from_str(&data).unwrap_or_default();
+            let doc: SubscriptionStorageDocument =
+                StorageService::parse_with_storage_format_for_path(&path, &data)
+                    .unwrap_or_default();
             let items = doc
                 .subscriptions
                 .into_iter()
@@ -66,19 +67,20 @@ impl SubscriptionStorage {
         })
     }
 
-    pub fn list(&self) -> Vec<pb::Subscription> {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn list(&self) -> Vec<WireSubscription> {
         let inner = self.inner.lock().expect("subscription storage poisoned");
-        let mut out: Vec<_> = inner.items.values().map(record_to_proto).collect();
+        let mut out: Vec<_> = inner.items.values().cloned().map(record_to_wire).collect();
         sort_by_string_key(&mut out, |item| item.id.as_str());
         out
     }
 
     #[allow(dead_code)] // used by tests
-    pub fn apply(&self, items: Vec<pb::Subscription>) -> Vec<pb::Subscription> {
-        let records = items.iter().map(proto_to_record).collect();
+    pub fn apply(&self, items: Vec<WireSubscription>) -> Vec<WireSubscription> {
+        let records = items.into_iter().map(record_from_wire).collect();
         self.apply_records(records)
             .into_iter()
-            .map(|record| record_to_proto(&record))
+            .map(record_to_wire)
             .collect()
     }
 
@@ -153,15 +155,11 @@ impl SubscriptionStorage {
             version: 1,
             subscriptions,
         };
-        let data = serde_json::to_string_pretty(&doc).context("serializing subscription store")?;
-
-        let temp_path = sibling_temp_path_with_suffix(&self.path, ".tmp");
-
-        StorageService::global().write_bytes_atomic_sync_and_notify(
+        StorageService::global().convert_and_write_with_storage_format_to_path_sync_and_notify(
             "subscription",
-            &temp_path,
             &self.path,
-            data.as_bytes(),
+            &doc,
+            true,
         )?;
 
         inner.dirty = false;
@@ -174,7 +172,7 @@ impl SubscriptionStorage {
             .context("joining subscription storage flush task")?
     }
 
-    /// Returns a `pb::SubscriptionStatistics` snapshot for metrics export.
+    /// Returns a wire subscription statistics snapshot for metrics export.
     ///
     /// Computes scalars (total/ready/error) and breakdown maps (by_status,
     /// by_group, by_node) from the current storage state in a single lock pass.
@@ -184,8 +182,8 @@ impl SubscriptionStorage {
         &self,
         refresh_count: u64,
         refresh_errors: u64,
-        events: Vec<pb::SubscriptionEvent>,
-    ) -> pb::SubscriptionStatistics {
+        events: Vec<WireSubscriptionEvent>,
+    ) -> WireSubscriptionStatistics {
         let inner = self.inner.lock().expect("subscription storage poisoned");
         let mut total = 0u64;
         let mut ready = 0u64;
@@ -209,7 +207,7 @@ impl SubscriptionStorage {
                 *by_node.entry(record.node.clone()).or_default() += 1;
             }
         }
-        pb::SubscriptionStatistics {
+        WireSubscriptionStatistics {
             total,
             ready,
             error,

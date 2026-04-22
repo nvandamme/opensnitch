@@ -1,4 +1,6 @@
+#[cfg(feature = "native-ebpf-ringbuf")]
 use crate::models::dns_payload::DnsPayload;
+#[cfg(feature = "native-ebpf-ringbuf")]
 use crate::models::proc_event::ProcEventKind;
 use crate::workers::runtime::ebpf::control::EbpfWorkerControl;
 use serde_json::json;

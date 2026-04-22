@@ -1,6 +1,10 @@
-use opensnitch_proto::pb;
 use tokio_util::sync::CancellationToken;
+use transport_wire_core::{
+    WireRuleSubscriptionEntry, WireSubscriptionAction, WireSubscriptionReply,
+    WireSubscriptionStatistics,
+};
 
+use crate::models::subscription_rpc::SubscriptionCommand;
 use crate::services::audit::AuditService;
 use crate::services::stats::StatsService;
 
@@ -18,11 +22,29 @@ impl SubscriptionService {
         Self
     }
 
-    pub async fn handle_request(&self, req: pb::SubscriptionRequest) -> pb::SubscriptionReply {
-        let operation = pb::SubscriptionAction::try_from(req.operation)
-            .unwrap_or(pb::SubscriptionAction::Unspecified) as i32;
+    pub async fn handle_wire_command(&self, command: SubscriptionCommand) -> WireSubscriptionReply {
+        let operation = match command.operation {
+            crate::models::subscription_rpc::SubscriptionOperation::Unspecified => {
+                WireSubscriptionAction::Unspecified as i32
+            }
+            crate::models::subscription_rpc::SubscriptionOperation::List => {
+                WireSubscriptionAction::List as i32
+            }
+            crate::models::subscription_rpc::SubscriptionOperation::Apply => {
+                WireSubscriptionAction::Apply as i32
+            }
+            crate::models::subscription_rpc::SubscriptionOperation::Delete => {
+                WireSubscriptionAction::Delete as i32
+            }
+            crate::models::subscription_rpc::SubscriptionOperation::Refresh => {
+                WireSubscriptionAction::Refresh as i32
+            }
+            crate::models::subscription_rpc::SubscriptionOperation::Deploy => {
+                WireSubscriptionAction::Deploy as i32
+            }
+        };
 
-        pb::SubscriptionReply {
+        WireSubscriptionReply {
             operation,
             accepted: false,
             message: "subscription feature is disabled in this build".to_string(),
@@ -30,21 +52,21 @@ impl SubscriptionService {
         }
     }
 
-    pub fn subscription_stats(&self) -> pb::SubscriptionStatistics {
-        pb::SubscriptionStatistics::default()
+    pub fn subscription_stats(&self) -> WireSubscriptionStatistics {
+        WireSubscriptionStatistics::default()
     }
 
     pub fn subscription_stats_with_rules(
         &self,
         _list_rule_paths: &[(std::sync::Arc<str>, std::path::PathBuf)],
-    ) -> pb::SubscriptionStatistics {
-        pb::SubscriptionStatistics::default()
+    ) -> WireSubscriptionStatistics {
+        WireSubscriptionStatistics::default()
     }
 
     pub fn build_rule_subscription_entries(
         &self,
         _list_rule_paths: &[(std::sync::Arc<str>, std::path::PathBuf)],
-    ) -> Vec<pb::RuleSubscriptionEntry> {
+    ) -> Vec<WireRuleSubscriptionEntry> {
         Vec::new()
     }
 

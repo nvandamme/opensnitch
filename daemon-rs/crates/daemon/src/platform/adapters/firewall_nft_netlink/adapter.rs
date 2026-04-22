@@ -3,9 +3,9 @@ use netlink_bindings::nftables::{self, Nfgenmsg};
 use netlink_socket2::NetlinkSocket;
 use nix::errno::Errno;
 use nix::libc;
-use opensnitch_proto::pb;
 use std::collections::BTreeMap;
 
+use crate::models::firewall_config::{FirewallChain, FirewallConfig};
 use crate::platform::adapters::firewall_nft::FirewallNftAdapter;
 use crate::utils::conntrack::flush_conntrack_table;
 
@@ -167,7 +167,7 @@ impl FirewallNftNetlinkAdapter {
             .context("execute interception validation via compatibility nft executor")
     }
 
-    pub async fn apply_system_firewall(sysfw: &pb::SysFirewall, queue_num: u16) -> Result<()> {
+    pub async fn apply_system_firewall(sysfw: &FirewallConfig, queue_num: u16) -> Result<()> {
         Self::probe_netfilter_netlink_socket()
             .context("probe netfilter netlink socket before system firewall apply")?;
 
@@ -191,7 +191,7 @@ impl FirewallNftNetlinkAdapter {
             .context("execute system firewall apply via compatibility nft executor")
     }
 
-    pub async fn clear_system_firewall(sysfw: &pb::SysFirewall) -> Result<()> {
+    pub async fn clear_system_firewall(sysfw: &FirewallConfig) -> Result<()> {
         Self::probe_netfilter_netlink_socket()
             .context("probe netfilter netlink socket before system firewall clear")?;
 
@@ -314,7 +314,7 @@ impl FirewallNftNetlinkAdapter {
     }
 
     fn plan_apply_system_firewall(
-        sysfw: &pb::SysFirewall,
+        sysfw: &FirewallConfig,
         queue_num: u16,
     ) -> Vec<NftNetlinkOperation> {
         if !sysfw.enabled {
@@ -322,72 +322,68 @@ impl FirewallNftNetlinkAdapter {
         }
 
         let mut operations = Vec::new();
-        for item in &sysfw.system_rules {
-            for chain in &item.chains {
-                let family = FirewallNftAdapter::probe_family_or_default(chain).to_string();
-                let table = FirewallNftAdapter::probe_table_or_default(chain).to_string();
-                let name = FirewallNftAdapter::probe_chain_name_or_default(chain).to_string();
-                let hook = if chain.hook.is_empty() {
-                    "output".to_string()
-                } else {
-                    chain.hook.clone()
-                };
-                let policy = if chain.policy.is_empty() {
-                    "accept".to_string()
-                } else {
-                    chain.policy.clone()
-                };
-                let priority = if chain.priority.is_empty() {
-                    "0".to_string()
-                } else {
-                    chain.priority.clone()
-                };
-                let chain_type = chain_type_name(chain);
+        for chain in &sysfw.chains {
+            let family = FirewallNftAdapter::probe_family_or_default(chain).to_string();
+            let table = FirewallNftAdapter::probe_table_or_default(chain).to_string();
+            let name = FirewallNftAdapter::probe_chain_name_or_default(chain).to_string();
+            let hook = if chain.hook.is_empty() {
+                "output".to_string()
+            } else {
+                chain.hook.clone()
+            };
+            let policy = if chain.policy.is_empty() {
+                "accept".to_string()
+            } else {
+                chain.policy.clone()
+            };
+            let priority = if chain.priority.is_empty() {
+                "0".to_string()
+            } else {
+                chain.priority.clone()
+            };
+            let chain_type = chain_type_name(chain);
 
-                operations.push(NftNetlinkOperation::EnsureSystemChain {
+            operations.push(NftNetlinkOperation::EnsureSystemChain {
+                family: family.clone(),
+                table: table.clone(),
+                name: name.clone(),
+                hook,
+                priority,
+                policy,
+                chain_type,
+            });
+
+            for rule in &chain.rules {
+                if !rule.enabled {
+                    continue;
+                }
+
+                let expression = FirewallNftAdapter::probe_nft_expression(rule, queue_num);
+                if expression.is_empty() {
+                    continue;
+                }
+
+                operations.push(NftNetlinkOperation::ApplySystemRule {
                     family: family.clone(),
                     table: table.clone(),
-                    name: name.clone(),
-                    hook,
-                    priority,
-                    policy,
-                    chain_type,
+                    chain: name.clone(),
+                    expression,
+                    tag: FirewallNftAdapter::probe_rule_tag(chain, rule),
                 });
-
-                for rule in &chain.rules {
-                    if !rule.enabled {
-                        continue;
-                    }
-
-                    let expression = FirewallNftAdapter::probe_nft_expression(rule, queue_num);
-                    if expression.is_empty() {
-                        continue;
-                    }
-
-                    operations.push(NftNetlinkOperation::ApplySystemRule {
-                        family: family.clone(),
-                        table: table.clone(),
-                        chain: name.clone(),
-                        expression,
-                        tag: FirewallNftAdapter::probe_rule_tag(chain, rule),
-                    });
-                }
             }
         }
 
         operations
     }
 
-    fn plan_clear_system_firewall(sysfw: &pb::SysFirewall) -> Vec<NftNetlinkOperation> {
+    fn plan_clear_system_firewall(sysfw: &FirewallConfig) -> Vec<NftNetlinkOperation> {
         let mut operations = Vec::new();
-        for item in &sysfw.system_rules {
-            for chain in &item.chains {
-                operations.push(NftNetlinkOperation::ClearTaggedSystemRules {
-                    family: FirewallNftAdapter::probe_family_or_default(chain).to_string(),
-                    table: FirewallNftAdapter::probe_table_or_default(chain).to_string(),
-                    chain: FirewallNftAdapter::probe_chain_name_or_default(chain).to_string(),
-                });
-            }
+        for chain in &sysfw.chains {
+            operations.push(NftNetlinkOperation::ClearTaggedSystemRules {
+                family: FirewallNftAdapter::probe_family_or_default(chain).to_string(),
+                table: FirewallNftAdapter::probe_table_or_default(chain).to_string(),
+                chain: FirewallNftAdapter::probe_chain_name_or_default(chain).to_string(),
+            });
         }
 
         operations
@@ -434,7 +430,7 @@ impl FirewallNftNetlinkAdapter {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn probe_plan_apply_system_firewall(
-        sysfw: &pb::SysFirewall,
+        sysfw: &FirewallConfig,
         queue_num: u16,
     ) -> Vec<NftNetlinkOperation> {
         Self::plan_apply_system_firewall(sysfw, queue_num)
@@ -442,7 +438,7 @@ impl FirewallNftNetlinkAdapter {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn probe_plan_clear_system_firewall(
-        sysfw: &pb::SysFirewall,
+        sysfw: &FirewallConfig,
     ) -> Vec<NftNetlinkOperation> {
         Self::plan_clear_system_firewall(sysfw)
     }
@@ -474,7 +470,7 @@ impl GenerationId {
     }
 }
 
-fn chain_type_name(chain: &pb::FwChain) -> String {
+fn chain_type_name(chain: &FirewallChain) -> String {
     match chain.r#type.as_str() {
         "mangle" if chain.hook.eq_ignore_ascii_case("output") => "route".to_string(),
         "mangle" => "filter".to_string(),

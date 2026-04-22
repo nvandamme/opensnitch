@@ -7,7 +7,6 @@ pub struct DnsAnswerRecord {
 }
 
 impl DnsAnswerRecord {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(host: impl Into<Arc<str>>, addresses: Arc<[IpAddr]>) -> Option<Self> {
         if addresses.is_empty() {
             return None;
@@ -38,6 +37,8 @@ pub enum DnsPayload {
     /// `error_code` carries the EAI_* value for `getaddrinfo` failures, or
     /// `0` for `gethostbyname` failures (h_errno is not accessible from a
     /// uretprobe without an additional probe hook).
+    // Produced only by specific DNS monitor backends; may be idle in minimal profiles.
+    #[cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
     NxDomain {
         host: Arc<str>,
         error_code: i32,
@@ -49,7 +50,6 @@ impl DnsPayload {
         Self::Answers(DnsAnswerRecord::from_ip(host, address))
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn answers(host: impl Into<Arc<str>>, addresses: Arc<[IpAddr]>) -> Option<Self> {
         DnsAnswerRecord::new(host, addresses).map(Self::Answers)
     }
@@ -61,6 +61,8 @@ impl DnsPayload {
         }
     }
 
+    // Constructor used by DNS backends that surface resolver error events.
+    #[cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
     pub fn nxdomain(host: impl Into<Arc<str>>, error_code: i32) -> Self {
         Self::NxDomain {
             host: host.into(),

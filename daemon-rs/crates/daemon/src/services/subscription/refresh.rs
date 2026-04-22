@@ -1,4 +1,4 @@
-use opensnitch_proto::pb;
+use transport_wire_core::WireSubscriptionReply;
 
 use crate::models::subscription_storage::SubscriptionRecord;
 
@@ -13,7 +13,7 @@ impl SubscriptionService {
         items: Vec<SubscriptionRecord>,
         targets: Vec<String>,
         force: bool,
-    ) -> pb::SubscriptionReply {
+    ) -> WireSubscriptionReply {
         let RefreshSelection {
             explicit_targeting,
             selected,

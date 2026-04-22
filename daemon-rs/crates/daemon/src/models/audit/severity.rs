@@ -96,7 +96,6 @@ impl AuditSeverity {
                 KernelFlowAction::QueueOverflow { .. } | KernelFlowAction::PacketDropped,
             )
             | AuditEventKind::ConnectFlowAction(ConnectFlowAction::ConnectionDropped)
-            | AuditEventKind::ProcessAction(ProcessAction::ProcessScanFailed { .. })
             | AuditEventKind::TaskAction(
                 TaskAction::TaskRuntimePauseFailed
                 | TaskAction::TaskRuntimeResumeFailed
@@ -112,8 +111,11 @@ impl AuditSeverity {
                 | DnsAction::ResolutionReceived { .. },
             )
             | AuditEventKind::ProcessAction(
-                ProcessAction::ProcessTracked { .. } | ProcessAction::ProcessEvicted { .. },
+                ProcessAction::ProcessTracked { .. }
+                | ProcessAction::ProcessEvicted { .. }
+                | ProcessAction::ProcessScanFailed { .. },
             )
+            | AuditEventKind::KernelAction(KernelAction::KernelInterfaceReattached { .. })
             | AuditEventKind::StorageAction(
                 StorageAction::FileRead { .. } | StorageAction::FileWritten { .. },
             ) => Self::Debug,

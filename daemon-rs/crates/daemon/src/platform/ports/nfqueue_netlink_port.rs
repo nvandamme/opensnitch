@@ -4,7 +4,10 @@
 //! backend-selection logic that previously lived in the nfqueue worker.
 //! Workers call through this port instead of importing the adapter directly.
 
-use std::time::Duration;
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
@@ -19,6 +22,7 @@ const NFQUEUE_NETLINK_RECOVERY_POLL_INTERVAL: Duration = Duration::from_millis(8
 
 static NFQUEUE_NETLINK_RECOVERY: NetlinkRecoveryGate =
     NetlinkRecoveryGate::new("nfqueue-netlink", NFQUEUE_NETLINK_RECOVERY_POLL_INTERVAL);
+static NFQUEUE_NETLINK_REATTACH_PENDING: AtomicBool = AtomicBool::new(false);
 
 pub(crate) struct NfqueueBackendPort;
 
@@ -36,9 +40,24 @@ impl NfqueueBackendPort {
     /// backend on startup errors or when the experiment flag is disabled.
     /// Marks the netlink backend as degraded on fallback so subsequent
     /// calls use FFI directly until the recovery probe succeeds.
-    pub(crate) fn run(queue_num: u16, shutdown: CancellationToken) -> Result<()> {
+    pub(crate) fn run<F>(
+        queue_num: u16,
+        shutdown: CancellationToken,
+        on_reattached: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(u16),
+    {
         if Self::netlink_available() {
-            let result = nfqueue_netlink::NfqueueNetlinkAdapter::run(queue_num, shutdown.clone());
+            let result = nfqueue_netlink::NfqueueNetlinkAdapter::run(
+                queue_num,
+                shutdown.clone(),
+                |queue_num| {
+                    if NFQUEUE_NETLINK_REATTACH_PENDING.swap(false, Ordering::Relaxed) {
+                        on_reattached(queue_num);
+                    }
+                },
+            );
 
             if let Err(err) = result {
                 let tunables = RuntimeTunables::global();
@@ -77,6 +96,7 @@ impl NfqueueBackendPort {
         let poll_ms = tunables.netlink_recovery_poll_interval_ms as u64;
         NFQUEUE_NETLINK_RECOVERY.set_retry_delay(Duration::from_millis(retry_ms));
         NFQUEUE_NETLINK_RECOVERY.set_poll_interval(Duration::from_millis(poll_ms));
+        NFQUEUE_NETLINK_REATTACH_PENDING.store(true, Ordering::Relaxed);
         NFQUEUE_NETLINK_RECOVERY.mark_degraded(Self::netlink_recovery_probe);
     }
 

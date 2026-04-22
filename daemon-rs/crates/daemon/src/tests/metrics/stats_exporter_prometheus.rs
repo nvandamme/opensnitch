@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use opensnitch_proto::pb;
 use tokio_util::sync::CancellationToken;
+use transport_wire_core::{WireRuleSubscriptionEntry, WireStatistics, WireSubscriptionStatistics};
 
 use crate::models::metrics_snapshot::MetricsSnapshot;
 use crate::platform::ports::stats_exporter_port::StatsExporterPort;
@@ -43,7 +43,7 @@ fn make_snapshot() -> MetricsSnapshot {
     by_rule.insert("allow-dns".to_string(), 8u64);
 
     MetricsSnapshot {
-        stats: pb::Statistics {
+        stats: WireStatistics {
             rules: 8,
             uptime: 7200,
             dns_responses: 150,
@@ -62,7 +62,7 @@ fn make_snapshot() -> MetricsSnapshot {
     }
 }
 
-fn make_sub_stats() -> pb::SubscriptionStatistics {
+fn make_sub_stats() -> WireSubscriptionStatistics {
     let mut by_status = HashMap::new();
     by_status.insert("ready".to_string(), 4u64);
     by_status.insert("error".to_string(), 1u64);
@@ -76,21 +76,21 @@ fn make_sub_stats() -> pb::SubscriptionStatistics {
 
     // block-combined references two groups → two subscriptions (N:N)
     let rule_subscriptions = vec![
-        pb::RuleSubscriptionEntry {
+        WireRuleSubscriptionEntry {
             rule: "block-ads".to_string(),
             subscriptions: vec!["easylist".to_string()],
         },
-        pb::RuleSubscriptionEntry {
+        WireRuleSubscriptionEntry {
             rule: "block-combined".to_string(),
             subscriptions: vec!["easylist".to_string(), "malware-domains".to_string()],
         },
-        pb::RuleSubscriptionEntry {
+        WireRuleSubscriptionEntry {
             rule: "block-malware".to_string(),
             subscriptions: vec!["malware-domains".to_string()],
         },
     ];
 
-    pb::SubscriptionStatistics {
+    WireSubscriptionStatistics {
         total: 5,
         ready: 4,
         error: 1,

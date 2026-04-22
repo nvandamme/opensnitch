@@ -1,8 +1,11 @@
+use crate::models::firewall_config::{
+    FirewallChain, FirewallConfig, FirewallExpression, FirewallRule, FirewallStatement,
+    FirewallStatementValue,
+};
 use crate::tests::gates::{
     skip_if_not_opted_in, skip_if_not_root, strict_mode, strict_mode_requires_iptables,
 };
 use crate::utils::command_path::resolve_command_path;
-use opensnitch_proto::pb;
 use std::sync::{Mutex, OnceLock};
 use tokio::process::Command;
 
@@ -31,36 +34,34 @@ async fn nft_list_chain(family: &str, table: &str, chain: &str) -> Option<String
     Some(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-fn make_privileged_sysfw_rule() -> pb::SysFirewall {
-    pb::SysFirewall {
+fn make_privileged_sysfw_rule() -> FirewallConfig {
+    FirewallConfig {
         enabled: true,
         version: 1,
-        system_rules: vec![pb::FwChains {
-            rule: None,
-            chains: vec![pb::FwChain {
-                name: "mangle_output".to_string(),
-                table: "opensnitch".to_string(),
-                family: "inet".to_string(),
-                priority: "0".to_string(),
-                r#type: "filter".to_string(),
-                hook: "output".to_string(),
-                policy: "accept".to_string(),
-                rules: vec![pb::FwRule {
-                    uuid: "it-sysfw-uuid-1".to_string(),
-                    enabled: true,
-                    expressions: vec![pb::Expressions {
-                        statement: Some(pb::Statement {
-                            op: "==".to_string(),
-                            name: "meta".to_string(),
-                            values: vec![pb::StatementValues {
-                                key: "l4proto".to_string(),
-                                value: "tcp".to_string(),
-                            }],
-                        }),
-                    }],
-                    target: "accept".to_string(),
-                    ..Default::default()
+        rules: Vec::new(),
+        chains: vec![FirewallChain {
+            name: "mangle_output".to_string(),
+            table: "opensnitch".to_string(),
+            family: "inet".to_string(),
+            priority: "0".to_string(),
+            r#type: "filter".to_string(),
+            hook: "output".to_string(),
+            policy: "accept".to_string(),
+            rules: vec![FirewallRule {
+                uuid: "it-sysfw-uuid-1".to_string(),
+                enabled: true,
+                expressions: vec![FirewallExpression {
+                    statement: Some(FirewallStatement {
+                        op: "==".to_string(),
+                        name: "meta".to_string(),
+                        values: vec![FirewallStatementValue {
+                            key: "l4proto".to_string(),
+                            value: "tcp".to_string(),
+                        }],
+                    }),
                 }],
+                target: "accept".to_string(),
+                ..Default::default()
             }],
         }],
     }

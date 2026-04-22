@@ -1,8 +1,8 @@
 //! Port facade for nfqueue runtime state operations used by flows/workers.
 
 use crate::platform::ffi::nfqueue::NfqueueRuntimeState;
-use crate::{bus::Bus, config::DefaultAction};
 use crate::tunables::NfqueueOverloadPolicy;
+use crate::{bus::Bus, config::DefaultAction};
 
 pub(crate) struct NfqueueRuntimePort;
 

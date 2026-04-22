@@ -1,0 +1,25 @@
+[package]
+name = "opensnitch-transport-wire-grpc-client"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+subscriptions = ["opensnitch-transport-wire-core/subscriptions"]
+
+[dependencies]
+opensnitch-proto = { path = "../proto" }
+opensnitch-transport-wire-core = { path = "../transport-wire-core" }
+anyhow = { workspace = true }
+tonic = { workspace = true, features = ["tls-webpki-roots", "gzip"] }
+tokio = { workspace = true, features = ["sync", "net", "rt"] }
+tokio-stream = { workspace = true }
+hyper-rustls = { workspace = true }
+hyper-util = { workspace = true }
+tower = { workspace = true }
+nix = { workspace = true, features = ["socket"] }
+rustls = { workspace = true }
+rustls-pki-types = "1.14"
+sha2 = "0.10"
+x509-cert = { version = "0.2", default-features = false, features = ["std"] }

@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+use transport_wire_core::WireNotificationReplyCode;
 
 use crate::daemon::{
     Daemon, DaemonRuntime, KernelPipeline, ProcWorkersRuntime, ProcessKernelEvent,
@@ -363,7 +364,7 @@ async fn runtime_task_start_duplicate_returns_error_without_initial_started_repl
     assert_eq!(duplicate_reply.id, 8);
     assert_eq!(
         duplicate_reply.code,
-        opensnitch_proto::pb::NotificationReplyCode::Error as i32
+        WireNotificationReplyCode::Error as i32
     );
     assert!(duplicate_reply.data.contains("already exists"));
 

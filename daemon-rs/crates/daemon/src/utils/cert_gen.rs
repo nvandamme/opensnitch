@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, SanType};
 use time::{Duration, OffsetDateTime};
 
@@ -219,9 +219,8 @@ pub fn generate_self_signed_pair(req: &CertGenRequest) -> Result<()> {
             req.cert_path.to_string_lossy()
         )
     })?;
-    fs::write(&req.key_path, key.serialize_pem()).with_context(|| {
-        format!("failed writing key to {}", req.key_path.to_string_lossy())
-    })?;
+    fs::write(&req.key_path, key.serialize_pem())
+        .with_context(|| format!("failed writing key to {}", req.key_path.to_string_lossy()))?;
 
     set_private_file_permissions(&req.key_path)?;
     Ok(())
@@ -230,9 +229,7 @@ pub fn generate_self_signed_pair(req: &CertGenRequest) -> Result<()> {
 fn ensure_single_role(current: Option<CertRole>, incoming: CertRole) -> Result<()> {
     if let Some(existing) = current {
         if existing != incoming {
-            bail!(
-                "cannot mix server and client generation flags in a single invocation"
-            );
+            bail!("cannot mix server and client generation flags in a single invocation");
         }
     }
     Ok(())

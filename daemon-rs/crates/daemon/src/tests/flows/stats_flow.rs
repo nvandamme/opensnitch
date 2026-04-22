@@ -1,126 +1,43 @@
-use std::{
-    net::TcpListener,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::{Duration as StdDuration, Instant},
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
-use opensnitch_proto::pb;
-use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
-use tonic::{Request, Response, Status};
+use transport_wire_core::WireConnection;
 
 use crate::{
     config::Config,
     flows::stats::{StatsFlow, WorkerTelemetrySnapshot},
+    platform::ports::stats_exporter_port::StatsExporterPort,
     services::{
         client::ClientService, config::ConfigService, dns::DnsService, rule::RuleService,
         stats::StatsService,
     },
 };
 
-#[derive(Default)]
-struct TestUiServer {
-    ping_calls: Arc<AtomicUsize>,
+struct TestExporter {
+    exports: Arc<AtomicUsize>,
 }
 
-#[async_trait::async_trait]
-impl pb::ui_server::Ui for TestUiServer {
-    type NotificationsStream =
-        tokio_stream::wrappers::ReceiverStream<Result<pb::Notification, Status>>;
-
-    async fn ping(
-        &self,
-        _request: Request<pb::PingRequest>,
-    ) -> Result<Response<pb::PingReply>, Status> {
-        self.ping_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(Response::new(pb::PingReply::default()))
-    }
-
-    async fn ask_rule(
-        &self,
-        _request: Request<pb::Connection>,
-    ) -> Result<Response<pb::Rule>, Status> {
-        Ok(Response::new(pb::Rule::default()))
-    }
-
-    async fn subscribe(
-        &self,
-        request: Request<pb::ClientConfig>,
-    ) -> Result<Response<pb::ClientConfig>, Status> {
-        Ok(Response::new(request.into_inner()))
-    }
-
-    async fn notifications(
-        &self,
-        _request: Request<tonic::Streaming<pb::NotificationReply>>,
-    ) -> Result<Response<Self::NotificationsStream>, Status> {
-        let (_tx, rx) = tokio::sync::mpsc::channel(1);
-        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
-            rx,
-        )))
-    }
-
-    async fn post_alert(
-        &self,
-        _request: Request<pb::Alert>,
-    ) -> Result<Response<pb::MsgResponse>, Status> {
-        Ok(Response::new(pb::MsgResponse::default()))
-    }
-}
-
-async fn wait_for_server_ready(addr: std::net::SocketAddr, max_wait: StdDuration) {
-    let start = Instant::now();
-    loop {
-        match TcpStream::connect(addr).await {
-            Ok(stream) => {
-                drop(stream);
-                return;
-            }
-            Err(_) if start.elapsed() < max_wait => {
-                tokio::time::sleep(StdDuration::from_millis(25)).await;
-            }
-            Err(err) => {
-                panic!("test ui server did not become ready at {addr}: {err}");
-            }
-        }
+impl StatsExporterPort for TestExporter {
+    fn export_snapshot(&self, _snapshot: &crate::models::metrics_snapshot::MetricsSnapshot) {
+        self.exports.fetch_add(1, Ordering::SeqCst);
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stats_flow_sends_stats_when_pending() {
-    let ping_calls = Arc::new(AtomicUsize::new(0));
-    let ui = TestUiServer {
-        ping_calls: ping_calls.clone(),
-    };
-
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test ui server");
-    let addr = listener.local_addr().expect("resolve test ui addr");
-    drop(listener);
-
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let server_handle = tokio::spawn(async move {
-        tonic::transport::Server::builder()
-            .add_service(pb::ui_server::UiServer::new(ui))
-            .serve_with_shutdown(addr, async move {
-                let _ = shutdown_rx.await;
-            })
-            .await
-            .expect("serve test ui server");
-    });
-
-    wait_for_server_ready(addr, StdDuration::from_secs(2)).await;
+    let exports = Arc::new(AtomicUsize::new(0));
 
     let mut config = Config::default();
-    config.client_addr = format!("http://{addr}");
+    config.client_addr = "stub://local-ui".to_string();
     let config_service = ConfigService::new(config);
 
     let dns = DnsService::default();
     let rules = RuleService::default();
     let stats = StatsService::default();
-    stats.on_event(pb::Connection::default(), None);
+    stats.on_event(WireConnection::default(), None);
     let kernel_pipeline_counters = Arc::new(crate::daemon::KernelPipelineCounters::default());
 
     let flow_shutdown = CancellationToken::new();
@@ -148,25 +65,25 @@ async fn stats_flow_sends_stats_when_pending() {
         }),
         dns,
         crate::services::audit::AuditService::new(64),
-    );
+    )
+    .with_stats_exporter(Arc::new(TestExporter {
+        exports: exports.clone(),
+    }));
 
     let flow_handle = flow.spawn();
 
-    let start = Instant::now();
-    while ping_calls.load(Ordering::SeqCst) == 0 {
+    let start = tokio::time::Instant::now();
+    while exports.load(Ordering::SeqCst) == 0 {
         assert!(
-            start.elapsed() < StdDuration::from_secs(3),
+            start.elapsed() < std::time::Duration::from_secs(3),
             "stats emission was not observed within deadline"
         );
-        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
 
     flow_shutdown.cancel();
-    tokio::time::timeout(StdDuration::from_secs(1), flow_handle)
+    tokio::time::timeout(std::time::Duration::from_secs(1), flow_handle)
         .await
         .expect("stats flow join timeout")
         .expect("stats flow join failed");
-
-    let _ = shutdown_tx.send(());
-    let _ = tokio::time::timeout(StdDuration::from_secs(1), server_handle).await;
 }

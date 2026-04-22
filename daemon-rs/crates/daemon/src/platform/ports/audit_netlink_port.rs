@@ -2,7 +2,8 @@
 
 use anyhow::Result;
 
-pub(crate) type AuditNetlinkSocketPort = crate::platform::adapters::audit_netlink::AuditNetlinkSocket;
+pub(crate) type AuditNetlinkSocketPort =
+    crate::platform::adapters::audit_netlink::AuditNetlinkSocket;
 
 pub(crate) struct AuditNetlinkPort;
 

@@ -16,6 +16,73 @@ Versioning baseline:
 
 ### Added
 
+- **Transport-wire test ownership and daemon stub-first flow coverage**
+  (`DESIGN_RULES.md`,
+  `crates/daemon/src/tests/{mod.rs,flows/notification_flow.rs,flows/stats_flow.rs,flows/verdict_flow.rs}`,
+  `crates/transport-wire-grpc-client/src/tests/transport_wire_grpc_client.rs`):
+  - Codified test-placement governance: daemon flow tests default to stub/wire-core paths,
+    protobuf/tonic conversion assertions live in `transport-wire-*` adapter tests, and
+    daemon transport-runtime exceptions must stay feature-gated with minimal protobuf usage.
+  - Moved notification/stats flow tests away from in-test live protobuf gRPC harnesses to
+    stub transport behavior so they run under default no-feature daemon test builds.
+  - Added transport-wire gRPC client E2E coverage for notifications hello-handshake and
+    `ask_rule` protobuf-to-wire mapping responsibilities.
+  - Reduced protobuf payload coupling in daemon `verdict_flow` orchestration coverage while
+    preserving the feature-gated in-flight gating/fallback behavior test.
+
+- **Tools/live-session and Aya smoke regression hardening** (`DESIGN_RULES.md`,
+  `TODO.md`, `PERF.md`, `crates/tools/src/{live_logs.rs,build_cmds.rs,cli.rs}`,
+  `crates/transport-wire-core/src/{wire_helpers.rs,tests/wire_helpers.rs}`,
+  `crates/daemon/src/tests/smoke/{aya_proc_trace.rs,aya_dns_trace.rs,aya_conn_trace.rs,aya_tunnel_trace.rs}`,
+  `crates/daemon/src/tests/metrics/{stats_exporter_prometheus.rs,stats_exporter_push.rs}`,
+  `crates/daemon/src/tests/flows/stats_flow.rs`):
+  - Added explicit commit-gate guidance requiring the tools orchestration smoke,
+    repo-level `cargo ost` launcher regressions, and serial execution for direct
+    elevated ignored Aya smoke runs.
+  - Fixed mock UI live-session compatibility by realigning `WireCommandAction`
+    numeric values with `proto/ui.proto`, restoring `LOG_LEVEL`, `STOP`,
+    `TASK_START`, and `TASK_STOP` interoperability.
+  - Bounded tools live-session and Aya smoke watchdog/runtime defaults so
+    launcher failures surface quickly without reporting false timeouts after the
+    child process has already exited.
+  - Reduced Aya smoke runtime budgets and accepted log-confirmed connection
+    activity as fallback evidence where direct BPF map inspection is unstable on
+    some hosts.
+  - Updated all-features daemon test fixtures to use wire-core statistics and
+    connection DTOs instead of stale protobuf-only types.
+  - Refreshed perf baseline rows through the mandatory `update-run-perf`
+    launcher flow.
+
+- **Main storage-format override and compiled default policy** (`crates/daemon/src/main.rs`,
+  `crates/daemon/src/daemon.rs`, `crates/daemon/src/daemon/bootstrap.rs`,
+  `crates/daemon/src/daemon/migration.rs`, `crates/daemon/src/services/storage/storage.rs`,
+  `crates/daemon/src/config/config.rs`):
+  - Added CLI flag `--main-storage-format <json|yaml|toml>` and threaded it through daemon
+    overrides, bootstrap, and migration entrypoints.
+  - `StorageService` now carries process-global `main_storage_format` policy and resolves
+    effective format as: CLI override → file extension → compiled default.
+  - Added `StorageFormat::compiled_default()` to make runtime defaults feature-aware without
+    scattering `#[cfg]` logic at call sites.
+  - Config default-path loading now prefers format-matched system/dev defaults
+    (`/etc/opensnitchd/default-config.<ext>`, `daemon/data/default-config.<ext>`).
+
+- **Storage codec packaging feature-gating** (`crates/daemon/Cargo.toml`,
+  `crates/daemon/src/services/storage/storage.rs`, `DESIGN_RULES.md`):
+  - Added optional storage codec features: `storage-format-json`, `storage-format-yaml`,
+    `storage-format-toml`.
+  - Codec dependencies are now optional and linked only when their feature is enabled.
+  - Added compile-time guard for invalid zero-codec builds.
+  - Added/expanded packaging governance in design rules with explicit feature-gating and
+    warning-resolution policies.
+
+- **DNS varlink multi-address batching** (`crates/daemon/src/workers/dns/dns_worker.rs`,
+  `crates/daemon/src/models/dns_payload.rs`,
+  `crates/daemon/src/tests/workers/workers_dns.rs`):
+  - Varlink DNS answers for the same host are now batched into one
+    `DnsPayload::answers(host, Arc<[IpAddr]>)` payload instead of emitting one payload per IP.
+  - Event ordering between answer and alias records is preserved via ordered parsed-event staging.
+  - Added regression coverage for multi-address host batching behavior.
+
 - **Cross-service audit domain model** (`crates/daemon/src/models/audit/`):
   - Replaced single-file `audit_event.rs` with a per-domain module tree under `models/audit/`:
     `client.rs`, `config.rs`, `connection.rs`, `dns.rs`, `event.rs`, `family.rs`, `firewall.rs`,
@@ -69,6 +136,129 @@ Versioning baseline:
   - `SubscriptionService::spawn_scheduler` in the disabled stub now accepts `AuditService`
     parameter for API parity with the gated implementation.
   - Added runtime tunable `audit_ring_capacity` (existing configuration surface).
+
+- **Debug audit coverage for deferred process/kernel paths** (`crates/daemon/src/services/process/inspection.rs`,
+  `crates/daemon/src/workers/runtime/kernel/process.rs`,
+  `crates/daemon/src/workers/runtime/nfqueue/worker.rs`,
+  `crates/daemon/src/platform/ports/nfqueue_netlink_port.rs`):
+  - `ProcessService::sync_from_proc_event` now returns a real failure result for failed
+    proc inspection warmups, and kernel process consumers emit
+    `ProcessAction::ProcessScanFailed` from those runtime failures.
+  - `ProcessAction::ProcessScanFailed` and `KernelAction::KernelInterfaceReattached`
+    are now classified as `Debug` severity.
+  - NFQUEUE degraded-mode recovery now signals the owning worker path, which emits
+    `KernelAction::KernelInterfaceReattached` when netlink queue startup actually succeeds
+    after recovery.
+
+- **Truthful DNS cache-eviction audit accounting** (`crates/daemon/src/utils/lru_cache.rs`,
+  `crates/daemon/src/services/dns/{dns.rs,cache_ops.rs}`,
+  `crates/daemon/src/flows/kernel/kernel.rs`):
+  - Added a generic eviction-counting cache lifecycle so cache users can obtain exact
+    per-request eviction counts without embedding domain audit logic into cache utilities.
+
+- **Transport-agnostic notification inbound seam** (`crates/daemon/src/platform/ports/client_transport_port.rs`,
+  `crates/daemon/src/services/client/notifications.rs`,
+  `crates/daemon/src/flows/notification/notification.rs`):
+  - Added `NotificationInboundPort` in `platform/ports` and switched notification flow
+    consumption to the port API (`recv`) instead of tonic stream methods.
+  - `NotificationStream` now exposes `Box<dyn NotificationInboundPort>`; gRPC-specific
+    stream adaptation is constrained to client adapter code.
+
+- **Transport-agnostic subscription command stream seam + flow trait adoption**
+  (`crates/daemon/src/platform/ports/client_transport_port.rs`,
+  `crates/daemon/src/services/client/client.rs`,
+  `crates/daemon/src/flows/subscription/command_flow.rs`,
+  `crates/daemon/src/flows/{notification,stats,verdict}/`,
+  `crates/daemon/src/flows/subscription/subscription.rs`):
+  - Added `SubscriptionCommandInboundPort` and moved subscription command stream
+    wire shaping (`ReceiverStream`, `tonic::Streaming`) behind
+    `ClientService::subscription_commands_open()`.
+  - `SubscriptionCommandFlow` now consumes command ingress via
+    `SubscriptionCommandInboundPort::recv_command()` instead of tonic stream methods.
+  - Added `ClientTransportPort` and routed active flow call sites through this
+    transport contract (`subscribe`, `post_alert`, `ping`, `ask_rule`,
+    `subscription_execute`) to reduce direct coupling to concrete client
+    transport APIs.
+
+- **Connector-port decoupling for client acquisition**
+  (`crates/daemon/src/platform/ports/client_transport_port.rs`,
+  `crates/daemon/src/services/client/client.rs`,
+  `crates/daemon/src/flows/{stats,subscription,verdict}/`):
+  - Added `ClientTransportConnectorPort` and concrete cache-backed
+    `ClientTransportConnector` to abstract transport client acquisition.
+  - `StatsFlow`, `SubscriptionFlow`, `SubscriptionCommandFlow`, and `VerdictFlow`
+    now acquire/invalidate transport clients through connector-port methods
+    (`connect_or_reuse`, `invalidate`) instead of calling concrete
+    `ClientService::connect_or_reuse` directly.
+
+- **Transport/wire core library extraction**
+  (`crates/transport-wire-core`,
+  `crates/daemon/src/services/client/`, `crates/daemon/src/flows/`,
+  `crates/daemon/src/utils/notification_reply.rs`):
+  - Added `opensnitch-transport-wire-core` as the unified workspace transport
+    core library, with separated submodules for transport-facing traits
+    (`ClientTransportPort`, `ClientTransportConnectorPort`,
+    `NotificationInboundPort`, `SubscriptionCommandInboundPort`, `PortFuture`)
+    and shared wire helper functions (`build_notification_reply`,
+    `is_ok_reply_code`, `status_payload`).
+  - Rewired daemon flow/service modules and notification utilities to consume
+    this external library; removed the in-crate
+    `platform/ports/client_transport_port.rs` module.
+
+- **Naming-aligned gRPC client transport-wire crate**
+  (`crates/transport-wire-grpc-client`, `crates/daemon/Cargo.toml`,
+  `crates/daemon/src/services/client/transport.rs`):
+  - Added `opensnitch-transport-wire-grpc-client` following the
+    `transport-wire-[kind]` naming convention.
+  - Daemon default features now include `transport-wire-grpc-client`; the
+    existing `grpc-ui` feature remains available for compatibility.
+  - gRPC client keepalive constants are now sourced from the named adapter
+    crate when enabled.
+
+- **Feature merge: grpc-ui into transport-wire-grpc-client**
+  (`crates/daemon/Cargo.toml`, `crates/daemon/src/services/client/`):
+  - Removed the standalone daemon `grpc-ui` feature and moved all source-level
+    feature gates to `transport-wire-grpc-client`.
+  - `transport-wire-grpc-client` now directly owns gRPC client dependency
+    activation and transport code-path gating.
+
+- **Client wire-orchestrator split for transport pluggability**
+  (`crates/daemon/src/services/client/{client,notifications,wire}.rs`):
+  - Added `services/client/wire.rs` as the transport-wire runtime boundary;
+    gRPC client/channel/stream mechanics now live in the wire adapter layer.
+  - `ClientService` now acts as an orchestrator over `ClientWire`, delegating
+    transport operations (`subscribe`, `ping`, `ask_rule`, `post_alert`,
+    notification stream open, subscription command stream/RPC calls) through
+    the adapter boundary.
+  - `NotificationStream::open` now consumes transport channels through
+    `ClientService` wire APIs instead of shaping gRPC stream types directly.
+  - Added a second runtime-selectable stub wire adapter (`stub://` client_addr)
+    to prove multi-wire orchestration without policy-flow changes; selection
+    now happens in `connect_with_config*` / `connect_or_reuse`.
+  - Added a centralized wire-selection strategy helper (`ClientWireKind` +
+    `select_wire_kind`) so adapter routing remains explicit and isolated from
+    client call-site orchestration methods.
+  - Added an adapter-local `subscriptions` feature gate in
+    `transport-wire-grpc-client` and routed daemon `subscriptions` feature into
+    that adapter feature.
+  - Relocated subscription command-stream/RPC wire calls from daemon client
+    wire runtime to `transport-wire-grpc-client` helper APIs, keeping daemon
+    service/flow layers on orchestrator-only boundaries.
+  - Relocated remaining UI gRPC wire calls (`subscribe`, `ping`, `ask_rule`,
+    `post_alert`, notification stream open) into `transport-wire-grpc-client`
+    helper APIs with a base adapter `ui` feature gate; daemon wire runtime now
+    delegates all gRPC call surfaces through adapter exports.
+  - Added adapter-owned test coverage for `transport-wire-grpc-client` under
+    `src/tests/`, and feature-gated daemon flow-consistency test modules that
+    depend on gRPC transport runtime wiring.
+  - Added workspace-level dependency reuse baseline for transport/storage
+    adapters (`[workspace.dependencies]`) and migrated adapter/storage crates
+    to `workspace = true` dependency declarations to avoid avoidable version
+    drift as new transport/storage libs are added.
+  - `DnsService::track_answers` and `track_alias` now return cache mutation summaries,
+    including truthful eviction counts.
+  - Kernel flow verbose DNS audit now emits `DnsAction::CacheEvicted` only when a DNS cache
+    insert actually evicts resident entries.
 
 - **Canonical firewall domain model + transport discriminator model** (`crates/daemon/src/models/firewall_config.rs`,
   `crates/daemon/src/models/command_action.rs`):
@@ -208,6 +398,39 @@ Versioning baseline:
 
 ### Changed
 
+- **Rule/file storage paths now honor selected main storage format**
+  (`crates/daemon/src/services/rule/storage.rs`,
+  `crates/daemon/src/services/rule/mutations.rs`,
+  `crates/daemon/src/daemon/migration.rs`):
+  - Rule scan filters now use storage-format-aware extension matching instead of hard-coded
+    `.json` checks.
+  - Rule file output extension now follows active main storage format.
+  - Migration read/write paths now use storage service format conversions for parity across
+    enabled codecs.
+
+- **Dead-code arbitration and suppression hygiene**
+  (`crates/daemon/src/models/lifecycle_contract.rs`,
+  `crates/daemon/src/daemon/{tasks.rs,probes.rs,kernel_pipeline.rs}`,
+  `crates/daemon/src/workers/runtime/watch/control.rs`,
+  `crates/tools/src/main.rs`):
+  - Removed suppressions from production-used APIs, removed truly unused helpers, and narrowed
+    intentional suppressions with explicit one-line justifications.
+  - Test-only helper wiring now prefers `#[cfg(test)]` where applicable.
+
+- **Config default-location API remains first-class** (`crates/daemon/src/config/config.rs`,
+  `crates/daemon/src/daemon/{bootstrap.rs,migration.rs}`):
+  - Restored `Config::load_from_default_locations()` and made it the direct path when no
+    CLI config-file or storage-format override is supplied.
+
+- **Packaging-profile warning/error cleanup**
+  (`crates/daemon/src/{services,workers,models,utils}/**`):
+  - Resolved pre-existing non-default profile eBPF/runtime compile errors and warnings for
+    `--no-default-features --features storage-format-yaml` by tightening feature-gated imports,
+    fixing no-backend code paths, and adding explicit feature-scoped dead-code justifications for
+    dormant surfaces.
+  - Fixed default-profile unreachable-code warning in
+    `services/connection/ebpf.rs::resolve_owner_by_ebpf_map`.
+
 - **Firewall wire/file compatibility now maps through the canonical domain model** (`crates/daemon/src/services/firewall/conversions.rs`,
   `crates/daemon/src/services/firewall/storage.rs`, `crates/daemon/src/platform/ports/firewall_port.rs`,
   `crates/daemon/src/services/client/client.rs`, `crates/daemon/src/models/firewall_storage.rs`):
@@ -216,6 +439,18 @@ Versioning baseline:
     then reconstructed only for wire/file egress compatibility.
   - Legacy `system-fw.json` nested chain rules now inherit missing `Table` / `Chain` values from the parent chain,
     matching the Go daemon's compatibility behavior.
+
+- **Client transport/wire boundary decoupling completed for notifications/subscriptions + metrics boundary clarified**
+  (`crates/transport-wire-core/src/{ports.rs,wire_helpers.rs}`,
+  `crates/transport-wire-grpc-client/src/lib.rs`,
+  `crates/daemon/src/services/client/{client.rs,transport.rs,wire.rs,notifications.rs,alerts.rs}`,
+  `crates/daemon/src/flows/{notification/notification.rs,subscription/command_flow.rs,stats/stats.rs}`,
+  `crates/daemon/src/models/metrics_snapshot.rs`,
+  `crates/daemon/src/platform/adapters/{stats_exporter_prometheus.rs,stats_exporter_push.rs}`):
+  - `transport-wire-core` no longer depends on OpenSnitch protobuf types for notification/rule/firewall payload helpers; core now exposes wire-native DTOs and transport-port associated types.
+  - gRPC/protobuf mapping for notification/rule/firewall/subscription payloads is now adapter-owned in `transport-wire-grpc-client`, including stream bridge conversions for notification replies and subscription command acks.
+  - Daemon client/flow code paths now consume wire aliases and domain mappers at service boundaries instead of directly coupling orchestration surfaces to protobuf request/reply types.
+  - Metrics-facing code now uses explicit metrics aliases (`MetricsProtoStats`, `MetricsProtoSubscriptionStats`) and documents the protocol split: OpenSnitch transport stats payloads vs Prometheus `io.prometheus.client.MetricFamily` protobuf output.
 
 - **Firewall-triggered rule-cache refresh now includes alias inputs** (`crates/daemon/src/commands/control/control.rs`,
   `crates/daemon/src/platform/adapters/nft_monitor.rs`, `crates/daemon/src/workers/firewall/watch_worker.rs`,
@@ -228,6 +463,23 @@ Versioning baseline:
 
 - `Config::default()` now initializes `auth_mode` to `legacy` and preserves allowlist defaults as `None`.
 - Hardened local modes now fall back to root-only local privileged access when no explicit principal/group policy is configured.
+
+- **Transport/storage boundary decoupling and adapter crate normalization**
+  (`crates/daemon/src/{commands,flows,models,platform,services,utils}/**`,
+  `crates/transport-wire-core/**`, `crates/transport-wire-grpc-client/**`,
+  `crates/storage-format-core/**`, `crates/storage-format-{json,yaml,toml}/**`):
+  - Removed remaining runtime-facing `pb::*` dependencies from daemon command/flow/service code
+    for notifications, rules, subscriptions, stats, alerts, and connection-event export paths;
+    daemon/runtime code now consumes explicit wire-core DTOs and domain mappers instead.
+  - Moved protobuf-only firewall/rule compatibility mappers into dedicated adapter-boundary modules
+    (`platform/adapters/firewall_proto.rs`, `platform/adapters/rule_proto.rs`) so runtime services
+    stay on canonical domain or wire-core shapes.
+  - Split `transport-wire-grpc-client` into thin-root adapter modules (`client.rs`, `rpc.rs`,
+    `tls.rs`, `transport.rs`, `wire_protos.rs`) and added adapter-local conversion tests.
+  - Split `storage-format-core` and all `storage-format-*` crates into thin `lib.rs` roots with
+    dedicated `codec.rs` / `error.rs` modules plus crate-local `src/tests/mod.rs` entrypoints.
+  - Added direct tests in `transport-wire-core` and `storage-format-core`, and fixed daemon
+    feature/profile drift so both default and minimal storage-format build profiles stay green.
 
 ### Changed
 
@@ -254,6 +506,13 @@ Versioning baseline:
 
 ### Documentation
 
+- **Tracker and release notes updated for storage-format + warning-rule slices**
+  (`TODO.md`, `CHANGELOG.md`, `DESIGN_RULES.md`):
+  - Added condensed history entries for main storage-format override wiring, codec
+    feature-gating, DNS answer batching, and warning arbitration outcomes.
+  - Added explicit compiler warning resolution rule (promote/remove/justify) and
+    suppression hygiene constraints.
+
 - **`DESIGN_RULES.md` restructured into four parts** (`DESIGN_RULES.md`):
   - Reorganised from a flat section list into **Part I — Cross-Cutting Architectural Rules** (§1–§5), **Part II — Per-Domain Rules** (§6–§8), **Part III — Infrastructure Rules** (§9–§10), and **Part IV — Implementation Quality Rules** (§11).
   - Added `#### Hot-Path State Access Rule` to §1: codifies wait-free/lock-free read discipline for per-packet paths, a primitive table (`ArcSwap`, `ConcurrentLruCache`, `DashMap::get`, firewall `watch::Receiver`, eBPF `ArcSwap<HashMap>`), six violation signals (mutex in hot path, deep clone at read, `DashMap` iteration, `async fn` snapshot accessor, `tokio::sync::Mutex`/`RwLock` on read-dominant state), and a cross-reference to §9.
@@ -272,6 +531,14 @@ Versioning baseline:
     TCP local identity handling.
   - Added planning guidance for dedicated `auth.proto` elevation RPCs, PAM-backed remote grants,
     and daemon-side owner-scope injection for backward-compatible UI rule creation.
+
+  - **Adapter crate structure rules codified in `DESIGN_RULES.md`** (`DESIGN_RULES.md`):
+    - Added explicit thin-root and sibling-module rules for all `transport-wire-*` and
+      `storage-format-*` crates.
+    - Added the `storage-format-core` internal separation rule and adapter-test entrypoint rule via
+      `src/tests/mod.rs`.
+    - Documented that pure shared boundary models may remain compiled across packaging profiles when
+      they are side-effect-free and preserve stable boundary/API contracts.
 
 - **Phase-2 policy clarification docs** (`DESIGN_RULES.md`, `DOCS.md`, `TODO.md`):
   - Clarified local principal semantics: UID is the identity anchor; GID/group selectors are

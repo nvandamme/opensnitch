@@ -1,9 +1,11 @@
+use crate::models::firewall_config::{
+    FirewallChain, FirewallExpression, FirewallRule, FirewallStatement, FirewallStatementValue,
+};
 use crate::platform::adapters::firewall_nft::FirewallNftAdapter;
-use opensnitch_proto::pb;
 
 #[test]
 fn chain_defaults_and_rule_tag_match_expected_values() {
-    let chain = pb::FwChain::default();
+    let chain = FirewallChain::default();
     assert_eq!(FirewallNftAdapter::probe_family_or_default(&chain), "inet");
     assert_eq!(
         FirewallNftAdapter::probe_table_or_default(&chain),
@@ -16,7 +18,7 @@ fn chain_defaults_and_rule_tag_match_expected_values() {
 
     let fallback_tag = FirewallNftAdapter::probe_rule_tag(
         &chain,
-        &pb::FwRule {
+        &FirewallRule {
             position: 7,
             description: "allow dns".to_string(),
             ..Default::default()
@@ -29,7 +31,7 @@ fn chain_defaults_and_rule_tag_match_expected_values() {
 
     let uuid_tag = FirewallNftAdapter::probe_rule_tag(
         &chain,
-        &pb::FwRule {
+        &FirewallRule {
             uuid: "uuid-1".to_string(),
             ..Default::default()
         },
@@ -39,7 +41,7 @@ fn chain_defaults_and_rule_tag_match_expected_values() {
 
 #[test]
 fn nft_expression_prefers_parameters_and_appends_target_parts() {
-    let rule = pb::FwRule {
+    let rule = FirewallRule {
         parameters: "tcp dport 443".to_string(),
         target: "accept".to_string(),
         target_parameters: "comment \"https\"".to_string(),
@@ -54,12 +56,12 @@ fn nft_expression_prefers_parameters_and_appends_target_parts() {
 
 #[test]
 fn nft_expression_builds_from_statements_and_rewrites_queue_num() {
-    let rule = pb::FwRule {
-        expressions: vec![pb::Expressions {
-            statement: Some(pb::Statement {
+    let rule = FirewallRule {
+        expressions: vec![FirewallExpression {
+            statement: Some(FirewallStatement {
                 op: "==".to_string(),
                 name: "meta".to_string(),
-                values: vec![pb::StatementValues {
+                values: vec![FirewallStatementValue {
                     key: "l4proto".to_string(),
                     value: "tcp".to_string(),
                 }],
@@ -141,33 +143,33 @@ table inet opensnitch {
 
 #[test]
 fn nft_expression_skips_empty_statement_parts() {
-    let rule = pb::FwRule {
+    let rule = FirewallRule {
         expressions: vec![
-            pb::Expressions {
-                statement: Some(pb::Statement {
+            FirewallExpression {
+                statement: Some(FirewallStatement {
                     op: "==".to_string(),
                     name: "".to_string(),
-                    values: vec![pb::StatementValues {
+                    values: vec![FirewallStatementValue {
                         key: "l4proto".to_string(),
                         value: "tcp".to_string(),
                     }],
                 }),
             },
-            pb::Expressions {
-                statement: Some(pb::Statement {
+            FirewallExpression {
+                statement: Some(FirewallStatement {
                     op: "".to_string(),
                     name: "meta".to_string(),
-                    values: vec![pb::StatementValues {
+                    values: vec![FirewallStatementValue {
                         key: "".to_string(),
                         value: "tcp".to_string(),
                     }],
                 }),
             },
-            pb::Expressions {
-                statement: Some(pb::Statement {
+            FirewallExpression {
+                statement: Some(FirewallStatement {
                     op: "".to_string(),
                     name: "meta".to_string(),
-                    values: vec![pb::StatementValues {
+                    values: vec![FirewallStatementValue {
                         key: "mark".to_string(),
                         value: "0x1".to_string(),
                     }],
@@ -186,12 +188,12 @@ fn nft_expression_skips_empty_statement_parts() {
 
 #[test]
 fn nft_expression_does_not_rewrite_non_queue_target_parameters() {
-    let rule = pb::FwRule {
-        expressions: vec![pb::Expressions {
-            statement: Some(pb::Statement {
+    let rule = FirewallRule {
+        expressions: vec![FirewallExpression {
+            statement: Some(FirewallStatement {
                 op: "==".to_string(),
                 name: "meta".to_string(),
-                values: vec![pb::StatementValues {
+                values: vec![FirewallStatementValue {
                     key: "l4proto".to_string(),
                     value: "tcp".to_string(),
                 }],
@@ -210,12 +212,12 @@ fn nft_expression_does_not_rewrite_non_queue_target_parameters() {
 
 #[test]
 fn nft_expression_keeps_queue_num_zero_when_runtime_queue_is_zero() {
-    let rule = pb::FwRule {
-        expressions: vec![pb::Expressions {
-            statement: Some(pb::Statement {
+    let rule = FirewallRule {
+        expressions: vec![FirewallExpression {
+            statement: Some(FirewallStatement {
                 op: "==".to_string(),
                 name: "meta".to_string(),
-                values: vec![pb::StatementValues {
+                values: vec![FirewallStatementValue {
                     key: "l4proto".to_string(),
                     value: "udp".to_string(),
                 }],
@@ -246,13 +248,13 @@ fn parse_nft_handle_returns_none_when_marker_missing_or_empty() {
 
 #[test]
 fn nft_expression_with_parameters_ignores_statement_fallback() {
-    let rule = pb::FwRule {
+    let rule = FirewallRule {
         parameters: "ip protocol tcp".to_string(),
-        expressions: vec![pb::Expressions {
-            statement: Some(pb::Statement {
+        expressions: vec![FirewallExpression {
+            statement: Some(FirewallStatement {
                 op: "==".to_string(),
                 name: "meta".to_string(),
-                values: vec![pb::StatementValues {
+                values: vec![FirewallStatementValue {
                     key: "l4proto".to_string(),
                     value: "udp".to_string(),
                 }],
@@ -270,7 +272,7 @@ fn nft_expression_with_parameters_ignores_statement_fallback() {
 
 #[test]
 fn nft_expression_normalizes_icmp_type_lists_in_parameters() {
-    let rule = pb::FwRule {
+    let rule = FirewallRule {
         parameters: "icmp type echo-request,echo-reply,destination-unreachable".to_string(),
         target: "accept".to_string(),
         ..Default::default()
@@ -284,12 +286,12 @@ fn nft_expression_normalizes_icmp_type_lists_in_parameters() {
 
 #[test]
 fn nft_expression_normalizes_icmp_type_lists_from_statements() {
-    let rule = pb::FwRule {
-        expressions: vec![pb::Expressions {
-            statement: Some(pb::Statement {
+    let rule = FirewallRule {
+        expressions: vec![FirewallExpression {
+            statement: Some(FirewallStatement {
                 op: "".to_string(),
                 name: "icmp".to_string(),
-                values: vec![pb::StatementValues {
+                values: vec![FirewallStatementValue {
                     key: "type".to_string(),
                     value: "echo-request,echo-reply,destination-unreachable".to_string(),
                 }],
@@ -307,23 +309,23 @@ fn nft_expression_normalizes_icmp_type_lists_from_statements() {
 
 #[test]
 fn nft_expression_normalizes_python_firewall_payload_shape() {
-    let rule = pb::FwRule {
+    let rule = FirewallRule {
         expressions: vec![
-            pb::Expressions {
-                statement: Some(pb::Statement {
+            FirewallExpression {
+                statement: Some(FirewallStatement {
                     op: "==".to_string(),
                     name: "meta".to_string(),
-                    values: vec![pb::StatementValues {
+                    values: vec![FirewallStatementValue {
                         key: "l4proto".to_string(),
                         value: "tcp,udp".to_string(),
                     }],
                 }),
             },
-            pb::Expressions {
-                statement: Some(pb::Statement {
+            FirewallExpression {
+                statement: Some(FirewallStatement {
                     op: "==".to_string(),
                     name: "meta".to_string(),
-                    values: vec![pb::StatementValues {
+                    values: vec![FirewallStatementValue {
                         key: "dport".to_string(),
                         value: "88".to_string(),
                     }],
@@ -342,7 +344,7 @@ fn nft_expression_normalizes_python_firewall_payload_shape() {
 
 #[test]
 fn nft_expression_normalizes_meta_dport_parameters() {
-    let rule = pb::FwRule {
+    let rule = FirewallRule {
         parameters: "meta l4proto == tcp,udp meta dport == 88".to_string(),
         target: "accept".to_string(),
         ..Default::default()
@@ -356,7 +358,7 @@ fn nft_expression_normalizes_meta_dport_parameters() {
 
 #[test]
 fn chain_defaults_use_explicit_values_when_present() {
-    let chain = pb::FwChain {
+    let chain = FirewallChain {
         family: "ip".to_string(),
         table: "filter".to_string(),
         name: "output".to_string(),
@@ -373,7 +375,7 @@ fn chain_defaults_use_explicit_values_when_present() {
 
 #[test]
 fn chain_rule_tag_uses_explicit_table_chain_and_position_when_uuid_missing() {
-    let chain = pb::FwChain {
+    let chain = FirewallChain {
         family: "inet".to_string(),
         table: "custom-table".to_string(),
         name: "custom-chain".to_string(),
@@ -382,7 +384,7 @@ fn chain_rule_tag_uses_explicit_table_chain_and_position_when_uuid_missing() {
 
     let tag = FirewallNftAdapter::probe_rule_tag(
         &chain,
-        &pb::FwRule {
+        &FirewallRule {
             position: 12,
             description: "custom description".to_string(),
             ..Default::default()
@@ -412,7 +414,7 @@ fn nft_rule_tag_detects_dns_and_tcp_syn_tags() {
 
 #[test]
 fn nft_expression_returns_target_only_when_no_predicates_exist() {
-    let rule = pb::FwRule {
+    let rule = FirewallRule {
         target: "drop".to_string(),
         ..Default::default()
     };
@@ -422,7 +424,7 @@ fn nft_expression_returns_target_only_when_no_predicates_exist() {
 
 #[test]
 fn nft_expression_returns_empty_string_when_rule_is_empty() {
-    let rule = pb::FwRule::default();
+    let rule = FirewallRule::default();
     assert_eq!(FirewallNftAdapter::probe_nft_expression(&rule, 0), "");
 }
 
@@ -445,10 +447,10 @@ fn parse_nft_handle_trims_whitespace_around_handle_value() {
 
 #[test]
 fn rule_tag_with_empty_description_keeps_position_component() {
-    let chain = pb::FwChain::default();
+    let chain = FirewallChain::default();
     let tag = FirewallNftAdapter::probe_rule_tag(
         &chain,
-        &pb::FwRule {
+        &FirewallRule {
             position: 5,
             description: String::new(),
             ..Default::default()

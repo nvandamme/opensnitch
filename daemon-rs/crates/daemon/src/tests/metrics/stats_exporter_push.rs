@@ -22,8 +22,8 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
-use opensnitch_proto::pb;
 use tokio::sync::Mutex;
+use transport_wire_core::{WireRuleSubscriptionEntry, WireStatistics, WireSubscriptionStatistics};
 
 use crate::models::metrics_snapshot::MetricsSnapshot;
 use crate::models::prometheus_wire as prom_wire;
@@ -46,7 +46,7 @@ fn make_snapshot() -> MetricsSnapshot {
     by_rule.insert("block-ads".to_string(), 5u64);
 
     MetricsSnapshot {
-        stats: pb::Statistics {
+        stats: WireStatistics {
             rules: 5,
             uptime: 1800,
             dns_responses: 80,
@@ -64,7 +64,7 @@ fn make_snapshot() -> MetricsSnapshot {
     }
 }
 
-fn make_sub_stats() -> pb::SubscriptionStatistics {
+fn make_sub_stats() -> WireSubscriptionStatistics {
     let mut by_status = HashMap::new();
     by_status.insert("ready".to_string(), 2u64);
     by_status.insert("error".to_string(), 1u64);
@@ -78,17 +78,17 @@ fn make_sub_stats() -> pb::SubscriptionStatistics {
 
     // block-multi references two subscriptions (N:N)
     let rule_subscriptions = vec![
-        pb::RuleSubscriptionEntry {
+        WireRuleSubscriptionEntry {
             rule: "block-ads".to_string(),
             subscriptions: vec!["easylist".to_string()],
         },
-        pb::RuleSubscriptionEntry {
+        WireRuleSubscriptionEntry {
             rule: "block-multi".to_string(),
             subscriptions: vec!["easylist".to_string(), "malware-list".to_string()],
         },
     ];
 
-    pb::SubscriptionStatistics {
+    WireSubscriptionStatistics {
         total: 3,
         ready: 2,
         error: 1,

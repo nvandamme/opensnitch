@@ -1,30 +1,28 @@
 use std::time::Duration;
 
-use opensnitch_proto::pb;
-use tokio::{sync::mpsc, task::JoinHandle};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
+use transport_wire_core::ClientTransportConnectorPort;
+use transport_wire_core::{SubscriptionCommandInboundPort, WireSubscriptionCommandAck};
 
 use crate::{
     commands::subscription::SubscriptionCommandService,
     models::audit::{AuditEvent, AuditEventKind, SubscriptionFlowLifecycle},
     services::{
         audit::AuditService,
-        client::{ClientService, GrpcChannelCache},
+        client::{ClientTransportConnector, WireSessionCache},
         config::ConfigService,
         subscription::SubscriptionService,
     },
 };
-
-const ACK_CHANNEL_CAPACITY: usize = 16;
 
 /// Dedicated task that maintains the `Subscriptions.Commands` bidi stream,
 /// receiving `SubscriptionCommand` items from the Python UI and sending back
 /// `SubscriptionCommandAck` items after local processing.
 ///
 /// Completely decoupled from `ui.proto` and the `Notifications` stream.
-/// Pattern mirrors `SubscriptionFlow`: owns its own `GrpcChannelCache` and
+/// Pattern mirrors `SubscriptionFlow`: owns its own `WireSessionCache` and
 /// reconnect loop (5 s delay), handling commands inline without touching the
 /// `ClientCommand` bus.
 pub(crate) struct SubscriptionCommandFlow {
@@ -61,7 +59,7 @@ impl SubscriptionCommandFlow {
 
         tokio::spawn(async move {
             debug!("subscription command flow: started");
-            let grpc_cache = GrpcChannelCache::default();
+            let connector = ClientTransportConnector::new(WireSessionCache::default());
 
             'reconnect: loop {
                 tokio::select! {
@@ -73,25 +71,28 @@ impl SubscriptionCommandFlow {
                 }
 
                 let config_snapshot = config.get_snapshot();
-                let mut client =
-                    match ClientService::connect_or_reuse(&config_snapshot, &grpc_cache).await {
-                        Ok(c) => c,
-                        Err(err) => {
-                            debug!(
-                                addr = %config_snapshot.client_addr,
-                                "subscription command flow: connect failed: {err}"
-                            );
-                            grpc_cache.invalidate();
-                            continue;
-                        }
-                    };
+                let mut client = match ClientTransportConnectorPort::connect_or_reuse(
+                    &connector,
+                    &config_snapshot,
+                )
+                .await
+                {
+                    Ok(c) => c,
+                    Err(err) => {
+                        debug!(
+                            addr = %config_snapshot.client_addr,
+                            "subscription command flow: connect failed: {err}"
+                        );
+                        ClientTransportConnectorPort::invalidate(&connector);
+                        continue;
+                    }
+                };
 
-                let (ack_tx, ack_rx) =
-                    mpsc::channel::<pb::SubscriptionCommandAck>(ACK_CHANNEL_CAPACITY);
-                let ack_stream = ReceiverStream::new(ack_rx);
-
-                let mut cmd_stream = match client.subscription_commands(ack_stream).await {
-                    Ok(stream) => stream,
+                let (mut cmd_stream, ack_tx): (
+                    Box<dyn SubscriptionCommandInboundPort>,
+                    tokio::sync::mpsc::Sender<WireSubscriptionCommandAck>,
+                ) = match client.subscription_commands_open().await {
+                    Ok(opened) => opened,
                     Err(err) => {
                         debug!("subscription command flow: Commands stream open failed: {err}");
                         audit.emit(AuditEvent::cold(AuditEventKind::SubscriptionFlowLifecycle(
@@ -99,7 +100,7 @@ impl SubscriptionCommandFlow {
                                 reason: "stream-open-failed",
                             },
                         )));
-                        grpc_cache.invalidate();
+                        ClientTransportConnectorPort::invalidate(&connector);
                         continue;
                     }
                 };
@@ -109,7 +110,7 @@ impl SubscriptionCommandFlow {
                 loop {
                     tokio::select! {
                         _ = shutdown.cancelled() => break 'reconnect,
-                        incoming = cmd_stream.message() => {
+                        incoming = cmd_stream.recv_command() => {
                             match incoming {
                                 Ok(Some(cmd)) => {
                                     // ClientService is Clone — short-lived copy for the
@@ -118,12 +119,17 @@ impl SubscriptionCommandFlow {
                                     let ack = command_service
                                         .handle_command(cmd, &mut back_sync)
                                         .await;
-                                    if ack_tx.send(ack).await.is_err() {
+                                    if ack_tx.send(WireSubscriptionCommandAck {
+                                        id: ack.id,
+                                        action: ack.action,
+                                        accepted: ack.accepted,
+                                        message: ack.message,
+                                    }).await.is_err() {
                                         debug!("subscription command flow: ack channel closed; reconnecting");
                                         audit.emit(AuditEvent::cold(AuditEventKind::SubscriptionFlowLifecycle(
                                             SubscriptionFlowLifecycle::CommandStreamFailed { reason: "ack-channel-closed" },
                                         )));
-                                        grpc_cache.invalidate();
+                                        ClientTransportConnectorPort::invalidate(&connector);
                                         continue 'reconnect;
                                     }
                                 }
@@ -132,7 +138,7 @@ impl SubscriptionCommandFlow {
                                     audit.emit(AuditEvent::cold(AuditEventKind::SubscriptionFlowLifecycle(
                                         SubscriptionFlowLifecycle::CommandStreamFailed { reason: "stream-closed-by-server" },
                                     )));
-                                    grpc_cache.invalidate();
+                                    ClientTransportConnectorPort::invalidate(&connector);
                                     continue 'reconnect;
                                 }
                                 Err(err) => {
@@ -142,7 +148,7 @@ impl SubscriptionCommandFlow {
                                     audit.emit(AuditEvent::cold(AuditEventKind::SubscriptionFlowLifecycle(
                                         SubscriptionFlowLifecycle::CommandStreamFailed { reason: "stream-error" },
                                     )));
-                                    grpc_cache.invalidate();
+                                    ClientTransportConnectorPort::invalidate(&connector);
                                     continue 'reconnect;
                                 }
                             }

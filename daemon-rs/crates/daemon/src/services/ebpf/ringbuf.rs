@@ -1,10 +1,19 @@
+// Ringbuf backend plumbing is retained in no-backend packaging profiles so the
+// public service surface stays stable; it becomes active when ebpf features are on.
+#![cfg_attr(
+    not(any(feature = "aya-ebpf", feature = "libbpf-ebpf")),
+    allow(dead_code)
+)]
+
 use std::time::Duration;
 
 #[cfg(feature = "libbpf-ebpf")]
 use std::path::Path;
 
 use anyhow::Result;
-use opensnitch_ebpf_common::maps::{EVENTS_MAP_MAX_ENTRIES, EVENTS_MAP_NAME};
+use ebpf_common::maps::EVENTS_MAP_MAX_ENTRIES;
+#[cfg(any(feature = "libbpf-ebpf", feature = "aya-ebpf"))]
+use ebpf_common::maps::EVENTS_MAP_NAME;
 
 #[cfg(feature = "aya-ebpf")]
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -130,6 +139,8 @@ impl EbpfRingbufConsumer {
         let managed_paths_present = managed_map_paths
             .iter()
             .any(|path| std::path::Path::new(path).exists());
+        #[cfg(not(any(feature = "aya-ebpf", feature = "libbpf-ebpf")))]
+        let _ = (legacy_map_paths, managed_paths_present);
         #[cfg(feature = "aya-ebpf")]
         let mut managed_aya_ringbuf = managed_aya_ringbuf;
 
@@ -208,6 +219,7 @@ impl EbpfRingbufConsumer {
         }
     }
 
+    #[cfg(any(feature = "libbpf-ebpf", feature = "aya-ebpf"))]
     pub(crate) fn poll_samples(&mut self, timeout: Duration) -> Result<Vec<Vec<u8>>, String> {
         match &mut self.inner {
             #[cfg(feature = "libbpf-ebpf")]
@@ -215,6 +227,12 @@ impl EbpfRingbufConsumer {
             #[cfg(feature = "aya-ebpf")]
             BackendInner::Aya(inner) => inner.poll_samples(timeout),
         }
+    }
+
+    #[cfg(not(any(feature = "libbpf-ebpf", feature = "aya-ebpf")))]
+    pub(crate) fn poll_samples(&mut self, timeout: Duration) -> Result<Vec<Vec<u8>>, String> {
+        let _ = timeout;
+        Err("no eBPF ringbuf backend enabled".to_string())
     }
 
     pub(crate) fn backend_kind(&self) -> &EbpfRingbufBackendKind {

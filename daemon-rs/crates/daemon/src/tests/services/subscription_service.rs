@@ -1,11 +1,15 @@
 use std::path::PathBuf;
 
-use opensnitch_proto::pb;
+use crate::models::subscription_rpc::{SubscriptionCommand, SubscriptionOperation};
+use crate::models::subscription_storage::SubscriptionRecord;
+use crate::services::subscription::{SubscriptionService, record_from_wire};
+use transport_wire_core::WireSubscriptionReply;
 
-use crate::services::subscription::SubscriptionService;
 use crate::services::subscription::format::validate_format_sample;
 use crate::services::subscription::storage::SubscriptionStorage;
 use crate::tests::support::{HttpFixture, HttpResponseFixture, TestDir, read_text};
+
+const READY_STATUS: i32 = 2;
 
 fn make_service() -> SubscriptionService {
     SubscriptionService::new(SubscriptionStorage::in_memory(), "/tmp/test-sub-svc")
@@ -18,8 +22,8 @@ fn make_persistent_service(dir: &TestDir) -> (SubscriptionService, PathBuf) {
     (SubscriptionService::new(storage, &root_dir), store_path)
 }
 
-fn sample_sub(name: &str, url: &str) -> pb::Subscription {
-    pb::Subscription {
+fn sample_sub(name: &str, url: &str) -> SubscriptionRecord {
+    SubscriptionRecord {
         name: name.to_string(),
         url: url.to_string(),
         enabled: true,
@@ -27,15 +31,25 @@ fn sample_sub(name: &str, url: &str) -> pb::Subscription {
     }
 }
 
+async fn command(
+    svc: &SubscriptionService,
+    operation: SubscriptionOperation,
+    subscriptions: Vec<SubscriptionRecord>,
+    force: bool,
+) -> WireSubscriptionReply {
+    svc.handle_wire_command(SubscriptionCommand {
+        operation,
+        subscriptions,
+        force,
+        targets: Vec::new(),
+    })
+    .await
+}
+
 #[tokio::test]
 async fn list_empty_returns_accepted() {
     let svc = make_service();
-    let reply = svc
-        .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionAction::List as i32,
-            ..Default::default()
-        })
-        .await;
+    let reply = command(&svc, SubscriptionOperation::List, Vec::new(), false).await;
     assert!(reply.accepted);
     assert!(reply.subscriptions.is_empty());
 }
@@ -45,13 +59,7 @@ async fn apply_then_list_round_trips() {
     let svc = make_service();
     let sub = sample_sub("hagezi-pro", "https://raw.example.com/hagezi.txt");
 
-    let apply_reply = svc
-        .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionAction::Apply as i32,
-            subscriptions: vec![sub.clone()],
-            ..Default::default()
-        })
-        .await;
+    let apply_reply = command(&svc, SubscriptionOperation::Apply, vec![sub], false).await;
     assert!(
         apply_reply.accepted,
         "apply failed: {}",
@@ -63,12 +71,7 @@ async fn apply_then_list_round_trips() {
     assert_eq!(apply_reply.subscriptions[0].interval_seconds, 24 * 3600);
     assert_eq!(apply_reply.subscriptions[0].timeout_seconds, 60);
 
-    let list_reply = svc
-        .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionAction::List as i32,
-            ..Default::default()
-        })
-        .await;
+    let list_reply = command(&svc, SubscriptionOperation::List, Vec::new(), false).await;
     assert!(list_reply.accepted);
     assert_eq!(list_reply.subscriptions.len(), 1);
     assert_eq!(list_reply.subscriptions[0].id, stored_id);
@@ -77,12 +80,7 @@ async fn apply_then_list_round_trips() {
 #[tokio::test]
 async fn apply_no_items_is_rejected() {
     let svc = make_service();
-    let reply = svc
-        .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionAction::Apply as i32,
-            ..Default::default()
-        })
-        .await;
+    let reply = command(&svc, SubscriptionOperation::Apply, Vec::new(), false).await;
     assert!(!reply.accepted);
 }
 
@@ -90,31 +88,18 @@ async fn apply_no_items_is_rejected() {
 async fn delete_removes_subscription() {
     let svc = make_service();
     let sub = sample_sub("block-a", "https://example.com/a.txt");
-    let apply = svc
-        .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionAction::Apply as i32,
-            subscriptions: vec![sub],
-            ..Default::default()
-        })
-        .await;
+    let apply = command(&svc, SubscriptionOperation::Apply, vec![sub], false).await;
     assert!(apply.accepted);
 
-    let to_delete = apply.subscriptions.clone();
-    let del = svc
-        .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionAction::Delete as i32,
-            subscriptions: to_delete,
-            ..Default::default()
-        })
-        .await;
+    let to_delete = apply
+        .subscriptions
+        .into_iter()
+        .map(record_from_wire)
+        .collect();
+    let del = command(&svc, SubscriptionOperation::Delete, to_delete, false).await;
     assert!(del.accepted);
 
-    let list = svc
-        .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionAction::List as i32,
-            ..Default::default()
-        })
-        .await;
+    let list = command(&svc, SubscriptionOperation::List, Vec::new(), false).await;
     assert!(
         list.subscriptions.is_empty(),
         "subscription should be deleted"
@@ -137,28 +122,19 @@ async fn refresh_downloads_source_and_persists_http_metadata() {
     )]);
     let (svc, store_path) = make_persistent_service(&dir);
 
-    let apply = svc
-        .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionAction::Apply as i32,
-            subscriptions: vec![sample_sub("refresh-me", &server.url("/list.txt"))],
-            ..Default::default()
-        })
-        .await;
+    let apply = command(
+        &svc,
+        SubscriptionOperation::Apply,
+        vec![sample_sub("refresh-me", &server.url("/list.txt"))],
+        false,
+    )
+    .await;
     assert!(apply.accepted);
 
-    let reply = svc
-        .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionAction::Refresh as i32,
-            force: true,
-            ..Default::default()
-        })
-        .await;
+    let reply = command(&svc, SubscriptionOperation::Refresh, Vec::new(), true).await;
     assert!(reply.accepted, "refresh failed: {:?}", reply.errors);
     assert_eq!(reply.subscriptions.len(), 1);
-    assert_eq!(
-        reply.subscriptions[0].status,
-        pb::SubscriptionStatus::Ready as i32
-    );
+    assert_eq!(reply.subscriptions[0].status, READY_STATUS);
 
     let source_path = dir
         .path
@@ -195,36 +171,21 @@ async fn refresh_uses_conditional_headers_for_not_modified_responses() {
     ]);
     let (svc, _) = make_persistent_service(&dir);
 
-    let apply = svc
-        .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionAction::Apply as i32,
-            subscriptions: vec![sample_sub("etag-check", &server.url("/etag.txt"))],
-            ..Default::default()
-        })
-        .await;
+    let apply = command(
+        &svc,
+        SubscriptionOperation::Apply,
+        vec![sample_sub("etag-check", &server.url("/etag.txt"))],
+        false,
+    )
+    .await;
     assert!(apply.accepted);
 
-    let first = svc
-        .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionAction::Refresh as i32,
-            force: true,
-            ..Default::default()
-        })
-        .await;
+    let first = command(&svc, SubscriptionOperation::Refresh, Vec::new(), true).await;
     assert!(first.accepted);
 
-    let second = svc
-        .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionAction::Refresh as i32,
-            force: true,
-            ..Default::default()
-        })
-        .await;
+    let second = command(&svc, SubscriptionOperation::Refresh, Vec::new(), true).await;
     assert!(second.accepted, "refresh failed: {:?}", second.errors);
-    assert_eq!(
-        second.subscriptions[0].status,
-        pb::SubscriptionStatus::Ready as i32
-    );
+    assert_eq!(second.subscriptions[0].status, READY_STATUS);
 
     let requests = server.requests();
     assert_eq!(requests.len(), 2);
@@ -243,22 +204,16 @@ async fn refresh_errors_back_off_and_skip_until_due() {
     )]);
     let (svc, store_path) = make_persistent_service(&dir);
 
-    let apply = svc
-        .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionAction::Apply as i32,
-            subscriptions: vec![sample_sub("retry-me", &server.url("/retry.txt"))],
-            ..Default::default()
-        })
-        .await;
+    let apply = command(
+        &svc,
+        SubscriptionOperation::Apply,
+        vec![sample_sub("retry-me", &server.url("/retry.txt"))],
+        false,
+    )
+    .await;
     assert!(apply.accepted);
 
-    let refresh = svc
-        .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionAction::Refresh as i32,
-            force: true,
-            ..Default::default()
-        })
-        .await;
+    let refresh = command(&svc, SubscriptionOperation::Refresh, Vec::new(), true).await;
     assert!(!refresh.accepted);
     assert_eq!(refresh.errors.len(), 1);
 
@@ -271,12 +226,7 @@ async fn refresh_errors_back_off_and_skip_until_due() {
     assert!(record.next_refresh_after > crate::utils::time_nonce::unix_timestamp_now_utc());
     assert!(record.last_error.contains("503"));
 
-    let skipped = svc
-        .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionAction::Refresh as i32,
-            ..Default::default()
-        })
-        .await;
+    let skipped = command(&svc, SubscriptionOperation::Refresh, Vec::new(), false).await;
     assert!(
         skipped.accepted,
         "skip reply should not fail: {:?}",
@@ -289,11 +239,12 @@ async fn refresh_errors_back_off_and_skip_until_due() {
 #[tokio::test]
 async fn counts_reflects_storage_state() {
     let svc = make_service();
-    svc.handle_request(pb::SubscriptionRequest {
-        operation: pb::SubscriptionAction::Apply as i32,
-        subscriptions: vec![sample_sub("a", "https://a.example/a.txt")],
-        ..Default::default()
-    })
+    command(
+        &svc,
+        SubscriptionOperation::Apply,
+        vec![sample_sub("a", "https://a.example/a.txt")],
+        false,
+    )
     .await;
     let ss = svc.subscription_stats();
     assert_eq!(ss.total, 1);
@@ -304,12 +255,7 @@ async fn counts_reflects_storage_state() {
 #[tokio::test]
 async fn unspecified_operation_is_rejected() {
     let svc = make_service();
-    let reply = svc
-        .handle_request(pb::SubscriptionRequest {
-            operation: pb::SubscriptionAction::Unspecified as i32,
-            ..Default::default()
-        })
-        .await;
+    let reply = command(&svc, SubscriptionOperation::Unspecified, Vec::new(), false).await;
     assert!(!reply.accepted);
 }
 

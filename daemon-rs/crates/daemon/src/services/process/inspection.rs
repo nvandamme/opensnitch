@@ -9,13 +9,18 @@ use super::{
 };
 
 impl ProcessService {
-    pub async fn sync_from_proc_event(&self, pid: u32, kind: ProcEventKind) {
+    pub async fn sync_from_proc_event(
+        &self,
+        pid: u32,
+        kind: ProcEventKind,
+    ) -> Result<(), &'static str> {
         match kind {
             ProcEventKind::Exit => {
                 self.cache.cleanup_expired().await;
                 self.cache
                     .mark_exit_deadline(pid, Instant::now() + EXIT_CACHE_TTL)
                     .await;
+                Ok(())
             }
             ProcEventKind::Fork | ProcEventKind::Exec => {
                 self.cache.cleanup_expired().await;
@@ -32,6 +37,9 @@ impl ProcessService {
                         .entries
                         .insert(pid, CachedProcessEntry { info, starttime });
                     Self::spawn_hash_update(self.cache.clone(), pid, starttime);
+                    Ok(())
+                } else {
+                    Err("inspect_process_no_hash failed")
                 }
             }
         }

@@ -5,13 +5,17 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["native-ebpf-ringbuf", "aya-ebpf", "grpc-ui"]
+default = ["native-ebpf-ringbuf", "aya-ebpf", "client-transport", "storage-format-json"]
 native-ebpf-ringbuf = []
 libbpf-ebpf = ["dep:libbpf-rs"]
 aya-ebpf = ["dep:aya"]
-grpc-ui = ["dep:hyper-rustls", "dep:rustls", "dep:rustls-pki-types", "dep:x509-cert"]
-subscriptions = []
+client-transport = ["dep:transport_wire_grpc_client", "dep:hyper-rustls", "dep:rustls", "dep:rustls-pki-types", "dep:x509-cert"]
+transport-wire-grpc-client = ["client-transport"]
+subscriptions = ["client-transport", "transport_wire_grpc_client/subscriptions"]
 metrics-export = ["dep:hyper", "dep:http-body-util", "dep:flate2", "dep:prost"]
+storage-format-json = ["dep:storage_format_json"]
+storage-format-yaml = ["dep:storage_format_yaml"]
+storage-format-toml = ["dep:storage_format_toml"]
 
 [dependencies]
 tokio = { version = "1.50", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "process", "net", "io-util", "fs"] }
@@ -37,8 +41,8 @@ sha1 = "0.10"
 md-5 = "0.10"
 time = { version = "0.3", features = ["formatting", "parsing", "macros", "local-offset"] }
 
-opensnitch-proto = { path = "../proto" }
-opensnitch-ebpf-common = { path = "../ebpf-common" }
+proto = { package = "opensnitch-proto", path = "../proto" }
+ebpf_common = { package = "opensnitch-ebpf-common", path = "../ebpf-common" }
 libbpf-rs = { version = "0.26", optional = true }
 aya = { version = "0.13", optional = true }
 netlink-bindings = { version = "0.3", features = ["inet-diag", "rt-link", "rt-addr", "nftables"] }
@@ -56,7 +60,13 @@ rustls-pki-types = { version = "1.14", optional = true }
 x509-cert = { version = "0.2", default-features = false, features = ["std"], optional = true }
 rcgen = "0.13"
 tower = { version = "0.5", features = ["util"] }
-opensnitch-kernel-caps = { path = "../kernel-caps" }
+kernel_caps = { package = "opensnitch-kernel-caps", path = "../kernel-caps" }
+transport_wire_core = { package = "opensnitch-transport-wire-core", path = "../transport-wire-core", features = ["subscriptions"] }
+transport_wire_grpc_client = { package = "opensnitch-transport-wire-grpc-client", path = "../transport-wire-grpc-client", optional = true }
+storage_format_core = { package = "opensnitch-storage-format-core", path = "../storage-format-core" }
+storage_format_json = { package = "opensnitch-storage-format-json", path = "../storage-format-json", optional = true }
+storage_format_yaml = { package = "opensnitch-storage-format-yaml", path = "../storage-format-yaml", optional = true }
+storage_format_toml = { package = "opensnitch-storage-format-toml", path = "../storage-format-toml", optional = true }
 
 [dev-dependencies]
 # async-trait is needed only to implement the tonic-generated `Ui` server trait in

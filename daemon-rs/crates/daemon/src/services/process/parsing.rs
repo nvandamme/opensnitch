@@ -1,3 +1,6 @@
+// Process eBPF sample parsing is only exercised by native ringbuf-enabled builds.
+#![cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
+
 use crate::{
     models::{ebpf_payload::EbpfProcStatePayload, proc_event::ProcEventKind},
     utils::byte_read::read_ne_value_at,

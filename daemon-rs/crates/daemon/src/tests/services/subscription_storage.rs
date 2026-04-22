@@ -1,6 +1,7 @@
 use crate::services::subscription::storage::SubscriptionStorage;
 use crate::tests::support::{TestDir, read_text, write_bytes};
 use crate::utils::atomic_write::sibling_temp_path_with_suffix;
+use transport_wire_core::WireSubscription;
 
 fn unique_store_path(dir: &TestDir) -> std::path::PathBuf {
     dir.path.join("subscriptions.json")
@@ -12,7 +13,7 @@ fn flush_is_atomic_and_survives_reload() {
     let path = unique_store_path(&dir);
 
     let storage = SubscriptionStorage::new(&path).expect("create store");
-    storage.apply(vec![opensnitch_proto::pb::Subscription {
+    storage.apply(vec![WireSubscription {
         name: "test-sub".to_string(),
         url: "https://example.com/list.txt".to_string(),
         enabled: true,
@@ -55,7 +56,7 @@ fn stale_tmp_is_removed_before_flush() {
     write_bytes(&tmp_path, b"stale");
 
     let storage = SubscriptionStorage::new(&path).expect("create store");
-    storage.apply(vec![opensnitch_proto::pb::Subscription {
+    storage.apply(vec![WireSubscription {
         name: "sub-a".to_string(),
         url: "https://a.example.com/list.txt".to_string(),
         enabled: true,

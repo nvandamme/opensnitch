@@ -6,6 +6,7 @@ use crate::models::firewall_config::{FirewallChain, FirewallConfig, FirewallRule
 use crate::models::firewall_storage::{
     PersistedFirewallChain, PersistedFirewallGroup, PersistedFirewallRule, RawFirewallConfig,
 };
+use crate::services::storage::StorageService;
 
 use super::FirewallService;
 
@@ -24,8 +25,9 @@ impl FirewallService {
 
         let raw = fs::read_to_string(path)
             .with_context(|| format!("failed to read firewall config {}", path.display()))?;
-        let parsed: RawFirewallConfig = serde_json::from_str(&raw)
-            .with_context(|| format!("failed to parse firewall config {}", path.display()))?;
+        let parsed: RawFirewallConfig =
+            StorageService::parse_with_storage_format_for_path(path, &raw)
+                .with_context(|| format!("failed to parse firewall config {}", path.display()))?;
 
         let mut rules = Vec::new();
         let mut chains = Vec::new();
@@ -44,14 +46,6 @@ impl FirewallService {
     }
 
     pub(super) fn save_system_firewall_to_path(path: &Path, sysfw: &FirewallConfig) -> Result<()> {
-        use anyhow::Context;
-
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create firewall config dir {}", parent.display())
-            })?;
-        }
-
         let mut system_rules: Vec<PersistedFirewallGroup> = sysfw
             .rules
             .iter()
@@ -73,10 +67,9 @@ impl FirewallService {
             system_rules,
         };
 
-        let raw = serde_json::to_string_pretty(&persisted)
-            .context("failed to serialize system firewall config")?;
-        fs::write(path, raw)
-            .with_context(|| format!("failed to write firewall config {}", path.display()))?;
+        StorageService::global().convert_and_write_with_storage_format_to_path_sync_and_notify(
+            "firewall", path, &persisted, true,
+        )?;
         tracing::info!(
             path = %path.display(),
             version = sysfw.version,

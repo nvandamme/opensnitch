@@ -39,9 +39,26 @@ impl Daemon {
             alert: 1024,
         });
         crate::utils::daemon_guard::ensure_no_competing_daemon_instances()?;
-        let mut config = crate::config::Config::load_from_default_locations_with_override(
-            cli.config_file.as_deref(),
-        )?
+        let storage_format_override = cli
+            .main_storage_format
+            .as_deref()
+            .and_then(crate::services::storage::StorageFormat::from_cli_flag);
+        if cli.main_storage_format.is_some() && storage_format_override.is_none() {
+            warn!(
+                value = ?cli.main_storage_format,
+                "daemon bootstrap: unsupported --main-storage-format override; keeping default JSON compatibility"
+            );
+        }
+        StorageService::install_global_main_storage_format(storage_format_override);
+
+        let mut config = if cli.config_file.is_none() && storage_format_override.is_none() {
+            crate::config::Config::load_from_default_locations()?
+        } else {
+            crate::config::Config::load_from_default_locations_with_override(
+                cli.config_file.as_deref(),
+                storage_format_override,
+            )?
+        }
         .with_client_addr_override(cli.ui_socket.as_deref())
         .with_auth_mode_override(cli.auth_mode.as_deref())
         .with_rules_path_override(cli.rules_path.as_deref());
@@ -347,7 +364,8 @@ impl Daemon {
             daemon
                 .runtime
                 .subscriptions
-                .subscription_stats_with_rules(&list_rule_paths),
+                .subscription_stats_with_rules(&list_rule_paths)
+                .into(),
         );
 
         daemon.runtime.stats.apply_config(config.stats);

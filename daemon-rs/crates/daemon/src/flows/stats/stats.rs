@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
+use transport_wire_core::{ClientTransportConnectorPort, ClientTransportPort};
 
 use crate::{
     daemon::{KernelPipelineDropStats, KernelPipelineIngressStats},
@@ -12,8 +13,12 @@ use crate::{
     },
     services::dns::DnsService,
     services::{
-        audit::AuditService, client::ClientService, config::ConfigService, rule::RuleService,
-        stats::StatsService, storage::StorageService,
+        audit::AuditService,
+        client::{ClientService, ClientTransportConnector, WireSessionCache},
+        config::ConfigService,
+        rule::RuleService,
+        stats::StatsService,
+        storage::StorageService,
     },
     utils::lru_cache::global_dual_layer_metrics_snapshot,
 };
@@ -21,6 +26,7 @@ use crate::{
 pub(crate) use crate::models::worker_telemetry::WorkerTelemetrySnapshot;
 
 use crate::platform::ports::stats_exporter_port::StatsExporterPort;
+use crate::services::client::transport::ClientPingRequest;
 
 pub(crate) struct StatsFlow {
     shutdown: CancellationToken,
@@ -70,13 +76,14 @@ impl StatsFlow {
 
     /// Attach an optional stats exporter (Prometheus, Grafana Mimir, etc.).
     ///
-    /// The exporter receives every `pb::Statistics` snapshot produced by
+    /// The exporter receives every metrics snapshot produced by
     /// the 1-second emission cycle.  When not attached, the flow behaves
     /// identically to before.  Call sites that do not need the exporter
     /// do not need to change.
     ///
     /// See `platform::ports::stats_exporter_port::StatsExporterPort`.
-    #[allow(dead_code)]
+    // Called only inside #[cfg(feature = "metrics-export")] wiring in daemon/tasks.rs; dead in non-metrics builds.
+    #[cfg_attr(not(feature = "metrics-export"), allow(dead_code))]
     pub(crate) fn with_stats_exporter(mut self, exporter: Arc<dyn StatsExporterPort>) -> Self {
         self.stats_exporter = Some(exporter);
         self
@@ -164,7 +171,7 @@ impl StatsFlow {
             });
 
             let mut ping_id = 2_u64;
-            let grpc_cache = crate::services::client::GrpcChannelCache::default();
+            let connector = ClientTransportConnector::new(WireSessionCache::default());
             let mut last_ingress_snapshot = ingress_stats_snapshot();
             let mut last_drop_snapshot = drop_stats_snapshot();
             let mut last_fast_allow = stats.fast_allow_count();
@@ -320,26 +327,26 @@ impl StatsFlow {
                             exporter.export_snapshot(&metrics_snapshot);
                         }
 
-                        let req = opensnitch_proto::pb::PingRequest {
+                        let req = ClientPingRequest {
                             id: ping_id,
-                            stats: Some(metrics_snapshot.stats),
+                            stats: Some(metrics_snapshot.stats.into()),
                         };
 
                         let config_snapshot = config.get_snapshot();
                         let client_addr = config_snapshot.client_addr.as_str();
-                        let mut client = match ClientService::connect_or_reuse(&config_snapshot, &grpc_cache).await {
+                        let mut client = match ClientTransportConnectorPort::connect_or_reuse(&connector, &config_snapshot).await {
                             Ok(client) => client,
                             Err(err) => {
                                 debug!(addr = %client_addr, "periodic ping connect failed: {err}");
-                                grpc_cache.invalidate();
+                                ClientTransportConnectorPort::invalidate(&connector);
                                 ping_id = ping_id.saturating_add(1);
                                 continue;
                             }
                         };
 
-                        if let Err(err) = client.ping(req).await {
+                        if let Err(err) = ClientTransportPort::ping(&mut client, req).await {
                             debug!(addr = %client_addr, "periodic ping failed: {err}");
-                            grpc_cache.invalidate();
+                            ClientTransportConnectorPort::invalidate(&connector);
                         }
                         ping_id = ping_id.saturating_add(1);
                     }

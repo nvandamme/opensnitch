@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use opensnitch_ebpf_common::dns::{AF_INET, AF_INET6, DnsEvent, HOST_LEN, IP_LEN};
+use ebpf_common::dns::{AF_INET, AF_INET6, DnsEvent, HOST_LEN, IP_LEN};
 
 use crate::{models::dns_payload::DnsPayload, services::dns::DnsService};
 

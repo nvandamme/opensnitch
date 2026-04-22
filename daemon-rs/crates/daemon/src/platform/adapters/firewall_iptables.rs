@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use opensnitch_proto::pb;
 use tokio::process::Command;
 
+use crate::models::firewall_config::{FirewallChain, FirewallConfig, FirewallRule};
 use crate::utils::command_output::run_command_checked;
 use crate::utils::command_path::resolve_command_path;
 use crate::utils::conntrack::flush_conntrack_table;
@@ -12,7 +12,7 @@ const IP6TABLES_BIN: &str = "ip6tables";
 pub(crate) struct FirewallIptablesAdapter;
 
 impl FirewallIptablesAdapter {
-    fn table_or_default(rule: &pb::FwRule) -> &str {
+    fn table_or_default(rule: &FirewallRule) -> &str {
         if rule.table.is_empty() {
             "filter"
         } else {
@@ -20,7 +20,7 @@ impl FirewallIptablesAdapter {
         }
     }
 
-    fn chain_or_default(rule: &pb::FwRule) -> &str {
+    fn chain_or_default(rule: &FirewallRule) -> &str {
         if rule.chain.is_empty() {
             "OUTPUT"
         } else {
@@ -28,7 +28,7 @@ impl FirewallIptablesAdapter {
         }
     }
 
-    fn iptables_args(rule: &pb::FwRule) -> Vec<&str> {
+    fn iptables_args(rule: &FirewallRule) -> Vec<&str> {
         let mut args = vec![
             "-t",
             Self::table_or_default(rule),
@@ -87,7 +87,7 @@ impl FirewallIptablesAdapter {
         (conn_rule, dns_rule)
     }
 
-    fn chain_policy_args(chain: &pb::FwChain) -> Option<Vec<String>> {
+    fn chain_policy_args(chain: &FirewallChain) -> Option<Vec<String>> {
         if chain.hook.trim().is_empty() || chain.r#type.trim().is_empty() {
             return None;
         }
@@ -111,12 +111,12 @@ impl FirewallIptablesAdapter {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn probe_chain_policy_args(chain: &pb::FwChain) -> Option<Vec<String>> {
+    pub(crate) fn probe_chain_policy_args(chain: &FirewallChain) -> Option<Vec<String>> {
         Self::chain_policy_args(chain)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn probe_iptables_args(rule: &pb::FwRule) -> Vec<String> {
+    pub(crate) fn probe_iptables_args(rule: &FirewallRule) -> Vec<String> {
         Self::iptables_args(rule)
             .into_iter()
             .map(ToOwned::to_owned)
@@ -195,17 +195,15 @@ impl FirewallIptablesAdapter {
         Ok(healthy)
     }
 
-    pub async fn apply_system_firewall(sysfw: &pb::SysFirewall) -> Result<()> {
+    pub async fn apply_system_firewall(sysfw: &FirewallConfig) -> Result<()> {
         if !sysfw.enabled {
             return Ok(());
         }
 
-        for item in &sysfw.system_rules {
-            for chain in &item.chains {
-                Self::ensure_chain_policy(chain).await?;
-            }
+        for chain in &sysfw.chains {
+            Self::ensure_chain_policy(chain).await?;
 
-            if let Some(rule) = &item.rule {
+            for rule in &chain.rules {
                 if !rule.enabled {
                     continue;
                 }
@@ -213,14 +211,19 @@ impl FirewallIptablesAdapter {
             }
         }
 
+        for rule in &sysfw.rules {
+            if !rule.enabled {
+                continue;
+            }
+            Self::ensure_system_rule(rule).await?;
+        }
+
         Ok(())
     }
 
-    pub async fn clear_system_firewall(sysfw: &pb::SysFirewall) -> Result<()> {
-        for item in &sysfw.system_rules {
-            if let Some(rule) = &item.rule {
-                Self::delete_system_rule(rule).await?;
-            }
+    pub async fn clear_system_firewall(sysfw: &FirewallConfig) -> Result<()> {
+        for rule in &sysfw.rules {
+            Self::delete_system_rule(rule).await?;
         }
 
         Ok(())
@@ -278,7 +281,7 @@ impl FirewallIptablesAdapter {
         let _ = flush_conntrack_table().await;
     }
 
-    async fn apply_system_rule_with(rule: &pb::FwRule, ensure: bool) -> Result<()> {
+    async fn apply_system_rule_with(rule: &FirewallRule, ensure: bool) -> Result<()> {
         let args = Self::iptables_args(rule);
         for bin in Self::active_bins() {
             if ensure {
@@ -290,15 +293,15 @@ impl FirewallIptablesAdapter {
         Ok(())
     }
 
-    async fn ensure_system_rule(rule: &pb::FwRule) -> Result<()> {
+    async fn ensure_system_rule(rule: &FirewallRule) -> Result<()> {
         Self::apply_system_rule_with(rule, true).await
     }
 
-    async fn delete_system_rule(rule: &pb::FwRule) -> Result<()> {
+    async fn delete_system_rule(rule: &FirewallRule) -> Result<()> {
         Self::apply_system_rule_with(rule, false).await
     }
 
-    async fn ensure_chain_policy(chain: &pb::FwChain) -> Result<()> {
+    async fn ensure_chain_policy(chain: &FirewallChain) -> Result<()> {
         let Some(args) = Self::chain_policy_args(chain) else {
             return Ok(());
         };

@@ -217,7 +217,7 @@ fn run_aya_smoke(spec: &AyaSmokeSpec) -> Result<(), DynError> {
     let timeout_secs = env::var("DAEMON_RS_EBPF_SMOKE_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(90);
+        .unwrap_or(40);
     let kill_after_secs = env::var("DAEMON_RS_EBPF_SMOKE_TIMEOUT_KILL_AFTER_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -230,6 +230,8 @@ fn run_aya_smoke(spec: &AyaSmokeSpec) -> Result<(), DynError> {
 
     let timed_out = Arc::new(AtomicBool::new(false));
     let timed_out_clone = timed_out.clone();
+    let child_done = Arc::new(AtomicBool::new(false));
+    let child_done_clone = child_done.clone();
     let timeout = Duration::from_secs(timeout_secs);
     let kill_after = Duration::from_secs(kill_after_secs);
 
@@ -251,22 +253,36 @@ fn run_aya_smoke(spec: &AyaSmokeSpec) -> Result<(), DynError> {
     let mut child = cmd.spawn()?;
     let child_id = child.id();
 
-    // Watchdog: send SIGTERM after timeout, then SIGKILL after kill_after.
+    // Watchdog: only enforce timeout if the child is still running at deadline.
     let watchdog = std::thread::spawn(move || {
-        std::thread::sleep(timeout);
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            if child_done_clone.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        if child_done_clone.load(Ordering::Relaxed) {
+            return;
+        }
+
         timed_out_clone.store(true, Ordering::Relaxed);
         Command::new("kill")
             .args(["-TERM", &child_id.to_string()])
             .status()
             .ok();
         std::thread::sleep(kill_after);
-        Command::new("kill")
-            .args(["-KILL", &child_id.to_string()])
-            .status()
-            .ok();
+        if !child_done_clone.load(Ordering::Relaxed) {
+            Command::new("kill")
+                .args(["-KILL", &child_id.to_string()])
+                .status()
+                .ok();
+        }
     });
 
     let status = child.wait()?;
+    child_done.store(true, Ordering::Relaxed);
     let _ = watchdog.join();
     let was_timeout = timed_out.load(Ordering::Relaxed);
 

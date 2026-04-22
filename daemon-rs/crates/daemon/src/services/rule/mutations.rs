@@ -4,13 +4,15 @@ use anyhow::Result;
 use tracing::{debug, warn};
 
 use crate::models::rule_record::{RuleDuration, RuleRecord};
+use crate::models::rule_storage::RuleFile;
 use crate::services::storage::StorageService;
 
 use super::{RuleService, rule_duration_persists_to_disk, rule_duration_temporary_spec};
 
 impl RuleService {
-    fn rule_json_path(rules_path: &std::path::Path, rule_name: &str) -> std::path::PathBuf {
-        rules_path.join(format!("{rule_name}.json"))
+    fn rule_storage_path(rules_path: &std::path::Path, rule_name: &str) -> std::path::PathBuf {
+        let extension = StorageService::global().main_storage_extension();
+        rules_path.join(format!("{rule_name}.{extension}"))
     }
 
     async fn remove_rule_file_if_missing_ok(file_path: &std::path::Path) -> Result<()> {
@@ -32,7 +34,7 @@ impl RuleService {
         let rules_path = current.rules_path.as_path();
         next_rules.retain(|rule| rule.name != rule_name);
 
-        let file_path = Self::rule_json_path(rules_path, rule_name);
+        let file_path = Self::rule_storage_path(rules_path, rule_name);
         Self::remove_rule_file_if_missing_ok(&file_path).await?;
 
         self.build_and_publish_snapshot(rules_path, next_rules)
@@ -59,17 +61,19 @@ impl RuleService {
         }
 
         let new_persisted = rule_duration_persists_to_disk(&record.duration);
-        let file_path = Self::rule_json_path(rules_path, record.name.as_str());
+        let file_path = Self::rule_storage_path(rules_path, record.name.as_str());
         if old_persisted && !new_persisted {
             Self::remove_rule_file_if_missing_ok(&file_path).await?;
         }
 
         if new_persisted {
-            let raw = serde_json::to_string_pretty(&crate::models::rule_storage::RuleFile::from(
-                &record,
-            ))?;
             StorageService::global()
-                .write_bytes_to_path_and_notify("rule", &file_path, raw.as_bytes())
+                .convert_and_write_with_storage_format_to_path_and_notify(
+                    "rule",
+                    &file_path,
+                    &RuleFile::from(&record),
+                    true,
+                )
                 .await?;
         }
 

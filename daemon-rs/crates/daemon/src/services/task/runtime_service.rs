@@ -16,7 +16,7 @@ impl TaskService {
         shutdown: CancellationToken,
         config: ConfigService,
         process: ProcessService,
-        task_reply_tx: tokio::sync::mpsc::Sender<opensnitch_proto::pb::NotificationReply>,
+        task_reply_tx: tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         alert_buffer: AlertBuffer,
         alert_tx: tokio::sync::mpsc::Sender<UiAlert>,
     ) -> Box<dyn WorkerControl> {

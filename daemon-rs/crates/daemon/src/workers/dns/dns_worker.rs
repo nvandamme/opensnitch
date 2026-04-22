@@ -1,6 +1,8 @@
 use std::{
+    collections::HashMap,
     fs,
     io::{BufRead, BufReader, Read, Write},
+    net::IpAddr,
     os::unix::net::UnixStream,
     path::Path,
     process::{Command, Stdio},
@@ -404,7 +406,13 @@ impl DnsWorkerControl {
             return Vec::new();
         };
 
-        let mut events = Vec::new();
+        enum ParsedEvent {
+            HostAnswers(String),
+            Alias(DnsPayload),
+        }
+
+        let mut parsed_events = Vec::<ParsedEvent>::new();
+        let mut host_addresses = HashMap::<String, Vec<IpAddr>>::new();
         for answer in answers {
             let rr = answer.get("rr").unwrap_or(answer);
             let rr_type = rr
@@ -426,7 +434,11 @@ impl DnsWorkerControl {
             if let Some(address_bytes) = rr.get("address").and_then(Value::as_array) {
                 let ip = Self::decode_varlink_ip(address_bytes);
                 if let (Some(ip), Some(host)) = (ip, key_name) {
-                    events.push(DnsPayload::answer(host, ip));
+                    let slot = host_addresses.entry(host.clone()).or_insert_with(|| {
+                        parsed_events.push(ParsedEvent::HostAnswers(host.clone()));
+                        Vec::new()
+                    });
+                    slot.push(ip);
                 }
                 continue;
             }
@@ -437,7 +449,24 @@ impl DnsWorkerControl {
                 .and_then(Self::normalize_dns_host);
 
             if let (Some(alias), Some(canonical)) = (key_name, cname) {
-                events.push(DnsPayload::alias(alias, canonical));
+                parsed_events.push(ParsedEvent::Alias(DnsPayload::alias(alias, canonical)));
+            }
+        }
+
+        let mut events = Vec::new();
+        for parsed in parsed_events {
+            match parsed {
+                ParsedEvent::HostAnswers(host) => {
+                    if let Some(addresses) = host_addresses.remove(&host)
+                        && let Some(payload) =
+                            DnsPayload::answers(host, std::sync::Arc::from(addresses))
+                    {
+                        events.push(payload);
+                    }
+                }
+                ParsedEvent::Alias(payload) => {
+                    events.push(payload);
+                }
             }
         }
 

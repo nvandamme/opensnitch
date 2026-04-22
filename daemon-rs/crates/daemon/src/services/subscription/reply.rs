@@ -1,11 +1,11 @@
-use opensnitch_proto::pb;
+use transport_wire_core::{WireSubscription, WireSubscriptionAction, WireSubscriptionReply};
 
 pub(super) fn base_reply(
-    operation: pb::SubscriptionAction,
+    operation: WireSubscriptionAction,
     message: impl Into<String>,
     accepted: bool,
-) -> pb::SubscriptionReply {
-    pb::SubscriptionReply {
+) -> WireSubscriptionReply {
+    WireSubscriptionReply {
         operation: operation as i32,
         message: message.into(),
         accepted,
@@ -14,13 +14,13 @@ pub(super) fn base_reply(
 }
 
 pub(super) fn reply_with(
-    operation: pb::SubscriptionAction,
+    operation: WireSubscriptionAction,
     message: impl Into<String>,
     accepted: bool,
-    subscriptions: Vec<pb::Subscription>,
+    subscriptions: Vec<WireSubscription>,
     errors: Vec<String>,
-) -> pb::SubscriptionReply {
-    pb::SubscriptionReply {
+) -> WireSubscriptionReply {
+    WireSubscriptionReply {
         operation: operation as i32,
         message: message.into(),
         accepted,

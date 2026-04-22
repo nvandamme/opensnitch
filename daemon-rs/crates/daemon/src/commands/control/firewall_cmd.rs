@@ -1,4 +1,3 @@
-use opensnitch_proto::pb;
 use tokio::sync::broadcast;
 
 use super::CommandControlService;
@@ -25,7 +24,7 @@ impl CommandControlService {
         enabled: bool,
         config: &ConfigService,
         firewall: &FirewallService,
-        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         client_service: &ClientService,
     ) {
         tracing::info!(
@@ -99,7 +98,7 @@ impl CommandControlService {
                 let _ = send_notification_reply(
                     task_reply_tx,
                     notification_id,
-                    pb::NotificationReplyCode::Ok,
+                    transport_wire_core::WireNotificationReplyCode::Ok,
                     status_payload("ok"),
                     CONTROL_COMMAND_NOTIFICATION_LABEL,
                 )
@@ -117,7 +116,7 @@ impl CommandControlService {
                 let _ = send_notification_reply(
                     task_reply_tx,
                     notification_id,
-                    pb::NotificationReplyCode::Error,
+                    transport_wire_core::WireNotificationReplyCode::Error,
                     message,
                     CONTROL_COMMAND_NOTIFICATION_LABEL,
                 )
@@ -133,14 +132,14 @@ impl CommandControlService {
         config: &ConfigService,
         rules: &RuleService,
         firewall: &FirewallService,
-        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         client_service: &ClientService,
     ) {
         let Some(fw_config) = fw_config else {
             let _ = send_notification_reply(
                 task_reply_tx,
                 notification_id,
-                pb::NotificationReplyCode::Error,
+                transport_wire_core::WireNotificationReplyCode::Error,
                 "Error reloading firewall, invalid rules".to_string(),
                 CONTROL_COMMAND_NOTIFICATION_LABEL,
             )
@@ -203,7 +202,7 @@ impl CommandControlService {
                     let _ = send_notification_reply(
                         task_reply_tx,
                         notification_id,
-                        pb::NotificationReplyCode::Error,
+                        transport_wire_core::WireNotificationReplyCode::Error,
                         errors,
                         CONTROL_COMMAND_NOTIFICATION_LABEL,
                     )
@@ -225,7 +224,7 @@ impl CommandControlService {
                 let _ = send_notification_reply(
                     task_reply_tx,
                     notification_id,
-                    pb::NotificationReplyCode::Ok,
+                    transport_wire_core::WireNotificationReplyCode::Ok,
                     status_payload("ok"),
                     CONTROL_COMMAND_NOTIFICATION_LABEL,
                 )
@@ -243,7 +242,7 @@ impl CommandControlService {
                 let _ = send_notification_reply(
                     task_reply_tx,
                     notification_id,
-                    pb::NotificationReplyCode::Error,
+                    transport_wire_core::WireNotificationReplyCode::Error,
                     message,
                     CONTROL_COMMAND_NOTIFICATION_LABEL,
                 )

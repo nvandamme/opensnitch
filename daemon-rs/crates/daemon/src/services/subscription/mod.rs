@@ -45,7 +45,8 @@ mod disabled;
 
 #[cfg(feature = "subscriptions")]
 pub(crate) use conversions::{
-    SubscriptionRecord, proto_to_record, record_to_proto, subscription_status_to_str,
+    SubscriptionRecord, operation_from_wire_action, record_from_wire, record_to_wire,
+    wire_subscription_action_from_i32, wire_subscription_from_record,
 };
 
 #[cfg(feature = "subscriptions")]

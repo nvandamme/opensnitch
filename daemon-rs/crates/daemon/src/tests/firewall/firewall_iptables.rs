@@ -1,9 +1,9 @@
+use crate::models::firewall_config::{FirewallChain, FirewallRule};
 use crate::platform::adapters::firewall_iptables::FirewallIptablesAdapter;
-use opensnitch_proto::pb;
 
 #[test]
 fn chain_policy_args_builds_expected_iptables_policy_command() {
-    let chain = pb::FwChain {
+    let chain = FirewallChain {
         r#type: "mangle".to_string(),
         hook: "output".to_string(),
         policy: "drop".to_string(),
@@ -17,13 +17,13 @@ fn chain_policy_args_builds_expected_iptables_policy_command() {
 
 #[test]
 fn chain_policy_args_returns_none_when_hook_or_table_missing() {
-    let missing_hook = pb::FwChain {
+    let missing_hook = FirewallChain {
         r#type: "filter".to_string(),
         ..Default::default()
     };
     assert!(FirewallIptablesAdapter::probe_chain_policy_args(&missing_hook).is_none());
 
-    let missing_type = pb::FwChain {
+    let missing_type = FirewallChain {
         hook: "output".to_string(),
         ..Default::default()
     };
@@ -32,7 +32,7 @@ fn chain_policy_args_returns_none_when_hook_or_table_missing() {
 
 #[test]
 fn iptables_args_render_expected_system_rule() {
-    let rule = pb::FwRule {
+    let rule = FirewallRule {
         table: "mangle".to_string(),
         chain: "OUTPUT".to_string(),
         parameters: "-p tcp --dport 443 -m comment --comment opensnitch".to_string(),
@@ -64,7 +64,7 @@ fn iptables_args_render_expected_system_rule() {
 
 #[test]
 fn iptables_args_use_defaults_when_table_chain_missing() {
-    let rule = pb::FwRule {
+    let rule = FirewallRule {
         parameters: "-p udp --sport 53".to_string(),
         target: "NFQUEUE".to_string(),
         target_parameters: "--queue-num 0 --queue-bypass".to_string(),

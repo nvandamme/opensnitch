@@ -4,42 +4,17 @@ use crate::models::{
     connection_state::{ConnectionAttempt, TransportProtocol},
     process_state::ProcessInfo,
 };
+use transport_wire_core::{WireConnection, WireStringInt};
 
 pub struct ProtoMapperAdapter;
 
 impl ProtoMapperAdapter {
-    pub fn to_proto_process(proc_info: &ProcessInfo) -> opensnitch_proto::pb::Process {
-        opensnitch_proto::pb::Process {
-            pid: proc_info.pid as u64,
-            ppid: 0,
-            uid: 0,
-            comm: String::new(),
-            path: proc_info.path.clone(),
-            args: proc_info.args.clone(),
-            env: Self::build_env_map(proc_info),
-            cwd: proc_info.cwd.clone().unwrap_or_default(),
-            checksums: Self::build_checksums(proc_info),
-            io_reads: 0,
-            io_writes: 0,
-            net_reads: 0,
-            net_writes: 0,
-            process_tree: proc_info
-                .parent_chain
-                .iter()
-                .map(|node| opensnitch_proto::pb::StringInt {
-                    key: node.path.clone(),
-                    value: node.pid,
-                })
-                .collect(),
-        }
-    }
-
-    pub fn to_proto_connection(
+    pub fn to_wire_connection(
         attempt: &ConnectionAttempt,
         proc_info: &ProcessInfo,
         dst_host: Option<&str>,
-    ) -> opensnitch_proto::pb::Connection {
-        opensnitch_proto::pb::Connection {
+    ) -> WireConnection {
+        WireConnection {
             protocol: match attempt.protocol {
                 TransportProtocol::Tcp => "tcp".into(),
                 TransportProtocol::Udp => "udp".into(),
@@ -52,10 +27,8 @@ impl ProtoMapperAdapter {
             dst_ip: attempt.dst_addr.to_string(),
             dst_host: dst_host.unwrap_or_default().to_string(),
             dst_port: attempt.dst_port as u32,
-
-            process_id: attempt.pid as u32,
-            user_id: attempt.uid as u32,
-
+            process_id: attempt.pid,
+            user_id: attempt.uid,
             process_path: proc_info.path.clone(),
             process_args: proc_info.args.clone(),
             process_cwd: proc_info.cwd.clone().unwrap_or_default(),
@@ -64,7 +37,7 @@ impl ProtoMapperAdapter {
             process_tree: proc_info
                 .parent_chain
                 .iter()
-                .map(|node| opensnitch_proto::pb::StringInt {
+                .map(|node| WireStringInt {
                     key: node.path.clone(),
                     value: node.pid,
                 })

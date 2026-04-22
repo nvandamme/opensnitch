@@ -1,4 +1,4 @@
-use opensnitch_proto::pb;
+use transport_wire_core::{WireConnection, WireRule};
 
 use crate::config::LoggerSinkConfig;
 
@@ -35,5 +35,5 @@ pub trait ConnectionEventExporterPort: Send + Sync {
     /// `connection` carries the full connection metadata (process, src/dst
     /// addr/port, protocol, uid, etc.).
     /// `rule` is `Some` when a rule was matched, `None` on missed/default.
-    fn on_connection_event(&self, connection: &pb::Connection, rule: Option<&pb::Rule>);
+    fn on_connection_event(&self, connection: &WireConnection, rule: Option<&WireRule>);
 }

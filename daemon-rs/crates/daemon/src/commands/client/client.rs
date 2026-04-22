@@ -1,6 +1,6 @@
-use opensnitch_proto::pb;
 use serde_json::Value;
 use tokio::sync::mpsc;
+use transport_wire_core::{WireNotificationReply, WireNotificationReplyCode};
 
 use crate::{
     models::{
@@ -9,7 +9,7 @@ use crate::{
         firewall_config::FirewallConfig,
         rule_record::RuleRecord,
     },
-    utils::{json_value::object_get_case_insensitive, notification_reply::send_notification_reply},
+    utils::{channel_send::send_with_backpressure, json_value::object_get_case_insensitive},
 };
 
 const CLIENT_COMMAND_NOTIFICATION_LABEL: &str = "client command notification";
@@ -26,7 +26,7 @@ pub(crate) async fn command_from_action_or_reply(
     data: &str,
     rules: Vec<RuleRecord>,
     firewall: Option<FirewallConfig>,
-    reply_tx: &mpsc::Sender<pb::NotificationReply>,
+    reply_tx: &mpsc::Sender<WireNotificationReply>,
 ) -> NotificationCommandDecision {
     if let Some(toggle_cmd) = parse_toggle_command(notification_id, action) {
         return NotificationCommandDecision::Command(toggle_cmd);
@@ -109,7 +109,7 @@ pub(crate) async fn command_from_action_or_reply(
 async fn parse_task_command_or_reply(
     id: u64,
     data: &str,
-    reply_tx: &mpsc::Sender<pb::NotificationReply>,
+    reply_tx: &mpsc::Sender<WireNotificationReply>,
     start: bool,
 ) -> Option<ClientCommand> {
     match parse_task_notification_data(id, data) {
@@ -135,12 +135,14 @@ async fn parse_task_command_or_reply(
             } else {
                 format!("Error stopping task: {data}")
             };
-            let _ = send_notification_reply(
+            tracing::error!(notification_id = id, reply_data = %data, "{CLIENT_COMMAND_NOTIFICATION_LABEL}");
+            let _ = send_with_backpressure(
                 reply_tx,
-                id,
-                pb::NotificationReplyCode::Error,
-                data,
-                CLIENT_COMMAND_NOTIFICATION_LABEL,
+                WireNotificationReply {
+                    id,
+                    code: WireNotificationReplyCode::Error as i32,
+                    data,
+                },
             )
             .await;
             None

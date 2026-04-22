@@ -117,6 +117,52 @@ module surfaces are bounded.
 - Avoid feature-split file churn: if a service is understandable as one unit, prefer co-locating runtime orchestration in `<service>.rs` instead of forcing `intent.rs` or `*Intent*` naming.
 - Service-internal split parts live in service submodules/files, not as root-level service files.
 - UI-facing client/session concerns live under `services/client` (`Client`, notification stream, UI session state); transport-specific adapters (current gRPC/tonic path, future non-gRPC frontends) hang off that boundary rather than owning daemon policy directly.
+- `services/client/client.rs` and `services/client/notifications.rs` are orchestration surfaces: they select/manage transport wires and route policy/runtime flow, but they must not own wire-runtime protocol mechanics (for example tonic stream/client/channel shaping).
+- `services/client/wire.rs` must consume explicit transport-boundary DTOs and wire contracts from `services/client/transport.rs`; it must not depend on alias-based indirection, adapter crates, or raw protobuf module paths.
+- `services/client/transport.rs` is a boundary façade: keep protocol-specific mechanics (for example gRPC TLS/session internals) in dedicated sibling modules (for example `transport/transport_grpc.rs`) and expose only explicit DTO / wire-contract surfaces used by orchestration modules.
+- Wire-runtime mechanics belong in dedicated adapter modules/crates (`services/client/wire*.rs`, `transport-wire-*` workspace crates). Adding a new transport wire must be an adapter-implementation change, not a policy-flow rewrite in `flows/notification`.
+- Subscription transport wiring (protobuf/gRPC stream shaping and RPC call surfaces) follows the same rule: daemon services/flows orchestrate through ports, while wire protocol mechanics stay inside `transport-wire-*` adapters.
+- Storage-format boundaries and transport-wire boundaries are symmetric governance surfaces: format/wire-specific codecs stay in `storage-format-*` / `transport-wire-*` adapters, while services/flows operate on canonical domain models and ports.
+- Terminology is explicit and mandatory:
+	- **transport** = connection/session protocol layer (for example HTTP/S, WebSocket, MQTT, Unix/TCP socket session mechanics).
+	- **wire** = payload encoding/codec carried over that transport (for example protobuf, JSON, CBOR).
+	- **role** = daemon endpoint role for that transport session (`client` / `server` when protocol supports both).
+	- Runtime selection logic must model transport and wire as separate dimensions (for example `ClientTransportKind` + `ClientWireCodecKind`) rather than one mixed enum.
+	- For client-boundary flows (`services/client/*`), runtime profile selection must also encode role explicitly (for example `ClientTransportRole` + transport + wire).
+- `transport-wire-core` is the unified transport core crate with mandatory internal separation:
+	- `ports` submodule: trait contracts and transport-facing interfaces only (`*Port`, async port futures).
+	- `wire_helpers` submodule: wire/payload helper primitives only (message/reply shaping utilities).
+	- Transport bootstrap must use generic factory contracts (`ClientTransportSessionFactoryPort`, `ClientTransportClientFactoryPort`) so daemon/runtime code depends on transport-agnostic `session` semantics rather than protocol nouns such as `channel`.
+	- Protocol-specific session primitives (gRPC channel, HTTP client pool, WebSocket stream handle, MQTT client, etc.) stay behind adapter crates and are exposed to daemon code only as `WireSession` aliases through those factory contracts.
+	- If an API introduces both a trait contract and wire helper behavior, split it across these submodules instead of co-locating in one file.
+- `storage-format-core` is the unified storage codec core crate with mandatory internal separation:
+	- `codec` submodule: trait contracts only (`StorageFormatCodec` and closely-related generic codec contract surfaces).
+	- Core codec contracts stay format-agnostic; JSON/YAML/TOML/UCI-specific parsing details belong in dedicated `storage-format-*` adapter crates, not in daemon services or the core crate root.
+- `transport-wire-*` and `storage-format-*` adapter crates must keep a thin crate root:
+	- `src/lib.rs` is a linker/re-export surface only.
+	- Protocol/format-specific implementation lives in dedicated sibling modules such as `codec.rs`, `rpc.rs`, `transport.rs`, `tls.rs`, `wire_protos.rs`, or `error.rs`.
+	- When an adapter exposes both public API and transport/format-specific internals, keep public surface re-exports stable in `lib.rs` and move concrete behavior into sibling modules rather than expanding the crate root.
+	- Adapter test trees must enter through `src/tests/mod.rs` so the crate root follows the same linker-only rule as daemon `mod.rs` files.
+
+#### Transport/Wire Decoupling Rule
+
+- `services/`, `flows/`, `workers/`, and runtime-facing `commands/` code must not reference generated protobuf types (`pb::*`, `proto::pb::*`) directly. Those types are transport-wire details and are allowed only in explicit adapter/boundary code:
+	- `transport-wire-*` crates,
+	- `platform/adapters/*` transport/storage edge adapters,
+	- narrowly-scoped mapper modules whose only responsibility is wire conversion.
+- Alias-based indirection is not decoupling. Do not hide protobuf dependence behind `type Foo = pb::Bar`, `pub type`, or renamed imports (`use ... as ...`) in daemon runtime code. If a runtime boundary needs a contract, define an explicit internal DTO or use an existing wire-core struct.
+- Boundary direction must stay explicit:
+	- daemon/domain -> internal DTO -> wire-core struct -> transport adapter,
+	- transport adapter -> wire-core struct -> internal DTO/domain.
+- Prefer direct field passthrough over re-materializing the same shape through compatibility helpers. If source and destination fields already align, move fields directly into the next boundary struct instead of cloning field-by-field through an intermediate protobuf alias.
+- Cloning rule for boundary payloads:
+	- Do not introduce `clone()` just to cross a transport/wire boundary when ownership can be moved.
+	- Use consuming conversions for request/reply payloads when the caller is finished with the source value.
+	- Borrowing conversions are acceptable only when the source must remain usable after conversion.
+- `Arc` is not a transport-decoupling tool. Use `Arc<T>` only for shared immutable runtime state/snapshots or intentionally shared long-lived objects. Do not wrap request/reply payload DTOs in `Arc` to avoid modeling ownership correctly; for one-shot transport payloads, prefer owned structs and moves.
+- Validation rule for decoupling slices:
+	- scan touched runtime code for `pb::`, `proto::pb`, `type ... = ...pb::`, and renamed-import alias walls,
+	- eliminate boundary leaks in the same slice rather than documenting them as follow-up debt when the call sites are already being migrated.
 
 
 #### Worker Layout Decision
@@ -180,6 +226,11 @@ module surfaces are bounded.
 #### Test Placement Rule
 
 - All tests for a crate must live under the `src/tests/` directory of that crate (e.g. `src/tests/parsing/`, `src/tests/workers/`, `src/tests/services/`, etc.).
+- Adapter-domain tests must live in the owning adapter crate test tree (`transport-wire-*`, `storage-format-*`, etc.), not under `crates/daemon/src/tests/`.
+- `crates/daemon/src/tests/` is reserved for daemon orchestration/policy/flow consistency coverage; adapter protocol/codec contract tests belong to adapter crates.
+- Daemon flow tests must prefer stub/wire-core profiles in default (no-feature) test builds.
+- Daemon tests that assert transport protocol/codec conversion behavior (protobuf field mapping, tonic channel/server handshake details, wire round-trip contracts) must live in the owning `transport-wire-*` crate tests.
+- Daemon flow-consistency tests that truly require a live transport adapter runtime (for example validating flow-level in-flight gating/fallback orchestration across concurrent transport calls) may remain in `crates/daemon/src/tests/`, but must be feature-guarded (for example `#[cfg(feature = "transport-wire-grpc-client")]`) and keep protobuf payload usage minimal.
 - Implementation files must not contain inline `mod tests { ... }` blocks with actual test functions.
 - The **only** `#[cfg(test)]` or `#[tokio::test]` annotations permitted inside implementation files are:
 	- `#[cfg(test)] #[path = "..."] mod <name>;` — a module declaration that wires a `src/tests/` file into the impl module's namespace for visibility (giving tests access to private items).
@@ -209,6 +260,7 @@ module surfaces are bounded.
 #### Canonical Domain Model And Wire Contract Rule
 
 - Canonical runtime/domain data contracts live in `models/`; they are the source of truth for invariants and semantics.
+- Pure boundary-shaping models that are shared by both enabled and disabled packaging profiles may remain compiled in even when the backing feature implementation is off, as long as they stay side-effect free and exist only to preserve a stable boundary/API contract.
 - **Every external serialization format is a wire contract, not the internal domain model.**  This applies equally to:
   - Protobuf (`*.proto`) / gRPC transport — generated `pb::*` types.
   - JSON file storage (on-disk config, rules, firewall) — `Raw*` / `Persisted*` serde shapes.
@@ -245,6 +297,79 @@ module surfaces are bounded.
 - Prefer extraction via stable wrappers first, then collapse wrappers in a second pass.
 - Do not keep compatibility shims once call sites are migrated in the same refactor slice, including one-line helper aliases kept only for transitional naming.
 - Keep behavior parity first; run `cargo check` and tests each slice.
+
+### 6. Compiler Warning Resolution Rule
+
+**No warning may be suppressed without justification.** Suppression attributes
+(`#[allow(dead_code)]`, `#[allow(unused)]`, `#[allow(unused_imports)]`, etc.) are not
+acceptable fixes by default. Every compiler warning must be resolved by understanding and
+addressing its root cause.
+
+#### Dead-Code Warning Arbitration
+
+When a `dead_code` (or equivalent unused-item) warning appears, the author must trace
+the item's history — using `git log`, `git blame`, and `git grep` — and arbitrate one of
+three outcomes:
+
+1. **Promote:** The item is a valid API that accidentally became orphaned (was introduced
+   with production intent, has clear semantic value, and a legitimate call site exists or
+   can be built). Fix: wire up the active code path and remove any suppression attribute.
+
+2. **Remove:** The item was never used in production and has no clear future caller. Fix:
+   delete the code and any associated tests that only exist to suppress the warning.
+
+3. **Justify:** The item is a deliberate public/cross-boundary API or test utility that
+   cannot have a production callsite in the same compilation unit (for example a library
+   item consumed by external crates, a trait method required by the interface, or a
+   test-only helper visible to sibling test modules). Fix: add a suppression attribute
+   *with a one-line comment explaining why* the item is intentionally unreachable from
+   the current unit:
+   ```rust
+   // Public codec API surface — consumed by packaging-profile integration tests.
+   #[allow(dead_code)]
+   pub fn encode_yaml(...) -> ...
+   ```
+
+#### Suppression Hygiene
+
+- `#[allow(...)]` at item level is preferred over module-level or crate-level allows.
+- Crate-level suppression (`#![allow(...)]` in `lib.rs`/`main.rs`) is forbidden.
+- Module-level suppression requires an explicit comment naming the full set of items it covers.
+- Suppression applied to silence a warning in another crate's generated code must use the
+	narrowest `#[allow]` scope possible and must be co-located with the type/module that
+	imports the generated code.
+
+- `#[cfg_attr(not(test), allow(dead_code))]` may be used narrowly for test-only helpers
+	that must live alongside production code for visibility reasons (see Test Placement Rule
+	for the preferred alternative). Any such attribute requires the same one-line comment
+	justification as the full suppress form.
+
+### 7. Workspace Dependency Reuse Rule
+
+- New adapter/codec crates (`transport-wire-*`, `storage-format-*`) must reuse shared dependency versions through `[workspace.dependencies]` in the workspace root `Cargo.toml`.
+- Crate-local version pins for dependencies already defined in `[workspace.dependencies]` are prohibited unless a crate has a documented compatibility exception.
+- Feature sets may differ per crate (for example `tokio` features), but the underlying crate version must come from workspace dependencies.
+- For transport/storage slice PRs, run `cargo tree -p <target-crate> -d` (and for daemon-facing impact, `cargo tree -p opensnitchd-rs -d`) and include a short note in the PR when new duplicate-version families are introduced.
+- Build-time duplicates from codegen/tooling may be accepted when unavoidable, but runtime duplicates introduced by new transport/storage libs must be treated as regressions and resolved before merge.
+
+#### Commit Hygiene Gate
+
+- All three build profiles must be warning-free before a commit lands:
+  - `cargo check -p <crate>` (default features / dev profile),
+  - `cargo test -p <crate> --no-run` (test profile),
+  - any non-default packaging profile declared in `Cargo.toml` (for example
+    `--no-default-features --features storage-format-yaml`).
+- A PR that introduces a new suppression attribute without a justification comment is a
+  blocking review finding.
+
+
+### Packaging Feature-Gating Rule
+
+- Optional integration surfaces (wire codecs, transport adapters, exporter backends, and other non-core pluggable components) must be exposed behind explicit Cargo features.
+- Default features should keep baseline OpenSnitch-compatible behavior; additional formats/adapters must be opt-in unless required for baseline compatibility.
+- When introducing a new optional dependency with measurable packaging footprint, add a dedicated `feature = ["dep:..."]` gate and avoid unconditional linking.
+- Runtime policy/authorization semantics must remain transport/codec agnostic and must not be hidden behind packaging-only feature flags.
+- Build safety: crates that require at least one implementation in a feature family (for example storage codecs) must enforce a compile-time guard so invalid zero-implementation builds fail fast.
 
 
 ## Part II — Per-Domain Rules
@@ -816,3 +941,26 @@ Before every commit in `daemon-rs/`, verify all of the following:
 
 5. **`cargo test`** — all tests must pass. Regressions introduced by mechanical splits must be
    fixed before committing.
+	- When invoking privileged ignored smoke tests directly via elevated `cargo test`
+	  instead of `cargo ost`, run them serially with `-- --ignored --nocapture --test-threads=1`.
+	  Parallel ignored smoke execution is invalid because multiple Aya smoke tests can try to
+	  launch daemon instances concurrently and trip the single-daemon startup guard.
+
+6. **Tools CLI orchestration harness regression** — run the tools-crate orchestration smoke
+	harness exposed via CLI pathways on every commit:
+	- `cargo test -p tools --test orchestration_smoke -- --nocapture`
+	- Repo-level equivalents for most tools test/harness flows are preferred when available:
+	  `cargo ost <command>` (from repo root) or root Makefile wrappers (`make <target>`).
+	  Keep the direct `cargo test -p tools --test orchestration_smoke -- --nocapture`
+	  invocation for this specific smoke test.
+	- This validates that commit-time changes did not regress test orchestration behavior that
+	  launch/guard flows depend on.
+
+7. **Tools launcher regression sweep** — run the core tools launcher flows to catch integration
+   regressions between orchestration, live session control, and perf pipelines:
+	- `cargo ost run-daemon-mock-ui-live-session` or `make daemon-rs-mock-ui-session`
+	- `cargo ost update-run-perf` or `make update-run-perf`
+	- Direct crate-level fallback remains valid:
+	  - `cargo run --release -p tools -- run-daemon-mock-ui-live-session`
+	  - `cargo run --release -p tools -- update-run-perf`
+   - Treat failures in either command as release-blocking until triaged or fixed.

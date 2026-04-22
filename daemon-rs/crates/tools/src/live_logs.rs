@@ -335,8 +335,14 @@ pub(crate) fn run_daemon_mock_ui_live_session() -> Result<(), DynError> {
     let session_secs = env::var("OPENSNITCH_MOCK_UI_SESSION_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(180)
+        .unwrap_or(60)
         .max(5);
+    let handshake_timeout_secs = env::var("OPENSNITCH_MOCK_UI_HANDSHAKE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(20)
+        .max(2)
+        .min(session_secs);
     let mock_runtime_secs = env::var("OPENSNITCH_MOCK_UI_RUNTIME_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -399,6 +405,28 @@ pub(crate) fn run_daemon_mock_ui_live_session() -> Result<(), DynError> {
     }
 
     launch_daemon_live_logs()?;
+
+    // Probe early daemon->client wiring so callers get quick visibility when
+    // startup is slow. This probe is advisory only; final pass/fail remains
+    // governed by the full compatibility marker set below.
+    let early_handshake_markers: Vec<&str> = vec![
+        "MOCK_UI Subscribe",
+        "MOCK_UI Ping",
+        "MOCK_UI Notifications stream open",
+    ];
+
+    let early_observed = wait_for_log_patterns(
+        &mock_stdout,
+        &early_handshake_markers,
+        Duration::from_secs(handshake_timeout_secs),
+    );
+
+    if !early_observed {
+        eprintln!(
+            "warning: early daemon->mock-ui handshake markers were not observed within {}s; continuing full compatibility wait (session={}s)",
+            handshake_timeout_secs, session_secs
+        );
+    }
 
     let handshake_markers: Vec<&str> = vec![
         "MOCK_UI Subscribe",

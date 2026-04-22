@@ -3,10 +3,10 @@ use crate::models::{
     rule_storage::{RuleFile, RuleFileOperator},
 };
 use crate::utils::name_parsing::case_folded;
-use opensnitch_proto::pb;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use transport_wire_core::{WireRule, WireRuleOperator};
 
-pub(crate) fn rule_record_from_proto(rule: &pb::Rule) -> RuleRecord {
+pub(crate) fn rule_record_from_wire(rule: &WireRule) -> RuleRecord {
     RuleRecord {
         created_at: OffsetDateTime::from_unix_timestamp(rule.created).ok(),
         updated_at: None,
@@ -17,12 +17,12 @@ pub(crate) fn rule_record_from_proto(rule: &pb::Rule) -> RuleRecord {
         enabled: rule.enabled,
         precedence: rule.precedence,
         nolog: rule.nolog,
-        operator: rule_operator_from_proto(rule.operator.as_ref()),
+        operator: rule_operator_from_wire(rule.operator.as_ref()),
     }
 }
 
-pub(crate) fn rule_record_to_proto(rule: &RuleRecord) -> pb::Rule {
-    pb::Rule {
+pub(crate) fn wire_rule_from_record(rule: &RuleRecord) -> WireRule {
+    WireRule {
         created: rule
             .created_at
             .map(|value| value.unix_timestamp())
@@ -34,7 +34,7 @@ pub(crate) fn rule_record_to_proto(rule: &RuleRecord) -> pb::Rule {
         nolog: rule.nolog,
         action: rule.action.as_str().to_string(),
         duration: rule.duration.as_str().to_string(),
-        operator: Some(rule_operator_to_proto(&rule.operator)),
+        operator: Some(wire_operator_from_rule_operator(&rule.operator)),
     }
 }
 
@@ -52,13 +52,13 @@ pub(crate) fn format_rule_timestamp(value: OffsetDateTime) -> String {
         .unwrap_or_else(|_| value.unix_timestamp().to_string())
 }
 
-fn rule_operator_from_proto(operator: Option<&pb::Operator>) -> RuleOperator {
+fn rule_operator_from_wire(operator: Option<&WireRuleOperator>) -> RuleOperator {
     let Some(operator) = operator else {
         return RuleOperator::default();
     };
 
     let mut parsed = RuleOperator {
-        type_name: operator.r#type.clone(),
+        type_name: operator.type_name.clone(),
         operand: operator.operand.clone(),
         data: operator.data.clone(),
         sensitive: operator.sensitive,
@@ -66,7 +66,7 @@ fn rule_operator_from_proto(operator: Option<&pb::Operator>) -> RuleOperator {
         list: operator
             .list
             .iter()
-            .map(|item| rule_operator_from_proto(Some(item)))
+            .map(|item| rule_operator_from_wire(Some(item)))
             .collect(),
     };
 
@@ -77,13 +77,17 @@ fn rule_operator_from_proto(operator: Option<&pb::Operator>) -> RuleOperator {
     parsed
 }
 
-fn rule_operator_to_proto(operator: &RuleOperator) -> pb::Operator {
-    pb::Operator {
-        r#type: operator.type_name.clone(),
+fn wire_operator_from_rule_operator(operator: &RuleOperator) -> WireRuleOperator {
+    WireRuleOperator {
+        type_name: operator.type_name.clone(),
         operand: operator.operand.clone(),
         data: operator.data.clone(),
         sensitive: operator.sensitive,
-        list: operator.list.iter().map(rule_operator_to_proto).collect(),
+        list: operator
+            .list
+            .iter()
+            .map(wire_operator_from_rule_operator)
+            .collect(),
     }
 }
 

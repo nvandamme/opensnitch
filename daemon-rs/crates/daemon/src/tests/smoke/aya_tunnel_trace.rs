@@ -278,7 +278,7 @@ fn aya_tunnel_trace_smoke_reports_tunnel_probe_activity() {
         std::env::temp_dir().join(format!("opensnitch-aya-tunnel-trace-test-{unique}.log"));
 
     let mut daemon = Command::new("timeout")
-        .arg("24s")
+        .arg("20s")
         .arg(&daemon_bin)
         .env("OPENSNITCH_EBPF_PIN_DOMAIN", "aya")
         .env("RUST_LOG", "debug")

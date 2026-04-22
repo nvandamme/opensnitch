@@ -1,6 +1,5 @@
 use std::{future::Future, pin::Pin};
 
-use opensnitch_proto::pb;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -157,7 +156,7 @@ impl CommandControlService {
         rules: &RuleService,
         firewall: &FirewallService,
         _stats: &StatsService,
-        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         client_service: &ClientService,
         reconfigure_proc_workers: &dyn ProcWorkerReconfigurePort,
         control_proc_workers: &dyn ProcWorkerControlPort,
@@ -262,7 +261,7 @@ impl CommandControlService {
         enabled: bool,
         config: &ConfigService,
         firewall: &FirewallService,
-        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         client_service: &ClientService,
         reconfigure_proc_workers: &dyn ProcWorkerReconfigurePort,
         control_proc_workers: &dyn ProcWorkerControlPort,
@@ -346,7 +345,7 @@ impl CommandControlService {
                 let _ = send_notification_reply(
                     task_reply_tx,
                     notification_id,
-                    pb::NotificationReplyCode::Ok,
+                    transport_wire_core::WireNotificationReplyCode::Ok,
                     status_payload("ok"),
                     CONTROL_COMMAND_NOTIFICATION_LABEL,
                 )
@@ -364,7 +363,7 @@ impl CommandControlService {
                 let _ = send_notification_reply(
                     task_reply_tx,
                     notification_id,
-                    pb::NotificationReplyCode::Error,
+                    transport_wire_core::WireNotificationReplyCode::Error,
                     message,
                     CONTROL_COMMAND_NOTIFICATION_LABEL,
                 )
@@ -377,12 +376,12 @@ impl CommandControlService {
         &self,
         notification_id: u64,
         shutdown: &CancellationToken,
-        task_reply_tx: &tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
     ) {
         let _ = send_notification_reply(
             task_reply_tx,
             notification_id,
-            pb::NotificationReplyCode::Ok,
+            transport_wire_core::WireNotificationReplyCode::Ok,
             status_payload("stopping"),
             CONTROL_COMMAND_NOTIFICATION_LABEL,
         )

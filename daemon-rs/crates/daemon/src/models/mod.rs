@@ -44,7 +44,6 @@ pub mod storage_dir_entry;
 pub mod storage_event;
 pub mod storage_event_counters;
 pub mod subscription_refresh;
-#[cfg(feature = "subscriptions")]
 pub mod subscription_rpc;
 pub mod subscription_storage;
 pub mod task_config;

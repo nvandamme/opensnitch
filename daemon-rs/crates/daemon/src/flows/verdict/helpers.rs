@@ -4,16 +4,16 @@
 /// helpers are a separate concern from the public-API entry points
 /// (`handle_connect_attempt`, `process_connect_attempt`, constructor) that
 /// stay in `verdict.rs`.
-use opensnitch_proto::pb;
+use transport_wire_core::{WireConnection, WireProcess, WireRule, WireStringInt};
 
 use crate::{
     config::{AskFallbackPolicy, DefaultAction},
     models::audit::{AuditEvent, AuditEventKind, VerdictAction},
     models::connection_state::ConnectionAttempt,
     models::effective_tunables::NfqueueOverloadPolicy,
+    models::process_state::ProcessInfo,
     models::rule_record::RuleRecord,
     platform::ports::nfqueue_runtime_port::NfqueueRuntimePort,
-    platform::ports::proto_mapper_port::ProtoMapperPort,
     services::client::enqueue_alert,
     services::client::{warning_connection_alert, warning_process_alert},
     services::policy_tx::PolicyOwner,
@@ -31,7 +31,7 @@ impl VerdictFlow {
             .iter()
             .map(|rule| rule.name.clone())
             .collect::<BTreeSet<_>>();
-        let current = rules.get_proto_snapshot();
+        let current = rules.get_wire_snapshot();
 
         for rule in current.as_ref() {
             if !target_names.contains(&rule.name) {
@@ -118,7 +118,7 @@ impl VerdictFlow {
         }
     }
 
-    pub(super) fn emit_connection_event(&self, conn: pb::Connection, rule: Option<pb::Rule>) {
+    pub(super) fn emit_connection_event(&self, conn: WireConnection, rule: Option<WireRule>) {
         if let Some(ref exporter) = self.event_exporter {
             let config = self.config.get_snapshot();
             exporter.refresh_loggers(&config.loggers);
@@ -155,7 +155,7 @@ impl VerdictFlow {
         }
     }
 
-    pub(super) fn enqueue_connection_warning_alert(&self, conn: pb::Connection) {
+    pub(super) fn enqueue_connection_warning_alert(&self, conn: WireConnection) {
         enqueue_alert(
             &self.alert_buffer,
             &self.bus.alert_tx,
@@ -163,22 +163,72 @@ impl VerdictFlow {
         );
     }
 
-    pub(super) fn enqueue_process_warning_alert(
-        &self,
-        proc_info: &crate::models::process_state::ProcessInfo,
-    ) {
+    pub(super) fn enqueue_process_warning_alert(&self, proc_info: &ProcessInfo) {
+        let mut checksums = std::collections::HashMap::new();
+        if let Some(hash) = proc_info
+            .process_hash_md5
+            .as_ref()
+            .filter(|v| !v.is_empty())
+        {
+            checksums.insert("md5".to_string(), hash.clone());
+        }
+        if let Some(hash) = proc_info
+            .process_hash_sha1
+            .as_ref()
+            .filter(|v| !v.is_empty())
+        {
+            checksums.insert("sha1".to_string(), hash.clone());
+        }
+        if let Some(hash) = proc_info.process_hash.as_ref().filter(|v| !v.is_empty()) {
+            checksums.insert("sha256".to_string(), hash.clone());
+        }
+
+        let env = if !proc_info.env_map.is_empty() {
+            proc_info.env_map.clone()
+        } else {
+            let mut env = std::collections::HashMap::new();
+            for entry in &proc_info.env_preview {
+                if let Some((key, value)) = entry.split_once('=') {
+                    env.insert(key.to_string(), value.to_string());
+                }
+            }
+            env
+        };
+
         enqueue_alert(
             &self.alert_buffer,
             &self.bus.alert_tx,
-            warning_process_alert(ProtoMapperPort::to_proto_process(proc_info)),
+            warning_process_alert(WireProcess {
+                pid: proc_info.pid as u64,
+                ppid: 0,
+                uid: 0,
+                comm: String::new(),
+                path: proc_info.path.clone(),
+                args: proc_info.args.clone(),
+                env,
+                cwd: proc_info.cwd.clone().unwrap_or_default(),
+                checksums,
+                io_reads: 0,
+                io_writes: 0,
+                net_reads: 0,
+                net_writes: 0,
+                process_tree: proc_info
+                    .parent_chain
+                    .iter()
+                    .map(|entry| WireStringInt {
+                        key: entry.path.clone(),
+                        value: entry.pid,
+                    })
+                    .collect(),
+            }),
         );
     }
 
-    pub(super) async fn apply_default_action_on_ui_miss(
+    pub(super) async fn apply_default_action_on_client_miss(
         &self,
         request_id: u64,
-        proc_info: &crate::models::process_state::ProcessInfo,
-        conn: pb::Connection,
+        proc_info: &ProcessInfo,
+        conn: WireConnection,
     ) {
         self.emit_connection_event(conn.clone(), None);
         self.enqueue_connection_warning_alert(conn);

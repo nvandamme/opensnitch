@@ -5,5 +5,5 @@ mod storage;
 
 #[allow(unused_imports)]
 pub(crate) use storage::{
-    StorageEvent, StorageEventSubscription, StorageOperation, StorageService,
+    StorageEvent, StorageEventSubscription, StorageFormat, StorageOperation, StorageService,
 };

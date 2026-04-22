@@ -19,6 +19,8 @@ mod trigger;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EmptyWatchTargetsBehavior {
     WarnPollFallback,
+    // Matched in control_trigger.rs for quieter info!-level poll-fallback logging;
+    // no watcher currently opts into this variant but it is a valid customization point.
     #[allow(dead_code)]
     InfoPollFallback,
 }

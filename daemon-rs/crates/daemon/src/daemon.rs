@@ -49,6 +49,7 @@ pub(crate) use migration::{
 ///   --rules-path               <path>       Rules directory override.
 ///   --ui-socket                <addr>       UI gRPC address.
 ///   --auth-mode                <mode>       Client authorization mode override (legacy|local-only|local+remote).
+///   --main-storage-format      <format>     Main storage format override (json|yaml|toml).
 ///   --migrate-ownerless-rules               Run one-shot legacy ownerless rule migration.
 ///   --migrate-owner-uid        <uid>        Target owner UID for migration mode.
 ///   --migrate-write                         Persist migration changes (default is dry-run).
@@ -67,6 +68,7 @@ pub struct CliOverrides {
     pub rules_path: Option<std::path::PathBuf>,
     pub ui_socket: Option<String>,
     pub auth_mode: Option<String>,
+    pub main_storage_format: Option<String>,
     pub rule_migration: RuleMigrationCliOverrides,
     pub metrics: crate::models::metrics_config::MetricsCliOverrides,
     pub audit: AuditCliOverrides,
@@ -126,9 +128,11 @@ pub(crate) struct DaemonRuntime {
     pub(crate) tunables: RuntimeTunables,
     pub(crate) shutdown: CancellationToken,
     /// Metrics export config loaded from `metrics.json` at startup (§7 baseline JSON layer).
+    // Read only inside #[cfg(feature = "metrics-export")] blocks in tasks.rs; dead when the feature is off.
     #[cfg_attr(not(feature = "metrics-export"), allow(dead_code))]
     pub(crate) metrics_config: crate::models::metrics_config::MetricsConfig,
     /// Metrics CLI overrides supplied via `--metrics-*` flags (§7 highest tier; overrides env vars and JSON).
+    // Read only inside #[cfg(feature = "metrics-export")] blocks in tasks.rs; dead when the feature is off.
     #[cfg_attr(not(feature = "metrics-export"), allow(dead_code))]
     pub(crate) metrics_cli: crate::models::metrics_config::MetricsCliOverrides,
     /// Hot-reload handle for the Prometheus scrape HTTP server.
@@ -162,8 +166,8 @@ pub(crate) struct MetricsServerSlot {
 }
 
 impl Daemon {
-    const STARTUP_UI_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-    const STARTUP_UI_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    const STARTUP_CLIENT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+    const STARTUP_CLIENT_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
     pub async fn start(cli: CliOverrides) -> Result<()> {
         if cli.rule_migration.ownerless_rules {

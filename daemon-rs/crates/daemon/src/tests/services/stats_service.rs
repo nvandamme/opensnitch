@@ -1,6 +1,6 @@
 use crate::config::StatsConfig;
 use crate::services::{stats::StatsService, storage::StorageService};
-use opensnitch_proto::pb;
+use transport_wire_core::WireConnection;
 
 #[test]
 fn bump_limited_counter_evicts_lowest_entry_at_capacity() {
@@ -20,7 +20,7 @@ fn apply_config_trims_existing_event_backlog() {
     let stats = StatsService::default();
     for index in 0..3 {
         stats.on_event(
-            pb::Connection {
+            WireConnection {
                 protocol: "tcp".to_string(),
                 dst_ip: format!("10.0.0.{index}"),
                 ..Default::default()
@@ -72,7 +72,7 @@ fn snapshot_if_pending_returns_none_without_events_and_drains_when_present() {
     let stats = StatsService::default();
     assert!(stats.snapshot_if_pending(0).is_none());
 
-    stats.on_event(pb::Connection::default(), None);
+    stats.on_event(WireConnection::default(), None);
     let snapshot = stats.snapshot_if_pending(0).expect("pending snapshot");
     assert_eq!(snapshot.stats.events.len(), 1);
     assert!(stats.snapshot_if_pending(0).is_none());
@@ -95,7 +95,7 @@ fn apply_config_zero_values_keep_existing_limits() {
 
     for index in 0..4 {
         stats.on_event(
-            pb::Connection {
+            WireConnection {
                 protocol: "tcp".to_string(),
                 dst_ip: format!("10.0.1.{index}"),
                 ..Default::default()

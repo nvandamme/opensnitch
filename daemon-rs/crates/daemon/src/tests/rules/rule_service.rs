@@ -1,6 +1,6 @@
 use anyhow::Result;
-use opensnitch_proto::pb;
 use std::time::Instant;
+use transport_wire_core::{WireRule, WireRuleOperator};
 
 use crate::{
     models::{
@@ -12,6 +12,10 @@ use crate::{
     services::rule::{RuleMatchDecision, RuleService},
     tests::support::{TestDir, path_string},
 };
+
+async fn upsert_rule(service: &RuleService, rule: WireRule) -> Result<RuleMatchDecision> {
+    service.upsert_from_wire(&rule).await
+}
 
 fn probe_process() -> ProcessInfo {
     ProcessInfo {
@@ -1460,22 +1464,24 @@ async fn upsert_once_rule_returns_decision_without_persisting() -> Result<()> {
     let service = RuleService::default();
     service.load_path(&rules_dir.path).await?;
 
-    let decision = service
-        .upsert_from_proto(&pb::Rule {
+    let decision = upsert_rule(
+        &service,
+        WireRule {
             name: "temp-once".to_string(),
             action: "deny".to_string(),
             duration: "once".to_string(),
             enabled: true,
-            operator: Some(pb::Operator {
-                r#type: "simple".to_string(),
+            operator: Some(WireRuleOperator {
+                type_name: "simple".to_string(),
                 operand: "true".to_string(),
                 data: String::new(),
                 sensitive: false,
                 list: Vec::new(),
             }),
             ..Default::default()
-        })
-        .await?;
+        },
+    )
+    .await?;
 
     assert_eq!(
         decision,
@@ -1485,7 +1491,7 @@ async fn upsert_once_rule_returns_decision_without_persisting() -> Result<()> {
             nolog: false,
         }
     );
-    assert!(service.list_proto().await.is_empty());
+    assert!(service.list_wire().await.is_empty());
     assert!(!rules_dir.path.join("temp-once.json").exists());
     Ok(())
 }
@@ -1496,13 +1502,13 @@ async fn upsert_persistent_rule_updates_existing_record() -> Result<()> {
     let service = RuleService::default();
     service.load_path(&rules_dir.path).await?;
 
-    let initial = pb::Rule {
+    let initial = WireRule {
         name: "persisted".to_string(),
         action: "allow".to_string(),
         duration: "always".to_string(),
         enabled: true,
-        operator: Some(pb::Operator {
-            r#type: "simple".to_string(),
+        operator: Some(WireRuleOperator {
+            type_name: "simple".to_string(),
             operand: "true".to_string(),
             data: String::new(),
             sensitive: false,
@@ -1511,13 +1517,13 @@ async fn upsert_persistent_rule_updates_existing_record() -> Result<()> {
         ..Default::default()
     };
 
-    service.upsert_from_proto(&initial).await?;
+    upsert_rule(&service, initial.clone()).await?;
 
-    let updated = pb::Rule {
+    let updated = WireRule {
         action: "reject".to_string(),
         ..initial
     };
-    let decision = service.upsert_from_proto(&updated).await?;
+    let decision = upsert_rule(&service, updated).await?;
 
     assert_eq!(
         decision,
@@ -1528,7 +1534,7 @@ async fn upsert_persistent_rule_updates_existing_record() -> Result<()> {
         }
     );
 
-    let list = service.list_proto().await;
+    let list = service.list_wire().await;
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].name, "persisted");
     assert_eq!(list[0].action, "reject");
@@ -1711,7 +1717,7 @@ async fn delete_by_name_is_idempotent_for_missing_rule() -> Result<()> {
     service.delete_by_name("does-not-exist").await?;
     service.delete_by_name("does-not-exist").await?;
 
-    assert!(service.list_proto().await.is_empty());
+    assert!(service.list_wire().await.is_empty());
     Ok(())
 }
 
@@ -1756,7 +1762,7 @@ async fn load_path_skips_invalid_enabled_regexp_rule() -> Result<()> {
     let service = RuleService::default();
     service.load_path(&rules_dir.path).await?;
 
-    let rules = service.list_proto().await;
+    let rules = service.list_wire().await;
     assert_eq!(rules.len(), 1);
     assert_eq!(rules[0].name, "002-valid-simple");
 
@@ -1769,25 +1775,27 @@ async fn upsert_enabled_invalid_regexp_returns_error() -> Result<()> {
     let service = RuleService::default();
     service.load_path(&rules_dir.path).await?;
 
-    let result = service
-        .upsert_from_proto(&pb::Rule {
+    let result = upsert_rule(
+        &service,
+        WireRule {
             name: "invalid-regexp-upsert".to_string(),
             action: "deny".to_string(),
             duration: "always".to_string(),
             enabled: true,
-            operator: Some(pb::Operator {
-                r#type: "regexp".to_string(),
+            operator: Some(WireRuleOperator {
+                type_name: "regexp".to_string(),
                 operand: "protocol".to_string(),
                 data: "^TC(P$".to_string(),
                 sensitive: false,
                 list: Vec::new(),
             }),
             ..Default::default()
-        })
-        .await;
+        },
+    )
+    .await;
 
     assert!(result.is_err());
-    assert!(service.list_proto().await.is_empty());
+    assert!(service.list_wire().await.is_empty());
     Ok(())
 }
 
@@ -1797,19 +1805,21 @@ async fn upsert_enabled_without_operator_returns_error() -> Result<()> {
     let service = RuleService::default();
     service.load_path(&rules_dir.path).await?;
 
-    let result = service
-        .upsert_from_proto(&pb::Rule {
+    let result = upsert_rule(
+        &service,
+        WireRule {
             name: "missing-operator".to_string(),
             action: "deny".to_string(),
             duration: "always".to_string(),
             enabled: true,
             operator: None,
             ..Default::default()
-        })
-        .await;
+        },
+    )
+    .await;
 
     assert!(result.is_err());
-    assert!(service.list_proto().await.is_empty());
+    assert!(service.list_wire().await.is_empty());
     Ok(())
 }
 
@@ -1819,25 +1829,27 @@ async fn upsert_enabled_unknown_user_name_returns_error() -> Result<()> {
     let service = RuleService::default();
     service.load_path(&rules_dir.path).await?;
 
-    let result = service
-        .upsert_from_proto(&pb::Rule {
+    let result = upsert_rule(
+        &service,
+        WireRule {
             name: "unknown-user-name".to_string(),
             action: "deny".to_string(),
             duration: "always".to_string(),
             enabled: true,
-            operator: Some(pb::Operator {
-                r#type: "simple".to_string(),
+            operator: Some(WireRuleOperator {
+                type_name: "simple".to_string(),
                 operand: "user.name".to_string(),
                 data: "opensnitch-user-that-should-not-exist".to_string(),
                 sensitive: false,
                 list: Vec::new(),
             }),
             ..Default::default()
-        })
-        .await;
+        },
+    )
+    .await;
 
     assert!(result.is_err());
-    assert!(service.list_proto().await.is_empty());
+    assert!(service.list_wire().await.is_empty());
     Ok(())
 }
 
@@ -1865,7 +1877,7 @@ async fn load_path_keeps_disabled_invalid_regexp_rule() -> Result<()> {
     let service = RuleService::default();
     service.load_path(&rules_dir.path).await?;
 
-    let rules = service.list_proto().await;
+    let rules = service.list_wire().await;
     assert_eq!(rules.len(), 1);
     assert_eq!(rules[0].name, "disabled-invalid-regexp");
     assert!(!rules[0].enabled);
@@ -1925,7 +1937,7 @@ async fn load_path_sorts_rules_by_name() -> Result<()> {
     let service = RuleService::default();
     service.load_path(&rules_dir.path).await?;
 
-    let listed = service.list_proto().await;
+    let listed = service.list_wire().await;
     assert_eq!(listed.len(), 2);
     assert_eq!(listed[0].name, "001-first");
     assert_eq!(listed[1].name, "002-second");
@@ -1938,26 +1950,28 @@ async fn temporary_rule_expires_after_duration() -> Result<()> {
     let service = RuleService::default();
     service.load_path(&rules_dir.path).await?;
 
-    service
-        .upsert_from_proto(&pb::Rule {
+    upsert_rule(
+        &service,
+        WireRule {
             name: "temp-expire".to_string(),
             action: "allow".to_string(),
             duration: "150ms".to_string(),
             enabled: true,
-            operator: Some(pb::Operator {
-                r#type: "simple".to_string(),
+            operator: Some(WireRuleOperator {
+                type_name: "simple".to_string(),
                 operand: "true".to_string(),
                 data: String::new(),
                 sensitive: false,
                 list: Vec::new(),
             }),
             ..Default::default()
-        })
-        .await?;
+        },
+    )
+    .await?;
 
-    assert_eq!(service.list_proto().await.len(), 1);
+    assert_eq!(service.list_wire().await.len(), 1);
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    assert!(service.list_proto().await.is_empty());
+    assert!(service.list_wire().await.is_empty());
     Ok(())
 }
 
@@ -1967,44 +1981,48 @@ async fn temporary_rule_duration_change_prevents_old_timer_deletion() -> Result<
     let service = RuleService::default();
     service.load_path(&rules_dir.path).await?;
 
-    service
-        .upsert_from_proto(&pb::Rule {
+    upsert_rule(
+        &service,
+        WireRule {
             name: "temp-change".to_string(),
             action: "allow".to_string(),
             duration: "150ms".to_string(),
             enabled: true,
-            operator: Some(pb::Operator {
-                r#type: "simple".to_string(),
+            operator: Some(WireRuleOperator {
+                type_name: "simple".to_string(),
                 operand: "true".to_string(),
                 data: String::new(),
                 sensitive: false,
                 list: Vec::new(),
             }),
             ..Default::default()
-        })
-        .await?;
+        },
+    )
+    .await?;
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    service
-        .upsert_from_proto(&pb::Rule {
+    upsert_rule(
+        &service,
+        WireRule {
             name: "temp-change".to_string(),
             action: "allow".to_string(),
             duration: "1h".to_string(),
             enabled: true,
-            operator: Some(pb::Operator {
-                r#type: "simple".to_string(),
+            operator: Some(WireRuleOperator {
+                type_name: "simple".to_string(),
                 operand: "true".to_string(),
                 data: String::new(),
                 sensitive: false,
                 list: Vec::new(),
             }),
             ..Default::default()
-        })
-        .await?;
+        },
+    )
+    .await?;
 
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    let listed = service.list_proto().await;
+    let listed = service.list_wire().await;
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].name, "temp-change");
     Ok(())

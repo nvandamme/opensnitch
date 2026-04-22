@@ -164,3 +164,40 @@ fn extract_dns_events_from_varlink_filters_non_a_aaaa_cname_records() {
         DnsPayload::alias("www.example.com", "example.com")
     );
 }
+
+#[test]
+fn extract_dns_events_from_varlink_batches_multiple_addresses_per_host() {
+    let msg = json!({
+        "parameters": {
+            "state": "success",
+            "answer": [
+                {
+                    "rr": {
+                        "key": {"name": "example.com.", "type": 1},
+                        "address": [1, 1, 1, 1]
+                    }
+                },
+                {
+                    "rr": {
+                        "key": {"name": "example.com.", "type": 1},
+                        "address": [8, 8, 8, 8]
+                    }
+                }
+            ]
+        }
+    });
+
+    let events = DnsWorkerControl::probe_extract_dns_events_from_varlink(&msg);
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0],
+        DnsPayload::answers(
+            "example.com",
+            std::sync::Arc::from(vec![
+                "1.1.1.1".parse().expect("test ip should parse"),
+                "8.8.8.8".parse().expect("test ip should parse"),
+            ]),
+        )
+        .expect("non-empty address list should build Answers payload")
+    );
+}

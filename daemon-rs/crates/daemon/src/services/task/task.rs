@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use opensnitch_proto::pb;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -17,7 +16,7 @@ use crate::{
 pub(crate) struct TaskRuntime {
     task_service: TaskService,
     process: ProcessService,
-    task_reply_tx: tokio::sync::mpsc::Sender<pb::NotificationReply>,
+    task_reply_tx: tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
     pub(super) task_handles: RuntimeTaskHandles,
     task_lifecycle_tx: tokio::sync::mpsc::Sender<TaskLifecycleEvent>,
     task_lifecycle_handle: JoinHandle<()>,
@@ -28,7 +27,7 @@ impl TaskRuntime {
     pub(crate) fn new(
         task_service: TaskService,
         process: ProcessService,
-        task_reply_tx: tokio::sync::mpsc::Sender<pb::NotificationReply>,
+        task_reply_tx: tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         shutdown: CancellationToken,
     ) -> Self {
         let (task_lifecycle_tx, mut task_lifecycle_rx) =
@@ -89,7 +88,7 @@ impl TaskRuntime {
             let _ = send_notification_reply(
                 &self.task_reply_tx,
                 task.notification_id,
-                pb::NotificationReplyCode::Error,
+                transport_wire_core::WireNotificationReplyCode::Error,
                 message,
                 "task notification",
             )
@@ -102,7 +101,7 @@ impl TaskRuntime {
             let _ = send_notification_reply(
                 &self.task_reply_tx,
                 task.notification_id,
-                pb::NotificationReplyCode::Error,
+                transport_wire_core::WireNotificationReplyCode::Error,
                 format!("task with name {} already exists", task_key),
                 "task notification",
             )

@@ -1,6 +1,6 @@
 //! Push-style stats exporter — Prometheus push-gateway, Grafana Mimir, and InfluxDB.
 //!
-//! Feature-gated behind `metrics-export`.  Sends a `pb::Statistics` snapshot to a
+//! Feature-gated behind `metrics-export`.  Sends a metrics snapshot payload to a
 //! remote HTTP endpoint on every `StatsFlow` emission tick (1 s cadence when events
 //! are pending).  I/O is off-loaded to a bounded background channel so
 //! `export_snapshot` never blocks the `StatsFlow` loop.
@@ -17,6 +17,12 @@
 //! - `OPENSNITCH_PUSH_GZIP`    — `1` / `true` / `yes` to gzip-compress push bodies (default: off)
 //! - `OPENSNITCH_PUSH_BUCKET`  — InfluxDB bucket (default: `opensnitch`)
 //! - `OPENSNITCH_PUSH_ORG`     — InfluxDB organisation (default: empty)
+//!
+//! Protocol boundary note:
+//! - The input snapshot shape comes from daemon metrics aliases
+//!   (`models/metrics_snapshot.rs`).
+//! - `pushgateway-proto` emits Prometheus `io.prometheus.client.MetricFamily`
+//!   protobuf frames, not OpenSnitch transport `proto::pb::*` messages.
 //!
 //! ## Push-gateway / Mimir remote-write
 //!
@@ -50,8 +56,7 @@ use tracing::{debug, info};
 
 use crate::models::metrics_snapshot::MetricsSnapshot;
 use crate::platform::ports::stats_exporter_port::StatsExporterPort;
-
-use opensnitch_proto::pb;
+use transport_wire_core::WireSubscriptionStatistics;
 
 // ---------------------------------------------------------------------------
 // Environment variable keys
@@ -123,7 +128,7 @@ struct CompactSnapshot {
     dropped: u64,
     rule_hits: u64,
     rule_misses: u64,
-    subscription_stats: Option<pb::SubscriptionStatistics>,
+    subscription_stats: Option<WireSubscriptionStatistics>,
     by_proto: Vec<(String, u64)>,
     by_address: Vec<(String, u64)>,
     by_host: Vec<(String, u64)>,
@@ -482,7 +487,7 @@ fn escape_prom_label_value(s: &str) -> String {
 }
 
 /// Render subscription scalars and breakdown maps into the push Prometheus text body.
-fn subscription_gauges_push(buf: &mut String, sub: Option<&pb::SubscriptionStatistics>) {
+fn subscription_gauges_push(buf: &mut String, sub: Option<&WireSubscriptionStatistics>) {
     let Some(s) = sub else { return };
     gauge(
         buf,
@@ -555,7 +560,7 @@ fn subscription_gauges_push(buf: &mut String, sub: Option<&pb::SubscriptionStati
 /// Build Prometheus protobuf MetricFamily entries for subscription statistics (push).
 fn subscription_proto_families_push(
     fams: &mut Vec<crate::models::prometheus_wire::MetricFamily>,
-    sub: Option<&pb::SubscriptionStatistics>,
+    sub: Option<&WireSubscriptionStatistics>,
 ) {
     use crate::models::prometheus_wire::*;
     let Some(s) = sub else { return };

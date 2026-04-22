@@ -9,19 +9,19 @@ use crate::{models::dns_payload::DnsAnswerRecord, services::dns::DnsService};
 async fn track_skips_loopback_and_self_alias() {
     let service = DnsService::default();
 
-    service
+    let _ = service
         .track_answers(DnsAnswerRecord::from_ip(
             "localhost",
             IpAddr::V4(Ipv4Addr::LOCALHOST),
         ))
         .await;
-    service
+    let _ = service
         .track_answers(DnsAnswerRecord::from_ip(
             "localhost",
             IpAddr::V6(Ipv6Addr::LOCALHOST),
         ))
         .await;
-    service
+    let _ = service
         .track_alias("example.com".to_string(), "example.com".to_string())
         .await;
 
@@ -34,13 +34,13 @@ async fn track_skips_loopback_and_self_alias() {
 #[tokio::test]
 async fn lookup_resolves_alias_chain() {
     let service = DnsService::default();
-    service
+    let _ = service
         .track_answers(DnsAnswerRecord::from_ip(
             "alias.local",
             IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
         ))
         .await;
-    service
+    let _ = service
         .track_alias("alias.local".to_string(), "final.local".to_string())
         .await;
 
@@ -60,7 +60,7 @@ async fn cache_is_bounded_with_lru_eviction() {
         let ip = format!("2001:db8::{idx:x}")
             .parse::<IpAddr>()
             .expect("test IPv6 address should parse");
-        service
+        let _ = service
             .track_answers(DnsAnswerRecord::from_ip(
                 format!("host-{idx}.example.test"),
                 ip,
@@ -92,7 +92,7 @@ async fn track_answers_accepts_mixed_ip_batches() {
     )
     .expect("mixed answer record should not be empty");
 
-    service.track_answers(record).await;
+    let _ = service.track_answers(record).await;
 
     assert_eq!(
         service
@@ -106,4 +106,31 @@ async fn track_answers_accepts_mixed_ip_batches() {
             .as_deref(),
         Some("mixed.example.test")
     );
+}
+
+#[tokio::test]
+async fn track_answers_reports_truthful_eviction_count() {
+    let service = DnsService::default();
+    let cap = DnsService::probe_cache_capacity();
+
+    let mut last_eviction = None;
+    for idx in 0..(cap * 2) {
+        let ip = format!("2001:db8::{idx:x}")
+            .parse::<IpAddr>()
+            .expect("test IPv6 address should parse");
+        let mutation = service
+            .track_answers(DnsAnswerRecord::from_ip(
+                format!("evict-{idx}.example.test"),
+                ip,
+            ))
+            .await;
+        if mutation.evicted > 0 {
+            last_eviction = Some(mutation);
+            break;
+        }
+    }
+
+    let mutation = last_eviction.expect("dns cache should eventually evict at capacity");
+    assert_eq!(mutation.entries, 1);
+    assert!(mutation.evicted >= 1);
 }

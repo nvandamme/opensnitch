@@ -5,7 +5,7 @@ use crate::models::metrics_snapshot::MetricsSnapshot;
 /// Implementors receive a [`MetricsSnapshot`] each time the
 /// `StatsFlow` emission cycle fires (1s cadence when events are pending).
 ///
-/// The snapshot contains the standard `pb::Statistics` proto payload plus
+/// The snapshot contains the standard transport stats payload plus
 /// daemon-rs-only fields (subscription counts, per-rule hit breakdown) that
 /// are not part of the upstream `ui.proto` wire format.
 ///

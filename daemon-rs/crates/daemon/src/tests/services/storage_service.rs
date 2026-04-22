@@ -1,11 +1,11 @@
-use crate::services::storage::{StorageOperation, StorageService};
-use crate::{
-    models::audit::{AuditEventKind, StorageAction},
-    services::audit::AuditService,
-};
+use crate::services::storage::{StorageFormat, StorageOperation, StorageService};
 use crate::tests::support::{
     TestDir, assert_storage_event, assert_storage_event_async, assert_storage_event_empty,
     ensure_dir, read_text, write_text,
+};
+use crate::{
+    models::audit::{AuditEventKind, StorageAction},
+    services::audit::AuditService,
 };
 use serde::Deserialize;
 use tokio::time::{Duration, timeout};
@@ -136,7 +136,7 @@ async fn json_helpers_parse_and_emit_read_event() {
     write_text(&path, r#"{"ok":true}"#);
 
     let parsed: DemoJson = service
-        .read_json_and_notify("rule", &path)
+        .read_and_parse_with_storage_format_and_notify("rule", &path)
         .await
         .expect("read json");
     assert_eq!(parsed, DemoJson { ok: true });
@@ -148,6 +148,62 @@ async fn json_helpers_parse_and_emit_read_event() {
         &path,
     )
     .await;
+}
+
+#[tokio::test]
+async fn storage_helpers_fallback_to_json_when_extension_is_unknown() {
+    let service = StorageService::new();
+    let dir = test_dir("json-fallback");
+    let path = dir.path.join("payload.unknown");
+    write_text(&path, r#"{"ok":true}"#);
+
+    let parsed: DemoJson = service
+        .read_and_parse_with_storage_format("rule", &path)
+        .await
+        .expect("parse unknown extension as default json");
+    assert_eq!(parsed, DemoJson { ok: true });
+}
+
+#[tokio::test]
+async fn storage_helpers_honor_explicit_main_storage_format_override() {
+    #[cfg(feature = "storage-format-json")]
+    let (format, dir_tag, file_name, payload) = (
+        StorageFormat::Json,
+        "json-main-format",
+        "payload.yaml",
+        r#"{"ok":true}"#,
+    );
+
+    #[cfg(all(not(feature = "storage-format-json"), feature = "storage-format-yaml"))]
+    let (format, dir_tag, file_name, payload) = (
+        StorageFormat::Yaml,
+        "yaml-main-format",
+        "payload.json",
+        "ok: true\n",
+    );
+
+    #[cfg(all(
+        not(feature = "storage-format-json"),
+        not(feature = "storage-format-yaml"),
+        feature = "storage-format-toml"
+    ))]
+    let (format, dir_tag, file_name, payload) = (
+        StorageFormat::Toml,
+        "toml-main-format",
+        "payload.json",
+        "ok = true\n",
+    );
+
+    let service = StorageService::new().with_main_storage_format(Some(format));
+    let dir = test_dir(dir_tag);
+    let path = dir.path.join(file_name);
+    write_text(&path, payload);
+
+    let parsed: DemoJson = service
+        .read_and_parse_with_storage_format("rule", &path)
+        .await
+        .expect("parse using explicit main storage format override");
+    assert_eq!(parsed, DemoJson { ok: true });
 }
 
 #[test]

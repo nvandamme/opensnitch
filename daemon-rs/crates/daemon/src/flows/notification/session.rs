@@ -1,8 +1,8 @@
 use std::net::IpAddr;
 use std::time::Instant;
 
-use opensnitch_proto::pb;
 use tokio::sync::mpsc;
+use transport_wire_core::WireNotificationReply;
 
 use super::notification::NotificationFlow;
 use crate::{
@@ -218,7 +218,7 @@ impl NotificationFlow {
 
     pub(super) async fn do_reconnect(
         &self,
-        task_reply_rx: &mpsc::Receiver<pb::NotificationReply>,
+        task_reply_rx: &mpsc::Receiver<WireNotificationReply>,
         reconnect_state: &mut ReconnectState,
         active_session_id: &mut Option<String>,
         client_id: &str,

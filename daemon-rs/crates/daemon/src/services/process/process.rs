@@ -108,17 +108,28 @@ pub struct ProcessService {
 }
 
 impl ProcessService {
-    pub(crate) const EV_TYPE_EXEC: u64 = opensnitch_ebpf_common::process::EV_TYPE_EXEC;
-    pub(crate) const EV_TYPE_EXECVEAT: u64 = opensnitch_ebpf_common::process::EV_TYPE_EXECVEAT;
-    pub(crate) const EV_TYPE_FORK: u64 = opensnitch_ebpf_common::process::EV_TYPE_FORK;
-    pub(crate) const EV_TYPE_SCHED_EXIT: u64 = opensnitch_ebpf_common::process::EV_TYPE_SCHED_EXIT;
+    // eBPF event layout constants are consumed by native ringbuf parsing paths.
+    #[cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
+    pub(crate) const EV_TYPE_EXEC: u64 = ebpf_common::process::EV_TYPE_EXEC;
+    #[cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
+    pub(crate) const EV_TYPE_EXECVEAT: u64 = ebpf_common::process::EV_TYPE_EXECVEAT;
+    #[cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
+    pub(crate) const EV_TYPE_FORK: u64 = ebpf_common::process::EV_TYPE_FORK;
+    #[cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
+    pub(crate) const EV_TYPE_SCHED_EXIT: u64 = ebpf_common::process::EV_TYPE_SCHED_EXIT;
 
-    pub(crate) const EXEC_HDR_LEN: usize = opensnitch_ebpf_common::process::ExecEvent::HDR_LEN;
-    pub(crate) const MAX_PATH_LEN: usize = opensnitch_ebpf_common::process::MAX_PATH_LEN;
-    pub(crate) const MAX_ARGS: usize = opensnitch_ebpf_common::process::MAX_ARGS;
-    pub(crate) const MAX_ARG_LEN: usize = opensnitch_ebpf_common::process::MAX_ARG_LEN;
-    pub(crate) const TASK_COMM_LEN: usize = opensnitch_ebpf_common::process::TASK_COMM_LEN;
-    pub(crate) const EBPF_EXEC_EVENT_LEN: usize = opensnitch_ebpf_common::process::ExecEvent::LEN;
+    #[cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
+    pub(crate) const EXEC_HDR_LEN: usize = ebpf_common::process::ExecEvent::HDR_LEN;
+    #[cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
+    pub(crate) const MAX_PATH_LEN: usize = ebpf_common::process::MAX_PATH_LEN;
+    #[cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
+    pub(crate) const MAX_ARGS: usize = ebpf_common::process::MAX_ARGS;
+    #[cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
+    pub(crate) const MAX_ARG_LEN: usize = ebpf_common::process::MAX_ARG_LEN;
+    #[cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
+    pub(crate) const TASK_COMM_LEN: usize = ebpf_common::process::TASK_COMM_LEN;
+    #[cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
+    pub(crate) const EBPF_EXEC_EVENT_LEN: usize = ebpf_common::process::ExecEvent::LEN;
 
     pub fn preferred_monitor_method(
         &self,

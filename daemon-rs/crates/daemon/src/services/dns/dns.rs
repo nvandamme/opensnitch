@@ -16,7 +16,7 @@ use crate::services::lifecycle::{
     EventSubscription, ServiceLifecycle, ServiceMonitorStats, ServiceStatus, StatusSubscription,
 };
 use crate::tunables::RuntimeTunables;
-use crate::utils::lru_cache::DualLayerLruMap;
+use crate::utils::lru_cache::EvictionTrackedLruMap;
 use crate::workers::{
     dns::{dns_worker::DnsWorkerControl, ebpf_worker::EbpfDnsWorkerControl},
     runtime::control::WorkerControl,
@@ -81,18 +81,24 @@ impl DnsRuntime {
 
 #[derive(Clone)]
 pub struct DnsService {
-    pub(super) ip_lookup: Arc<DualLayerLruMap<IpAddr, Arc<str>>>,
-    pub(super) alias_lookup: Arc<DualLayerLruMap<Arc<str>, Arc<str>>>,
+    pub(super) ip_lookup: Arc<EvictionTrackedLruMap<IpAddr, Arc<str>>>,
+    pub(super) alias_lookup: Arc<EvictionTrackedLruMap<Arc<str>, Arc<str>>>,
     runtime: Arc<DnsRuntime>,
     lifecycle: DnsLifecycle,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DnsCacheMutation {
+    pub(crate) entries: u32,
+    pub(crate) evicted: u32,
 }
 
 impl Default for DnsService {
     fn default() -> Self {
         let capacity = DNS_CACHE_CAPACITY.load(Ordering::Relaxed).max(1);
         Self {
-            ip_lookup: Arc::new(DualLayerLruMap::new(capacity)),
-            alias_lookup: Arc::new(DualLayerLruMap::new(capacity)),
+            ip_lookup: Arc::new(EvictionTrackedLruMap::new_with_eviction_count(capacity)),
+            alias_lookup: Arc::new(EvictionTrackedLruMap::new_with_eviction_count(capacity)),
             runtime: Arc::new(DnsRuntime::default()),
             lifecycle: DnsLifecycle::default(),
         }
@@ -100,13 +106,15 @@ impl Default for DnsService {
 }
 
 #[derive(Default)]
+// Used by native eBPF DNS ringbuf ingestion path.
+#[cfg_attr(not(feature = "native-ebpf-ringbuf"), allow(dead_code))]
 pub(crate) struct DnsEbpfEventDeduper {
     pub(super) recent_events: HashMap<(String, String), Instant>,
 }
 
 impl DnsService {
     #[allow(dead_code)]
-    pub(crate) const EBPF_DNS_EVENT_LEN: usize = opensnitch_ebpf_common::dns::DnsEvent::LEN;
+    pub(crate) const EBPF_DNS_EVENT_LEN: usize = ebpf_common::dns::DnsEvent::LEN;
 
     pub fn init_workers(
         &self,

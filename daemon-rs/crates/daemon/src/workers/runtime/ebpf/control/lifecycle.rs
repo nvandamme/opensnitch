@@ -412,6 +412,9 @@ impl EbpfWorkerControl {
         );
 
         #[cfg(not(feature = "aya-ebpf"))]
+        let _ = has_rust_dns_obj;
+
+        #[cfg(not(feature = "aya-ebpf"))]
         let runtime = Self::select_dns_explicit_runtime_parts(
             pin_domain,
             has_legacy_dns_obj.then_some(Path::new("legacy-dns.o")),

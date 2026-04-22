@@ -1,5 +1,5 @@
 use crate::services::ebpf::probe_select_opensnitch_ringbuf_map_id;
-use opensnitch_ebpf_common::maps::EVENTS_MAP_MAX_ENTRIES;
+use ebpf_common::maps::EVENTS_MAP_MAX_ENTRIES;
 
 #[test]
 fn selects_latest_matching_ringbuf_candidate() {

@@ -6,7 +6,7 @@ use std::{
 use super::cache_types::RuleMatchCaches;
 use super::dispatch::ActiveOperatorDispatch;
 use super::matching::{AttemptDerived, AttemptTextNeeds};
-use super::{rule_record_from_proto, rule_record_now_timestamp, rule_record_to_proto};
+use super::{rule_record_from_wire, rule_record_now_timestamp, wire_rule_from_record};
 use crate::models::{
     connection_state::ConnectionAttempt,
     process_state::ProcessInfo,
@@ -14,9 +14,9 @@ use crate::models::{
     rule_record::{RuleDuration, RuleOperator, RuleRecord},
 };
 use anyhow::Result;
-use opensnitch_proto::pb;
 use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
+use transport_wire_core::WireRule;
 
 pub(super) struct ActiveRuleCompiled {
     pub(super) name: Arc<str>,
@@ -32,7 +32,7 @@ pub(super) struct RuleSnapshot {
     pub(super) rules: Vec<RuleRecord>,
     pub(super) active_rules: Vec<ActiveRuleCompiled>,
     pub(super) attempt_text_needs: AttemptTextNeeds,
-    pub(super) proto_rules: Arc<Vec<pb::Rule>>,
+    pub(super) wire_rules: Arc<Vec<WireRule>>,
     pub(super) caches: RuleMatchCaches,
 }
 
@@ -119,13 +119,13 @@ impl RuleService {
         for rule in rules.iter().filter(|rule| rule.enabled) {
             Self::collect_attempt_text_needs(&rule.operator, &mut attempt_text_needs);
         }
-        let proto_rules = Arc::new(rules.iter().map(rule_record_to_proto).collect());
+        let wire_rules = Arc::new(rules.iter().map(wire_rule_from_record).collect());
         self.publish_snapshot(RuleSnapshot {
             rules_path: Arc::new(rules_path.to_path_buf()),
             rules,
             active_rules,
             attempt_text_needs,
-            proto_rules,
+            wire_rules,
             caches,
         });
         Ok(count)
@@ -209,13 +209,13 @@ impl RuleService {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub async fn list_proto(&self) -> Vec<pb::Rule> {
-        self.snapshot().proto_rules.as_ref().clone()
+    pub async fn list_wire(&self) -> Vec<WireRule> {
+        self.snapshot().wire_rules.as_ref().clone()
     }
 
-    pub fn get_proto_snapshot(&self) -> Arc<Vec<pb::Rule>> {
+    pub fn get_wire_snapshot(&self) -> Arc<Vec<WireRule>> {
         let snapshot = self.snapshot();
-        Arc::clone(&snapshot.proto_rules)
+        Arc::clone(&snapshot.wire_rules)
     }
 
     pub fn rules_count(&self) -> usize {
@@ -281,8 +281,8 @@ impl RuleService {
     }
 
     #[allow(dead_code)] // used by tests; production hook point for gRPC rule upsert
-    pub async fn upsert_from_proto(&self, rule: &pb::Rule) -> Result<RuleMatchDecision> {
-        self.upsert_rule_record(rule_record_from_proto(rule)).await
+    pub async fn upsert_from_wire(&self, rule: &WireRule) -> Result<RuleMatchDecision> {
+        self.upsert_rule_record(rule_record_from_wire(rule)).await
     }
 
     pub async fn upsert_rule_record(&self, mut record: RuleRecord) -> Result<RuleMatchDecision> {

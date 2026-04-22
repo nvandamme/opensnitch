@@ -1,5 +1,8 @@
 use crate::models::subscription_storage::SubscriptionRecord;
 
+// Shared subscription command model kept available across build profiles so the
+// enabled and disabled subscription services expose the same API surface.
+#[cfg_attr(not(feature = "subscriptions"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubscriptionOperation {
     Unspecified,
@@ -16,6 +19,9 @@ impl Default for SubscriptionOperation {
     }
 }
 
+// Shared subscription command model kept available across build profiles so the
+// enabled and disabled subscription services expose the same API surface.
+#[cfg_attr(not(feature = "subscriptions"), allow(dead_code))]
 #[derive(Clone, Debug, Default)]
 pub struct SubscriptionCommand {
     pub operation: SubscriptionOperation,

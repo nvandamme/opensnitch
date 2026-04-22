@@ -1,5 +1,5 @@
-use opensnitch_proto::pb;
 use std::sync::atomic::Ordering;
+use transport_wire_core::WireStatistics;
 
 use crate::models::connection_state::ConnectionAttempt;
 use crate::models::metrics_snapshot::MetricsSnapshot;
@@ -61,7 +61,7 @@ impl StatsService {
     ) -> MetricsSnapshot {
         let events = ev.events.drain_all();
 
-        let stats = pb::Statistics {
+        let stats = WireStatistics {
             daemon_version: Self::daemon_version_string(),
             rules: rules_count,
             uptime: ev

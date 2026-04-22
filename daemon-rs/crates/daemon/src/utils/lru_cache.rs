@@ -46,7 +46,7 @@ use std::{
 };
 
 use quick_cache::{
-    DefaultHashBuilder, OptionsBuilder, UnitWeighter, Weighter,
+    DefaultHashBuilder, Lifecycle, OptionsBuilder, UnitWeighter, Weighter,
     sync::{Cache, DefaultLifecycle},
 };
 
@@ -95,6 +95,27 @@ pub(crate) fn global_dual_layer_metrics_snapshot() -> DualLayerMetricsSnapshot {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct EvictionCountLifecycle<K, V>(std::marker::PhantomData<(K, V)>);
+
+impl<K, V> Default for EvictionCountLifecycle<K, V> {
+    fn default() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl<K, V> Lifecycle<K, V> for EvictionCountLifecycle<K, V> {
+    type RequestState = u32;
+
+    fn begin_request(&self) -> Self::RequestState {
+        0
+    }
+
+    fn on_evict(&self, state: &mut Self::RequestState, _key: K, _val: V) {
+        *state = state.saturating_add(1);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ConcurrentLruCache
 // ---------------------------------------------------------------------------
@@ -108,20 +129,22 @@ pub(crate) fn global_dual_layer_metrics_snapshot() -> DualLayerMetricsSnapshot {
 /// `capacity` is an item count).  Pass a custom [`Weighter`] with
 /// [`ConcurrentLruCache::with_weighter`] to budget by bytes or other domain
 /// units instead.
-pub(crate) struct ConcurrentLruCache<K, V, W = UnitWeighter>
+pub(crate) struct ConcurrentLruCache<K, V, W = UnitWeighter, L = DefaultLifecycle<K, V>>
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
     W: Weighter<K, V> + Clone + Send + Sync + 'static,
+    L: Lifecycle<K, V> + Clone + Send + Sync + 'static,
 {
-    inner: Arc<Cache<K, V, W, DefaultHashBuilder, DefaultLifecycle<K, V>>>,
+    inner: Arc<Cache<K, V, W, DefaultHashBuilder, L>>,
 }
 
-impl<K, V, W> Clone for ConcurrentLruCache<K, V, W>
+impl<K, V, W, L> Clone for ConcurrentLruCache<K, V, W, L>
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
     W: Weighter<K, V> + Clone + Send + Sync + 'static,
+    L: Lifecycle<K, V> + Clone + Send + Sync + 'static,
 {
     fn clone(&self) -> Self {
         Self {
@@ -131,7 +154,7 @@ where
 }
 
 /// Constructor for the default unit-weighted variant (`capacity` = item count).
-impl<K, V> ConcurrentLruCache<K, V, UnitWeighter>
+impl<K, V> ConcurrentLruCache<K, V, UnitWeighter, DefaultLifecycle<K, V>>
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
@@ -143,8 +166,39 @@ where
     }
 }
 
+impl<K, V> ConcurrentLruCache<K, V, UnitWeighter, EvictionCountLifecycle<K, V>>
+where
+    K: Eq + Hash + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    pub(crate) fn new_with_eviction_count(capacity: usize) -> Self {
+        Self {
+            inner: Arc::new(Cache::with(
+                capacity.max(1),
+                capacity.max(1) as u64,
+                UnitWeighter,
+                DefaultHashBuilder::default(),
+                EvictionCountLifecycle::default(),
+            )),
+        }
+    }
+
+    pub(crate) fn insert_with_eviction_count(&self, key: K, value: V) -> u32 {
+        self.inner.insert_with_lifecycle(key, value)
+    }
+
+    pub(crate) fn insert_many_with_eviction_count<I>(&self, entries: I) -> u32
+    where
+        I: IntoIterator<Item = (K, V)>,
+    {
+        entries.into_iter().fold(0, |evicted, (key, value)| {
+            evicted.saturating_add(self.inner.insert_with_lifecycle(key, value))
+        })
+    }
+}
+
 /// Operations and constructors available for any [`Weighter`].
-impl<K, V, W> ConcurrentLruCache<K, V, W>
+impl<K, V, W> ConcurrentLruCache<K, V, W, DefaultLifecycle<K, V>>
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
@@ -174,7 +228,16 @@ where
             )),
         }
     }
+}
 
+/// Operations available for any lifecycle implementation.
+impl<K, V, W, L> ConcurrentLruCache<K, V, W, L>
+where
+    K: Eq + Hash + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+    W: Weighter<K, V> + Clone + Send + Sync + 'static,
+    L: Lifecycle<K, V> + Clone + Send + Sync + 'static,
+{
     /// Fetch an entry, updating its recency. Increments global hit / miss counter.
     pub(crate) fn get<Q>(&self, key: &Q) -> Option<V>
     where
@@ -204,6 +267,7 @@ where
         self.inner.insert(key, value);
     }
 
+    #[cfg(test)]
     pub(crate) fn insert_many<I>(&self, entries: I)
     where
         I: IntoIterator<Item = (K, V)>,
@@ -242,7 +306,12 @@ where
 
 /// Async-flavoured cache alias (previously a separate type; now identical to
 /// [`SyncDualLayerLruMap`] since all operations are lock-free).
+#[cfg(test)]
 pub(crate) type DualLayerLruMap<K, V> = ConcurrentLruCache<K, V>;
 
 /// Sync-flavoured cache alias.
 pub(crate) type SyncDualLayerLruMap<K, V> = ConcurrentLruCache<K, V>;
+
+/// Cache alias that reports truthful per-request eviction counts.
+pub(crate) type EvictionTrackedLruMap<K, V> =
+    ConcurrentLruCache<K, V, UnitWeighter, EvictionCountLifecycle<K, V>>;

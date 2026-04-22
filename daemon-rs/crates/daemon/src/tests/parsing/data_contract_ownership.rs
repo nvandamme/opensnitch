@@ -27,10 +27,16 @@ fn has_contract_marker(content: &str) -> bool {
                 || line.contains("prost::Message"))
     });
 
-    derive_contract
-        || content.contains("serde::Serialize")
-        || content.contains("serde::Deserialize")
-        || content.contains("#[derive(prost::Message)]")
+    // Treat only type-level contracts as violations. Plain imports like
+    // `use serde::Serialize;` are not data-contract definitions.
+    let explicit_impl_contract = content.lines().any(|line| {
+        line.contains("impl serde::Serialize for")
+            || line.contains("impl serde::Deserialize for")
+            || line.contains("impl Serialize for")
+            || line.contains("impl Deserialize for")
+    });
+
+    derive_contract || explicit_impl_contract || content.contains("#[derive(prost::Message)]")
 }
 
 #[test]

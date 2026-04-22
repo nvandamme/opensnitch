@@ -9,7 +9,10 @@ use crate::{
         rule_record::{RuleOperator, RuleRecord},
         rule_storage::RuleFile,
     },
-    services::{rule::rule_record_now_timestamp, storage::StorageService},
+    services::{
+        rule::rule_record_now_timestamp,
+        storage::{StorageFormat, StorageService},
+    },
 };
 
 use super::{CliOverrides, Daemon};
@@ -121,6 +124,12 @@ impl OwnerlessRuleMigrationPlan {
 
 impl Daemon {
     pub async fn run_ownerless_rule_migration(cli: CliOverrides) -> Result<()> {
+        let storage_format_override = cli
+            .main_storage_format
+            .as_deref()
+            .and_then(StorageFormat::from_cli_flag);
+        StorageService::install_global_main_storage_format(storage_format_override);
+
         let owner_uid = cli
             .rule_migration
             .owner_uid
@@ -134,8 +143,15 @@ impl Daemon {
                 )
             })?;
 
-        let config = Config::load_from_default_locations_with_override(cli.config_file.as_deref())?
-            .with_rules_path_override(cli.rules_path.as_deref());
+        let config = if cli.config_file.is_none() && storage_format_override.is_none() {
+            Config::load_from_default_locations()?
+        } else {
+            Config::load_from_default_locations_with_override(
+                cli.config_file.as_deref(),
+                storage_format_override,
+            )?
+        }
+        .with_rules_path_override(cli.rules_path.as_deref());
         let plan = load_ownerless_rule_migration_plan(config.rules_path.as_path(), owner_uid)?;
         plan.print_summary(cli.rule_migration.write);
 
@@ -152,9 +168,13 @@ impl Daemon {
 
         let storage = StorageService::global();
         for candidate in &plan.eligible {
-            let raw = serde_json::to_string_pretty(&RuleFile::from(&candidate.migrated_record))?;
             storage
-                .write_bytes_to_path_and_notify("rule", &candidate.file_path, raw.as_bytes())
+                .convert_and_write_with_storage_format_to_path_and_notify(
+                    "rule",
+                    &candidate.file_path,
+                    &RuleFile::from(&candidate.migrated_record),
+                    true,
+                )
                 .await
                 .with_context(|| {
                     format!(
@@ -230,23 +250,27 @@ pub(crate) fn load_ownerless_rule_migration_plan(
 }
 
 fn load_rule_files_for_migration(rules_path: &Path) -> Result<Vec<LoadedRuleFile>> {
+    let storage = StorageService::global();
     let entries = std::fs::read_dir(rules_path)
         .with_context(|| format!("failed to read rules directory {}", rules_path.display()))?;
-    let mut json_paths: Vec<PathBuf> = entries
+    let mut rule_paths: Vec<PathBuf> = entries
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let path = entry.path();
-            (path.extension().and_then(|ext| ext.to_str()) == Some("json")).then_some(path)
+            storage
+                .path_matches_main_storage_format(&path)
+                .then_some(path)
         })
         .collect();
-    json_paths.sort();
+    rule_paths.sort();
 
     let mut loaded = Vec::new();
-    for file_path in json_paths {
+    for file_path in rule_paths {
         let contents = std::fs::read_to_string(&file_path)
             .with_context(|| format!("failed to read rule file {}", file_path.display()))?;
-        let rule_file: RuleFile = serde_json::from_str(&contents)
-            .with_context(|| format!("failed to parse rule file {}", file_path.display()))?;
+        let rule_file: RuleFile =
+            StorageService::parse_with_storage_format_for_path(&file_path, &contents)
+                .with_context(|| format!("failed to parse rule file {}", file_path.display()))?;
         loaded.push(LoadedRuleFile {
             file_path,
             record: RuleRecord::from(rule_file),

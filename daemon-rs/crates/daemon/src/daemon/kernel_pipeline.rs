@@ -127,13 +127,8 @@ impl Daemon {
         self.runtime.kernel_pipeline_counters.drop_stats()
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn increment_kernel_pipeline_drop(&self, pipeline: KernelPipeline) -> u64 {
-        self.runtime
-            .kernel_pipeline_counters
-            .increment_drop(pipeline)
-    }
-
+    /// Test probe — called from smoke tests to observe kernel-pipeline drop counters
+    /// directly without going through the real dispatch path.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn probe_kernel_pipeline_drop_stats(&self) -> KernelPipelineDropStats {
         self.kernel_pipeline_drop_stats()

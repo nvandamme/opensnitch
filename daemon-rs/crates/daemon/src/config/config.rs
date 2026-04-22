@@ -11,10 +11,9 @@ use super::{
     StatsConfig,
 };
 use crate::{
-    models::{
-        audit::AuditSeverity, config_storage::RawConfig, firewall_state::FirewallBackend,
-    },
+    models::{audit::AuditSeverity, config_storage::RawConfig, firewall_state::FirewallBackend},
     services::firewall::parse_firewall_backend,
+    services::storage::{StorageFormat, StorageService},
     utils::name_parsing::{case_folded, normalized_name},
 };
 
@@ -193,22 +192,56 @@ impl Config {
     ///   4. Dev-tree fallback `daemon/data/default-config.json`
     pub fn load_from_default_locations_with_override(
         cli_path: Option<&std::path::Path>,
+        main_storage_format: Option<StorageFormat>,
     ) -> Result<Self> {
         let env_path = std::env::var_os("OPENSNITCH_CONFIG_FILE").map(PathBuf::from);
         let cli_path = cli_path.and_then(|p| p.exists().then(|| p.to_path_buf()));
+        let effective_main_storage_format =
+            main_storage_format.unwrap_or(StorageFormat::compiled_default());
+        let preferred_default_path = Some(effective_main_storage_format)
+            .map(|format| {
+                PathBuf::from(format!(
+                    "/etc/opensnitchd/default-config.{}",
+                    format.canonical_extension()
+                ))
+            })
+            .filter(|path| path.exists());
+        let preferred_dev_path = Some(effective_main_storage_format)
+            .map(|format| {
+                Self::dev_default_path(&format!(
+                    "daemon/data/default-config.{}",
+                    format.canonical_extension()
+                ))
+            })
+            .filter(|path| path.exists());
+
+        #[cfg(feature = "storage-format-json")]
         let default_path = PathBuf::from("/etc/opensnitchd/default-config.json");
+
+        #[cfg(feature = "storage-format-json")]
+        let default_path = default_path.exists().then_some(default_path);
+
+        #[cfg(not(feature = "storage-format-json"))]
+        let default_path: Option<PathBuf> = None;
+
         let config_path = cli_path
             .or_else(|| env_path.filter(|path| path.exists()))
-            .or_else(|| default_path.exists().then_some(default_path))
-            .unwrap_or_else(|| Self::dev_default_path("daemon/data/default-config.json"));
+            .or(preferred_default_path)
+            .or(default_path)
+            .or(preferred_dev_path)
+            .unwrap_or_else(|| {
+                Self::dev_default_path(&format!(
+                    "daemon/data/default-config.{}",
+                    effective_main_storage_format.canonical_extension()
+                ))
+            });
 
         Self::load_from_path(&config_path)
     }
 
-    /// Convenience wrapper: no CLI config-file override.
-    #[allow(dead_code)]
+    /// Load config from canonical default locations with no CLI override.
     pub fn load_from_default_locations() -> Result<Self> {
-        Self::load_from_default_locations_with_override(None)
+        Self::load_from_default_locations_with_override(None, None)
     }
 
     pub fn load_from_path(path: &Path) -> Result<Self> {
@@ -218,8 +251,9 @@ impl Config {
     }
 
     pub fn from_raw_json(path: &Path, raw_json: String) -> Result<Self> {
-        let parsed_value = serde_json::from_str::<serde_json::Value>(&raw_json)
-            .with_context(|| format!("failed to parse config file {}", path.display()))?;
+        let parsed_value: serde_json::Value =
+            StorageService::parse_with_storage_format_for_path(path, &raw_json)
+                .with_context(|| format!("failed to parse config file {}", path.display()))?;
         let normalized_value = Self::normalize_config_json_keys(parsed_value);
         let raw: RawConfig = serde_json::from_value(normalized_value)
             .with_context(|| format!("failed to parse config file {}", path.display()))?;

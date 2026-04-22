@@ -1,14 +1,14 @@
-use opensnitch_proto::pb;
+use transport_wire_core::{WireSubscriptionAction, WireSubscriptionReply};
 
-use super::record_to_proto;
+use super::record_to_wire;
 use super::refresh_timing::build_refresh_message;
 use super::reply::{base_reply, reply_with};
 use crate::models::subscription_storage::SubscriptionRecord;
 use crate::utils::sort_key::sort_by_string_key;
 
-pub(super) fn empty_refresh_reply(explicit_targeting: bool) -> pb::SubscriptionReply {
+pub(super) fn empty_refresh_reply(explicit_targeting: bool) -> WireSubscriptionReply {
     base_reply(
-        pb::SubscriptionAction::Refresh,
+        WireSubscriptionAction::Refresh,
         if explicit_targeting {
             "no matching subscriptions supplied"
         } else {
@@ -24,17 +24,14 @@ pub(super) fn finalize_refresh_reply(
     refreshed: usize,
     unchanged: usize,
     skipped: usize,
-) -> pb::SubscriptionReply {
+) -> WireSubscriptionReply {
     sort_by_string_key(&mut subscriptions, |sub| sub.id.as_str());
-    let subscriptions = subscriptions
-        .into_iter()
-        .map(|record| record_to_proto(&record))
-        .collect();
+    let subscriptions = subscriptions.into_iter().map(record_to_wire).collect();
     let error_count = errors.len();
     let accepted = errors.is_empty();
 
     reply_with(
-        pb::SubscriptionAction::Refresh,
+        WireSubscriptionAction::Refresh,
         build_refresh_message(refreshed, unchanged, skipped, error_count),
         accepted,
         subscriptions,

@@ -279,7 +279,7 @@ async fn wait_until_rule_count(
 ) {
     timeout(Duration::from_secs(timeout_secs), async {
         loop {
-            let rules = rules_service.list_proto().await;
+            let rules = rules_service.list_wire().await;
             if rules.len() == expected {
                 break;
             }
@@ -522,7 +522,7 @@ async fn rules_watch_task_emits_live_reload_delete_sequence() {
     )
     .await;
 
-    let remaining_rules = rules_service.list_proto().await;
+    let remaining_rules = rules_service.list_wire().await;
     assert!(
         remaining_rules.is_empty(),
         "all live-reload rules should be deleted"
@@ -593,7 +593,7 @@ async fn rules_watch_task_matches_go_live_reload_add_then_delete_flow() {
     )
     .await;
 
-    let remaining = rules_service.list_proto().await;
+    let remaining = rules_service.list_wire().await;
     assert_eq!(remaining.len(), 2);
     assert!(remaining.iter().any(|rule| rule.name == "000-allow-chrome"));
     assert!(remaining.iter().any(|rule| rule.name == "001-deny-chrome"));
@@ -640,7 +640,7 @@ async fn rules_watch_task_survives_churn_like_go_race_scenario() {
     let churn_reader_rules = rules_service.clone();
     let churn_reader = tokio::spawn(async move {
         for _ in 0..120 {
-            let _ = churn_reader_rules.list_proto().await;
+            let _ = churn_reader_rules.list_wire().await;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     });
@@ -656,7 +656,7 @@ async fn rules_watch_task_survives_churn_like_go_race_scenario() {
 
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    let final_rules = rules_service.list_proto().await;
+    let final_rules = rules_service.list_wire().await;
     assert!(
         final_rules.iter().any(|rule| rule.name == "000-base"),
         "base rule should remain after churn"

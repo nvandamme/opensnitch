@@ -3,9 +3,15 @@ use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use anyhow::Result;
-use opensnitch_proto::pb;
+use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
+use transport_wire_core::ClientTransportPort;
+use transport_wire_core::WireAlert;
+use transport_wire_core::{
+    WireFwChain, WireFwExpression, WireFwRule, WireFwStatement, WireFwStatementValue,
+    WireNotificationReply, WireRule, WireRuleOperator, WireSysFirewall,
+};
 
 use crate::{
     bus::Bus,
@@ -21,7 +27,6 @@ use crate::{
         rule_record::RuleRecord,
         ui_alert::UiAlert,
     },
-    services::rule::rule_record_from_proto,
     services::{
         audit::AuditService,
         client::{
@@ -35,6 +40,7 @@ use crate::{
         rule::RuleService,
     },
     utils::channel_send::send_with_backpressure,
+    utils::name_parsing::case_folded,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,15 +141,15 @@ impl NotificationFlow {
 
     pub async fn run(
         self,
-        mut task_reply_rx: mpsc::Receiver<pb::NotificationReply>,
+        mut task_reply_rx: mpsc::Receiver<WireNotificationReply>,
         mut alert_rx: mpsc::Receiver<UiAlert>,
     ) -> Result<()> {
         let mut reconnect_state = ReconnectState::default();
         let mut active_session_id: Option<String> = None;
         const QUEUED_ALERTS_MAX: usize = 32;
-        let mut queued_alerts: VecDeque<pb::Alert> = VecDeque::with_capacity(QUEUED_ALERTS_MAX);
+        let mut queued_alerts: VecDeque<WireAlert> = VecDeque::with_capacity(QUEUED_ALERTS_MAX);
 
-        let queue_alert = |queue: &mut VecDeque<pb::Alert>, alert: pb::Alert| {
+        let queue_alert = |queue: &mut VecDeque<WireAlert>, alert: WireAlert| {
             if queue.len() >= QUEUED_ALERTS_MAX
                 && let Some(discarded) = queue.pop_front()
             {
@@ -152,7 +158,7 @@ impl NotificationFlow {
             queue.push_back(alert);
         };
 
-        let drain_alert_overflow = |queue: &mut VecDeque<pb::Alert>| {
+        let drain_alert_overflow = |queue: &mut VecDeque<WireAlert>| {
             for alert in drain_overflow_alerts(&self.alert_buffer) {
                 queue_alert(queue, build_wire_alert(alert));
             }
@@ -187,27 +193,29 @@ impl NotificationFlow {
             let preconnect_client_origin = Self::client_origin(&preconnect_session_binding.owner);
 
             let current_auth_fingerprint = Self::auth_fingerprint(&config_snapshot);
-            tracing::debug!(client_id = preconnect_client_id, client_origin = preconnect_client_origin, addr = %client_addr, "notification flow: connecting to UI endpoint");
+            tracing::debug!(client_id = preconnect_client_id, client_origin = preconnect_client_origin, addr = %client_addr, "notification flow: connecting to client endpoint");
 
-            let (mut client, server_identity) = match ClientService::connect_with_config_and_server_identity(&config_snapshot).await {
-                Ok(result) => result,
-                Err(err) => {
-                    if self
-                        .do_reconnect(
-                            &task_reply_rx,
-                            &mut reconnect_state,
-                            &mut active_session_id,
-                            preconnect_client_id.as_str(),
-                            preconnect_client_origin.as_str(),
-                            Some(&format!("notification flow connect failed: {err}")),
-                        )
-                        .await
-                    {
-                        break;
+            let (mut client, server_identity) =
+                match ClientService::connect_with_config_and_server_identity(&config_snapshot).await
+                {
+                    Ok(result) => result,
+                    Err(err) => {
+                        if self
+                            .do_reconnect(
+                                &task_reply_rx,
+                                &mut reconnect_state,
+                                &mut active_session_id,
+                                preconnect_client_id.as_str(),
+                                preconnect_client_origin.as_str(),
+                                Some(&format!("notification flow connect failed: {err}")),
+                            )
+                            .await
+                        {
+                            break;
+                        }
+                        continue;
                     }
-                    continue;
-                }
-            };
+                };
 
             let session_binding = Self::session_binding_from_client_addr_and_server_identity(
                 client_addr,
@@ -234,16 +242,16 @@ impl NotificationFlow {
                     )));
             }
 
-            let rules = self.rules.get_proto_snapshot();
+            let rules = self.rules.get_wire_snapshot();
             let firewall_state = self.firewall.get_snapshot();
             let subscribe_cfg = ClientService::build_subscribe_config_from_snapshots(
                 &config_snapshot,
-                &rules,
+                rules.as_ref(),
                 firewall_state.state.enabled,
                 &firewall_state.system_firewall,
             );
 
-            match client.subscribe(subscribe_cfg).await {
+            match ClientTransportPort::subscribe(&mut client, subscribe_cfg).await {
                 Ok(subscribe_reply) => {
                     if let Some(action) =
                         Self::parse_connected_default_action(&subscribe_reply.config)
@@ -276,7 +284,7 @@ impl NotificationFlow {
             tracing::debug!(
                 client_id,
                 client_origin,
-                "UI service poller started for socket {poller_addr}"
+                "client service poller started for socket {poller_addr}"
             );
 
             let stream = match NotificationStream::open(&mut client).await {
@@ -301,7 +309,7 @@ impl NotificationFlow {
 
             let mut inbound = stream.inbound;
             let reply_tx = stream.reply_tx;
-            tracing::debug!(client_id, client_origin, "UI auth: {auth_mode}");
+            tracing::debug!(client_id, client_origin, "client auth: {auth_mode}");
             if !send_with_backpressure(&reply_tx, notification_hello_reply_wire()).await {
                 if self
                     .do_reconnect(
@@ -331,17 +339,18 @@ impl NotificationFlow {
                 tracing::warn!(
                     client_id,
                     client_origin,
-                    "failed to queue runtime task resume command after UI handshake"
+                    "failed to queue runtime task resume command after client handshake"
                 );
             }
 
             while let Some(alert) = queued_alerts.pop_front() {
-                if let Err(err) = client.post_alert(alert.clone()).await {
+                if let Err(err) = ClientTransportPort::post_alert(&mut client, alert.clone()).await
+                {
                     queue_alert(&mut queued_alerts, alert);
                     tracing::warn!(
                         client_id,
                         client_origin,
-                        "failed to flush queued alert to UI endpoint: {err}"
+                        "failed to flush queued alert to client endpoint: {err}"
                     );
                     break;
                 }
@@ -385,9 +394,9 @@ impl NotificationFlow {
                         match maybe_alert {
                             Some(alert) => {
                                 let pb_alert = build_wire_alert(alert);
-                                if let Err(err) = client.post_alert(pb_alert.clone()).await {
+                                if let Err(err) = ClientTransportPort::post_alert(&mut client, pb_alert.clone()).await {
                                     queue_alert(&mut queued_alerts, pb_alert);
-                                    tracing::warn!(client_id, client_origin, "failed to post alert to UI endpoint: {err}");
+                                    tracing::warn!(client_id, client_origin, "failed to post alert to client endpoint: {err}");
                                     break true;
                                 }
                             }
@@ -396,17 +405,14 @@ impl NotificationFlow {
                             }
                         }
                     }
-                    incoming = inbound.message() => {
+                    incoming = inbound.recv() => {
                         match incoming {
                             Ok(Some(notification)) => {
-                                let pb::Notification {
-                                    id,
-                                    r#type: action,
-                                    data,
-                                    rules,
-                                    sys_firewall: firewall,
-                                    ..
-                                } = notification;
+                                let id = notification.id;
+                                let action = notification.action;
+                                let data = notification.data;
+                                let rules = notification.rules;
+                                let firewall = notification.sys_firewall;
                                 tracing::info!(
                                     client_id,
                                     client_origin,
@@ -429,12 +435,12 @@ impl NotificationFlow {
                                 // Map wire rules to domain models at the adapter boundary.
                                 let mut rules: Vec<RuleRecord> = rules
                                     .into_iter()
-                                    .map(|r| rule_record_from_proto(&r))
+                                    .map(rule_record_from_wire)
                                     .collect();
 
                                 // Map wire firewall to domain model at the adapter boundary.
                                 let mut firewall: Option<FirewallConfig> =
-                                    firewall.map(FirewallConfig::from);
+                                    firewall.map(firewall_config_from_wire);
 
                                 match Self::normalize_owner_scoped_rule_mutation_rules(
                                     &config_snapshot,
@@ -743,13 +749,141 @@ impl NotificationFlow {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)] // Test helper retained for flow-level assertions across split test modules.
     pub(crate) fn is_stream_close_notification(action: i32) -> bool {
         is_stream_close_notification_wire(action)
     }
 
     #[cfg(test)]
-    pub(crate) fn notification_hello_reply() -> pb::NotificationReply {
+    #[allow(dead_code)] // Test helper retained for flow-level assertions across split test modules.
+    pub(crate) fn notification_hello_reply() -> transport_wire_core::WireNotificationReply {
         notification_hello_reply_wire()
+    }
+}
+
+fn rule_record_from_wire(rule: WireRule) -> RuleRecord {
+    RuleRecord {
+        created_at: OffsetDateTime::from_unix_timestamp(rule.created).ok(),
+        updated_at: None,
+        name: rule.name,
+        description: rule.description,
+        action: crate::models::rule_record::RuleAction::from_name(&rule.action),
+        duration: crate::models::rule_record::RuleDuration::from_name(&rule.duration),
+        enabled: rule.enabled,
+        precedence: rule.precedence,
+        nolog: rule.nolog,
+        operator: rule_operator_from_wire(rule.operator),
+    }
+}
+
+fn rule_operator_from_wire(
+    operator: Option<WireRuleOperator>,
+) -> crate::models::rule_record::RuleOperator {
+    let Some(operator) = operator else {
+        return crate::models::rule_record::RuleOperator::default();
+    };
+
+    let mut parsed = crate::models::rule_record::RuleOperator {
+        type_name: operator.type_name,
+        operand: operator.operand,
+        data: operator.data,
+        sensitive: operator.sensitive,
+        scope: None,
+        list: operator
+            .list
+            .into_iter()
+            .map(|item| rule_operator_from_wire(Some(item)))
+            .collect(),
+    };
+
+    if case_folded(&parsed.type_name) == "list" {
+        parsed.data.clear()
+    }
+
+    parsed
+}
+
+fn firewall_config_from_wire(value: WireSysFirewall) -> FirewallConfig {
+    FirewallConfig {
+        enabled: value.enabled,
+        version: value.version,
+        rules: value
+            .rules
+            .into_iter()
+            .map(firewall_rule_from_wire)
+            .collect(),
+        chains: value
+            .chains
+            .into_iter()
+            .map(firewall_chain_from_wire)
+            .collect(),
+    }
+}
+
+fn firewall_chain_from_wire(value: WireFwChain) -> crate::models::firewall_config::FirewallChain {
+    crate::models::firewall_config::FirewallChain {
+        name: value.name,
+        table: value.table,
+        family: value.family,
+        priority: value.priority,
+        r#type: value.type_name,
+        hook: value.hook,
+        policy: value.policy,
+        rules: value
+            .rules
+            .into_iter()
+            .map(firewall_rule_from_wire)
+            .collect(),
+    }
+}
+
+fn firewall_rule_from_wire(value: WireFwRule) -> crate::models::firewall_config::FirewallRule {
+    crate::models::firewall_config::FirewallRule {
+        table: value.table,
+        chain: value.chain,
+        uuid: value.uuid,
+        enabled: value.enabled,
+        position: value.position,
+        description: value.description,
+        parameters: value.parameters,
+        expressions: value
+            .expressions
+            .into_iter()
+            .map(firewall_expression_from_wire)
+            .collect(),
+        target: value.target,
+        target_parameters: value.target_parameters,
+    }
+}
+
+fn firewall_expression_from_wire(
+    value: WireFwExpression,
+) -> crate::models::firewall_config::FirewallExpression {
+    crate::models::firewall_config::FirewallExpression {
+        statement: value.statement.map(firewall_statement_from_wire),
+    }
+}
+
+fn firewall_statement_from_wire(
+    value: WireFwStatement,
+) -> crate::models::firewall_config::FirewallStatement {
+    crate::models::firewall_config::FirewallStatement {
+        op: value.op,
+        name: value.name,
+        values: value
+            .values
+            .into_iter()
+            .map(firewall_statement_value_from_wire)
+            .collect(),
+    }
+}
+
+fn firewall_statement_value_from_wire(
+    value: WireFwStatementValue,
+) -> crate::models::firewall_config::FirewallStatementValue {
+    crate::models::firewall_config::FirewallStatementValue {
+        key: value.key,
+        value: value.value,
     }
 }
 

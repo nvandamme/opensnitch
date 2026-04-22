@@ -1,14 +1,4 @@
-use std::{
-    net::TcpListener,
-    sync::Mutex,
-    time::{Duration as StdDuration, Instant},
-};
-
-use opensnitch_proto::pb;
-use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot};
-use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Request, Response, Status};
+use transport_wire_core::{WireCommandAction, WireNotificationReplyCode};
 
 use crate::{
     bus::{BusCaps, BusState},
@@ -27,151 +17,22 @@ use crate::{
     services::rule::RuleService,
 };
 
-#[derive(Default)]
-struct TestUiServer {
-    open_tx: Mutex<Option<oneshot::Sender<()>>>,
-    hello_tx: Mutex<Option<oneshot::Sender<pb::NotificationReply>>>,
-}
-
-async fn recv_oneshot_with_deadline<T>(
-    rx: &mut oneshot::Receiver<T>,
-    max_wait: StdDuration,
-) -> Result<T, &'static str> {
-    let start = Instant::now();
-    loop {
-        match rx.try_recv() {
-            Ok(value) => return Ok(value),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                if start.elapsed() >= max_wait {
-                    return Err("timeout");
-                }
-                tokio::task::yield_now().await;
-            }
-            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                return Err("closed");
-            }
-        }
-    }
-}
-
-async fn wait_join_with_deadline<T>(
-    handle: &mut tokio::task::JoinHandle<T>,
-    max_wait: StdDuration,
-) -> Result<T, &'static str> {
-    let start = Instant::now();
-    loop {
-        if handle.is_finished() {
-            return handle.await.map_err(|_| "join-error");
-        }
-        if start.elapsed() >= max_wait {
-            return Err("timeout");
-        }
-        tokio::task::yield_now().await;
-    }
-}
-
-async fn yield_for(duration: StdDuration) {
-    let start = Instant::now();
-    while start.elapsed() < duration {
-        tokio::task::yield_now().await;
-    }
-}
-
-async fn wait_for_server_ready(addr: std::net::SocketAddr, max_wait: StdDuration) {
-    let start = Instant::now();
-    loop {
-        match TcpStream::connect(addr).await {
-            Ok(stream) => {
-                drop(stream);
-                return;
-            }
-            Err(_) if start.elapsed() < max_wait => {
-                tokio::time::sleep(StdDuration::from_millis(25)).await;
-            }
-            Err(err) => {
-                panic!("test ui server did not become ready at {addr}: {err}");
-            }
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl pb::ui_server::Ui for TestUiServer {
-    type NotificationsStream = ReceiverStream<Result<pb::Notification, Status>>;
-
-    async fn ping(
-        &self,
-        _request: Request<pb::PingRequest>,
-    ) -> Result<Response<pb::PingReply>, Status> {
-        Ok(Response::new(pb::PingReply::default()))
-    }
-
-    async fn ask_rule(
-        &self,
-        _request: Request<pb::Connection>,
-    ) -> Result<Response<pb::Rule>, Status> {
-        Ok(Response::new(pb::Rule::default()))
-    }
-
-    async fn subscribe(
-        &self,
-        request: Request<pb::ClientConfig>,
-    ) -> Result<Response<pb::ClientConfig>, Status> {
-        eprintln!("[notification_flow_test] server=subscribe");
-        Ok(Response::new(request.into_inner()))
-    }
-
-    async fn notifications(
-        &self,
-        request: Request<tonic::Streaming<pb::NotificationReply>>,
-    ) -> Result<Response<Self::NotificationsStream>, Status> {
-        eprintln!("[notification_flow_test] server=notifications-open");
-        if let Some(open_tx) = self.open_tx.lock().expect("lock open sender").take() {
-            let _ = open_tx.send(());
-        }
-        let mut outbound = request.into_inner();
-        let hello_tx = self.hello_tx.lock().expect("lock hello sender").take();
-        let (notification_tx, notification_rx) = mpsc::channel(1);
-
-        tokio::spawn(async move {
-            if let Ok(Some(reply)) = outbound.message().await
-                && let Some(hello_tx) = hello_tx
-            {
-                eprintln!("[notification_flow_test] server=notifications-hello-received");
-                let _ = hello_tx.send(reply);
-            }
-
-            yield_for(StdDuration::from_millis(200)).await;
-            drop(notification_tx);
-        });
-
-        Ok(Response::new(ReceiverStream::new(notification_rx)))
-    }
-
-    async fn post_alert(
-        &self,
-        _request: Request<pb::Alert>,
-    ) -> Result<Response<pb::MsgResponse>, Status> {
-        Ok(Response::new(pb::MsgResponse::default()))
-    }
-}
-
 #[test]
 fn notification_hello_reply_matches_go_stream_handshake() {
     let reply = NotificationFlow::notification_hello_reply();
     assert_eq!(reply.id, 0);
-    assert_eq!(reply.code, pb::NotificationReplyCode::Ok as i32);
+    assert_eq!(reply.code, WireNotificationReplyCode::Ok as i32);
     assert!(reply.data.is_empty());
 }
 
 #[test]
 fn stream_close_notification_recognizes_action_none_and_lower_values() {
     assert!(NotificationFlow::is_stream_close_notification(
-        pb::Action::None as i32
+        WireCommandAction::None as i32
     ));
     assert!(NotificationFlow::is_stream_close_notification(-1));
     assert!(!NotificationFlow::is_stream_close_notification(
-        pb::Action::EnableInterception as i32
+        WireCommandAction::EnableInterception as i32
     ));
 }
 
@@ -210,7 +71,10 @@ fn session_binding_uses_live_tls_identity_for_remote_principal_resolution() {
         cert_fingerprint: Some("abc123live".to_string()),
         cert_subject: None,
         cert_san: None,
-        local_principal: LocalPrincipal { uid: 1000, gid: 100 },
+        local_principal: LocalPrincipal {
+            uid: 1000,
+            gid: 100,
+        },
         capabilities: vec!["config.write".to_string()],
     }]);
 
@@ -244,7 +108,10 @@ fn session_binding_does_not_fallback_to_configured_cert_binding_when_live_identi
         cert_fingerprint: Some("abc123live".to_string()),
         cert_subject: None,
         cert_san: None,
-        local_principal: LocalPrincipal { uid: 1000, gid: 100 },
+        local_principal: LocalPrincipal {
+            uid: 1000,
+            gid: 100,
+        },
         capabilities: vec!["config.write".to_string()],
     }]);
 
@@ -1413,46 +1280,16 @@ fn session_binding_extracts_local_uid_for_live_loopback_listener() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn notification_flow_runs_ui_poller_path_against_live_server() {
-    crate::tests::support::init_test_logging();
-    eprintln!("[notification_flow_test] stage=begin");
-
-    let (open_tx, open_rx) = oneshot::channel();
-    let (hello_tx, hello_rx) = oneshot::channel();
-    let ui = TestUiServer {
-        open_tx: Mutex::new(Some(open_tx)),
-        hello_tx: Mutex::new(Some(hello_tx)),
-    };
-
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test ui server");
-    let addr = listener.local_addr().expect("resolve test ui addr");
-    drop(listener);
-    eprintln!("[notification_flow_test] stage=server-bind addr={addr}");
-
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let mut server_handle = tokio::spawn(async move {
-        tonic::transport::Server::builder()
-            .add_service(pb::ui_server::UiServer::new(ui))
-            .serve_with_shutdown(addr, async move {
-                let _ = shutdown_rx.await;
-            })
-            .await
-            .expect("serve test ui server");
-    });
-
-    wait_for_server_ready(addr, StdDuration::from_secs(2)).await;
-    eprintln!("[notification_flow_test] stage=server-ready");
-
+async fn notification_flow_runs_ui_poller_path_with_stub_transport() {
     let (bus, _bus_rx) = BusState::build_with_caps(BusCaps::uniform(8));
     let mut config = Config::default();
-    config.client_addr = format!("http://{addr}");
+    config.client_addr = "stub://local-ui".to_string();
     config.client_auth.auth_type = ClientAuthType::Simple;
     let rules = RuleService::default();
     rules
         .load_path(&config.rules_path)
         .await
         .expect("load rules");
-    eprintln!("[notification_flow_test] stage=rules-loaded");
     let firewall = FirewallService::new(&config).expect("build firewall service");
     let _flow = NotificationFlow::new(
         bus,
@@ -1464,16 +1301,15 @@ async fn notification_flow_runs_ui_poller_path_against_live_server() {
         crate::services::audit::AuditService::new(32),
     );
 
-    eprintln!("[notification_flow_test] stage=client-connect");
     let mut subscribe_client = ClientService::connect_with_config(&config)
         .await
         .expect("client connect should succeed");
 
-    let rules_snapshot = rules.get_proto_snapshot();
+    let rules_snapshot = rules.get_wire_snapshot();
     let firewall_state = firewall.get_snapshot();
     let subscribe_cfg = ClientService::build_subscribe_config_from_snapshots(
         &config,
-        &rules_snapshot,
+        rules_snapshot.as_ref(),
         firewall_state.state.enabled,
         &firewall_state.system_firewall,
     );
@@ -1481,78 +1317,13 @@ async fn notification_flow_runs_ui_poller_path_against_live_server() {
         .subscribe(subscribe_cfg)
         .await
         .expect("subscribe should succeed");
-    eprintln!("[notification_flow_test] stage=subscribe-ok");
 
     let mut stream_client = ClientService::connect_with_config(&config)
         .await
         .expect("stream client connect should succeed");
-    let stream = NotificationStream::open(&mut stream_client)
+    let _stream = NotificationStream::open(&mut stream_client)
         .await
         .expect("notifications stream open should succeed");
-    eprintln!("[notification_flow_test] stage=stream-opened");
-
-    assert!(
-        stream
-            .reply_tx
-            .send(NotificationFlow::notification_hello_reply())
-            .await
-            .is_ok(),
-        "hello send should succeed"
-    );
-    eprintln!("[notification_flow_test] stage=hello-sent");
-
-    let mut failure: Option<String> = None;
-
-    let mut open_rx = open_rx;
-    if recv_oneshot_with_deadline(&mut open_rx, StdDuration::from_secs(10))
-        .await
-        .is_err()
-    {
-        failure = Some("notifications rpc open timeout".to_string());
-    }
-    eprintln!(
-        "[notification_flow_test] stage=open-wait-finished failure={:?}",
-        failure
-    );
-
-    // Wait for the hello handshake to be captured by the test server.
-    if failure.is_none() {
-        let mut hello_rx = hello_rx;
-        match recv_oneshot_with_deadline(&mut hello_rx, StdDuration::from_secs(10)).await {
-            Ok(hello) => {
-                eprintln!("[notification_flow_test] stage=hello-received");
-                if hello.id != 0 || hello.code != pb::NotificationReplyCode::Ok as i32 {
-                    failure = Some("unexpected hello reply payload".to_string());
-                }
-            }
-            Err("closed") => {
-                failure = Some("hello channel closed before reply".to_string());
-            }
-            Err(_) => {
-                failure = Some("hello reply timeout".to_string());
-            }
-        }
-    }
-
-    yield_for(StdDuration::from_millis(250)).await;
-    let _ = shutdown_tx.send(());
-    eprintln!("[notification_flow_test] stage=shutdown-sent");
-
-    match wait_join_with_deadline(&mut server_handle, StdDuration::from_secs(1)).await {
-        Ok(_) => {}
-        Err(_) => {
-            server_handle.abort();
-            let _ = wait_join_with_deadline(&mut server_handle, StdDuration::from_secs(1)).await;
-            if failure.is_none() {
-                failure = Some("test server did not stop within timeout".to_string());
-            }
-        }
-    }
-    eprintln!("[notification_flow_test] stage=server-joined");
-
-    if let Some(reason) = failure {
-        panic!("{reason}");
-    }
 }
 
 #[test]

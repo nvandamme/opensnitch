@@ -7,7 +7,7 @@ It supersedes:
 - `daemon-rs/FEATURE_PARITY.md`
 - `daemon-rs/SERVICE_ASYNC_AND_MODEL_SCAN_2026-03-15.md`
 
-Last update: 2026-03-30 (internal one-shot self-signed server/client cert generation switches added)
+Last update: 2026-03-30 (storage-format pluggability slice + warning arbitration/design-rule enforcement updates)
 
 ## Scope
 
@@ -72,6 +72,21 @@ eBPF library policy:
   - `make parity-hot-cold-delta STRESS_ROUNDS=1000`
 - Commit hygiene (mirrors `DESIGN_RULES.md` pre-commit checklist):
   - `cargo build` must be warning-free in touched scope.
+  - If you bypass `cargo ost` and run privileged ignored smoke tests directly with elevated
+    `cargo test`, use `-- --ignored --nocapture --test-threads=1` so Aya smoke tests run
+    serially and do not conflict with the daemon single-instance guard.
+  - Run tools orchestration CLI harness regression on every commit:
+    `cargo test -p tools --test orchestration_smoke -- --nocapture`.
+  - For most tools test/harness flows, prefer repo-level entrypoints when available:
+    `cargo ost <command>` from repo root or root Makefile wrappers (`make <target>`).
+    Keep the direct `cargo test -p tools --test orchestration_smoke -- --nocapture`
+    invocation for this specific smoke test.
+  - Run tools launcher regression commands on every commit:
+    - `cargo ost run-daemon-mock-ui-live-session` or `make daemon-rs-mock-ui-session`
+    - `cargo ost update-run-perf` or `make update-run-perf`
+    - Direct crate-level fallback remains valid:
+      - `cargo run --release -p tools -- run-daemon-mock-ui-live-session`
+      - `cargo run --release -p tools -- update-run-perf`
   - For warnings in touched code, either fix/remove the root cause or add a targeted
     `#[allow(...)]` with a short rationale when the API/path is intentionally retained.
   - When `mod.rs` `pub use` re-exports warn as unused, prefer consuming canonical re-export
@@ -109,10 +124,14 @@ eBPF library policy:
   (`CacheUpdated`, `ResolutionReceived`, `ProcessTracked`, `ProcessEvicted`,
   `ConnectionTracked`, `FileRead`, `FileWritten`) removed from default code paths —
   reserved for the verbose-audit follow-up below.
-  **Deferred emit sites** (models defined, no hook exists yet):
-  `DnsAction::CacheEvicted` (LRU eviction hook), `ProcessAction::ProcessScanFailed`
-  (requires `sync_from_proc_event` result propagation),
-  `KernelAction::KernelInterfaceReattached` (needs nfqueue reattach retry loop).
+  **Deferred debug-audit follow-up (2026-03-31)**: `ProcessAction::ProcessScanFailed`
+  now propagates real inspection failures out of `sync_from_proc_event`, and
+  `KernelAction::KernelInterfaceReattached` now emits from the NFQUEUE worker path when
+  netlink queue startup succeeds after degraded-mode recovery.
+  **Audit completion follow-up (2026-03-31)**: DNS cache updates now return truthful
+  per-request eviction counts from the generic cache lifecycle hook, and kernel flow
+  verbose audit emits `DnsAction::CacheEvicted` only when cache insertion actually evicts
+  resident entries.
 
 - [x] **`[AUDIT]`** Verbose hot-path audit mode — gate high-frequency operational events behind
   `Config.audit.verbose_hot_path: bool` (default `false`).
@@ -494,17 +513,17 @@ eBPF library policy:
 
 - [ ] **`[ARCH]`** Isolate current gRPC UI transport behind a dedicated adapter feature.
   - **Current branch progress (2026-03-30)**:
-    - **Done**: added explicit default-on Cargo feature gate `grpc-ui` in `crates/daemon/Cargo.toml`.
-    - **Done**: `ClientService` transport methods now have `grpc-ui`/no-`grpc-ui` behavior split; no-`grpc-ui` builds return explicit transport-unavailable errors instead of panicking (`subscribe`, `ping`, `ask_rule`, `post_alert`, subscription RPCs, notification stream open).
-    - **Done**: `connect*` helpers now degrade to `ClientService::default()` when `grpc-ui` is disabled so policy/runtime paths can continue to apply fallback behavior instead of hard startup failure.
-    - **Done**: tonic/rustls dependency wiring moved behind optional `grpc-ui` feature deps (`hyper-rustls`, `rustls`, `rustls-pki-types`, `x509-cert`) and transport TLS helpers are now `#[cfg(feature = "grpc-ui")]`-scoped.
+    - **Done**: added explicit default-on Cargo feature gate for the gRPC wire adapter in `crates/daemon/Cargo.toml` (`transport-wire-grpc-client`).
+    - **Done**: `ClientService` transport methods now have `transport-wire-grpc-client`/no-adapter behavior split; no-adapter builds return explicit transport-unavailable errors instead of panicking (`subscribe`, `ping`, `ask_rule`, `post_alert`, subscription RPCs, notification stream open).
+    - **Done**: `connect*` helpers now degrade to `ClientService::default()` when `transport-wire-grpc-client` is disabled so policy/runtime paths can continue to apply fallback behavior instead of hard startup failure.
+    - **Done**: tonic/rustls dependency wiring moved behind optional `transport-wire-grpc-client` feature deps (`hyper-rustls`, `rustls`, `rustls-pki-types`, `x509-cert`) and transport TLS helpers are now `#[cfg(feature = "transport-wire-grpc-client")]`-scoped.
     - **Pending**: add one `--no-default-features --features ...` CI lane once unrelated no-default eBPF compile errors are fixed.
-  - **Feature gate**: `grpc-ui` default-on Cargo feature for the current tonic-based UI transport/client path.
+  - **Feature gate**: `transport-wire-grpc-client` default-on Cargo feature for the current tonic-based UI transport/client path.
   - **Intent**: treat gRPC as one transport adapter, not as the permanent shape of the daemon client.
   - **Scope**:
     - keep shared proto/domain contracts and session/auth policy available without tying them to tonic client types,
     - extract a transport-agnostic UI session/control port from `services/client`,
-    - keep tonic/h2/rustls connector code behind the `grpc-ui` feature,
+    - keep tonic/h2/rustls connector code behind the adapter feature,
     - ensure future adapters (HTTP+WebSocket, OpenWrt `ubus`/Luci, TUI/CLI bridge) target the same session/control boundary instead of re-implementing authorization or verdict routing.
   - **Sequencing**:
     - first split transport adapter code from session/control policy in the current inverted client model,
@@ -512,8 +531,67 @@ eBPF library policy:
     - keep default behavior unchanged until at least one alternate adapter path exists.
   - **Guardrails**:
     - do not hide remote-principal mapping or command authorization behind transport-specific code paths,
-    - do not make `grpc-ui` responsible for core command classification, owner-scope validation, or elevation policy,
+    - do not make wire adapters responsible for core command classification, owner-scope validation, or elevation policy,
     - do not gate proto definitions or shared UI message models that other adapters must reuse.
+
+- [ ] **`[ARCH]`** Extract transport/session client port and make transport libraries truly pluggable.
+  - **Why**: current mapper-boundary progress is strong, but daemon runtime is still coupled to tonic client surfaces (`UiClient<Channel>`, `tonic::Streaming`, `NotificationStream` wire stream shape) and tonic remains a baseline dependency.
+  - **Current branch progress (2026-03-31)**:
+    - **Done**: introduced `platform/ports/client_transport_port.rs::NotificationInboundPort` as a transport-agnostic inbound notification stream contract.
+    - **Done**: `services/client/notifications.rs::NotificationStream` now exposes `Box<dyn NotificationInboundPort>` instead of `tonic::Streaming<pb::Notification>`; gRPC stream adaptation is contained at the client adapter boundary.
+    - **Done**: `flows/notification/notification.rs` now consumes inbound notifications via the port API (`recv`) and no longer calls tonic stream methods directly.
+    - **Done**: subscription command bidi stream ingress now has a transport-agnostic open/receive seam — `ClientService::subscription_commands_open()` returns `Box<dyn SubscriptionCommandInboundPort>` plus ack sender; gRPC `ReceiverStream`/`tonic::Streaming` shaping moved to client adapter code.
+    - **Done**: `flows/subscription/command_flow.rs` now consumes command ingress through `SubscriptionCommandInboundPort::recv_command()` and no longer calls tonic stream methods directly.
+    - **Done**: introduced `ClientTransportPort` and adopted it in active flows (`notification`, `stats`, `verdict`, `subscription`) for `subscribe`/`post_alert`/`ping`/`ask_rule`/`subscription_execute` call sites, reducing direct flow coupling to concrete client transport APIs.
+    - **Done**: introduced `ClientTransportConnectorPort` plus concrete `ClientTransportConnector` (cache-backed) so `stats`, `subscription`, `subscription-command`, and `verdict` flows now acquire clients via connector-port `connect_or_reuse()` / `invalidate()` instead of calling `ClientService::connect_or_reuse` directly.
+    - **Done**: extracted transport contracts and shared notification wire helpers into unified workspace lib `crates/transport-wire-core` (`opensnitch-transport-wire-core`) with internal `ports`/`wire_helpers` module separation; rewired daemon flow/service imports and notification reply utilities to consume the external crate.
+    - **Done**: introduced naming-aligned transport adapter crate `crates/transport-wire-grpc-client` (`opensnitch-transport-wire-grpc-client`) and set daemon default features to enable `transport-wire-grpc-client`.
+    - **Done**: fully merged feature gating into `transport-wire-grpc-client`; daemon source no longer uses `#[cfg(feature = "grpc-ui")]` and `grpc-ui` is removed as a standalone daemon feature.
+    - **Done**: `services/client/wire.rs` now owns grpc client/channel/stream runtime mechanics (`UiClient`, `SubscriptionsClient`, notification stream, subscription command stream); `services/client/client.rs` delegates through a wire adapter orchestrator (`ClientWire`) for subscribe/ping/ask-rule/alert/stream open operations.
+    - **Done**: `services/client/notifications.rs` now opens inbound/outbound notification channels exclusively through `ClientService` wire-orchestrator APIs and no longer contains grpc stream shaping logic.
+    - **Done**: added a second runtime-selectable transport wire stub (`stub://` client_addr) in `services/client/wire.rs`; `connect_with_config*` and `connect_or_reuse` now select between grpc wire and stub wire without changing flow/policy call sites.
+    - **Done**: centralized wire selection in `services/client/wire.rs::select_wire_kind` (`ClientWireKind`) so adapter routing is strategy-driven rather than hard-coded prefix checks in client call sites.
+    - **Done**: added adapter-local `subscriptions` feature gate in `crates/transport-wire-grpc-client` and propagated daemon `subscriptions` feature into it.
+    - **Done**: moved subscription command-stream opening and subscription RPC wire calls (`list/apply/delete/refresh/deploy`) into `transport-wire-grpc-client` helper APIs; daemon wire layer now delegates those calls through adapter exports.
+    - **Done**: moved remaining UI gRPC wire calls (`subscribe/ping/ask-rule/post-alert/notifications-open`) into `transport-wire-grpc-client` helper APIs; daemon `services/client/wire.rs` now holds orchestration + inbound adapter wrapping only.
+    - **Done**: added dedicated transport adapter tests under `crates/transport-wire-grpc-client/src/tests/` and guarded daemon flow-consistency test modules (`notification_flow`, `stats_flow`, `verdict_flow`) behind `transport-wire-grpc-client`.
+    - **Done**: centralized transport/storage adapter dependency versions in workspace-level `[workspace.dependencies]` and switched adapter/storage crates to `workspace = true` dependencies to reduce avoidable version drift for future libs.
+  - **Target**:
+    - introduce a transport-agnostic client/session port in `platform/ports` (connect, subscribe, ping, ask-rule, alert post, notification stream open/send/recv, subscription RPCs),
+    - keep flow/service policy paths dependent on domain contracts and transport ports only,
+    - move tonic-specific stream/client/channel types behind adapter implementations,
+    - make tonic dependency optional under an adapter-specific feature so non-gRPC adapter builds can omit tonic/h2 stacks.
+  - **Guardrails**:
+    - no flow/service policy file should require tonic types in signatures,
+    - wire-only enums/messages stay at adapter boundaries via explicit mappers,
+    - no transport adapter may own authorization or owner-scope policy logic.
+  - **Validation gate**:
+    - `rg -n "tonic::|UiClient<|SubscriptionsClient<|tonic::Streaming" crates/daemon/src/flows crates/daemon/src/services crates/daemon/src/commands` should return only adapter/bridge surfaces,
+    - a no-gRPC transport build path must compile once alternate adapter stubs exist,
+    - tests cover parity of notification command/reply flow across at least one non-gRPC adapter stub.
+
+- [ ] **`[ARCH]`** Extract loadable-state backend/codec ports and make file formats truly pluggable.
+  - **Why**: pluggability must be symmetric with transport. Runtime currently assumes JSON/file-centric load paths for config/rules/network aliases/firewall state in multiple domains. We need explicit multi-format compatibility so OpenWrt-style configuration and control surfaces can plug in cleanly (for example UCI-like config files and ubus JSON-compatible payload contracts) without policy-layer rewrites.
+  - **Current branch progress (2026-03-30)**:
+    - **Done**: introduced external workspace storage-format crate `crates/storage-format-json` (`opensnitch-storage-format-json`) as a first format library boundary for loadable-state JSON parse/convert operations.
+    - **Done**: rewired primary JSON loadable paths to codec-lib APIs without behavior changes: shared storage JSON reads (`services/storage/storage.rs`), rule sync file parsing (`services/rule/storage.rs`), firewall load/save (`services/firewall/storage.rs`), subscription store load/save (`services/subscription/storage.rs`), and config raw decode path (`config/config.rs`).
+    - **Done**: added explicit CLI main-format override `--main-storage-format <json|yaml|toml>` and wired it into bootstrap/migration global storage policy (`services/storage/storage.rs`, `daemon/bootstrap.rs`, `daemon/migration.rs`).
+    - **Done**: default compatibility now falls back to JSON when extension-based detection is missing/unsupported, while explicit CLI main-format overrides can force parse/convert behavior and rule file extension selection.
+    - **Next**: extract domain-facing backend/codec ports (`ConfigStorePort`, `RuleStorePort`, `AliasStorePort`, `FirewallStorePort`) and move remaining direct `serde_json` callsites in service internals behind adapter/codec boundaries.
+  - **Target**:
+    - introduce formal ports for loadable state (`ConfigStorePort`, `RuleStorePort`, `AliasStorePort`, `FirewallStorePort`) with explicit `load/save/watch` contracts,
+    - separate storage backend from wire codec: backend (file/db/remote) and codec (json/yaml/toml/uci/etc.) are independent pluggable adapters,
+    - keep flow/service policy paths dependent on canonical domain models only (`models/*`),
+    - centralize wire<->domain mapping in adapter codecs (including compat JSON shape handling) and remove format assumptions from service logic,
+    - align with `StorageBackend` evolution (`db-storage`) so file/db backends can share the same domain-facing contracts.
+  - **Guardrails**:
+    - no domain service/flow may parse or serialize raw loadable formats directly,
+    - format-specific structs (`Raw*`/`Persisted*`/`Incoming*`) remain adapter-boundary only,
+    - network-alias/rule/firewall/config reload logic must remain backend/codec agnostic.
+  - **Validation gate**:
+    - adding a new codec/backend should require adapter wiring only (no flow/service policy edits),
+    - `rg -n "serde_json::|from_str\(|to_string\(" crates/daemon/src/services crates/daemon/src/flows` should return only approved adapter/storage modules,
+    - integration tests prove parity for at least two codec/backend combinations (e.g., JSON+file and JSON+db/file-backend abstraction; future UCI codec for OpenWrt).
 
 - [x] **`[ARCH]`** Enforce canonical-model-first wire mapping across UI/control transports.
   - **Policy**: every external serialization format (protobuf, JSON, future UCI/ubus) is a wire contract; only domain models in `models/` are canonical. See `DESIGN_RULES.md §3 Canonical Domain Model And Wire Contract Rule` for the full naming convention and adapter-boundary rules.
@@ -567,7 +645,7 @@ eBPF library policy:
     - **Slice F (notification adapter mapping, 2026-03-30)**: moved notification wire-shaping helpers to the client adapter boundary (`services/client/alerts.rs::build_wire_alert`, `services/client/notifications.rs::notification_hello_reply_wire`) and removed duplicated flow-local wire builders. Notification command mapping now consumes canonical `CommandAction` end-to-end (`commands/client/client.rs::command_from_action_or_reply`), with wire `i32` action converted at ingress in `flows/notification/notification.rs`.
     - **Slice G (notification reply wire mapping, 2026-03-30)**: moved notification error-reply wire shaping to the client adapter boundary via `services/client/notifications.rs::notification_error_reply_wire`. `flows/notification/notification.rs` no longer builds `pb::NotificationReply` error payloads directly and now routes all hello/error reply construction through client adapter helpers.
     - **Slice H (notification wire-action mapper boundary, 2026-03-30)**: moved notification action wire→domain conversion and stream-close wire predicate from flow internals to the client adapter boundary (`services/client/notifications.rs::{command_action_from_notification_wire,is_stream_close_notification_wire}`). `flows/notification/notification.rs` now consumes adapter helpers for those decisions.
-  - **Closure note (2026-03-30)**: canonical-model-first mapper boundary objective for current UI/control transport is complete on this branch. Remaining protobuf-heavy work belongs to the future daemon-as-server and alternate-transport backlog items below (`server-mode`, `http-client`, `openwrt`) and should reuse the same mapper-boundary contract.
+  - **Closure note (2026-03-30)**: canonical-model-first mapper boundary objective for current UI/control transport is complete on this branch. This closure does **not** imply full transport-library agnosticism; transport pluggability remains tracked in the dedicated `transport/session client port` backlog item above. Remaining protobuf-heavy work belongs to future daemon-as-server and alternate-transport backlog items below (`server-mode`, `http-client`, `openwrt`) and should reuse the same mapper-boundary contract.
 
 - [ ] **`[ARCH]`** Migrate daemon to full gRPC server; Python UI and future clients become gRPC clients.
   - **Current architecture** (inverted): daemon is a gRPC *client* calling a Python UI acting as
@@ -590,7 +668,7 @@ eBPF library policy:
       subscriber pattern; UI connects to daemon, reads `AskRule` stream, pushes verdict replies.
     - `clients/` service in `daemon-rs`: remodel as a session registry for inbound clients rather than
       an outbound connection pool.
-    - reuse the transport-agnostic session/control port introduced by the `grpc-ui` seam so server-mode
+    - reuse the transport-agnostic session/control port introduced by the transport-wire seam so server-mode
       gRPC stays an adapter, not a policy owner.
   - **Compatibility**: keep Go daemon unaffected (Go continues using current inverted model);
     `daemon-rs` flag-gates the server model behind a `server-mode` Cargo feature initially.
@@ -713,6 +791,7 @@ eBPF library policy:
   - Split progress confirmed: monolith paths `platform/adapters/firewall_nft_netlink.rs`, `workers/runtime/ebpf/control.rs`, `platform/ffi/nfqueue.rs`, and `config.rs` were replaced by directory modules.
   - **Done (2026-03-30)**: `workers/runtime/watch/control.rs` split by extracting inotify trigger machinery to `workers/runtime/watch/control_trigger.rs`; `control.rs` reduced to 295 lines.
   - Still >500 lines: `platform/adapters/stats_exporter_prometheus.rs` (1080), `platform/adapters/stats_exporter_push.rs` (946), `services/task/runtime_handlers.rs` (916), `flows/notification/notification.rs` (861), `platform/adapters/nfqueue_netlink.rs` (709), `platform/adapters/firewall_nft.rs` (677), `models/audit/kind.rs` (674), `services/storage/storage.rs` (668), `daemon/tasks.rs` (631), `services/rule/matching.rs` (621), `platform/adapters/connection_event_logger.rs` (556), `workers/dns/dns_worker.rs` (552), `platform/adapters/firewall_nft_netlink/apply.rs` (539), `workers/runtime/ebpf/control/aya_runtime.rs` (534), `platform/adapters/firewall_nft_netlink/parse.rs` (528).
+  - Concrete next-touch split plan for `platform/adapters/nfqueue_netlink.rs`: extract wire/message builders (`nlmsg` + config/verdict encoders) to `platform/adapters/nfqueue_netlink/wire.rs`, packet parsing to `.../parse.rs`, and socket/runtime loop control to `.../runtime.rs`, leaving `mod.rs`/facade-only startup helpers in the main adapter file.
   - Follow-up policy: split on next feature touch; prioritize runtime/flow/service files before adapter-only files when selecting incremental refactor slices.
 
 ### Hot-Path Optimization Backlog (rescan 2026-03-26)
@@ -887,6 +966,11 @@ New findings from systematic full-codebase audit (services, flows, workers, plat
 
 ## Recent History (Condensed)
 
+- 2026-03-30: Commit-hygiene follow-up for non-default packaging profile (`--no-default-features --features storage-format-yaml`): resolved pre-existing eBPF/runtime-mode compile errors and warning set by tightening feature-gated imports/locals, adding explicit feature-scoped dead-code justifications for dormant surfaces, and fixing a default-profile unreachable-code warning in `services/connection/ebpf.rs`. Validation now clean across all three gates: `cargo check`, `cargo test --no-run`, and non-default storage-format packaging profile.
+- 2026-03-30: Loadable-state storage-format pluggability slice expanded and validated end-to-end: added CLI main format override `--main-storage-format <json|yaml|toml>` through daemon bootstrap and migration paths; `StorageService` now carries process-global main-storage policy, resolves format as `CLI override -> path extension -> compiled default`, and keeps JSON fallback compatibility for unknown extensions. Rule scanning/writes now honor the selected main format extension (`path_matches_main_storage_format` / `main_storage_extension`) and migration reads/writes now route through storage-format conversion helpers rather than hard-coded JSON parse/emit paths.
+- 2026-03-30: Storage codec dependencies are now packaging-feature-gated in `crates/daemon/Cargo.toml` (`storage-format-json`, `storage-format-yaml`, `storage-format-toml`) with optional deps and compile-time invalid-build guard (at least one storage codec required). `DESIGN_RULES.md` updated with explicit Packaging Feature-Gating Rule and Compiler Warning Resolution Rule (promote/remove/justify arbitration, suppression hygiene, and commit warning gates).
+- 2026-03-30: DNS varlink parsing now batches multiple A/AAAA addresses per host into `DnsPayload::answers` while preserving response order relative to alias records via ordered parsed-event staging. Added regression coverage in `tests/workers/workers_dns.rs` for multi-address host batching. `DnsPayload::answers`/`DnsAnswerRecord::new` are now active runtime paths (no dead-code suppression needed).
+- 2026-03-30: Dead-code/unused-warning cleanup pass aligned with design rules: removed stale suppressions for production-used APIs, deleted genuinely unused helpers, and added explicit one-line justifications for remaining intentional test/feature-gated suppressions. `contract_types_stay_under_models` test now detects actual contract declarations (derive/impl) instead of import-only false positives. `Config::load_from_default_locations()` restored as a canonical no-override system-path loader and made reachable from bootstrap/migration when no CLI overrides are provided.
 - 2026-03-30: UI TLS transport parity hardening: `tls-simple`/`tls-mutual` now fail closed when `SkipVerify=false` and no explicit trust material is configured (`TLSOptions.CACert` or `TLSOptions.ServerCert`), aligning Rust with Go's explicit `RootCAs` model. Maintainer/user-provided OpenSSL self-signed certs are supported as first-class trust anchors via those config fields. Added regression test in `tests/services/client.rs`.
 - 2026-03-26: Full codebase rescan: Go/Rust parity audit (COMPATIBILITY.md updated with kernel self-check gap and firewall reload trigger model delta), DESIGN_RULES.md violation scan (3 items: lifecycle/runtime_lifecycle.rs missing, verdict Arc value-clone, API-surface density), hot/cold path optimization analysis (5 HIGH, 6 MEDIUM, 4 LOW items prioritized in PERF.md optimization backlog).  All findings tracked as actionable backlog items.
 - 2026-03-26: Complete bpftool subprocess removal (db8970e follow-up): all bpftool-only code (`bpftool_list_maps`, `bpftool_lookup_owner`, `bpftool_lookup_owner`, `try_load_object_with_bpftool`, `is_already_pinned_error`, bpftool supervisor block, 9 `#[cfg(not(aya-ebpf))]`-gated helpers) deleted outright rather than left behind cfg gates.  `BpfProgram` struct removed from `models/ebpf_state.rs`.  `conn_pin_root`/`proc_pin_root`/`dns_pin_root` removed from `services/ebpf/ebpf.rs` (sole caller was bpftool loader).  `bpftool` removed from firewall preflight and smoke test fallback blocks.  623 lines deleted, 0 warnings, 425 passed.

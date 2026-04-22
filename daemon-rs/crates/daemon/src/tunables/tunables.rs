@@ -96,7 +96,6 @@ impl RuntimeTunables {
             .unwrap_or_default()
     }
 
-    #[allow(dead_code)]
     pub fn reload_global() -> (Self, String) {
         let (tunables, source) = Self::load_effective();
         tunables.publish_global();

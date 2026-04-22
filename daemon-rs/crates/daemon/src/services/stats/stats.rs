@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex, atomic::Ordering};
 
-use opensnitch_proto::pb;
+use transport_wire_core::{WireConnection, WireEvent, WireRule, WireSubscriptionStatistics};
 
 use super::internal::{
     BreakdownCounters, CacheAlignedAtomicU64, EventsState, STATS_EVENT_RING_CAPACITY, StatsCounters,
@@ -18,7 +18,7 @@ pub struct StatsService {
     pub(super) counters: Arc<StatsCounters>,
     pub(super) fast_allow: Arc<CacheAlignedAtomicU64>,
     pub(super) fast_deny: Arc<CacheAlignedAtomicU64>,
-    pub(super) sub_stats: Arc<Mutex<Option<pb::SubscriptionStatistics>>>,
+    pub(super) sub_stats: Arc<Mutex<Option<WireSubscriptionStatistics>>>,
 }
 
 impl Default for StatsService {
@@ -40,7 +40,7 @@ impl StatsService {
     }
 
     /// Replace the subscription statistics block; reflected in the next metrics export.
-    pub fn update_subscription_stats(&self, stats: pb::SubscriptionStatistics) {
+    pub fn update_subscription_stats(&self, stats: WireSubscriptionStatistics) {
         *self
             .sub_stats
             .lock()
@@ -107,7 +107,7 @@ impl StatsService {
         }
     }
 
-    pub fn on_event(&self, connection: pb::Connection, rule: Option<pb::Rule>) {
+    pub fn on_event(&self, connection: WireConnection, rule: Option<WireRule>) {
         let mut ev = match self.events_state.try_lock() {
             Ok(ev) => ev,
             Err(std::sync::TryLockError::WouldBlock) => {
@@ -124,7 +124,7 @@ impl StatsService {
             }
         };
         let unix_nano = i64::try_from(unix_epoch_nanos()).unwrap_or(i64::MAX);
-        ev.events.push_overwrite(pb::Event {
+        ev.events.push_overwrite(WireEvent {
             time: Self::format_event_time(unix_nano),
             connection: Some(connection),
             rule,

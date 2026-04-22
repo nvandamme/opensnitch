@@ -19,7 +19,7 @@ mod utilities;
 pub use crate::models::rule_match_decision::RuleMatchDecision;
 pub(crate) use cache_types::*;
 pub(crate) use conversions::{
-    rule_record_from_proto, rule_record_now_timestamp, rule_record_to_proto,
+    rule_record_from_wire, rule_record_now_timestamp, wire_rule_from_record,
 };
 pub use rule::*;
 pub(crate) use semantics::{rule_duration_persists_to_disk, rule_duration_temporary_spec};

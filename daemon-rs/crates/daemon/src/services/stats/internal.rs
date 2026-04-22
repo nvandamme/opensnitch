@@ -6,7 +6,7 @@ use std::{
     time::Instant,
 };
 
-use opensnitch_proto::pb;
+use transport_wire_core::WireEvent;
 
 use crate::utils::ring_buffer::RingBuffer;
 
@@ -89,7 +89,7 @@ impl Default for BreakdownCounters {
 /// with breakdown counter updates.
 pub(super) struct EventsState {
     pub(super) started_at: Option<Instant>,
-    pub(super) events: RingBuffer<pb::Event>,
+    pub(super) events: RingBuffer<WireEvent>,
     pub(super) max_events: usize,
     pub(super) workers: usize,
 }

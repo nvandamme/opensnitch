@@ -30,6 +30,13 @@
 //! All metrics are prefixed with `opensnitch_`.  Counters carry the `_total`
 //! suffix per Prometheus conventions.  Breakdown maps (by_proto, by_host,
 //! etc.) are exposed as gauges with a single label key.
+//!
+//! Protocol boundary note:
+//! - This adapter consumes daemon snapshots shaped by OpenSnitch transport stats
+//!   aliases (`models/metrics_snapshot.rs`).
+//! - When negotiation selects protobuf, the response format is Prometheus
+//!   `io.prometheus.client.MetricFamily` from `models/prometheus_wire.rs`.
+//!   This is intentionally distinct from OpenSnitch `proto::pb::*` messages.
 use std::convert::Infallible;
 use std::fmt::Write as FmtWrite;
 use std::net::SocketAddr;
@@ -48,8 +55,7 @@ use tracing::{info, warn};
 
 use crate::models::metrics_snapshot::MetricsSnapshot;
 use crate::platform::ports::stats_exporter_port::StatsExporterPort;
-
-use opensnitch_proto::pb;
+use transport_wire_core::WireSubscriptionStatistics;
 
 // ---------------------------------------------------------------------------
 // Compact snapshot (no Events slice — reduces per-tick allocation)
@@ -65,7 +71,7 @@ struct CompactStats {
     dropped: u64,
     rule_hits: u64,
     rule_misses: u64,
-    subscription_stats: Option<pb::SubscriptionStatistics>,
+    subscription_stats: Option<WireSubscriptionStatistics>,
     by_proto: Vec<(String, u64)>,
     by_address: Vec<(String, u64)>,
     by_host: Vec<(String, u64)>,
@@ -565,7 +571,7 @@ fn escape_label_value(s: &str) -> String {
 ///   opensnitch_subscription_by_group{group=...}
 ///   opensnitch_subscription_by_node{node=...}
 ///   opensnitch_subscription_rule_info{rule=...,subscription=...}  (one row per rule×subscription)
-fn subscription_gauges(buf: &mut String, sub: Option<&pb::SubscriptionStatistics>) {
+fn subscription_gauges(buf: &mut String, sub: Option<&WireSubscriptionStatistics>) {
     let Some(s) = sub else { return };
     gauge(
         buf,
@@ -637,7 +643,7 @@ fn subscription_gauges(buf: &mut String, sub: Option<&pb::SubscriptionStatistics
 /// Build Prometheus protobuf MetricFamily entries for subscription statistics.
 fn subscription_proto_families(
     fams: &mut Vec<prom_proto::MetricFamily>,
-    sub: Option<&pb::SubscriptionStatistics>,
+    sub: Option<&WireSubscriptionStatistics>,
 ) {
     use prom_proto::*;
     let Some(s) = sub else { return };

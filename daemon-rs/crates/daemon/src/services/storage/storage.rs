@@ -5,7 +5,15 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
+use storage_format_core::StorageFormatCodec;
+#[cfg(feature = "storage-format-json")]
+use storage_format_json::JsonStorageFormat;
+#[cfg(feature = "storage-format-toml")]
+use storage_format_toml::TomlStorageFormat;
+#[cfg(feature = "storage-format-yaml")]
+use storage_format_yaml::YamlStorageFormat;
 
 use super::event_bus::StorageEventBus;
 use super::ops::{bool_if_not_found, exists_if_not_found, option_if_not_found};
@@ -23,11 +31,194 @@ use crate::{
     services::audit::AuditService,
 };
 
+#[cfg(not(any(
+    feature = "storage-format-json",
+    feature = "storage-format-yaml",
+    feature = "storage-format-toml"
+)))]
+compile_error!(
+    "opensnitchd-rs requires at least one storage codec feature: storage-format-json, storage-format-yaml, or storage-format-toml"
+);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StorageFormat {
+    Json,
+    Yaml,
+    Toml,
+}
+
+impl StorageFormat {
+    pub(crate) fn compiled_default() -> Self {
+        #[cfg(feature = "storage-format-json")]
+        {
+            Self::Json
+        }
+
+        #[cfg(all(not(feature = "storage-format-json"), feature = "storage-format-yaml"))]
+        {
+            Self::Yaml
+        }
+
+        #[cfg(all(
+            not(feature = "storage-format-json"),
+            not(feature = "storage-format-yaml"),
+            feature = "storage-format-toml"
+        ))]
+        {
+            Self::Toml
+        }
+    }
+
+    pub(crate) fn from_cli_flag(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            #[cfg(feature = "storage-format-json")]
+            "json" => Some(Self::Json),
+            #[cfg(feature = "storage-format-yaml")]
+            "yaml" | "yml" => Some(Self::Yaml),
+            #[cfg(feature = "storage-format-toml")]
+            "toml" => Some(Self::Toml),
+            _ => None,
+        }
+    }
+
+    fn from_path(path: &Path) -> Result<Self> {
+        let ext = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase())
+            .ok_or_else(|| anyhow::anyhow!("storage file has no extension: {}", path.display()))?;
+
+        match ext.as_str() {
+            "json" => Ok(Self::Json),
+            "yaml" | "yml" => Ok(Self::Yaml),
+            "toml" => Ok(Self::Toml),
+            _ => Err(anyhow::anyhow!(
+                "unsupported storage format extension '{ext}' for {}",
+                path.display()
+            )),
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Json => "JSON",
+            Self::Yaml => "YAML",
+            Self::Toml => "TOML",
+        }
+    }
+
+    pub(crate) fn canonical_extension(&self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Yaml => "yaml",
+            Self::Toml => "toml",
+        }
+    }
+
+    fn matches_path(&self, path: &Path) -> bool {
+        let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
+            return false;
+        };
+        let ext = ext.to_ascii_lowercase();
+        match self {
+            Self::Json => ext == "json",
+            Self::Yaml => ext == "yaml" || ext == "yml",
+            Self::Toml => ext == "toml",
+        }
+    }
+
+    fn parse<T>(&self, raw: &str) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        match self {
+            Self::Json => {
+                #[cfg(feature = "storage-format-json")]
+                {
+                    return Ok(JsonStorageFormat.parse_from_storage(raw)?);
+                }
+                #[cfg(not(feature = "storage-format-json"))]
+                {
+                    return Err(anyhow::anyhow!("JSON storage format feature is disabled"));
+                }
+            }
+            Self::Yaml => {
+                #[cfg(feature = "storage-format-yaml")]
+                {
+                    return Ok(YamlStorageFormat.parse_from_storage(raw)?);
+                }
+                #[cfg(not(feature = "storage-format-yaml"))]
+                {
+                    return Err(anyhow::anyhow!("YAML storage format feature is disabled"));
+                }
+            }
+            Self::Toml => {
+                #[cfg(feature = "storage-format-toml")]
+                {
+                    return Ok(TomlStorageFormat.parse_from_storage(raw)?);
+                }
+                #[cfg(not(feature = "storage-format-toml"))]
+                {
+                    return Err(anyhow::anyhow!("TOML storage format feature is disabled"));
+                }
+            }
+        }
+    }
+
+    fn convert<T>(&self, value: &T, pretty: bool) -> Result<String>
+    where
+        T: Serialize,
+    {
+        match self {
+            Self::Json => {
+                #[cfg(feature = "storage-format-json")]
+                {
+                    if pretty {
+                        return Ok(JsonStorageFormat.convert_to_storage_pretty(value)?);
+                    }
+                    return Ok(JsonStorageFormat.convert_to_storage(value)?);
+                }
+                #[cfg(not(feature = "storage-format-json"))]
+                {
+                    return Err(anyhow::anyhow!("JSON storage format feature is disabled"));
+                }
+            }
+            Self::Yaml => {
+                #[cfg(feature = "storage-format-yaml")]
+                {
+                    if pretty {
+                        return Ok(YamlStorageFormat.convert_to_storage_pretty(value)?);
+                    }
+                    return Ok(YamlStorageFormat.convert_to_storage(value)?);
+                }
+                #[cfg(not(feature = "storage-format-yaml"))]
+                {
+                    return Err(anyhow::anyhow!("YAML storage format feature is disabled"));
+                }
+            }
+            Self::Toml => {
+                #[cfg(feature = "storage-format-toml")]
+                {
+                    if pretty {
+                        return Ok(TomlStorageFormat.convert_to_storage_pretty(value)?);
+                    }
+                    return Ok(TomlStorageFormat.convert_to_storage(value)?);
+                }
+                #[cfg(not(feature = "storage-format-toml"))]
+                {
+                    return Err(anyhow::anyhow!("TOML storage format feature is disabled"));
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct StorageService {
     events: StorageEventBus,
     audit: Option<AuditService>,
     verbose_hot_path_audit: bool,
+    main_storage_format: Option<StorageFormat>,
 }
 
 #[allow(dead_code)]
@@ -37,6 +228,7 @@ impl StorageService {
             events: StorageEventBus::new(),
             audit: None,
             verbose_hot_path_audit: false,
+            main_storage_format: None,
         }
     }
 
@@ -47,6 +239,14 @@ impl StorageService {
 
     pub(crate) fn with_verbose_hot_path_audit(mut self, enabled: bool) -> Self {
         self.verbose_hot_path_audit = enabled;
+        self
+    }
+
+    pub(crate) fn with_main_storage_format(
+        mut self,
+        storage_format: Option<StorageFormat>,
+    ) -> Self {
+        self.main_storage_format = storage_format;
         self
     }
 
@@ -63,6 +263,10 @@ impl StorageService {
         self.verbose_hot_path_audit
     }
 
+    pub(super) fn main_storage_format(&self) -> Option<StorageFormat> {
+        self.main_storage_format
+    }
+
     pub(crate) fn global() -> Self {
         global_storage_service()
     }
@@ -71,6 +275,14 @@ impl StorageService {
         let mut current = global_storage_service();
         current.audit = Some(audit);
         current.verbose_hot_path_audit = verbose_hot_path;
+        super::runtime_lifecycle::replace_global_storage_service(current)
+    }
+
+    pub(crate) fn install_global_main_storage_format(
+        storage_format: Option<StorageFormat>,
+    ) -> Self {
+        let mut current = global_storage_service();
+        current.main_storage_format = storage_format;
         super::runtime_lifecycle::replace_global_storage_service(current)
     }
 
@@ -101,6 +313,26 @@ impl StorageService {
 
     pub(crate) fn dropped_ingress_events_count(&self) -> u64 {
         self.events.dropped_ingress_events() as u64
+    }
+
+    pub(crate) fn main_storage_extension(&self) -> &'static str {
+        self.main_storage_format
+            .unwrap_or(StorageFormat::compiled_default())
+            .canonical_extension()
+    }
+
+    pub(crate) fn path_matches_main_storage_format(&self, path: &Path) -> bool {
+        self.main_storage_format
+            .unwrap_or(StorageFormat::compiled_default())
+            .matches_path(path)
+    }
+
+    fn resolve_storage_format(&self, path: &Path) -> StorageFormat {
+        if let Some(storage_format) = self.main_storage_format {
+            return storage_format;
+        }
+
+        StorageFormat::from_path(path).unwrap_or(StorageFormat::compiled_default())
     }
 
     pub(crate) async fn read_to_string(
@@ -186,18 +418,7 @@ impl StorageService {
         Ok(contents)
     }
 
-    pub(crate) async fn read_json<T>(&self, domain: &'static str, path: &Path) -> Result<T>
-    where
-        T: DeserializeOwned,
-    {
-        let raw = self
-            .read_to_string(domain, path)
-            .await
-            .with_context(|| format!("reading file {}", path.display()))?;
-        serde_json::from_str(&raw).with_context(|| format!("parsing JSON file {}", path.display()))
-    }
-
-    pub(crate) async fn read_json_and_notify<T>(
+    pub(crate) async fn read_and_parse_with_storage_format<T>(
         &self,
         domain: &'static str,
         path: &Path,
@@ -205,15 +426,36 @@ impl StorageService {
     where
         T: DeserializeOwned,
     {
+        let storage_format = self.resolve_storage_format(path);
+        let raw = self
+            .read_to_string(domain, path)
+            .await
+            .with_context(|| format!("reading file {}", path.display()))?;
+        storage_format
+            .parse(&raw)
+            .with_context(|| format!("parsing {} file {}", storage_format.label(), path.display()))
+    }
+
+    pub(crate) async fn read_and_parse_with_storage_format_and_notify<T>(
+        &self,
+        domain: &'static str,
+        path: &Path,
+    ) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let storage_format = self.resolve_storage_format(path);
         let raw = self
             .read_to_string_and_notify(domain, path)
             .await
             .with_context(|| format!("reading file {}", path.display()))?;
-        serde_json::from_str(&raw).with_context(|| format!("parsing JSON file {}", path.display()))
+        storage_format
+            .parse(&raw)
+            .with_context(|| format!("parsing {} file {}", storage_format.label(), path.display()))
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn read_json_if_exists<T>(
+    pub(crate) async fn read_and_parse_with_storage_format_if_exists<T>(
         &self,
         domain: &'static str,
         path: &Path,
@@ -221,6 +463,7 @@ impl StorageService {
     where
         T: DeserializeOwned,
     {
+        let storage_format = self.resolve_storage_format(path);
         let Some(raw) = self
             .read_to_string_if_exists(domain, path)
             .await
@@ -229,12 +472,13 @@ impl StorageService {
             return Ok(None);
         };
 
-        let parsed = serde_json::from_str(&raw)
-            .with_context(|| format!("parsing JSON file {}", path.display()))?;
+        let parsed = storage_format.parse(&raw).with_context(|| {
+            format!("parsing {} file {}", storage_format.label(), path.display())
+        })?;
         Ok(Some(parsed))
     }
 
-    pub(crate) async fn read_json_if_exists_and_notify<T>(
+    pub(crate) async fn read_and_parse_with_storage_format_if_exists_and_notify<T>(
         &self,
         domain: &'static str,
         path: &Path,
@@ -242,6 +486,7 @@ impl StorageService {
     where
         T: DeserializeOwned,
     {
+        let storage_format = self.resolve_storage_format(path);
         let Some(raw) = self
             .read_to_string_if_exists_and_notify(domain, path)
             .await
@@ -250,20 +495,38 @@ impl StorageService {
             return Ok(None);
         };
 
-        let parsed = serde_json::from_str(&raw)
-            .with_context(|| format!("parsing JSON file {}", path.display()))?;
+        let parsed = storage_format.parse(&raw).with_context(|| {
+            format!("parsing {} file {}", storage_format.label(), path.display())
+        })?;
         Ok(Some(parsed))
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn read_json_sync<T>(&self, domain: &'static str, path: &Path) -> Result<T>
+    pub(crate) fn read_and_parse_with_storage_format_sync<T>(
+        &self,
+        domain: &'static str,
+        path: &Path,
+    ) -> Result<T>
     where
         T: DeserializeOwned,
     {
+        let storage_format = self.resolve_storage_format(path);
         let raw = self
             .read_to_string_sync(domain, path)
             .with_context(|| format!("reading file {}", path.display()))?;
-        serde_json::from_str(&raw).with_context(|| format!("parsing JSON file {}", path.display()))
+        storage_format
+            .parse(&raw)
+            .with_context(|| format!("parsing {} file {}", storage_format.label(), path.display()))
+    }
+
+    pub(crate) fn parse_with_storage_format_for_path<T>(path: &Path, raw: &str) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let storage_format = global_storage_service().resolve_storage_format(path);
+        storage_format
+            .parse(raw)
+            .with_context(|| format!("parsing {} file {}", storage_format.label(), path.display()))
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -565,6 +828,34 @@ impl StorageService {
             .await
     }
 
+    pub(crate) async fn convert_and_write_with_storage_format_to_path_and_notify<T>(
+        &self,
+        domain: &'static str,
+        path: &Path,
+        value: &T,
+        pretty: bool,
+    ) -> Result<()>
+    where
+        T: Serialize,
+    {
+        let storage_format = self.resolve_storage_format(path);
+        if let Some(parent) = path.parent() {
+            self.create_dir_all_and_notify(domain, parent).await?;
+        }
+
+        let payload = storage_format.convert(value, pretty).with_context(|| {
+            format!(
+                "converting {} payload for {}",
+                storage_format.label(),
+                path.display()
+            )
+        })?;
+
+        let temp_path = crate::utils::atomic_write::sibling_temp_path_with_suffix(path, ".tmp");
+        self.write_bytes_atomic_and_notify(domain, &temp_path, path, payload.as_bytes())
+            .await
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn write_bytes_atomic_sync(
         &self,
@@ -586,6 +877,33 @@ impl StorageService {
         write_bytes_atomic_sync(temp_path, path, bytes, domain)?;
         self.emit_write(domain, path);
         Ok(())
+    }
+
+    pub(crate) fn convert_and_write_with_storage_format_to_path_sync_and_notify<T>(
+        &self,
+        domain: &'static str,
+        path: &Path,
+        value: &T,
+        pretty: bool,
+    ) -> Result<()>
+    where
+        T: Serialize,
+    {
+        let storage_format = self.resolve_storage_format(path);
+        if let Some(parent) = path.parent() {
+            self.create_dir_all_sync_and_notify(domain, parent)?;
+        }
+
+        let payload = storage_format.convert(value, pretty).with_context(|| {
+            format!(
+                "converting {} payload for {}",
+                storage_format.label(),
+                path.display()
+            )
+        })?;
+
+        let temp_path = crate::utils::atomic_write::sibling_temp_path_with_suffix(path, ".tmp");
+        self.write_bytes_atomic_sync_and_notify(domain, &temp_path, path, payload.as_bytes())
     }
 
     pub(crate) fn emit_scan(&self, domain: &'static str, path: &Path) {

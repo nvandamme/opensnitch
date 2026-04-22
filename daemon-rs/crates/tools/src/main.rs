@@ -1291,7 +1291,7 @@ fn update_perf_md() -> Result<(), DynError> {
     }) // with_guard update_perf_md
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn with_fixture_backup<T, F>(repo_root: &Path, relative_path: &str, work: F) -> Result<T, DynError>
 where
     F: FnOnce() -> Result<T, DynError>,
