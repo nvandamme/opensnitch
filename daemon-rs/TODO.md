@@ -130,21 +130,69 @@ eBPF library policy:
 
 ### Future enhancements
 
-- [ ] **[ARCH][OPENWRT]** Deliver OpenWrt-native storage and transport adapters without policy-layer coupling.
+- [ ] **PERF/FUTURE-HYBRID-BANDIX** Future performance goal: add Bandix-inspired observability + explore a fat Aya bootstrap branch for faster verdict flow experiments.
+  - **Goal**: define a future-focused performance track (not a Phase 0 release gate) that improves hybrid eBPF verdict observability now and enables an optional fast-branch bootstrap path for later experiments.
+  - **Reference baseline (full Bandix repository)**:
+    - https://github.com/timsaya/bandix
+    - Scope to review explicitly: root architecture + `bandix/` userspace runtime + `bandix-ebpf/` Aya eBPF modules + `bandix-common/` shared wire/model structs.
+  - **Why Bandix behavior is relevant**:
+    - Bandix demonstrates that a lightweight eBPF-first classification stage can expose stable, low-overhead runtime signals (map occupancy/pressure, drop actions, ringbuf backpressure) that are useful even when policy authority remains in userspace.
+    - For daemon-rs, the useful takeaway is not Bandix policy semantics, but Bandix-style observability semantics: count fast-path decisions and overflow conditions close to the kernel boundary, then reconcile with canonical userspace verdict accounting.
+    - This directly reduces blind spots in hybrid mode where NFQUEUE fallback correctness depends on understanding hit/miss ratios, stale-entry churn, and cache-pressure behavior over time.
+  - **Fat Aya bootstrap branch exploration (future experimental branch, optional)**:
+    - Explore a single shared Aya program bootstrap pattern (Bandix-style shared ingress/egress module orchestration) for faster bring-up of a dedicated verdict-fast experiment branch.
+    - Keep daemon-rs policy authority unchanged: kernel fast path may short-circuit known decisions, but canonical rule semantics and misses remain userspace/NFQUEUE-controlled.
+    - Add explicit bootstrap counters so branch viability is measurable from first run:
+      - `diag.hybrid.bootstrap.program_attach_success_total`
+      - `diag.hybrid.bootstrap.program_attach_error_total`
+      - `diag.hybrid.bootstrap.map_open_success_total`
+      - `diag.hybrid.bootstrap.map_open_error_total`
+      - `diag.hybrid.bootstrap.runtime_fallback_total`
+  - **How to implement explicit metrics/counters (Bandix-inspired, daemon-rs semantics)**:
+    - Add hybrid verdict counters at decision boundaries:
+      - `diag.hybrid.fastpath_allow_total`
+      - `diag.hybrid.fastpath_drop_total`
+      - `diag.hybrid.fallback_nfqueue_total`
+      - `diag.hybrid.cache_miss_total`
+      - `diag.hybrid.cache_stale_total`
+    - Add cache lifecycle counters from daemon-triggered writes/invalidations:
+      - `diag.hybrid.cache_insert_total`
+      - `diag.hybrid.cache_update_total`
+      - `diag.hybrid.cache_delete_total`
+      - `diag.hybrid.cache_invalidate_rule_reload_total`
+      - `diag.hybrid.cache_invalidate_config_reload_total`
+      - `diag.hybrid.cache_invalidate_owner_change_total`
+    - Add pressure/backpressure counters modeled after Bandix map/ring stress observability:
+      - `diag.hybrid.map_pressure_events_total`
+      - `diag.hybrid.map_prune_total`
+      - `diag.hybrid.ringbuf_poll_errors_total`
+      - `diag.hybrid.ringbuf_samples_dropped_total`
+    - Wire points (initial slice):
+      - increment fast-path/fallback counters in the connection/verdict boundary where eBPF cache decision is arbitrated against NFQUEUE fallback,
+      - increment cache mutation/invalidation counters in rule/config reload paths and post-verdict cache write path,
+      - increment pressure/backpressure counters in eBPF supervisor/ringbuf worker paths where map pressure and poll failures are already detected.
+    - Export/visibility requirements:
+      - all new counters must flow through existing daemon statistics export surfaces (Prometheus/OpenMetrics/proto) with stable names,
+      - add a periodic consistency check metric `diag.hybrid.accounting_skew_total` to record mismatches between fast-path counters and userspace verdict totals during validation runs.
+  - **Blockers**: unresolved hook trade-off (`cgroup/connect4+connect6` vs `tc`) and unresolved key trade-off (`socket cookie` vs normalized 5-tuple + uid/process identity), plus unresolved scope boundary for how far a fat Aya module can go without duplicating RuleService policy semantics.
+  - **Validation/proof**: commit a short future-goal memo + decision table and add focused test/perf plan bullets covering miss fallback correctness, stale-cache prevention, and p50/p95/p99 latency impact; include one mock/harness run report proving that each listed counter can be incremented at least once in a controlled scenario.
+  - **Closure condition**: this task closes when the future-goal metrics contract is accepted (including bootstrap counters), Bandix reference scope is documented with the full repository URL above, and a concrete fast-branch exploration plan exists without reclassifying the work as mandatory Phase 0 delivery.
+
+- [ ] **ARCH/OPENWRT** Deliver OpenWrt-native storage and ubus transport adapters without policy-layer coupling.
   - **Objective**: keep OpenWrt file formats, runtime command plans, and transport wiring adapter-owned while daemon services/flows stay canonical-model-first.
   - **Remote progress already landed**: firewall zones are part of the canonical firewall model, backend-to-DTO extraction exists for nftables and iptables, OpenWrt firewall authority is explicit (`OpenWrtUci`), UCI CLI plan scaffolding exists behind the `openwrt` feature, and OpenWrt mode now hard-requires UCI storage-format support.
   - **Policy to preserve**: generic Linux persistence is manager/nftables/iptables-owned as appropriate; OpenWrt persistence remains UCI/firewall4-owned, while runtime introspection and health stay netlink-first.
-  - **Next work**: finish adapter-crate boundaries for UCI file codecs, ubus event/RPC transport, and LuCI-facing control-plane integration without leaking OpenWrt wire/storage structs into daemon policy layers.
+  - **Next work**: finish adapter-crate boundaries for ubus event/RPC transport and LuCI polling compatibility over the same `/ubus` JSON-RPC surface, without leaking OpenWrt wire/storage structs into daemon policy layers.
   - **Validation**: OpenWrt additions must stay adapter-local, daemon policy signatures must remain model-first, and transport/storage adapter tests must live with the owning adapter crates.
 
-- [ ] **[ARCH][FIREWALL-PERSISTENCE]** Implement true file-backed persistence surfaces per backend authority.
+- [ ] **ARCH/FIREWALL-PERSISTENCE** Implement true file-backed persistence surfaces per backend authority.
   - **Objective**: make firewall mutations survive reboot/reload through backend-owned persistent surfaces rather than runtime-only netlink/CLI mutation.
   - **nftables path**: detect the real loader contract from `/etc/nftables.conf`, persist only through an existing include-backed or explicitly provisioned managed path, and fail loudly on ambiguous/unsupported layouts instead of silently inventing one.
   - **iptables path**: target distro-native persistent restore authorities/services rather than treating runtime CLI mutation as durable state.
   - **OpenWrt path**: keep persistence on UCI CLI/ubus command plans; remote branch progress already includes stale managed-section removal and sidecar mapping for daemon rule identity during LuCI/UCI renames.
   - **Validation**: persistence must be idempotent, authority-owned, reload-safe, and verified with backend-specific restart/reload tests.
 
-- [ ] **[PERF][ARCH]** Prototype hybrid eBPF fast-path ahead of NFQUEUE.
+- [ ] **PERF/ARCH** Prototype hybrid eBPF fast-path ahead of NFQUEUE.
   - **Goal**: keep the current NFQUEUE/userspace rule engine as the canonical verdict source, while allowing eBPF to short-circuit already-known allow/deny decisions for repeat flows before they reach the queue.
   - **Non-goal**: do not attempt a 1:1 "port NFQUEUE to eBPF" replacement. eBPF may enforce cached decisions, but it cannot synchronously block on UI/userspace verdicts.
   - **Phase 0 design spike**: choose the hook point (`cgroup/connect4` + `connect6` preferred for local outbound flows; validate `tc` / other hook trade-offs), define the cache key (`socket cookie` vs normalized 5-tuple + uid/process identity), TTL/invalidation rules, and miss-path telemetry.
@@ -576,7 +624,7 @@ eBPF library policy:
     - UCI config editor page backed by `opensnitchd.rule_apply` ubus call.
     - Packaged as an opkg `.ipk` targeting OpenWrt 23.05+ (LuCI framework 2.0).
     - Separate repository / submodule; tracked here for scope awareness.
-  - Prerequisite: ubus adapter (`transport-wire-openwrt-ubus`) must land first; LuCI consumes the ubus object.
+  - Prerequisite: ubus adapter (`transport-wire-openwrt-ubus`) is the transport boundary; LuCI consumes the same ubus object surface via polling.
 
 - [ ] **`[ARCH]`** Evaluate embedded DB (`redb`) for ACID persistence of cold snapshotables (`db-storage` non-default feature).
   - **Exploration slice (2026-03-30)**:

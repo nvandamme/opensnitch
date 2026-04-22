@@ -158,7 +158,7 @@ module surfaces are bounded.
 	- Protocol/format-specific implementation lives in dedicated sibling modules such as `codec.rs`, `rpc.rs`, `transport.rs`, `tls.rs`, `wire_protos.rs`, or `error.rs`.
 	- When an adapter exposes both public API and transport/format-specific internals, keep public surface re-exports stable in `lib.rs` and move concrete behavior into sibling modules rather than expanding the crate root.
 	- Adapter test trees must enter through `src/tests/mod.rs` so the crate root follows the same linker-only rule as daemon `mod.rs` files.
-	- OpenWrt runtime adapters follow the same ownership boundary: ubus runtime/wire behavior belongs in `transport-wire-openwrt-ubus`; LuCI/uhttpd-mod-ubus behavior belongs in `transport-wire-openwrt-luci`.
+	- OpenWrt runtime adapters follow one transport ownership boundary: ubus runtime/wire behavior and `/ubus` JSON-RPC semantics (including LuCI polling usage) belong in `transport-wire-openwrt-ubus`.
 	- OpenWrt ubus event posting is transport-wire-owned behavior (session/topic/retry/payload mapping) and must not be implemented as daemon service/flow protocol logic.
 	- OpenWrt ubus integration is explicitly bidirectional at the adapter boundary: outbound live-event publish/subscribe and inbound RPC method handling for service-scoped command paths (including console/script consumers).
 	- Treat ubus as both an object/method RPC bus and an event bus; adapter contracts should map these primitives explicitly (method invocation analogous to `ubus call`, event watch/publish analogous to `ubus listen`/`ubus send`, and object notifications analogous to `ubus subscribe`).
@@ -328,7 +328,7 @@ module surfaces are bounded.
 	- ACL role identity is defined by top-level keys inside ACL JSON content, not by ACL filenames; adapter behavior and tests must not couple authorization semantics to filename conventions.
 	- Preserve authorization error semantics from ubus responses: status code `6` (`UBUS_STATUS_PERMISSION_DENIED`) must be mapped as permission denial, not collapsed into generic transport/runtime failure.
 	- Session token `00000000000000000000000000000000` is a null-session token with unauthenticated rights only (typically `session.login`); adapters must not treat it as an authenticated control session.
-	- LuCI transport adapters must map request/response/event payloads through adapter-local wire contracts (`RawLuci*`/`IncomingLuci*`) before entering daemon policy paths.
+	- LuCI-facing `/ubus` JSON-RPC handling must map request/response/event payloads through adapter-local ubus wire contracts before entering daemon policy paths.
   - No UCI or ubus format assumptions must leak into `services/`, `flows/`, or `models/` domain types.
 	- No LuCI/uhttpd protocol assumptions may leak into `services/`, `flows/`, or `models/`; those details are adapter-owned.
 	- OpenWrt init/procd integration code must be build-host safe: guard target-only side effects using `IPKG_INSTROOT` checks because init scripts can run during package/image build-time enable/disable actions.
@@ -978,8 +978,9 @@ Before every commit in `daemon-rs/`, verify all of the following:
      accumulated domain logic that belongs in a sibling file.
 
 4. **Derive CHANGELOG and commit message from actual diffs** — use `git diff --stat` and
-   `git diff HEAD -- <files>` to enumerate what actually changed. The commit message subject
-   must be `daemon-rs: <scope> — <action>` and the body must enumerate the concrete changes,
+	`git diff HEAD -- <files>` to enumerate what actually changed. The commit message subject
+	must begin with a top-level functionality prefix such as `daemon-rs:` or
+	`luci-app-opensnitch:` followed by `<scope> — <action>`; the body must enumerate the concrete changes,
    not restate intent. The CHANGELOG `[Unreleased]` section must be updated in the same commit
    using the same enumeration. The commit message body and CHANGELOG entry can share wording.
 	- **Amend + push policy**: if `git commit --amend` rewrites a commit that has already been
