@@ -16,6 +16,17 @@ Versioning baseline:
 
 ### Added
 
+- **Repository ignore policy cleanup for generated/runtime-local artifacts**
+  (`.gitignore`):
+  - Consolidated Rust build-output ignore entries under a single Cargo/Rust block while keeping
+    `target`, `target-*`, and `Cargo.lock` filtered for local daemon-rs workflows.
+  - Switched per-file protobuf ignore entries to stable directory-level rules for
+    `ui/opensnitch/proto/` and `daemon/ui/protocol/`.
+  - Added explicit local cache/tooling exclusions (`.ruff_cache/`, `.mypy_cache/`,
+    `.pytest_cache/`, `__pycache__/`, `*.pyc`) and local workspace metadata (`.coco*/`).
+  - Kept generated runtime/test local data exclusions for
+    `daemon/ui/testdata/default-config.json` and `daemon-rs/data/tunables.json`.
+
 - **OpenWrt UCI co-management reconciliation hardening + terminology governance update**
   (`crates/daemon/src/platform/adapters/openwrt_uci_firewall.rs`,
   `crates/daemon/src/tests/firewall/{firewall_service.rs,openwrt_uci_firewall_adapter.rs}`,
