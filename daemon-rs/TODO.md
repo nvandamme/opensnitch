@@ -133,7 +133,7 @@ eBPF library policy:
 - [ ] **PERF/FUTURE-HYBRID-BANDIX** Future performance goal: add Bandix-inspired observability + explore a fat Aya bootstrap branch for faster verdict flow experiments.
   - **Goal**: define a future-focused performance track (not a Phase 0 release gate) that improves hybrid eBPF verdict observability now and enables an optional fast-branch bootstrap path for later experiments.
   - **Reference baseline (full Bandix repository)**:
-    - https://github.com/timsaya/bandix
+    - [https://github.com/timsaya/bandix](https://github.com/timsaya/bandix)
     - Scope to review explicitly: root architecture + `bandix/` userspace runtime + `bandix-ebpf/` Aya eBPF modules + `bandix-common/` shared wire/model structs.
   - **Why Bandix behavior is relevant**:
     - Bandix demonstrates that a lightweight eBPF-first classification stage can expose stable, low-overhead runtime signals (map occupancy/pressure, drop actions, ringbuf backpressure) that are useful even when policy authority remains in userspace.
@@ -184,6 +184,11 @@ eBPF library policy:
   - **Policy to preserve**: generic Linux persistence is manager/nftables/iptables-owned as appropriate; OpenWrt persistence remains UCI/firewall4-owned, while runtime introspection and health stay netlink-first.
   - **Next work**: finish adapter-crate boundaries for ubus event/RPC transport and LuCI polling compatibility over the same `/ubus` JSON-RPC surface, without leaking OpenWrt wire/storage structs into daemon policy layers.
   - **Validation**: OpenWrt additions must stay adapter-local, daemon policy signatures must remain model-first, and transport/storage adapter tests must live with the owning adapter crates.
+  - **Closure condition**:
+    - ubus method/event schema v1 is defined and used as the single LuCI polling surface,
+    - package skeleton and procd/UCI runtime assets exist in the OpenWrt package repo,
+    - backend<->LuCI compatibility matrix and package release update automation are documented and exercised once.
+  - **Reference**: OpenWrt UCI storage and ubus transport design is documented in `OPENWRT.md` with detailed rationale and implementation notes for deamon-rs and LuCI App.
 
 - [ ] **ARCH/FIREWALL-PERSISTENCE** Implement true file-backed persistence surfaces per backend authority.
   - **Objective**: make firewall mutations survive reboot/reload through backend-owned persistent surfaces rather than runtime-only netlink/CLI mutation.

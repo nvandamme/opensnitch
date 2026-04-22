@@ -336,11 +336,8 @@ These names reflect the current intended split.
   - owns ubus runtime mechanics,
   - owns event publish/subscribe mapping,
   - owns service-scoped RPC command ingress,
+  - owns `/ubus` JSON-RPC semantics used by LuCI polling clients,
   - should support console/script-friendly event watching and method invocation semantics.
-- `crates/transport-wire-openwrt-luci`
-  - owns LuCI-facing integration,
-  - should align with `/ubus` JSON-RPC 2.0 expectations (uhttpd-mod-ubus baseline),
-  - must keep request/response/event payloads adapter-local before mapping into daemon contracts.
 
 ## Non-Negotiable Boundary Rules
 
@@ -372,7 +369,7 @@ These names reflect the current intended split.
   - ACL-denied paths.
 - Treat package/install/runtime integration as part of the feature, not post-processing.
 
-#### UCI File Format vs UCI CLI Output
+## UCI File Format vs UCI CLI Output
 
 - UCI config files and daemon-rs `storage-format-uci` share the same text file format surface.
 - Differences belong to runtime command/output surfaces (`uci` CLI / `ubus uci.*`):
@@ -386,6 +383,72 @@ These names reflect the current intended split.
 - Reference baseline for UCI runtime semantics and key syntax: `rust-uci`
   docs/API (`docs.rs/rust-uci`) and source-level libuci bindings. Use it as a
   libuci behavior reference; do not treat it as a parser for ubus JSON payloads.
+
+## LuCI App Integration
+
+- LuCI apps are typically implemented as uhttpd CGI scripts that interact with ubus
+  via the `/ubus` JSON-RPC endpoint.
+- For daemon-rs, LuCI is a client-facing usage profile over the same ubus transport
+  surface, not a separate transport or protocol.
+- LuCI-specific payload shaping and view-specific behavior must stay adapter-local and
+  must not leak into daemon policy/runtime modules.
+- LuCI-facing integration must preserve native ubus interaction semantics:
+  session/ACL behavior, method invocation patterns, and event subscription behavior.
+- `luci-app-opensnitch` (separate repository) is the reference UI client for this path.
+
+### LuCI Feature Coverage Baseline
+
+- The LuCI app should expose most core operator-facing functionality from the current
+  Python UI, adapted for LuCI workflows rather than cloned 1:1.
+- Minimum feature coverage should include:
+  - viewing and managing in-memory rules and policies,
+  - viewing and managing pending verdict events,
+  - viewing and managing UCI-backed configuration,
+  - viewing and managing firewall rules with OpenWrt authority semantics,
+  - viewing runtime logs and non-verdict events,
+  - configuring daemon settings.
+
+## Reference Highlights And Enforceable Checklist
+
+This section captures actionable lessons from these references:
+
+- `timsaya/bandix`
+- `timsaya/openwrt-bandix`
+- `timsaya/luci-app-bandix`
+
+### MUST
+
+- Keep a three-repository delivery split:
+  - daemon runtime (`daemon-rs`),
+  - OpenWrt package repo (`openwrt-opensnitchd`),
+  - LuCI application repo (`luci-app-opensnitch`).
+- Keep a single OpenWrt transport boundary in `transport-wire-openwrt-ubus`.
+- Define and freeze an initial ubus object/method/event schema before broad LuCI UI
+  feature expansion.
+- Publish and enforce a backend<->LuCI compatibility matrix for supported versions.
+- Implement package release update automation (version/hash refresh per architecture).
+
+### SHOULD
+
+- Reuse an openwrt-bandix-style package skeleton:
+  - package metadata + install layout,
+  - procd init script,
+  - UCI defaults,
+  - conffiles + sysupgrade keep behavior.
+- Keep LuCI-side RPC method contracts explicit and stable (method list, parameter
+  shapes, normalized success/error envelopes).
+- Keep read-path behavior resilient with bounded timeouts and safe fallback payloads,
+  while preserving strict error paths for write/control operations.
+
+### Bridge Pattern Caution
+
+- The Bandix family commonly uses a two-hop path:
+  - LuCI JS -> rpcd/ubus script object,
+  - rpcd script -> localhost HTTP API (`curl`).
+- For daemon-rs, prefer direct ubus transport ownership and avoid introducing a
+  long-lived parallel HTTP bridge surface.
+- If a temporary bridge is used during migration, keep method contracts identical to
+  the target ubus surface and remove the bridge when direct ubus handling is ready.
 
 ## Cross-References
 

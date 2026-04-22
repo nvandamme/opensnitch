@@ -12,9 +12,21 @@ Versioning baseline:
 - `v0.6.0`
 - `v0.7.0`
 
-## [Unreleased]
+## Unreleased
 
 ### Added
+
+- **OpenWrt guidance and tracker alignment for ubus-only LuCI integration path**
+  (`OPENWRT.md`, `TODO.md`, `DESIGN_RULES.md`):
+  - Updated OpenWrt transport ownership language to a single ubus surface and removed
+    separate-transport wording for LuCI.
+  - Added enforceable OpenWrt implementation checklist in `OPENWRT.md` (`MUST`/`SHOULD`),
+    including repository split, ubus schema freeze, compatibility matrix, and release
+    update automation requirements.
+  - Refined LuCI integration guidance to a client profile over `/ubus` JSON-RPC with
+    explicit feature-coverage baseline and adapter-boundary constraints.
+  - Updated active OpenWrt backlog closure criteria in `TODO.md` and added explicit
+    cross-reference to `OPENWRT.md` for implementation rationale and plan context.
 
 - **Repository ignore policy cleanup for generated/runtime-local artifacts**
   (`.gitignore`):

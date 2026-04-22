@@ -11,7 +11,6 @@ This document defines maintenance rules for tracker, compatibility, and design d
 - [daemon-rs/CHANGELOG.md](CHANGELOG.md): archived version-by-version notes.
 - [daemon-rs/PERF.md](PERF.md): performance/stress baselines and perf history.
 
-
 ## Part I — Cross-Cutting Architectural Rules
 
 This section captures rules that span all service, flow, worker, and platform
@@ -97,7 +96,6 @@ following constraints without exception.
 and per-use-case guidance for write paths and capacity sizing. This rule establishes the
 *mandatory latency constraint* that hot-path code must satisfy regardless of which
 primitive is chosen.
-
 
 ### 2. Module Layout Rules
 
@@ -187,14 +185,12 @@ module surfaces are bounded.
 	- scan touched runtime code for `pb::`, `proto::pb`, `type ... = ...pb::`, and renamed-import alias walls,
 	- eliminate boundary leaks in the same slice rather than documenting them as follow-up debt when the call sites are already being migrated.
 
-
 #### Worker Layout Decision
 
 - Keep `src/workers/` as the runtime execution layer (shared worker contracts, lifecycle helpers, daemon wiring touchpoints), but organize worker implementations by domain/service subfolders for clarity.
 - Avoid splitting worker ownership across both `services/*` and `workers/*` for the same concern at the same time; pick one location per worker family and keep imports stable per refactor slice.
 - `workers/` owns reusable execution primitives (long-running loops, queue consumers/producers, watcher engines, OS/FFI adapters, backpressure/retry mechanics).
 - Workers should be policy-agnostic where possible and expose small control/port surfaces.
-
 
 #### `commands/` And `flows/` Rules
 
@@ -211,7 +207,6 @@ module surfaces are bounded.
 	- when flow internals become generic/reusable execution machinery, extract those internals into `workers/` and keep only orchestration policy in `flows/`.
 - `flows/<domain>/mod.rs` stays linker-only; functional code lives in dedicated sibling files.
 
-
 #### Flow-vs-Worker Extraction Heuristic
 
 - Keep in `flows/` when logic answers "what should happen" (policy/decision path, domain orchestration, cross-service sequencing).
@@ -222,13 +217,11 @@ module surfaces are bounded.
 	- reconsider `WorkerControl` adapters only if explicit start/stop/probe lifecycle commands are required for those domains.
 - `commands/<domain>/mod.rs` must remain linker-only; implementations live in `commands/<domain>/<domain>.rs`.
 
-
 #### `mod.rs` Linker-Only Rule
 
 - `mod.rs` files are module wiring surfaces only (module declarations + re-exports).
 - Functional code (`struct`/`enum`/`impl`/runtime logic) belongs in dedicated sibling files.
 - Apply this consistently to `services/*`, `commands/*`, `flows/*`, and `workers/*` as those areas are touched.
-
 
 #### API-Surface File Rule
 
@@ -245,7 +238,6 @@ module surfaces are bounded.
 - Enforcement is incremental: each PR that touches a file over the threshold must either reduce it or add a follow-up entry to TODO.md with a concrete split plan.
 - CI validation: run `find src -name '*.rs' ! -path '*/tests/*' | xargs wc -l | awk '$1 > 500 && $2 != "total"'` in `crates/daemon/` as a review gate; failing files must be justified or split.
 
-
 #### Test Placement Rule
 
 - All tests for a crate must live under the `src/tests/` directory of that crate (e.g. `src/tests/parsing/`, `src/tests/workers/`, `src/tests/services/`, etc.).
@@ -260,12 +252,10 @@ module surfaces are bounded.
 	- `#[cfg(test)] pub(super) ...` / `#[cfg(test)] pub(crate) ...` — visibility shims that expose private helpers or types exclusively to the test module above.
 - Any annotation beyond those two forms (actual test functions, test harness setup, inline `#[test]` items) constitutes a violation and must be extracted to `src/tests/`.
 
-
 ### 3. Trait-First Integration Boundaries
 - Infra integrations must be consumed through `platform::ports::*` traits.
 - `platform::adapters::*` and `platform::ffi::*` are implementation details behind those traits.
 - Application/services/flows/workers should depend on ports, not concrete adapters/ffi modules.
-
 
 ### 4. Data Contract Rules
 
@@ -336,7 +326,6 @@ module surfaces are bounded.
 	- UCI syntax fixtures (`data/*.uci`, `data/rules/*.uci`) are storage-format tests only,
 	- firewall runtime semantics fixtures must live under `data/fixtures/firewall/*.json` and be consumed by firewall runtime/adapter tests.
 
-
 ### 5. Refactor Safety Rule
 
 - Prefer extraction via stable wrappers first, then collapse wrappers in a second pass.
@@ -369,6 +358,7 @@ three outcomes:
    test-only helper visible to sibling test modules). Fix: add a suppression attribute
    *with a one-line comment explaining why* the item is intentionally unreachable from
    the current unit:
+
    ```rust
    // Public codec API surface — consumed by packaging-profile integration tests.
    #[allow(dead_code)]
@@ -407,7 +397,6 @@ three outcomes:
 - A PR that introduces a new suppression attribute without a justification comment is a
   blocking review finding.
 
-
 ### Packaging Feature-Gating Rule
 
 - Optional integration surfaces (wire codecs, transport adapters, exporter backends, and other non-core pluggable components) must be exposed behind explicit Cargo features.
@@ -415,7 +404,6 @@ three outcomes:
 - When introducing a new optional dependency with measurable packaging footprint, add a dedicated `feature = ["dep:..."]` gate and avoid unconditional linking.
 - Runtime policy/authorization semantics must remain transport/codec agnostic and must not be hidden behind packaging-only feature flags.
 - Build safety: crates that require at least one implementation in a feature family (for example storage codecs) must enforce a compile-time guard so invalid zero-implementation builds fail fast.
-
 
 ## Part II — Per-Domain Rules
 
@@ -455,7 +443,6 @@ above and take precedence within their domain.
 	- `kernel.rs`: queue pressure (`PacketDropped`, `QueueOverflow`) and interface reattach (`KernelInterfaceReattached`).
 - **Design imperative — Copy vs Clone discipline:** use `#[derive(Debug, Clone, Copy)]` for signal enums whose variants carry only primitive or `&'static str` fields. Use `#[derive(Debug, Clone)]` (without `Copy`) for enums with heap-allocated fields (`Box<str>`, `String`). Do not force `Copy` by eliminating semantically necessary dynamic data.
 
-
 ### 7. Firewall Domain
 
 - `FirewallConfig` in `models/firewall_config.rs` is the canonical domain type for firewall configuration.
@@ -479,7 +466,6 @@ above and take precedence within their domain.
 	must map their zone concepts into/out of `FirewallZone` at their own boundary while preserving existing
 	flat chain/rule paths for non-zone payloads.
 
-
 ### 8. UI, Client Transport And Authorization Domain
 
 #### UI Transport Adapter Rule
@@ -498,7 +484,6 @@ above and take precedence within their domain.
 - Naming guidance: prefer `client_*` or `*_client` symbols over `control_*` when the behavior is specifically about client-originated command authorization.
 - Lingo violation: do not use metaphor-based infrastructure wording such as `sidecar`, `control plane`, or other layer/car analogies in code, docs, comments, commit messages, or review discussion.
 - Required replacement policy: use concrete technical terms that describe the actual mechanism, for example `metadata file`, `metadata map`, `client`, `transport`, `wire`, `runtime`, `storage`, or `rule-section mapping`.
-
 
 #### Privileged Control Boundary Rule
 
@@ -737,7 +722,6 @@ service Auth {
 - Rationale: seccomp is blast-radius containment, not business-logic authorization. Applying strict filters before auth/scope behavior converges creates churn and false-negative breakage with weak security signal.
 - During early phases, seccomp can run in discovery/logging mode for trace collection, but enforcement should remain non-blocking until steps 1-4 are complete.
 
-
 ## Part III — Infrastructure Rules
 
 Rules for selecting and using shared runtime infrastructure: caches, shared state
@@ -811,7 +795,6 @@ churn paths.
 | Firewall runtime snapshot | low-churn control writes; frequent reads | whole-runtime `Arc` snapshot via `watch` publish |
 | Write-heavy / high-churn map | write-heavy, any | plain `HashMap` behind `Mutex` or single-writer pattern |
 
-
 ### 10. Configuration Surface Precedence
 
 Any parameter that must be set externally — by an operator, integrator, or end-user — **must follow this precedence order** (highest → lowest):
@@ -852,7 +835,6 @@ Any parameter that must be set externally — by an operator, integrator, or end
 - Config files must be locatable via the daemon's `--config-file` override and its standard search path (`/etc/opensnitchd/`, `~/.config/opensnitchd/`, and the running binary's directory in that order).
 - Subsystem-specific files (e.g. `metrics.json`) must be co-located with the primary daemon config file or in a well-known sibling directory; their path may be overridden by a dedicated CLI switch.
 
-
 ## Part IV — Implementation Quality Rules
 
 Rules for implementation discipline: trait design, display vs debug contracts, and
@@ -880,7 +862,6 @@ Additional trait implementation rules may be added here as the codebase evolves.
 	- `{:?}` in development-only code paths or behind a `#[cfg(debug_assertions)]` guard is fine.
 	- `tracing::debug!(?value, ...)` spans/events (the `?` sigil explicitly uses `Debug`) are fine for developer instrumentation.
 	- `{:?}` for `std` or external-crate types that **do not implement `Display`** (e.g. `std::time::Duration`, `std::time::Instant`, third-party error types that only derive `Debug`) is an accepted exception. The violation target is domain-owned types: if the type is defined in this codebase and emitted to a log or wire format, it needs a `Display` impl.
-
 
 ## Tracker Retention Rules
 
@@ -1012,16 +993,16 @@ Before every commit in `daemon-rs/`, verify all of the following:
 	  launch/guard flows depend on.
 
 7. **Tools launcher regression sweep** — run the core tools launcher flows to catch integration
-   regressions between orchestration, live session control, and perf pipelines:
-	- `cargo ost run-daemon-mock-ui-live-session` or `make daemon-rs-mock-ui-session`
-	- `cargo ost update-run-perf` or `make update-run-perf`
-	- `run-daemon-mock-ui-live-session` timeout policy: daemon compile/startup latency is governed
+    regressions between orchestration, live session control, and perf pipelines:
+    - `cargo ost run-daemon-mock-ui-live-session` or `make daemon-rs-mock-ui-session`
+    - `cargo ost update-run-perf` or `make update-run-perf`
+    - `run-daemon-mock-ui-live-session` timeout policy: daemon compile/startup latency is governed
 	  by `OPENSNITCH_MOCK_UI_DAEMON_START_TIMEOUT_SECS` (default `180`) and must not consume
 	  handshake/session marker timeout budgets.
-	- Path requirement: these launcher commands are repo-root commands (`opensnitch/`).
-	- Direct crate-level fallback remains valid:
+    - Path requirement: these launcher commands are repo-root commands (`opensnitch/`).
+    - Direct crate-level fallback remains valid:
 	  - `cargo run --release -p tools -- run-daemon-mock-ui-live-session`
 	  - `cargo run --release -p tools -- update-run-perf`
-	- Path requirement for direct fallback: run from `opensnitch/daemon-rs/` (or pass explicit
+    - Path requirement for direct fallback: run from `opensnitch/daemon-rs/` (or pass explicit
 	  `--manifest-path daemon-rs/Cargo.toml` when launched from repo root).
-   - Treat failures in either command as release-blocking until triaged or fixed.
+    - Treat failures in either command as release-blocking until triaged or fixed.
