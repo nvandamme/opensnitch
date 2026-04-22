@@ -46,6 +46,8 @@ mod hex_parse;
 mod firewall_iptables;
 #[path = "firewall/firewall_nft.rs"]
 mod firewall_nft;
+#[path = "firewall/firewall_nft_netlink.rs"]
+mod firewall_nft_netlink;
 #[path = "firewall/firewall_privileged.rs"]
 mod firewall_privileged;
 #[path = "firewall/firewall_service.rs"]
@@ -60,6 +62,8 @@ mod lifecycle_flow;
 mod netlink_addr_worker;
 #[path = "firewall/nfqueue.rs"]
 mod nfqueue;
+#[path = "nfqueue/nfqueue_netlink.rs"]
+mod nfqueue_netlink_adapter;
 #[path = "flows/notification_flow.rs"]
 mod notification_flow;
 #[path = "parsing/pid_resolver.rs"]

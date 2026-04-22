@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "subscriptions"), allow(dead_code))]
+
 use opensnitch_proto::pb;
 
 use crate::models::subscription_storage::SubscriptionRecord;

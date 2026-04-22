@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "subscriptions"), allow(dead_code))]
+
 use serde::{Deserialize, Serialize};
 
 /// Mirror of `pb::Subscription` for JSON persistence.

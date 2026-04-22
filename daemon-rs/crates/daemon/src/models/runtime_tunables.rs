@@ -13,6 +13,8 @@ pub(crate) struct RawRuntimeTunables {
     pub kernel_process_queue_capacity: Option<usize>,
     pub kernel_firewall_queue_capacity: Option<usize>,
     pub nfqueue_overload_policy: Option<String>,
+    pub netlink_fallback_retry_delay_ms: Option<usize>,
+    pub netlink_recovery_poll_interval_ms: Option<usize>,
     pub ebpf_map_prune_enabled: Option<bool>,
     pub ebpf_map_prune_threshold_percent: Option<usize>,
     pub ebpf_map_prune_target_percent: Option<usize>,

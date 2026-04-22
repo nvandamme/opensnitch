@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "subscriptions"), allow(dead_code))]
+
 use std::hash::{Hash, Hasher};
 
 #[derive(Clone, Copy)]

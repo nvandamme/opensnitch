@@ -39,6 +39,7 @@ impl Daemon {
             info!(status = %status, "daemon bootstrap: startup autotune");
         }
         let (tunables, tunables_source) = RuntimeTunables::load_effective();
+        tunables.publish_global();
         info!(
             addr = %config.client_addr,
             ?config.default_action,
@@ -59,6 +60,8 @@ impl Daemon {
             kernel_process_queue_capacity = tunables.kernel_process_queue_capacity,
             kernel_firewall_queue_capacity = tunables.kernel_firewall_queue_capacity,
             nfqueue_overload_policy = tunables.nfqueue_overload_policy.as_str(),
+            netlink_fallback_retry_delay_ms = tunables.netlink_fallback_retry_delay_ms,
+            netlink_recovery_poll_interval_ms = tunables.netlink_recovery_poll_interval_ms,
             ebpf_map_prune_enabled = tunables.ebpf_map_prune_enabled,
             ebpf_map_prune_threshold_percent = tunables.ebpf_map_prune_threshold_percent,
             ebpf_map_prune_target_percent = tunables.ebpf_map_prune_target_percent,

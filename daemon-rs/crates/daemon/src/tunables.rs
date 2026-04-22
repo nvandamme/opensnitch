@@ -2,6 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::OnceLock,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -31,6 +32,10 @@ const MIN_LRU_CACHE_CAPACITY: usize = 1_024;
 const MAX_LRU_CACHE_CAPACITY: usize = 16_000_000;
 const MIN_RING_BUFFER_CAPACITY: usize = 1;
 const MAX_RING_BUFFER_CAPACITY: usize = 1_000_000;
+const MIN_NETLINK_DELAY_MS: usize = 100;
+const MAX_NETLINK_DELAY_MS: usize = 10_000;
+
+static EFFECTIVE_TUNABLES: OnceLock<RuntimeTunables> = OnceLock::new();
 
 impl NfqueueOverloadPolicy {
     fn parse(raw: &str) -> Option<Self> {
@@ -63,6 +68,8 @@ impl Default for RuntimeTunables {
             kernel_process_queue_capacity: 512,
             kernel_firewall_queue_capacity: 128,
             nfqueue_overload_policy: NfqueueOverloadPolicy::FailOpen,
+            netlink_fallback_retry_delay_ms: 800,
+            netlink_recovery_poll_interval_ms: 800,
             ebpf_map_prune_enabled: true,
             ebpf_map_prune_threshold_percent: 80,
             ebpf_map_prune_target_percent: 50,
@@ -78,6 +85,14 @@ impl Default for RuntimeTunables {
 }
 
 impl RuntimeTunables {
+    pub fn publish_global(self) {
+        let _ = EFFECTIVE_TUNABLES.set(self);
+    }
+
+    pub fn global() -> Self {
+        EFFECTIVE_TUNABLES.get().copied().unwrap_or_default()
+    }
+
     pub fn load_effective() -> (Self, String) {
         let mut tunables = Self::default();
         let mut source_parts = vec!["defaults(conservative)".to_string()];
@@ -170,6 +185,14 @@ impl RuntimeTunables {
                     "invalid nfqueue_overload_policy in tunables file ignored"
                 );
             }
+        }
+        if let Some(value) = raw.netlink_fallback_retry_delay_ms {
+            self.netlink_fallback_retry_delay_ms =
+                Self::clamp(value, MIN_NETLINK_DELAY_MS, MAX_NETLINK_DELAY_MS);
+        }
+        if let Some(value) = raw.netlink_recovery_poll_interval_ms {
+            self.netlink_recovery_poll_interval_ms =
+                Self::clamp(value, MIN_NETLINK_DELAY_MS, MAX_NETLINK_DELAY_MS);
         }
         if let Some(value) = raw.ebpf_map_prune_enabled {
             self.ebpf_map_prune_enabled = value;
@@ -309,6 +332,20 @@ impl RuntimeTunables {
                     "invalid tunable env override ignored"
                 );
             }
+        }
+        if let Some(value) =
+            Self::parse_env_usize("OPENSNITCH_TUNE_NETLINK_FALLBACK_RETRY_DELAY_MS")
+        {
+            self.netlink_fallback_retry_delay_ms =
+                Self::clamp(value, MIN_NETLINK_DELAY_MS, MAX_NETLINK_DELAY_MS);
+            count += 1;
+        }
+        if let Some(value) =
+            Self::parse_env_usize("OPENSNITCH_TUNE_NETLINK_RECOVERY_POLL_INTERVAL_MS")
+        {
+            self.netlink_recovery_poll_interval_ms =
+                Self::clamp(value, MIN_NETLINK_DELAY_MS, MAX_NETLINK_DELAY_MS);
+            count += 1;
         }
         if let Some(value) = Self::parse_env_bool("OPENSNITCH_TUNE_EBPF_MAP_PRUNE_ENABLED") {
             self.ebpf_map_prune_enabled = value;

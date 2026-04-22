@@ -1,8 +1,10 @@
 pub mod audit_netlink;
 pub mod firewall_iptables;
+pub mod firewall_nft_netlink;
 pub mod firewall_nft;
 pub mod net_iface;
 pub(crate) mod netlink_rt;
+pub(crate) mod nfqueue_netlink;
 pub mod proc_connector;
 pub mod proto_mapper;
 pub mod socket_diag;

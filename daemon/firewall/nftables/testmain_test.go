@@ -1,4 +1,4 @@
-package ui
+package nftables_test
 
 import (
 	"os"

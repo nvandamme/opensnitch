@@ -6,7 +6,7 @@ It supersedes:
 - `daemon-rs/FEATURE_PARITY.md`
 - `daemon-rs/SERVICE_ASYNC_AND_MODEL_SCAN_2026-03-15.md`
 
-Last update: 2026-03-23 (entry 442)
+Last update: 2026-03-23 (entry 459)
 
 ## Scope
 
@@ -142,40 +142,18 @@ Flow-vs-worker extraction heuristic:
 - Baseline parity reference: commit tag "release: prepare v0.1.0" is treated as the basic functional parity-aligned release baseline (without full functional eBPF module parity).
 - Latest parity scan status: no open backend parity gaps in the scanned slice.
 - Async/runtime hardening status: all high-priority 2026-03-15 verdict-path items are implemented.
-- Test baseline after latest runtime changes: `cargo test -p opensnitchd-rs` passes (66/66 + 1 ignored profiling harness).
+- Test baseline after latest runtime changes: `cargo test -p opensnitchd-rs` passes (392/392 + 8 ignored); nfqueue_netlink_adapter suite contributes 18 new tests.
 - Latest full-suite verification status: `sudo make go-test-full` and `make parity-hot-cold-matrix STRESS_ROUNDS=500` both passed on 2026-03-16 with no new Go-vs-Rust parity drift identified in the follow-up inventory pass.
 - Root orchestration now auto-restores `daemon/ui/testdata/default-config.json` after full Go and cold-path parity runs so the Go UI reload test no longer leaves the worktree dirty.
 - Rust parity-heavy tests now have a reusable tracing bootstrap via `utils::test_support::init_test_logging()` so reload/runtime tests can emit inspectable logs similar to Go's verbose test flows.
 - Rust now parses and applies Go logging config fields (`LogUTC`, `LogMicro`, `Server.LogFile`, `Server.Loggers`) and supports active file/UDP sink routing through the daemon logging subsystem.
 - DNS worker now includes a direct systemd-resolved varlink socket monitor path (`/run/systemd/resolve/io.systemd.Resolve.Monitor`) with `resolvectl monitor` fallback for compatibility.
+- Detailed performance run history, hot/cold deltas, and harness notes are maintained in `daemon-rs/PERF.md`.
 
 ## Perf Regression Baselines (Machine-Readable)
 
-These keys are consumed by Rust and Go stress-profile harness tests to flag clear regressions.
-
-```text
-PERF_CLEAR_REGRESSION_FACTOR=1.75
-PERF_CLEAR_REGRESSION_MIN_DELTA_MS=0.050
-
-PERF_BASELINE_RUST_DEBUG_P95_MS=0.114
-PERF_BASELINE_RUST_DEBUG_P99_MS=0.173
-PERF_BASELINE_RUST_DEBUG_MAX_MS=0.607
-PERF_BASELINE_RUST_DEBUG_DROP_TOTAL=0
-
-PERF_BASELINE_RUST_RELEASE_P95_MS=0.013
-PERF_BASELINE_RUST_RELEASE_P99_MS=0.019
-PERF_BASELINE_RUST_RELEASE_MAX_MS=0.127
-PERF_BASELINE_RUST_RELEASE_DROP_TOTAL=0
-
-PERF_BASELINE_GO_P95_MS=0.007
-PERF_BASELINE_GO_P99_MS=0.011
-PERF_BASELINE_GO_MAX_MS=0.416
-PERF_BASELINE_GO_DROP_TOTAL=0
-```
-
-Override at runtime when needed:
-- `OPENSNITCH_STRESS_SKIP_REGRESSION_CHECK=1` skips baseline enforcement.
-- `OPENSNITCH_STRESS_TODO_PATH=/path/to/TODO.md` overrides baseline file path.
+Perf regression baselines and run-history details are maintained in `daemon-rs/PERF.md`.
+TODO no longer carries machine-readable perf baseline keys.
 
 ## Active Backlog
 
@@ -202,23 +180,41 @@ Override at runtime when needed:
   - Add explicit client-side disconnect/stream-close handling on normal quit paths and signal paths (`SIGINT`/Ctrl-C).
   - Goal: avoid daemon-side noisy transport warnings (`h2 protocol error`/broken-pipe) during intentional UI termination.
   - Note: tracked as future work only; do not implement in this branch. Land in a separate PR branch once the related Python-client PR is accepted by maintainers.
-- [ ] Explore nftables handling over netlink (replace/augment `nft` CLI shelling in firewall adapter).
+
+3. Active netfilter/netlink backlog
+- [x] Explore nftables handling over netlink (replace/augment `nft` CLI shelling in firewall adapter).
   - References:
     - https://raw.githubusercontent.com/one-d-wide/netlink-bindings/refs/heads/main/netlink-socket/examples/nftables.rs
     - https://raw.githubusercontent.com/one-d-wide/netlink-bindings/refs/heads/main/netlink-socket/examples/nftables-api.rs
-  - Scope for exploration PR branch:
+  - Scope:
     - model table/chain/rule lifecycle using chained netlink transactions (`batch begin/end` + generation-id guard),
     - preserve existing behavior and rule semantics from current `firewall_nft` adapter,
     - add parity tests against current CLI-backed implementation before any default-path switch.
-  - Note: future enhancement only; keep current branch release-focused and defer implementation to a dedicated follow-up PR branch.
-- [ ] Explore NFQUEUE handling via netlink abstractions (reduce direct C/ffi coupling where practical).
-  - Scope for exploration PR branch:
+  - Status (entry 443): promoted from Future enhancements into active backlog.
+  - Progress (entry 444): landed first implementation slice with a dedicated netlink adapter seam (`platform/adapters/firewall_nft_netlink.rs`) and env-gated integration path (`OPENSNITCH_NFT_NETLINK_EXPERIMENT`) in firewall ports, with automatic fallback to the current `nft` CLI adapter on errors.
+  - Progress (entry 445): replaced netlink adapter stubs with a concrete first execution slice: operation-plan modeling for interception/system firewall paths, NETLINK_NETFILTER socket preflight checks, compatibility execution delegation to the existing nft adapter, and focused plan-shape unit tests (`tests/firewall/firewall_nft_netlink.rs`).
+  - Progress (entry 446): implemented typed nftables netlink transaction execution for supported lifecycle operations (generation-id guarded batch begin/end with table/chain ensure and table delete) using `netlink-bindings` nftables API; the adapter now executes supported operations via netlink and falls back to the existing nft CLI adapter only for currently unsupported rule-expression operations.
+  - Progress (entry 447): expanded rule-expression parity and chain semantics in the netlink adapter while preserving CLI fallback: native `queue` expression encoding, interception rule ensure/validation in netlink, base-chain hook/type/policy/priority handling, userdata-based dedupe/clear paths, IPv4+IPv6 CIDR/range support, ICMP/ICMPv6 type list handling, and expression-level unsupported telemetry.
+  - Progress (entry 448): added parity/observability guardrails for staged rollout: differential CLI-normalized support tests, Go nftables testdata shape parity test, strict env-gated shipped coverage threshold (`OPENSNITCH_NFT_NETLINK_MIN_AUDIT_COVERAGE`), and stable contract tests for unsupported-expression family classification + fallback summary shape counters.
+  - Completed (entry 449): closure criteria for this backlog scope are satisfied with green checks: focused netlink test suite passing, strict shipped-shape coverage gate at 100%, and explicit Go-side testdata shape parity coverage in Rust tests. CLI fallback remains intentionally enabled and default-path switch/privileged runtime rollout is tracked separately.
+  - Progress (entry 451): promoted nftables netlink to netlink-first runtime behavior in firewall ports (default-enabled unless explicitly disabled with `OPENSNITCH_NFT_NETLINK_EXPERIMENT=0`), and added bounded request timeout fallback (`2s`) so missed netlink ACK/request paths degrade quickly to the legacy `nft` CLI adapter instead of stalling.
+  - Progress (entry 452): tuned runtime fallback policy in firewall ports for graceful degradation with explicit warn-level fallback logging and non-aggressive retry cadence: after a netlink failure/timeout, calls continue through the legacy `nft` CLI path while netlink retries are delayed by a short cooldown window (`5s`) before being attempted again.
+  - Progress (entry 453): tightened nftables netlink fallback/recovery timings to deterministic sub-second bounds for call-path responsiveness and short recovery loop behavior: request timeout is now `800ms` and retry cooldown is `800ms`.
+  - Progress (entry 454): switched nftables recovery probing to failure-only polling semantics: no steady-state polling while healthy; on first netlink failure the port enters degraded mode, logs warn-level fallback, starts a short recovery poll loop (now tunable; default `800ms`) that runs only during degraded state, and automatically resumes netlink-first calls once preflight probe succeeds.
+  - Progress (entry 455): optimized recovery-loop lifecycle to avoid repeated thread spawn costs: a single long-lived recovery loop thread is started once and remains idle while healthy; it performs preflight polling only when degraded/fallback state is active and clears degraded mode automatically on recovery.
+  - Progress (entry 457): extracted a shared lock-free recovery primitive (`utils/netlink_recovery.rs::NetlinkRecoveryGate`) and rewired nftables + NFQUEUE domains to use per-domain static instances (each domain keeps its own degraded flag/probe policy/interval, while sharing the same one-time loop + degraded-only polling mechanics).
+  - Progress (entry 458): split netlink recovery timing controls into explicit runtime tunables and applied them in both fallback domains: `netlink_fallback_retry_delay_ms` (initial retry delay after fallback) and `netlink_recovery_poll_interval_ms` (steady degraded-mode probe interval), with matching env overrides `OPENSNITCH_TUNE_NETLINK_FALLBACK_RETRY_DELAY_MS` and `OPENSNITCH_TUNE_NETLINK_RECOVERY_POLL_INTERVAL_MS`.
+- [x] Explore NFQUEUE handling via netlink abstractions (reduce direct C/ffi coupling where practical).
+  - Scope:
     - evaluate a typed netlink path for queue lifecycle/configuration and telemetry while preserving packet verdict semantics,
     - keep current behavior/performance parity with the existing runtime path,
     - stage migration behind parity harness checks before considering any default-path switch.
-  - Note: future enhancement only; do not implement in this branch before the release tag.
+  - Status (entry 443): promoted from Future enhancements into active backlog.
+  - Progress (entry 450): landed `platform/adapters/nfqueue_netlink.rs` — a pure-Rust `NETLINK_NETFILTER` NFQUEUE backend that requires no `libnetfilter_queue` C library: typed netlink message builder (`NlMsg`), NLA attribute parser (`parse_nfq_packet`), raw socket lifecycle (open, PF_BIND, BIND with ACK, copy-mode/maxlen/flags config, UNBIND on drop), recv loop reusing all existing verdict/metrics/parser logic from `platform::ffi::nfqueue` without modification, and verdict send (`NFQNL_MSG_VERDICT`).  Worker now selects between FFI and netlink backend with automatic fallback on error.  18 focused unit tests covering wire-shape, alignment helpers, NLA flag stripping, full-field packet parsing, and preflight socket check all pass.
+  - Progress (entry 451): promoted NFQUEUE netlink to netlink-first runtime behavior (default-enabled unless explicitly disabled with `OPENSNITCH_NFQUEUE_NETLINK_EXPERIMENT=0`) and hardened worker startup fallback so netlink startup failures degrade gracefully to legacy FFI backend, with dedicated timeout-path logging retained for ACK/request miss signals.
+  - Progress (entry 456): reused the same lock-free degraded-state recovery primitive as nftables in NFQUEUE startup control: single atomic degraded flag + one-time recovery loop starter, with preflight polling only while degraded (now tunable; default `800ms`) so subsequent startup attempts can resume netlink path after recovery without mutex/lock hot-path overhead.
 
-3. Design-rule backlog (active)
+4. Design-rule backlog (active)
 - [x] Cache strategy policy codification (caller-class matrix + default-not-mandatory dual-layer stance).
   - Decision baseline (2026-03-22 review): dual-layer is preferred/default for shared read-heavy caches with lock-free immutable reads, but is not the only allowed cache implementation.
   - Selection rule: allow plain `LruCache` or map-based caches for write-heavy/high-churn or strictly local ownership paths when dual-layer publish overhead would dominate.
@@ -948,3 +944,56 @@ Override at runtime when needed:
     - tunables tests: `2 passed`,
     - ring_buffer target: `5 passed` (includes tunables module tests),
     - stats_service: `10 passed`.
+
+## 458 — Netlink recovery timing split tunables + perf tracker consistency
+
+- Trigger/context:
+  - requested separation between initial fallback retry delay and degraded-mode
+    recovery polling cadence, and TODO tracker consistency after moving detailed
+    perf history out to `PERF.md`.
+
+- Changes in this slice:
+  - split netlink recovery timing tunables:
+    - `netlink_fallback_retry_delay_ms`
+    - `netlink_recovery_poll_interval_ms`
+  - wired both tunables into nftables and NFQUEUE netlink recovery paths:
+    - first degraded probe waits `netlink_fallback_retry_delay_ms`,
+    - subsequent degraded probes run every
+      `netlink_recovery_poll_interval_ms`.
+  - updated tunables schema/models and example tunables file:
+    - `models/effective_tunables.rs`
+    - `models/runtime_tunables.rs`
+    - `tunables.rs`
+    - `data/tunables.example.json`
+  - added matching env overrides:
+    - `OPENSNITCH_TUNE_NETLINK_FALLBACK_RETRY_DELAY_MS`
+    - `OPENSNITCH_TUNE_NETLINK_RECOVERY_POLL_INTERVAL_MS`
+  - updated TODO perf guidance to keep detailed run history in `PERF.md` while
+    retaining machine-readable baseline keys in TODO for harness checks.
+
+- Validation:
+  - `cargo check -p opensnitchd-rs` passes after the split-tunable wiring.
+
+## 459 — Stress baseline source moved from TODO to PERF
+
+- Trigger/context:
+  - Go stress test guard failed after removing TODO perf baseline keys:
+    `runtime_profile_test.go:532: missing GO stress baseline keys in TODO baseline file`.
+  - policy decision: Go and Rust harnesses should no longer require perf-key
+    maintenance in `TODO.md`.
+
+- Changes in this slice:
+  - switched Go stress guard default baseline source from
+    `daemon-rs/TODO.md` to `daemon-rs/PERF.md` in
+    `daemon/runtimeprofile/runtime_profile_test.go`.
+  - switched Rust stress guard default baseline source from
+    `daemon-rs/TODO.md` to `daemon-rs/PERF.md` in
+    `crates/daemon/src/tests/smoke/daemon_runtime.rs`.
+  - added `OPENSNITCH_STRESS_BASELINE_PATH` override in both harnesses, while
+    keeping `OPENSNITCH_STRESS_TODO_PATH` as a backward-compatible fallback.
+  - moved machine-readable baseline keys to `daemon-rs/PERF.md` regression
+    policy section and marked TODO as non-owner for perf baseline keys.
+
+- Validation:
+  - `go test ./runtimeprofile -run TestStressProfileReportsConnectLatencyAndPipelineDrops -count=1` passes.
+  - `cargo check -p opensnitchd-rs` passes.

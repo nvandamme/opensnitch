@@ -9,11 +9,13 @@ import (
 	"time"
 
 	"github.com/evilsocket/opensnitch/daemon/internal/testutil"
+	oslog "github.com/evilsocket/opensnitch/daemon/log"
 )
 
 var tmpDir string
 
 func TestMain(m *testing.M) {
+	oslog.SetLogLevel(oslog.ERROR)
 	testutil.StopConflictingServices()
 	tmpDir = "/tmp/ostest_" + randString()
 	os.Mkdir(tmpDir, 0777)

@@ -661,28 +661,36 @@ struct StressPerfBaseline {
     drop_total: u64,
 }
 
-fn todo_perf_path() -> String {
-    std::env::var("OPENSNITCH_STRESS_TODO_PATH")
+fn stress_baseline_path() -> String {
+    std::env::var("OPENSNITCH_STRESS_BASELINE_PATH")
         .ok()
         .filter(|path| !path.trim().is_empty())
-        .unwrap_or_else(|| format!("{}/../../TODO.md", env!("CARGO_MANIFEST_DIR")))
+        .or_else(|| {
+            // Backward compatibility for older harness scripts.
+            std::env::var("OPENSNITCH_STRESS_TODO_PATH")
+                .ok()
+                .filter(|path| !path.trim().is_empty())
+        })
+        .unwrap_or_else(|| format!("{}/../../PERF.md", env!("CARGO_MANIFEST_DIR")))
 }
 
-fn parse_todo_f64(todo: &str, key: &str) -> Option<f64> {
-    todo.lines()
+fn parse_baseline_f64(content: &str, key: &str) -> Option<f64> {
+    content
+        .lines()
         .map(str::trim)
         .find_map(|line| line.strip_prefix(key).map(str::trim))
         .and_then(|raw| raw.parse::<f64>().ok())
 }
 
-fn parse_todo_u64(todo: &str, key: &str) -> Option<u64> {
-    todo.lines()
+fn parse_baseline_u64(content: &str, key: &str) -> Option<u64> {
+    content
+        .lines()
         .map(str::trim)
         .find_map(|line| line.strip_prefix(key).map(str::trim))
         .and_then(|raw| raw.parse::<u64>().ok())
 }
 
-fn load_stress_perf_baseline(todo: &str) -> StressPerfBaseline {
+fn load_stress_perf_baseline(content: &str) -> StressPerfBaseline {
     let prefix = if cfg!(debug_assertions) {
         "PERF_BASELINE_RUST_DEBUG"
     } else {
@@ -690,14 +698,14 @@ fn load_stress_perf_baseline(todo: &str) -> StressPerfBaseline {
     };
 
     StressPerfBaseline {
-        p95_ms: parse_todo_f64(todo, &format!("{prefix}_P95_MS="))
-            .expect("missing TODO baseline key for rust p95"),
-        p99_ms: parse_todo_f64(todo, &format!("{prefix}_P99_MS="))
-            .expect("missing TODO baseline key for rust p99"),
-        max_ms: parse_todo_f64(todo, &format!("{prefix}_MAX_MS="))
-            .expect("missing TODO baseline key for rust max"),
-        drop_total: parse_todo_u64(todo, &format!("{prefix}_DROP_TOTAL="))
-            .expect("missing TODO baseline key for rust drop_total"),
+        p95_ms: parse_baseline_f64(content, &format!("{prefix}_P95_MS="))
+            .expect("missing baseline key for rust p95"),
+        p99_ms: parse_baseline_f64(content, &format!("{prefix}_P99_MS="))
+            .expect("missing baseline key for rust p99"),
+        max_ms: parse_baseline_f64(content, &format!("{prefix}_MAX_MS="))
+            .expect("missing baseline key for rust max"),
+        drop_total: parse_baseline_u64(content, &format!("{prefix}_DROP_TOTAL="))
+            .expect("missing baseline key for rust drop_total"),
     }
 }
 
@@ -738,14 +746,14 @@ fn enforce_stress_regression_guard(
         return;
     }
 
-    let todo_path = todo_perf_path();
-    let todo = fs::read_to_string(&todo_path)
-        .unwrap_or_else(|err| panic!("failed to read TODO baseline file '{}': {err}", todo_path));
+    let baseline_path = stress_baseline_path();
+    let baseline_content = fs::read_to_string(&baseline_path)
+        .unwrap_or_else(|err| panic!("failed to read stress baseline file '{}': {err}", baseline_path));
 
-    let baseline = load_stress_perf_baseline(&todo);
-    let factor = parse_todo_f64(&todo, "PERF_CLEAR_REGRESSION_FACTOR=").unwrap_or(1.75);
+    let baseline = load_stress_perf_baseline(&baseline_content);
+    let factor = parse_baseline_f64(&baseline_content, "PERF_CLEAR_REGRESSION_FACTOR=").unwrap_or(1.75);
     let min_delta_ms =
-        parse_todo_f64(&todo, "PERF_CLEAR_REGRESSION_MIN_DELTA_MS=").unwrap_or(0.050);
+        parse_baseline_f64(&baseline_content, "PERF_CLEAR_REGRESSION_MIN_DELTA_MS=").unwrap_or(0.050);
 
     let p95_ms = p95.as_secs_f64() * 1000.0;
     let p99_ms = p99.as_secs_f64() * 1000.0;

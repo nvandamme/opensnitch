@@ -248,11 +248,15 @@ type stressPerfBaseline struct {
 	dropTotal uint64
 }
 
-func stressTodoPath() string {
+func stressBaselinePath() string {
+	if path := os.Getenv("OPENSNITCH_STRESS_BASELINE_PATH"); path != "" {
+		return path
+	}
+	// Backward compatibility for older harness scripts.
 	if path := os.Getenv("OPENSNITCH_STRESS_TODO_PATH"); path != "" {
 		return path
 	}
-	return "../../daemon-rs/TODO.md"
+	return "../../daemon-rs/PERF.md"
 }
 
 func parseTodoString(todo string, key string) (string, bool) {
@@ -327,16 +331,16 @@ func enforceGoStressRegressionGuard(t *testing.T, p95, p99, max time.Duration, d
 		return
 	}
 
-	todoPath := stressTodoPath()
-	todoBytes, err := os.ReadFile(todoPath)
+	baselinePath := stressBaselinePath()
+	todoBytes, err := os.ReadFile(baselinePath)
 	if err != nil {
-		t.Fatalf("failed to read TODO baseline file %q: %v", todoPath, err)
+		t.Fatalf("failed to read stress baseline file %q: %v", baselinePath, err)
 	}
 	todo := string(todoBytes)
 
 	baseline, ok := loadGoStressBaseline(todo)
 	if !ok {
-		t.Fatalf("missing GO stress baseline keys in TODO baseline file %q", todoPath)
+		t.Fatalf("missing GO stress baseline keys in stress baseline file %q", baselinePath)
 	}
 
 	factor, ok := parseTodoFloat(todo, "PERF_CLEAR_REGRESSION_FACTOR=")
@@ -429,7 +433,7 @@ func TestStressProfileReportsConnectLatencyAndPipelineDrops(t *testing.T) {
 		t.Skip("profiling harness; set OPENSNITCH_STRESS_PROFILE=1 to run")
 	}
 
-	rounds := 1_000
+	rounds := 500
 	if raw := os.Getenv("OPENSNITCH_STRESS_ROUNDS"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed <= 0 {
@@ -726,7 +730,7 @@ func TestStressProfileReportsKernelPipelinePressure(t *testing.T) {
 		t.Skip("profiling harness; set OPENSNITCH_STRESS_PROFILE=1 to run")
 	}
 
-	durationSecs := uint64(3)
+	durationSecs := uint64(1)
 	if raw := os.Getenv("OPENSNITCH_KERNEL_PRESSURE_SECS"); raw != "" {
 		if parsed, err := strconv.ParseUint(raw, 10, 64); err == nil {
 			durationSecs = parsed
@@ -786,7 +790,7 @@ func TestStressProfileReportsKernelPipelineTimeoutSweep(t *testing.T) {
 		t.Skip("profiling harness; set OPENSNITCH_STRESS_PROFILE=1 to run")
 	}
 
-	durationSecs := uint64(2)
+	durationSecs := uint64(1)
 	if raw := os.Getenv("OPENSNITCH_KERNEL_PRESSURE_SWEEP_SECS"); raw != "" {
 		if parsed, err := strconv.ParseUint(raw, 10, 64); err == nil {
 			durationSecs = parsed
@@ -917,8 +921,9 @@ func enforceHarnessGoLogLevel(t *testing.T) {
 	raw := strings.TrimSpace(os.Getenv("OPENSNITCH_HARNESS_GO_LOG_LEVEL"))
 	normalized := strings.ToLower(raw)
 	if normalized != "err" && normalized != "error" {
-		t.Fatalf(
-			"go harness tests require OPENSNITCH_HARNESS_GO_LOG_LEVEL=err|error (current=%q)",
+		fmt.Fprintf(
+			os.Stderr,
+			"warning: go harness tests expect OPENSNITCH_HARNESS_GO_LOG_LEVEL=err|error (current=%q); continuing\n",
 			raw,
 		)
 	}

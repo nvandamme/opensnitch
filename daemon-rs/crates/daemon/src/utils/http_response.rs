@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "subscriptions"), allow(dead_code))]
+
 use reqwest::{Response, StatusCode, header};
 
 const DEFAULT_HTTP_ERROR_BODY_PREVIEW_BYTES: usize = 160;

@@ -39,6 +39,7 @@ import (
 
 	"github.com/evilsocket/opensnitch/daemon/firewall/iptables"
 	"github.com/evilsocket/opensnitch/daemon/internal/testutil"
+	oslog "github.com/evilsocket/opensnitch/daemon/log"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
@@ -70,6 +71,9 @@ func TestMain(m *testing.M) {
 	if os.Getenv("TEST_NATIVE") == "1" {
 		os.Exit(m.Run())
 	}
+
+	// Suppress log noise for all netfilter test runs.
+	oslog.SetLogLevel(oslog.ERROR)
 
 	// Try to setup namespace isolation (requires root)
 	testNet := testutil.NewTestNetwork()

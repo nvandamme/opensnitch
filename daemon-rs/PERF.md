@@ -30,13 +30,13 @@ Track stress-profile harness runs for Rust and Go backends.
   - `OPENSNITCH_PERF_CACHE_DIR=/custom/path` overrides the default `/tmp` cache location used by the tools crate.
 
 Rust perf/stress profiling must always use `--release`.
-All Rust harness/perf test commands must run with WARN/ERROR-only logging (`RUST_LOG=warn` or `RUST_LOG=error`); debug/trace log levels are disallowed for performance runs.
+All Rust harness/perf test commands should use low-noise logging (`RUST_LOG=warn` by default; `error` also accepted); debug/trace log levels are discouraged for performance runs.
 `stress_profile_reports_connect_latency_and_pipeline_drops` and `stress_profile_reports_kernel*` enforce this policy at test runtime.
-All Go harness/perf test commands must run with `OPENSNITCH_HARNESS_GO_LOG_LEVEL=error` (or `err`) for apples-to-apples low-noise comparisons.
+All Go harness/perf test commands should use low-noise logging (`OPENSNITCH_HARNESS_GO_LOG_LEVEL=warn` by default; `warning|err|error` also accepted) for apples-to-apples comparisons.
 `make parity-hot-cold-delta` now parses `cold-profile ... elapsed_s=` lines emitted by each Go/Rust cold-path subtest (`rule`, `ui`, `tasks`) instead of shell timing wrappers.
 Rust cold-path commands in parity harness targets should use current concrete test paths (`tests::watch_workers::...`, `daemon::tests::...`) to avoid false zero-test timings.
-Tools-based perf commands (`update-run-perf`, `parity-gate`, `microbench-connect-dispatch`) enforce low-noise Rust logs via `OPENSNITCH_PERF_RUST_LOG_LEVEL` (default `error`) and fail fast on noisy values.
-Tools-based perf/parity commands also enforce low-noise Go harness logging via `OPENSNITCH_PERF_GO_LOG_LEVEL` (default `error`) and fail fast on non-ERR/ERROR values.
+Tools-based perf commands (`update-run-perf`, `parity-gate`, `microbench-connect-dispatch`) validate low-noise Rust logs via `OPENSNITCH_PERF_RUST_LOG_LEVEL` (default `warn`, accepts `warn|warning|err|error`) and emit warnings for noisy values.
+Tools-based perf/parity commands also validate low-noise Go harness logging via `OPENSNITCH_PERF_GO_LOG_LEVEL` (default `warn`, accepts `warn|warning|err|error`) and emit warnings for invalid values.
 Compare only like-for-like profiles for retained history entries.
 
 ThinLTO for release is enforced in `daemon-rs/Cargo.toml` under `[profile.release]`.
@@ -73,11 +73,33 @@ Policy audit command:
 
 ## Regression Policy
 
-- Baselines are sourced from `daemon-rs/TODO.md` keys under `Perf Regression Baselines (Machine-Readable)`.
+- Baselines are sourced from the machine-readable keys in this file.
 - Harness checks treat a metric as a clear regression when:
   - `observed_ms > baseline_ms * PERF_CLEAR_REGRESSION_FACTOR`
   - and `observed_ms - baseline_ms > PERF_CLEAR_REGRESSION_MIN_DELTA_MS`
 - `drop_total` is a hard check and must not exceed baseline.
+
+Machine-readable keys consumed by Rust/Go stress harness guards:
+
+```text
+PERF_CLEAR_REGRESSION_FACTOR=1.75
+PERF_CLEAR_REGRESSION_MIN_DELTA_MS=0.050
+
+PERF_BASELINE_RUST_DEBUG_P95_MS=0.114
+PERF_BASELINE_RUST_DEBUG_P99_MS=0.173
+PERF_BASELINE_RUST_DEBUG_MAX_MS=0.607
+PERF_BASELINE_RUST_DEBUG_DROP_TOTAL=0
+
+PERF_BASELINE_RUST_RELEASE_P95_MS=0.013
+PERF_BASELINE_RUST_RELEASE_P99_MS=0.019
+PERF_BASELINE_RUST_RELEASE_MAX_MS=0.127
+PERF_BASELINE_RUST_RELEASE_DROP_TOTAL=0
+
+PERF_BASELINE_GO_P95_MS=0.007
+PERF_BASELINE_GO_P99_MS=0.011
+PERF_BASELINE_GO_MAX_MS=0.416
+PERF_BASELINE_GO_DROP_TOTAL=0
+```
 
 ## Run History
 
@@ -87,6 +109,15 @@ The `update-run-perf` tools command runs the current Rust release harness and cu
 
 | Date | Backend | Profile | Rounds | Commit | p50 ms | p95 ms | p99 ms | max ms | drop_total | Baseline Check | Go Ref | vs Go p50 | vs Go p95 | vs Go p99 | vs Go max | vs Go drop | Prev Commit Ref | vs Prev p50 | vs Prev p95 | vs Prev p99 | vs Prev max | vs Prev drop | Notes |
 |---|---|---|---:|---|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---|
+| 2026-03-23 | Rust | release (ThinLTO) | 1000 | `613ef5cc` | 0.001 | 0.001 | 0.001 | 0.067 | 0 | pass | Go default same run | +0.000 | -0.001 | -0.003 | -0.024 | +0 | `0bc72a16` | +0.000 | +0.000 | +0.000 | +0.004 | +0 | Auto-updated current reference Rust run (daemon-rs: expand nft netlink parity with telemetry and tests); workspace dirty. |
+| 2026-03-23 | Go | default | 1000 | `613ef5cc` | 0.001 | 0.002 | 0.004 | 0.091 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated current Go comparison row paired with Rust actual. |
+| 2026-03-23 | Rust | release (ThinLTO) | 1000 | `0bc72a16` | 0.001 | 0.001 | 0.001 | 0.063 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated previous commit benchmark (release: bump daemon-rs to v0.4.0 and activate netfilter/netlink backlog) using cached previous-commit worktree/results when available. |
+| 2026-03-23 | Rust | release (ThinLTO) | 1000 | `613ef5cc` | 0.001 | 0.001 | 0.002 | 0.074 | 0 | pass | Go default same run | +0.000 | -0.001 | -0.001 | +0.002 | +0 | `0bc72a16` | +0.000 | +0.000 | +0.001 | +0.011 | +0 | Auto-updated current reference Rust run (daemon-rs: expand nft netlink parity with telemetry and tests); workspace dirty. |
+| 2026-03-23 | Go | default | 1000 | `613ef5cc` | 0.001 | 0.002 | 0.003 | 0.072 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated current Go comparison row paired with Rust actual. |
+| 2026-03-23 | Rust | release (ThinLTO) | 1000 | `0bc72a16` | 0.001 | 0.001 | 0.001 | 0.063 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated previous commit benchmark (release: bump daemon-rs to v0.4.0 and activate netfilter/netlink backlog) using cached previous-commit worktree/results when available. |
+| 2026-03-23 | Rust | release (ThinLTO) | 1000 | `613ef5cc` | 0.001 | 0.001 | 0.002 | 0.074 | 0 | pass | Go default same run | +0.000 | -0.001 | -0.002 | +0.055 | +0 | `0bc72a16` | +0.000 | +0.000 | +0.001 | +0.011 | +0 | Auto-updated current reference Rust run (daemon-rs: expand nft netlink parity with telemetry and tests); workspace clean. |
+| 2026-03-23 | Go | default | 1000 | `613ef5cc` | 0.001 | 0.002 | 0.004 | 0.019 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated current Go comparison row paired with Rust actual. |
+| 2026-03-23 | Rust | release (ThinLTO) | 1000 | `0bc72a16` | 0.001 | 0.001 | 0.001 | 0.063 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated previous commit benchmark (release: bump daemon-rs to v0.4.0 and activate netfilter/netlink backlog) using cached previous-commit worktree/results when available. |
 | 2026-03-19 | Rust | release (ThinLTO) | 10000 | `5dacbb86` | 0.001 | 0.004 | 0.006 | 0.103 | 0 | pass | Go default same run | +0.000 | +0.002 | +0.002 | -0.089 | +0 | `60b478c8` | +0.000 | +0.002 | +0.002 | +0.040 | +0 | Auto-updated current reference Rust run (parity: align go runtimeprofile loop semantics and rust ui-miss verdict flow); workspace dirty. |
 | 2026-03-19 | Go | default | 10000 | `5dacbb86` | 0.001 | 0.002 | 0.004 | 0.192 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated current Go comparison row paired with Rust actual. |
 | 2026-03-19 | Rust | release (ThinLTO) | 10000 | `60b478c8` | 0.001 | 0.002 | 0.004 | 0.063 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated previous commit benchmark (daemon-rs: speed up hot-path parity harness and refresh perf baselines) using cached previous-commit worktree/results when available. |
@@ -140,6 +171,7 @@ Track explicit Rust-vs-Go deltas emitted by `parity-hot-cold-delta`.
 
 | Date | Delta Target | Rounds | Commit | Hot Mixed Go verdict ms | Hot Mixed Rust verdict ms | Hot Mixed Δ ms (Rust-Go) | Hot Throughput Go time/op us | Hot Throughput Rust time/op us | Hot Throughput Go op/s | Hot Throughput Rust op/s | Hot Δ p50 ms | Hot Δ p95 ms | Hot Δ p99 ms | Hot Δ max ms | Hot Δ drop_total | Cold Go rule s | Cold Rust rule s | Cold Δ rule s | Cold Go ui s | Cold Rust ui s | Cold Δ ui s | Cold Go tasks s | Cold Rust tasks s | Cold Δ tasks s | Cold Go total s | Cold Rust total s | Cold Δ total s (Rust-Go) | Result | Notes |
 |---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| 2026-03-23 | `make parity-hot-cold-delta` | 1000 | `613ef5cc` | 0.008 | 0.028 | +0.020 | 1.111 | 1.059 | 899832.5 | 944635.8 | +0.000 | -0.001 | -0.003 | +0.066 | +0 | 0.101 | 0.153 | +0.052 | 4.000 | 4.013 | +0.013 | 0.247 | 0.243 | -0.003 | 4.348 | 4.409 | +0.062 | PASS | Auto-updated parity hot/cold delta row from tools command. |
 | 2026-03-19 | `make parity-hot-cold-delta` | 10000 | `5dacbb86` | 0.074 | 0.017 | -0.057 | 1.321 | 1.805 | 756757.3 | 553978.9 | +0.000 | +0.002 | +0.001 | -0.252 | +0 | 0.100 | 0.401 | +0.301 | 4.001 | 4.001 | +0.000 | 0.000 | 0.244 | +0.244 | 4.101 | 4.402 | +0.301 | PASS | Auto-updated parity hot/cold delta row from tools command. |
 | 2026-03-19 | `make parity-hot-cold-delta` | 10000 | `d9340a45` | 0.012 | 0.010 | -0.002 | 1.484 | 1.954 | 673628.9 | 511714.6 | +0.000 | +0.003 | +0.002 | -0.376 | +0 | 0.101 | 0.401 | +0.300 | 4.001 | 4.205 | +0.204 | 0.000 | 0.244 | +0.244 | 4.102 | 4.606 | +0.504 | PASS | Auto-updated parity hot/cold delta row from tools command. |
 | 2026-03-19 | `make parity-hot-cold-delta` | 4000 | `2523b4c9` | 0.081 | 0.280 | +0.199 | 1.461 | 1.978 | 684235.9 | 505687.5 | +0.001 | -0.001 | +0.000 | -0.016 | +0 | 3.001 | 2.802 | -0.199 | 4.000 | 4.005 | +0.005 | 0.000 | 0.244 | +0.244 | 7.001 | 6.807 | -0.194 | PASS | Auto-updated parity hot/cold delta row from tools command. |

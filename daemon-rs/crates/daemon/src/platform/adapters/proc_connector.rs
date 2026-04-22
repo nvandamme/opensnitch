@@ -1,6 +1,6 @@
 use std::{os::fd::AsFd, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use nix::libc;
 use netlink_bindings::traits::{NetlinkRequest, Protocol};
 use netlink_socket2::{MulticastSocketRaw, NetlinkSocket};
@@ -22,6 +22,7 @@ pub(crate) const CN_MSG_LEN: usize = 20;
 pub(crate) const PROC_EVENT_HEADER_LEN: usize = 16;
 pub(crate) const PROC_EVENT_EXEC_PID_OFFSET: usize = 16;
 pub(crate) const PROC_EVENT_FORK_CHILD_PID_OFFSET: usize = 24;
+const PROC_CONNECTOR_OPEN_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) const PROC_EVENT_FORK: u32 = 0x0000_0001;
 pub(crate) const PROC_EVENT_EXEC: u32 = 0x0000_0002;
@@ -195,8 +196,13 @@ impl ProcEventSocket {
         let request = ProcListenRequest {
             payload: Self::build_listen_payload(),
         };
-        let mut iter = request_sock.request(&request).await?;
-        iter.recv_ack().await.map_err(anyhow::Error::new)?;
+        let mut iter = tokio::time::timeout(PROC_CONNECTOR_OPEN_TIMEOUT, request_sock.request(&request))
+            .await
+            .map_err(|_| anyhow!("proc connector request timed out"))??;
+        tokio::time::timeout(PROC_CONNECTOR_OPEN_TIMEOUT, iter.recv_ack())
+            .await
+            .map_err(|_| anyhow!("proc connector ack timed out"))?
+            .map_err(anyhow::Error::new)?;
 
         Ok(Self { request_sock, event_sock })
     }

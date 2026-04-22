@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "subscriptions"), allow(dead_code))]
+
 pub fn unix_epoch_nanos() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

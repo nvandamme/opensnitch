@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "subscriptions"), allow(dead_code))]
+
 pub(crate) fn sample_content_lines_match<F>(sample: &[String], mut predicate: F) -> bool
 where
     F: FnMut(&str) -> bool,

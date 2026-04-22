@@ -18,6 +18,8 @@ pub struct RuntimeTunables {
     pub kernel_process_queue_capacity: usize,
     pub kernel_firewall_queue_capacity: usize,
     pub nfqueue_overload_policy: NfqueueOverloadPolicy,
+    pub netlink_fallback_retry_delay_ms: usize,
+    pub netlink_recovery_poll_interval_ms: usize,
     pub ebpf_map_prune_enabled: bool,
     pub ebpf_map_prune_threshold_percent: usize,
     pub ebpf_map_prune_target_percent: usize,

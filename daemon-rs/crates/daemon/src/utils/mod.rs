@@ -12,6 +12,7 @@ pub mod http_response;
 pub mod json_value;
 pub mod list_shape;
 pub mod lru_cache;
+pub mod netlink_recovery;
 pub mod name_parsing;
 pub mod notification_reply;
 pub mod nul_terminated;

@@ -7,6 +7,7 @@ use crate::services::stats::StatsService;
 pub struct SubscriptionService;
 
 impl SubscriptionService {
+    #[allow(dead_code)]
     pub fn new<T, U>(_storage: T, _root_dir: U) -> Self {
         Self
     }

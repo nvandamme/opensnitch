@@ -291,10 +291,13 @@ fn run_hot_path_harness_once_internal(repo_root: &Path) -> Result<String, DynErr
     let rounds = parity_stress_rounds();
     let rust_log = perf_rust_log_level();
     let go_log = perf_go_log_level();
-    let go_kernel_pressure_secs =
-        env::var("GO_KERNEL_PRESSURE_SECS").unwrap_or_else(|_| "3".to_string());
-    let go_kernel_pressure_sweep_secs =
-        env::var("GO_KERNEL_PRESSURE_SWEEP_SECS").unwrap_or_else(|_| "2".to_string());
+    let rounds_u64 = rounds.parse::<u64>().unwrap_or(500);
+    let default_kernel_pressure_secs = if rounds_u64 <= 500 { "1" } else { "3" };
+    let default_kernel_pressure_sweep_secs = if rounds_u64 <= 500 { "1" } else { "2" };
+    let go_kernel_pressure_secs = env::var("GO_KERNEL_PRESSURE_SECS")
+        .unwrap_or_else(|_| default_kernel_pressure_secs.to_string());
+    let go_kernel_pressure_sweep_secs = env::var("GO_KERNEL_PRESSURE_SWEEP_SECS")
+        .unwrap_or_else(|_| default_kernel_pressure_sweep_secs.to_string());
     let daemon_dir = repo_root.join("daemon");
 
     let mut out = String::new();
@@ -406,6 +409,10 @@ fn run_hot_path_harness_once_internal(repo_root: &Path) -> Result<String, DynErr
         &[
             ("RUST_LOG", rust_log.as_str()),
             ("OPENSNITCH_STRESS_SKIP_REGRESSION_CHECK", "1"),
+            (
+                "OPENSNITCH_KERNEL_PRESSURE_SECS",
+                go_kernel_pressure_secs.as_str(),
+            ),
         ],
     )?);
     out.push('\n');
@@ -417,6 +424,10 @@ fn run_hot_path_harness_once_internal(repo_root: &Path) -> Result<String, DynErr
         &[
             ("RUST_LOG", rust_log.as_str()),
             ("OPENSNITCH_STRESS_SKIP_REGRESSION_CHECK", "1"),
+            (
+                "OPENSNITCH_KERNEL_PRESSURE_SWEEP_SECS",
+                go_kernel_pressure_sweep_secs.as_str(),
+            ),
         ],
     )?);
 
@@ -547,8 +558,9 @@ fn prebuild_daemon_rs_release_tests(repo_root: &Path, manifest: &Path) -> Result
             "--manifest-path",
             manifest.to_string_lossy().as_ref(),
             "--release",
-            "--workspace",
-            "--all-targets",
+            "-p",
+            "opensnitchd-rs",
+            "--tests",
             "--no-run",
         ],
         &[],

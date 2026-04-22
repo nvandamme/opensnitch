@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "subscriptions"), allow(dead_code))]
+
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 

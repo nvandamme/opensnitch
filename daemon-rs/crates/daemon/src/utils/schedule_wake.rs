@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "subscriptions"), allow(dead_code))]
+
 use std::time::Duration;
 
 pub(crate) fn bounded_wake_duration_from_timestamps<I>(

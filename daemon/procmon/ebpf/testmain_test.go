@@ -1,4 +1,6 @@
-package ui
+//go:build linux
+
+package ebpf
 
 import (
 	"os"

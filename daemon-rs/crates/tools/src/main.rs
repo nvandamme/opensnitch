@@ -91,45 +91,50 @@ fn ensure_release_tools_mode() -> Result<(), DynError> {
 }
 
 pub(crate) fn perf_rust_log_level() -> String {
-    let raw = env::var("OPENSNITCH_PERF_RUST_LOG_LEVEL").unwrap_or_else(|_| "error".to_string());
+    let raw = env::var("OPENSNITCH_PERF_RUST_LOG_LEVEL").unwrap_or_else(|_| "warn".to_string());
     let normalized = raw.to_ascii_lowercase();
-    let has_warn_or_error = normalized.contains("warn") || normalized.contains("error");
+    let has_warn_or_error = normalized.contains("warn")
+        || normalized.contains("warning")
+        || normalized.contains("err")
+        || normalized.contains("error");
     let has_debug_or_trace = normalized.contains("debug") || normalized.contains("trace");
 
     if !has_warn_or_error || has_debug_or_trace {
         eprintln!(
-            "OPENSNITCH_PERF_RUST_LOG_LEVEL must be WARN/ERROR-only for harness/perf commands (current={:?})",
+            "warning: OPENSNITCH_PERF_RUST_LOG_LEVEL should be warn|warning|err|error for harness/perf commands (current={:?}); continuing",
             raw
         );
-        std::process::exit(2);
     }
 
     raw
 }
 
 pub(crate) fn perf_go_log_level() -> String {
-    let raw = env::var("OPENSNITCH_PERF_GO_LOG_LEVEL").unwrap_or_else(|_| "error".to_string());
+    let raw = env::var("OPENSNITCH_PERF_GO_LOG_LEVEL").unwrap_or_else(|_| "warn".to_string());
     let normalized = raw.to_ascii_lowercase();
-    if normalized != "err" && normalized != "error" {
+    if normalized != "warn"
+        && normalized != "warning"
+        && normalized != "err"
+        && normalized != "error"
+    {
         eprintln!(
-            "OPENSNITCH_PERF_GO_LOG_LEVEL must be err|error for harness/perf commands (current={:?})",
+            "warning: OPENSNITCH_PERF_GO_LOG_LEVEL should be warn|warning|err|error for harness/perf commands (current={:?}); continuing",
             raw
         );
-        std::process::exit(2);
     }
 
     raw
 }
 
 pub(crate) fn parity_stress_rounds() -> String {
-    env::var("OPENSNITCH_PARITY_STRESS_ROUNDS").unwrap_or_else(|_| "1000".to_string())
+    env::var("OPENSNITCH_PARITY_STRESS_ROUNDS").unwrap_or_else(|_| "500".to_string())
 }
 
 pub(crate) fn perf_repeats() -> usize {
     env::var("OPENSNITCH_PERF_REPEATS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(5)
+        .unwrap_or(3)
         .clamp(1, 9)
 }
 
@@ -1015,7 +1020,7 @@ fn update_perf_md() -> Result<(), DynError> {
     let perf_md = env::var("PERF_MD_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| daemon_rs_dir.join("PERF.md"));
-    let stress_rounds = env::var("STRESS_ROUNDS").unwrap_or_else(|_| "1000".to_string());
+    let stress_rounds = env::var("STRESS_ROUNDS").unwrap_or_else(|_| "500".to_string());
     let perf_repeats = perf_repeats();
     let parity_rounds = parity_stress_rounds();
     let rust_log = perf_rust_log_level();

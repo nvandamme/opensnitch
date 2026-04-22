@@ -159,7 +159,7 @@ impl SubscriptionReplyWire {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn into_proto(self) -> pb::SubscriptionReply {
         pb::SubscriptionReply {
             operation: self.operation,
