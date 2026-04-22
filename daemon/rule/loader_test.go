@@ -240,7 +240,9 @@ func waitForRuleCount(t *testing.T, l *Loader, expected int, timeout time.Durati
 		if time.Now().After(deadline) {
 			t.Fatalf("timeout waiting for rule count=%d, got=%d", expected, l.NumRules())
 		}
-		time.Sleep(50 * time.Millisecond)
+		// 5ms: matches Rust parity test poll interval; fsnotify delivers events
+		// near-instantly so 50ms was measuring poll-tick jitter, not reload latency.
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

@@ -549,11 +549,14 @@ async fn rules_watch_task_matches_go_live_reload_add_then_delete_flow() {
     write_rule_file(&rules_path, "test-live-reload-remove", "deny").await;
     write_rule_file(&rules_path, "test-live-reload-delete", "deny").await;
 
+    // Poll at 5ms: epoll now delivers events near-instantly so a 50ms poll
+    // would dominate the measured latency with noise.  5ms ≈ Go's synchronous
+    // fsnotify handler overhead, giving a comparable measurement window.
     wait_until_rule_count(
         &rules_service,
         4,
         3,
-        50,
+        5,
         "rules watch should reload after adding two rules",
     )
     .await;
@@ -572,7 +575,7 @@ async fn rules_watch_task_matches_go_live_reload_add_then_delete_flow() {
         &rules_service,
         2,
         3,
-        50,
+        5,
         "rules watch should converge back to two rules after delete/remove",
     )
     .await;

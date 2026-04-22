@@ -354,7 +354,35 @@ fn setup_fs_trigger(
     let worker = std::thread::spawn(move || {
         let mut buffer = [0_u8; 4096];
 
+        // Use epoll to wait for inotify events with near-zero latency instead of sleeping.
+        // SAFETY: epoll_create1 with EPOLL_CLOEXEC; return value checked below.
+        let epoll_fd = unsafe { nix::libc::epoll_create1(nix::libc::EPOLL_CLOEXEC) };
+        let use_epoll = if epoll_fd >= 0 {
+            let mut ev = nix::libc::epoll_event {
+                events: nix::libc::EPOLLIN as u32,
+                u64: 0,
+            };
+            // SAFETY: epoll_fd and fd are both valid; ev is properly initialised.
+            let rc = unsafe { nix::libc::epoll_ctl(epoll_fd, nix::libc::EPOLL_CTL_ADD, fd, &mut ev) };
+            rc >= 0
+        } else {
+            false
+        };
+
         while !stop_thread.load(std::sync::atomic::Ordering::Relaxed) {
+            if use_epoll {
+                // Block until the inotify fd is readable or the 10 ms timeout expires so
+                // we can re-check the stop flag without busy-spinning.
+                let mut events = [nix::libc::epoll_event { events: 0, u64: 0 }; 1];
+                // SAFETY: epoll_fd is valid; events slice is writable and correctly sized.
+                let n = unsafe {
+                    nix::libc::epoll_wait(epoll_fd, events.as_mut_ptr(), 1, 10)
+                };
+                if n <= 0 {
+                    continue;
+                }
+            }
+
             // SAFETY: fd is a live inotify descriptor; buffer is writable and sized correctly.
             let bytes_read = unsafe {
                 nix::libc::read(
@@ -370,12 +398,16 @@ fn setup_fs_trigger(
                     tracing::warn!("inotify read failed, keeping poll fallback active: {err}");
                     break;
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                if !use_epoll {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
                 continue;
             }
 
             if bytes_read == 0 {
-                std::thread::sleep(Duration::from_millis(50));
+                if !use_epoll {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
                 continue;
             }
 
@@ -419,6 +451,10 @@ fn setup_fs_trigger(
             }
         }
 
+        // SAFETY: epoll_fd was created in this function and should be closed once worker exits.
+        if use_epoll {
+            unsafe { nix::libc::close(epoll_fd) };
+        }
         // SAFETY: fd was created in this function and should be closed once worker exits.
         unsafe {
             nix::libc::close(fd);

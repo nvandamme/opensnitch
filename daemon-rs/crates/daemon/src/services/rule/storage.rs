@@ -14,7 +14,7 @@ use tracing::warn;
 use super::{RuleService, rule_duration_temporary_spec};
 use crate::{
     models::{
-        rule_record::{RuleDuration, RuleRecord},
+        rule_record::{RuleDuration, RuleOperator, RuleRecord},
         rule_storage::{RuleFile, RuleFileOperator},
     },
     services::storage::StorageService,
@@ -175,6 +175,81 @@ impl RuleService {
         }
     }
 
+    /// Mirrors [`collect_rule_list_dirs`] but operates on the in-memory
+    /// [`RuleOperator`] (field `type_name`) rather than the on-disk
+    /// [`RuleFileOperator`] (field `r#type`), avoiding disk reads.
+    fn collect_list_dirs_from_rule_operator(
+        operator: &RuleOperator,
+        list_dirs: &mut BTreeSet<PathBuf>,
+    ) {
+        if Self::operator_is_lists(operator.type_name.as_str(), operator.operand.as_str()) {
+            let path = PathBuf::from(operator.data.as_str());
+            if !path.as_os_str().is_empty() {
+                list_dirs.insert(path);
+            }
+        }
+        for child in &operator.list {
+            Self::collect_list_dirs_from_rule_operator(child, list_dirs);
+        }
+    }
+
+    /// Collect all list directory paths referenced by active rules in the snapshot.
+    /// Used to prime the hint for [`read_rules_dir_file_state_with_hint`] so the
+    /// scan/detection pass can skip re-reading every JSON rule file.
+    pub(crate) fn snapshot_list_dirs(rules: &[RuleRecord]) -> BTreeSet<PathBuf> {
+        let mut list_dirs = BTreeSet::new();
+        for rule in rules.iter().filter(|r| r.enabled) {
+            Self::collect_list_dirs_from_rule_operator(&rule.operator, &mut list_dirs);
+        }
+        list_dirs
+    }
+
+    /// Like [`read_rules_dir_file_state_async`] but takes pre-known list
+    /// directories from the in-memory snapshot instead of re-reading every JSON
+    /// rule file.  Use this on the watch-worker scan hot path; fall back to
+    /// [`read_rules_dir_file_state_async`] when no snapshot is available.
+    pub(crate) async fn read_rules_dir_file_state_with_hint(
+        path: &Path,
+        known_list_dirs: &BTreeSet<PathBuf>,
+    ) -> Option<BTreeMap<String, Option<SystemTime>>> {
+        let mut state = BTreeMap::new();
+        let storage = StorageService::global();
+        let entries = storage.list_dir_with_metadata("rule", path).await.ok()?;
+
+        for entry in entries {
+            let file_path = entry.path;
+            if file_path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let name = file_name_lossy(&file_path)?;
+            state.insert(name, entry.modified);
+            // No JSON read — list dirs come from the caller's snapshot hint.
+        }
+
+        for list_dir in known_list_dirs {
+            let Ok(list_entries) = storage.list_dir_with_metadata("rule", list_dir).await else {
+                continue;
+            };
+            for list_entry in list_entries {
+                let list_path = list_entry.path;
+                let Some(file_name) = list_path.file_name().and_then(|value| value.to_str())
+                else {
+                    continue;
+                };
+                if is_transient_artifact_name(file_name) {
+                    continue;
+                }
+                if !list_entry.is_file {
+                    continue;
+                }
+                let key = format!("list:{}:{}", list_dir.display(), file_name);
+                state.insert(key, list_entry.modified);
+            }
+        }
+
+        Some(state)
+    }
+
     pub(crate) async fn read_rules_dir_file_state_async(
         path: &Path,
     ) -> Option<BTreeMap<String, Option<SystemTime>>> {
@@ -257,7 +332,11 @@ impl WatchWorkerControl for RuleWatchControl {
             let snapshot = rules.snapshot();
             let path = snapshot.rules_path.as_path();
             StorageService::global().emit_scan("rule", path);
-            let state = RuleService::read_rules_dir_file_state_async(path).await;
+            // Derive list dirs from the in-memory snapshot to avoid re-reading all
+            // JSON rule files on every scan tick.
+            let known_list_dirs = RuleService::snapshot_list_dirs(&snapshot.rules);
+            let state =
+                RuleService::read_rules_dir_file_state_with_hint(path, &known_list_dirs).await;
             let mut previous_guard = last_state.lock().await;
 
             let changed = match (&*previous_guard, &state) {

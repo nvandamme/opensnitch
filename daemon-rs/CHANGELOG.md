@@ -10,6 +10,24 @@ Versioning baseline:
 - `v0.4.0`
 - `v0.5.0`
 
+## [Unreleased]
+
+### Fixed
+- `inotify` watch thread was sleeping 50 ms on `EWOULDBLOCK` (non-blocking fd, nothing
+  to read) before retrying `read()`.  This added up to 50 ms latency per
+  `wait_until_rule_count` barrier in the cold-path parity harness and in production rule
+  reload paths.  The thread now opens an `epoll` descriptor, adds the inotify fd with
+  `EPOLLIN`, and calls `epoll_wait` with a 10 ms timeout instead — reacting to file
+  events in effectively zero time.  Cold-path rule reload delta in the parity harness
+  improved from +50 ms to +12 ms (Go 0.101 s → Rust 0.112 s).
+- `RuleWatchControl::scan()` was re-reading every JSON rule file on every scan tick
+  (every 2 s poll interval and every inotify event) purely to collect list directory
+  paths for mtime tracking.  The in-memory snapshot's `rules: Vec<RuleRecord>` already
+  holds the same operator data.  The new `snapshot_list_dirs` helper derives list dirs
+  from the snapshot; the new `read_rules_dir_file_state_with_hint` scan variant uses it,
+  eliminating N async JSON reads per scan pass.  The full-directory reload on change
+  detection is unchanged.
+
 ## [v0.5.0] - 2026-03-26
 
 ### Added
