@@ -11,17 +11,18 @@ libbpf-ebpf = ["dep:libbpf-rs"]
 aya-ebpf = ["dep:aya"]
 cert-gen = ["dep:rcgen"]
 kernel-caps-diag = ["dep:kernel_caps"]
-task-http = ["dep:reqwest"]
+http-client-hyper = ["dep:hyper", "dep:http-body-util", "dep:hyper-util", "dep:hyper-rustls"]
+task-http = ["http-client-hyper"]
 client-transport = []
 transport-wire-grpc-client = ["client-transport", "dep:transport_wire_grpc_client", "transport_wire_grpc_client/subscriptions"]
-subscriptions = ["dep:reqwest"]
+subscriptions = ["http-client-hyper"]
 metrics-http-serve-text = ["dep:hyper", "dep:http-body-util", "dep:hyper-util", "dep:flate2"]
 metrics-http-serve-openmetrics = ["dep:hyper", "dep:http-body-util", "dep:hyper-util", "dep:flate2"]
 metrics-http-serve-protobuf = ["dep:hyper", "dep:http-body-util", "dep:hyper-util", "dep:flate2", "dep:prost"]
-metrics-http-push-text = ["dep:reqwest", "dep:flate2"]
-metrics-http-push-protobuf = ["dep:reqwest", "dep:flate2", "dep:prost"]
-metrics-http-push-openmetrics = ["dep:reqwest", "dep:flate2"]
-metrics-http-push-influxdb = ["dep:reqwest", "dep:flate2"]
+metrics-http-push-text = ["http-client-hyper", "dep:flate2"]
+metrics-http-push-protobuf = ["http-client-hyper", "dep:flate2", "dep:prost"]
+metrics-http-push-openmetrics = ["http-client-hyper", "dep:flate2"]
+metrics-http-push-influxdb = ["http-client-hyper", "dep:flate2"]
 metrics-syslog = []
 storage-format-json = ["dep:storage_format_json"]
 storage-format-yaml = ["dep:storage_format_yaml"]
@@ -57,10 +58,10 @@ aya = { workspace = true, optional = true }
 netlink-bindings = { workspace = true, features = ["inet-diag", "rt-link", "rt-addr", "nftables"] }
 netlink-socket2 = { workspace = true, features = ["tokio"] }
 rustix = { workspace = true, features = ["net", "event", "thread", "system"] }
-reqwest = { workspace = true, default-features = false, features = ["rustls"], optional = true }
-hyper-util = { workspace = true, optional = true }
+hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "http2", "tokio"], optional = true }
 hyper = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
+hyper-rustls = { workspace = true, optional = true }
 flate2 = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }

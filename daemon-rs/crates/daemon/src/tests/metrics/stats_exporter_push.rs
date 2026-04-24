@@ -27,6 +27,7 @@ use transport_wire_core::{WireRuleSubscriptionEntry, WireStatistics, WireSubscri
 
 use crate::models::metrics_snapshot::MetricsSnapshot;
 use crate::models::prometheus_wire as prom_wire;
+use crate::utils::http_client::build_http_client;
 
 // Pull all private items from the parent push adapter module.
 use super::{
@@ -746,7 +747,7 @@ async fn push_gateway_posts_prometheus_text_body() {
     snap.subscription_stats = Some(make_sub_stats());
     let cs = CompactSnapshot::from(&snap);
 
-    let client = reqwest::Client::new();
+    let client = build_http_client();
     post_snapshot(&client, &config, &endpoint, &cs)
         .await
         .unwrap();
@@ -794,7 +795,7 @@ async fn push_gateway_proto_posts_protobuf_body() {
     snap.subscription_stats = Some(make_sub_stats());
     let cs = CompactSnapshot::from(&snap);
 
-    let client = reqwest::Client::new();
+    let client = build_http_client();
     post_snapshot(&client, &config, &endpoint, &cs)
         .await
         .unwrap();
@@ -835,7 +836,7 @@ async fn push_gateway_openmetrics_posts_openmetrics_body() {
     snap.subscription_stats = Some(make_sub_stats());
     let cs = CompactSnapshot::from(&snap);
 
-    let client = reqwest::Client::new();
+    let client = build_http_client();
     post_snapshot(&client, &config, &endpoint, &cs)
         .await
         .unwrap();
@@ -870,7 +871,7 @@ async fn influxdb_push_posts_line_protocol_body() {
     snap.subscription_stats = Some(make_sub_stats());
     let cs = CompactSnapshot::from(&snap);
 
-    let client = reqwest::Client::new();
+    let client = build_http_client();
     post_snapshot(&client, &config, &endpoint, &cs)
         .await
         .unwrap();
@@ -951,7 +952,7 @@ async fn push_gateway_bearer_token_sent_in_authorization_header() {
     let endpoint = build_endpoint(&config);
     let cs = CompactSnapshot::from(&make_snapshot());
 
-    let client = reqwest::Client::new();
+    let client = build_http_client();
     post_snapshot(&client, &config, &endpoint, &cs)
         .await
         .unwrap();

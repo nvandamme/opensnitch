@@ -660,8 +660,6 @@ Versioning baseline:
 
 ### Changed
 
-### Changed
-  - `models/hash_cache.rs` → `models/hash_cache_storage.rs`: on-disk JSON cache format types (`HashCacheKey`, `HashCacheEntry`, `HashCacheFile`, `HashCacheRecord`) correctly signal storage intent via file name.
 - **Stats exporter adapter module restructuring**
   (`crates/daemon/src/platform/adapters/stats_exporters/`,
   `crates/daemon/src/daemon/tasks.rs`):
@@ -726,6 +724,24 @@ Versioning baseline:
     ring) and surfaces it as `diag.stats.dropped_events_contention` in stat snapshots.
   - Storage event bus dropped-ingress count added as `diag.storage.event_bus.dropped_ingress`
     in stat snapshots via `StorageService` reference.
+
+- **reqwest replaced with hyper stack across all runtime and test HTTP paths**
+  (`crates/daemon/src/utils/http_client.rs` (new),
+   `crates/daemon/src/platform/adapters/stats_exporters/http_push.rs`,
+   `crates/daemon/src/platform/adapters/stats_exporters/http_push_influxdb.rs`,
+   `crates/daemon/src/services/subscription/`,
+   `crates/daemon/src/services/task/runtime_handlers.rs`,
+   `crates/daemon/src/utils/http_response.rs`,
+   `crates/daemon/src/tests/metrics/`):
+  - Added `utils/http_client.rs` as the shared outbound HTTP client utility (`build_http_client`,
+    `build_request`, `send_request`, `HttpClient`, `HttpResponse`) wrapping hyper/hyper-util/
+    hyper-rustls — the same stack already present via the gRPC transport path.
+  - Migrated all runtime HTTP call sites (push exporters, subscription refresh, task downloader)
+    from `reqwest` to the new shared client.
+  - Migrated all test HTTP call sites (push exporter tests, Prometheus serve integration tests)
+    from `reqwest::Client` to the shared client, gating the module also under `cfg(test)`.
+  - Removed `reqwest` from `[dependencies]`, `[dev-dependencies]`, and the workspace
+    `[dependencies]` table entirely.
 
 ### Documentation
 

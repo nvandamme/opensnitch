@@ -81,7 +81,6 @@ import threading
 import time
 from concurrent import futures
 from pathlib import Path
-
 import grpc
 
 
@@ -89,28 +88,29 @@ def _add_proto_path() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(repo_root))
     proto_dir = repo_root / "ui" / "opensnitch" / "proto"
-    proto_pre3200_dir = proto_dir / "pre3200"
     sys.path.insert(0, str(proto_dir))
-    if proto_pre3200_dir.exists():
-        sys.path.insert(0, str(proto_pre3200_dir))
 
 
 _add_proto_path()
 
 try:
-    import ui_pb2  # type: ignore  # noqa: E402
-    import ui_pb2_grpc  # type: ignore  # noqa: E402
-except Exception:
-    from ui.opensnitch.proto.pre3200 import ui_pb2  # type: ignore  # noqa: E402
-    from ui.opensnitch.proto.pre3200 import ui_pb2_grpc  # type: ignore  # noqa: E402
-
-try:
-    import subscriptions_pb2  # type: ignore  # noqa: E402
-    import subscriptions_pb2_grpc  # type: ignore  # noqa: E402
+    import ui_pb2
+    import ui_pb2_grpc
 except Exception:
     try:
-        from ui.opensnitch.proto import subscriptions_pb2  # type: ignore  # noqa: E402
-        from ui.opensnitch.proto import subscriptions_pb2_grpc  # type: ignore  # noqa: E402
+        from ui.opensnitch.proto import ui_pb2
+        from ui.opensnitch.proto import ui_pb2_grpc
+    except Exception:
+        raise ImportError(
+            "Failed to import ui_pb2 and ui_pb2_grpc.  Make sure the proto files are compiled and the generated Python modules are in the PYTHONPATH."
+        )
+try:
+    import subscriptions_pb2
+    import subscriptions_pb2_grpc
+except Exception:
+    try:
+        from ui.opensnitch.proto import subscriptions_pb2
+        from ui.opensnitch.proto import subscriptions_pb2_grpc
     except Exception:
         subscriptions_pb2 = None
         subscriptions_pb2_grpc = None
@@ -161,7 +161,7 @@ _SUBSCRIPTION_REFRESH_DATA = json.dumps({
 _ASK_RULE_EXPECTED_DSTS: frozenset[str] = frozenset({"192.0.2.1", "198.51.100.1"})
 
 
-def _make_test_rule() -> ui_pb2.Rule:
+def _make_test_rule():
     """Initial test rule for the add step of the rule lifecycle.
 
     Targets RFC 5737 TEST-NET-2 (198.51.100.0/24), a documentation-only address
@@ -182,7 +182,7 @@ def _make_test_rule() -> ui_pb2.Rule:
     )
 
 
-def _make_test_rule_edited() -> ui_pb2.Rule:
+def _make_test_rule_edited():
     """Edited version of the test rule for the edit step of the rule lifecycle.
 
     Same name (so the daemon replaces the existing rule on upsert), but action
@@ -444,7 +444,7 @@ class MockUiService(ui_pb2_grpc.UIServicer):
 
         def _send(
             cmd: str,
-            action: int,
+            action: int | ui_pb2.Action,
             data: str = "",
             rules: list | None = None,
             sys_firewall: ui_pb2.SysFirewall | None = None,
@@ -454,6 +454,7 @@ class MockUiService(ui_pb2_grpc.UIServicer):
             nonlocal next_id
             nid = next_id
             next_id += 1
+            action = ui_pb2.Action(action) if isinstance(action, int) else action
             msg = ui_pb2.Notification(
                 id=nid,
                 clientName="mock-ui-client",

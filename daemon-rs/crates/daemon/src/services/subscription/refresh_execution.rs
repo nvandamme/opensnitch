@@ -1,4 +1,4 @@
-use reqwest::{StatusCode, header};
+use hyper::{Method, StatusCode, header};
 use tracing::{info, warn};
 
 use super::SubscriptionRecord;
@@ -6,6 +6,7 @@ use super::SubscriptionService;
 use super::refresh_timing::next_refresh_success;
 pub(super) use crate::models::subscription_refresh::RefreshOutcome;
 use crate::services::storage::StorageService;
+use crate::utils::http_client::{HttpResponse, build_request, send_request};
 use crate::utils::http_response::{header_value, summarize_http_error};
 use crate::utils::time_nonce::now_rfc3339_utc;
 
@@ -22,49 +23,33 @@ impl SubscriptionService {
 
         info!(name = %record.name, url = %record.url, "subscription refresh: started");
 
-        let mut request = self
-            .http
-            .get(&record.url)
-            .timeout(std::time::Duration::from_secs(u64::from(
-                record.timeout_seconds.max(1),
-            )));
-        if !record.etag.is_empty() {
-            request = request.header(header::IF_NONE_MATCH, &record.etag);
-        }
-        if !record.last_modified.is_empty() {
-            request = request.header(header::IF_MODIFIED_SINCE, &record.last_modified);
-        }
-
-        let retry = request.try_clone();
-        let response = match request.send().await {
+        let timeout = std::time::Duration::from_secs(u64::from(record.timeout_seconds.max(1)));
+        let response = match self.send_refresh_request(record, timeout).await {
             Ok(response) => response,
-            Err(err) => match retry {
-                Some(retry_request) => {
-                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                    match retry_request.send().await {
-                        Ok(response) => response,
-                        Err(retry_err) => {
-                            let message =
-                                format!("request failed: {err}; retry failed: {retry_err}");
-                            self.mark_refresh_error(record, &message);
-                            return Err(message);
-                        }
+            Err(err) => {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                match self.send_refresh_request(record, timeout).await {
+                    Ok(response) => response,
+                    Err(retry_err) => {
+                        let message = format!("request failed: {err}; retry failed: {retry_err}");
+                        self.mark_refresh_error(record, &message);
+                        return Err(message);
                     }
                 }
-                None => {
-                    let message = format!("request failed: {err}");
-                    self.mark_refresh_error(record, &message);
-                    return Err(message);
-                }
-            },
+            }
         };
 
-        match response.status() {
+        match response.status {
             StatusCode::OK => {
-                let etag = header_value(response.headers().get(header::ETAG));
-                let last_modified = header_value(response.headers().get(header::LAST_MODIFIED));
+                let etag = header_value(response.headers.get(header::ETAG));
+                let last_modified = header_value(response.headers.get(header::LAST_MODIFIED));
                 if let Err(err) = self
-                    .write_source_file(&record.filename, &record.format, record.max_bytes, response)
+                    .write_source_file(
+                        &record.filename,
+                        &record.format,
+                        record.max_bytes,
+                        &response.body,
+                    )
                     .await
                 {
                     let message = err.to_string();
@@ -97,8 +82,8 @@ impl SubscriptionService {
                     return Err(message);
                 }
 
-                let etag = header_value(response.headers().get(header::ETAG));
-                let last_modified = header_value(response.headers().get(header::LAST_MODIFIED));
+                let etag = header_value(response.headers.get(header::ETAG));
+                let last_modified = header_value(response.headers.get(header::LAST_MODIFIED));
                 if !etag.is_empty() {
                     record.etag = etag;
                 }
@@ -114,11 +99,28 @@ impl SubscriptionService {
                 Ok(RefreshOutcome::NotModified)
             }
             status => {
-                let message = summarize_http_error(status, response).await;
+                let message = summarize_http_error(status, &response.body);
                 self.mark_refresh_error(record, &message);
                 warn!(name = %record.name, error = %message, "subscription refresh: failed");
                 Err(message)
             }
         }
+    }
+
+    async fn send_refresh_request(
+        &self,
+        record: &SubscriptionRecord,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<HttpResponse> {
+        let mut headers: Vec<(hyper::header::HeaderName, String)> = Vec::new();
+        if !record.etag.is_empty() {
+            headers.push((header::IF_NONE_MATCH, record.etag.clone()));
+        }
+        if !record.last_modified.is_empty() {
+            headers.push((header::IF_MODIFIED_SINCE, record.last_modified.clone()));
+        }
+
+        let request = build_request(Method::GET, &record.url, &headers, Vec::new())?;
+        send_request(&self.http, request, timeout, Some(record.max_bytes)).await
     }
 }

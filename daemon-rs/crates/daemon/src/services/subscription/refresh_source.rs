@@ -20,7 +20,7 @@ impl SubscriptionService {
         filename: &str,
         format: &str,
         max_bytes: u64,
-        mut response: reqwest::Response,
+        body: &[u8],
     ) -> Result<()> {
         let sources_dir = self.root_dir.join("sources.list.d");
         StorageService::global()
@@ -33,12 +33,10 @@ impl SubscriptionService {
                 )
             })?;
 
-        if let Some(length) = response.content_length()
-            && length > max_bytes
-        {
+        if (body.len() as u64) > max_bytes {
             anyhow::bail!(
                 "response exceeds max-bytes limit ({} > {})",
-                length,
+                body.len(),
                 max_bytes
             );
         }
@@ -47,47 +45,22 @@ impl SubscriptionService {
         let temp_path = sibling_temp_path_with_suffix(&source_path, ".download");
 
         let mut file = open_atomic_temp_file(&temp_path, "source")?;
-        let mut written = 0u64;
 
         const SAMPLE_LINES_MAX: usize = 200;
         let needs_validation = super::format::is_known_format(format);
         let mut sample_lines: Vec<String> = Vec::new();
-        let mut sample_done = false;
 
-        loop {
-            let chunk = response
-                .chunk()
-                .await
-                .context("reading subscription response chunk")?;
-            let Some(chunk) = chunk else {
-                break;
-            };
-            written = written.saturating_add(chunk.len() as u64);
-            if written > max_bytes {
-                Self::cleanup_temp_source_file(&temp_path).await;
-                anyhow::bail!(
-                    "response exceeds max-bytes limit ({} > {})",
-                    written,
-                    max_bytes
-                );
+        if needs_validation {
+            let text = String::from_utf8_lossy(body);
+            for line in text.lines().take(SAMPLE_LINES_MAX) {
+                sample_lines.push(line.to_owned());
             }
+        }
 
-            if needs_validation && !sample_done {
-                let text = String::from_utf8_lossy(&chunk);
-                for line in text.lines() {
-                    sample_lines.push(line.to_owned());
-                    if sample_lines.len() >= SAMPLE_LINES_MAX {
-                        sample_done = true;
-                        break;
-                    }
-                }
-            }
-
-            if let Err(err) = file.write_all(&chunk) {
-                Self::cleanup_temp_source_file(&temp_path).await;
-                return Err(err)
-                    .with_context(|| format!("writing temp source file: {}", temp_path.display()));
-            }
+        if let Err(err) = file.write_all(body) {
+            Self::cleanup_temp_source_file(&temp_path).await;
+            return Err(err)
+                .with_context(|| format!("writing temp source file: {}", temp_path.display()));
         }
 
         if needs_validation {

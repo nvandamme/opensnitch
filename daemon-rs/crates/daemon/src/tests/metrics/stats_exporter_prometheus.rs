@@ -10,12 +10,16 @@
 //! - `render_prometheus_proto`  — length-delimited protobuf MetricFamilies
 //! - `negotiate_format`         — Accept header content negotiation
 //! - `gzip_compress`            — round-trip compress / decompress
-//! - HTTP endpoint              — live server integration (reqwest GET)
+//! - HTTP endpoint              — live server integration (hyper GET)
 
 use std::collections::HashMap;
 use std::time::Duration;
 
+use hyper::Method;
+use hyper::header::ACCEPT;
 use tokio_util::sync::CancellationToken;
+
+use crate::utils::http_client::{build_http_client, build_request, send_request};
 use transport_wire_core::{WireRuleSubscriptionEntry, WireStatistics, WireSubscriptionStatistics};
 
 use crate::models::metrics_snapshot::MetricsSnapshot;
@@ -752,17 +756,17 @@ async fn http_endpoint_returns_prometheus_text_by_default() {
         .spawn_metrics_server(addr, shutdown.clone());
     wait_ready(addr).await;
 
-    let resp = reqwest::Client::new()
-        .get(format!("http://{addr}/metrics"))
-        .send()
+    let client = build_http_client();
+    let req = build_request(Method::GET, &format!("http://{addr}/metrics"), &[], vec![]).unwrap();
+    let resp = send_request(&client, req, Duration::from_secs(5), None)
         .await
         .unwrap();
 
-    assert_eq!(resp.status().as_u16(), 200);
-    let ct = resp.headers()["content-type"].to_str().unwrap().to_string();
+    assert_eq!(resp.status.as_u16(), 200);
+    let ct = resp.headers["content-type"].to_str().unwrap().to_string();
     assert!(ct.contains("text/plain"), "content-type: {ct}");
 
-    let body = resp.text().await.unwrap();
+    let body = String::from_utf8(resp.body).unwrap();
     assert!(
         body.contains("opensnitch_connections_total 400"),
         "connections\n{body}"
@@ -791,20 +795,22 @@ async fn http_endpoint_returns_openmetrics_on_accept_header() {
         .spawn_metrics_server(addr, shutdown.clone());
     wait_ready(addr).await;
 
-    let resp = reqwest::Client::new()
-        .get(format!("http://{addr}/metrics"))
-        .header(
-            "Accept",
-            "application/openmetrics-text; version=1.0.0; charset=utf-8",
-        )
-        .send()
+    let client = build_http_client();
+    let req = build_request(
+        Method::GET,
+        &format!("http://{addr}/metrics"),
+        &[(ACCEPT, "application/openmetrics-text; version=1.0.0; charset=utf-8".to_string())],
+        vec![],
+    )
+    .unwrap();
+    let resp = send_request(&client, req, Duration::from_secs(5), None)
         .await
         .unwrap();
 
-    assert_eq!(resp.status().as_u16(), 200);
-    let ct = resp.headers()["content-type"].to_str().unwrap().to_string();
+    assert_eq!(resp.status.as_u16(), 200);
+    let ct = resp.headers["content-type"].to_str().unwrap().to_string();
     assert!(ct.contains("openmetrics-text"), "content-type: {ct}");
-    let body = resp.text().await.unwrap();
+    let body = String::from_utf8(resp.body).unwrap();
     assert!(body.ends_with("# EOF\n"), "expected # EOF\n{body}");
 
     shutdown.cancel();
@@ -822,26 +828,27 @@ async fn http_endpoint_returns_proto_on_accept_header() {
         .spawn_metrics_server(addr, shutdown.clone());
     wait_ready(addr).await;
 
-    let resp = reqwest::Client::new()
-        .get(format!("http://{addr}/metrics"))
-        .header(
-            "Accept",
-            "application/vnd.google.protobuf; \
-             proto=io.prometheus.client.MetricFamily; encoding=delimited",
-        )
-        .send()
+    let client = build_http_client();
+    let req = build_request(
+        Method::GET,
+        &format!("http://{addr}/metrics"),
+        &[(ACCEPT, "application/vnd.google.protobuf; \
+             proto=io.prometheus.client.MetricFamily; encoding=delimited".to_string())],
+        vec![],
+    )
+    .unwrap();
+    let resp = send_request(&client, req, Duration::from_secs(5), None)
         .await
         .unwrap();
 
-    assert_eq!(resp.status().as_u16(), 200);
-    let ct = resp.headers()["content-type"].to_str().unwrap().to_string();
+    assert_eq!(resp.status.as_u16(), 200);
+    let ct = resp.headers["content-type"].to_str().unwrap().to_string();
     assert!(
         ct.contains("application/vnd.google.protobuf"),
         "content-type: {ct}"
     );
 
-    let body = resp.bytes().await.unwrap();
-    let fams = decode_proto_families(&body);
+    let fams = decode_proto_families(&resp.body);
     let names: Vec<_> = fams.iter().filter_map(|f| f.name.as_deref()).collect();
     assert!(names.contains(&"opensnitch_connections_total"), "{names:?}");
 
@@ -859,13 +866,13 @@ async fn http_endpoint_returns_404_for_unknown_paths() {
         .spawn_metrics_server(addr, shutdown.clone());
     wait_ready(addr).await;
 
-    let resp = reqwest::Client::new()
-        .get(format!("http://{addr}/health"))
-        .send()
+    let client = build_http_client();
+    let req = build_request(Method::GET, &format!("http://{addr}/health"), &[], vec![]).unwrap();
+    let resp = send_request(&client, req, Duration::from_secs(5), None)
         .await
         .unwrap();
 
-    assert_eq!(resp.status().as_u16(), 404);
+    assert_eq!(resp.status.as_u16(), 404);
 
     shutdown.cancel();
 }
@@ -882,14 +889,14 @@ async fn http_endpoint_empty_body_when_no_snapshot_yet() {
         .spawn_metrics_server(addr, shutdown.clone());
     wait_ready(addr).await;
 
-    let resp = reqwest::Client::new()
-        .get(format!("http://{addr}/metrics"))
-        .send()
+    let client = build_http_client();
+    let req = build_request(Method::GET, &format!("http://{addr}/metrics"), &[], vec![]).unwrap();
+    let resp = send_request(&client, req, Duration::from_secs(5), None)
         .await
         .unwrap();
 
-    assert_eq!(resp.status().as_u16(), 200);
-    let body = resp.text().await.unwrap();
+    assert_eq!(resp.status.as_u16(), 200);
+    let body = String::from_utf8(resp.body).unwrap();
     assert!(
         body.is_empty(),
         "expected empty body before first snapshot, got:\n{body}"

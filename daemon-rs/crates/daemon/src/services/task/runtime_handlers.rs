@@ -1,12 +1,17 @@
 use std::{collections::HashMap, fmt::Display};
 
 use anyhow::Result;
+#[cfg(feature = "task-http")]
+use hyper::Method;
 use tokio_util::sync::CancellationToken;
 
 use super::{
     TaskRuntimePayload, TaskService, naming as task_runtime_naming, reply as task_runtime_reply,
     socket_monitor,
 };
+#[cfg(feature = "task-http")]
+use crate::utils::http_client::{build_http_client, build_request, send_request};
+
 use crate::{
     models::{
         socket_monitor_payload::SocketMonitorPayload,
@@ -740,7 +745,7 @@ impl TaskService {
     async fn run_downloader_once_cfg(cfg: &DownloaderTaskConfig) -> Result<DownloaderResult> {
         let timeout =
             Self::parse_interval_or_default(&cfg.timeout, std::time::Duration::from_secs(5));
-        let client = reqwest::Client::builder().timeout(timeout).build()?;
+        let client = build_http_client();
 
         let mut sources = 0usize;
         let mut updated = 0usize;
@@ -756,18 +761,18 @@ impl TaskService {
 
             let local_path = std::path::PathBuf::from(source.local_file.trim());
             let download_result = async {
-                let response = client.get(source.remote.trim()).send().await?;
-                if !response.status().is_success() {
-                    anyhow::bail!("http status {}", response.status().as_u16());
+                let request = build_request(Method::GET, source.remote.trim(), &[], Vec::new())?;
+                let response = send_request(&client, request, timeout, None).await?;
+                if !response.status.is_success() {
+                    anyhow::bail!("http status {}", response.status.as_u16());
                 }
 
-                let body = response.bytes().await?;
-                if body.is_empty() {
+                if response.body.is_empty() {
                     anyhow::bail!("empty response body");
                 }
 
                 StorageService::global()
-                    .write_bytes_to_path_and_notify("task", &local_path, body.as_ref())
+                    .write_bytes_to_path_and_notify("task", &local_path, &response.body)
                     .await?;
                 Ok::<(), anyhow::Error>(())
             }

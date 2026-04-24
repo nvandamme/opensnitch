@@ -42,12 +42,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Result;
+use hyper::Method;
+use hyper::header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderName};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use crate::models::metrics_snapshot::{MetricsExportSnapshot, MetricsSnapshot};
 use crate::platform::ports::stats_exporter_port::StatsExporterPort;
+use crate::utils::http_client::{HttpClient, build_http_client, build_request, send_request};
 
 // ---------------------------------------------------------------------------
 // Environment variable keys
@@ -152,10 +156,7 @@ async fn push_worker(
     config: PushConfig,
     shutdown: CancellationToken,
 ) {
-    let client = reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    let client = build_http_client();
 
     let endpoint = build_endpoint(&config);
     info!(
@@ -169,7 +170,9 @@ async fn push_worker(
             _ = shutdown.cancelled() => break,
             maybe = rx.recv() => {
                 let Some(snapshot) = maybe else { break };
-                    let _ = post_snapshot(&client, &config, &endpoint, &snapshot).await;
+                if let Err(err) = post_snapshot(&client, &config, &endpoint, &snapshot).await {
+                    debug!(error = %err, "push stats exporter: push failed");
+                }
             }
         }
     }
@@ -207,11 +210,11 @@ fn build_endpoint(config: &PushConfig) -> String {
 }
 
 async fn post_snapshot(
-    client: &reqwest::Client,
+    client: &HttpClient,
     config: &PushConfig,
     endpoint: &str,
     snapshot: &CompactSnapshot,
-) -> Result<(), reqwest::Error> {
+) -> Result<()> {
     match config.format {
         PushFormat::Pushgateway => {
             #[cfg(feature = "metrics-http-push-text")]
@@ -270,12 +273,12 @@ async fn post_snapshot(
 
 /// Issue a single POST for one wire format body.
 async fn post_one_format(
-    client: &reqwest::Client,
+    client: &HttpClient,
     config: &PushConfig,
     endpoint: &str,
     body_bytes: Vec<u8>,
     content_type: &'static str,
-) -> Result<(), reqwest::Error> {
+) -> Result<()> {
     let (final_body, gzip_encoded) = if config.gzip {
         match gzip_compress(&body_bytes) {
             Some(c) => (c, true),
@@ -285,24 +288,25 @@ async fn post_one_format(
         (body_bytes, false)
     };
 
-    let mut req = client
-        .post(endpoint)
-        .header("Content-Type", content_type)
-        .body(final_body);
+    let mut headers: Vec<(HeaderName, String)> = vec![(CONTENT_TYPE, content_type.to_string())];
 
     if gzip_encoded {
-        req = req.header("Content-Encoding", "gzip");
+        headers.push((CONTENT_ENCODING, "gzip".to_string()));
     }
 
     if let Some(ref token) = config.token {
-        req = req.header("Authorization", format!("Bearer {token}"));
+        headers.push((AUTHORIZATION, format!("Bearer {token}")));
     }
 
-    let resp = req.send().await?;
-    if !resp.status().is_success() {
+    let request = build_request(Method::POST, endpoint, &headers, final_body)?;
+    let response = send_request(client, request, HTTP_TIMEOUT, None).await?;
+
+    if !response.status.is_success() {
         debug!(
-            status = resp.status().as_u16(),
-            endpoint, content_type, "push stats exporter: non-2xx response"
+            status = response.status.as_u16(),
+            endpoint,
+            content_type,
+            "push stats exporter: non-2xx response"
         );
     }
     Ok(())

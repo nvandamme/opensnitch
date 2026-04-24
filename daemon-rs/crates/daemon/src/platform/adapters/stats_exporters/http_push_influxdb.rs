@@ -1,12 +1,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Result;
+use hyper::Method;
+use hyper::header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderName};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use crate::models::metrics_snapshot::{MetricsExportSnapshot, MetricsSnapshot};
 use crate::platform::ports::stats_exporter_port::StatsExporterPort;
+use crate::utils::http_client::{HttpClient, build_http_client, build_request, send_request};
 
 pub const INFLUX_URL_ENV: &str = "OPENSNITCH_INFLUXDB_URL";
 pub(crate) const INFLUX_TOKEN_ENV: &str = "OPENSNITCH_INFLUXDB_TOKEN";
@@ -54,10 +58,7 @@ async fn push_worker(
     config: InfluxDbConfig,
     shutdown: CancellationToken,
 ) {
-    let client = reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    let client = build_http_client();
 
     let endpoint = build_endpoint(&config);
     info!(endpoint = %endpoint, "influxdb stats exporter started");
@@ -99,11 +100,11 @@ fn build_endpoint(config: &InfluxDbConfig) -> String {
 }
 
 async fn post_snapshot(
-    client: &reqwest::Client,
+    client: &HttpClient,
     config: &InfluxDbConfig,
     endpoint: &str,
     snapshot: &CompactSnapshot,
-) -> Result<(), reqwest::Error> {
+) -> Result<()> {
     let body_bytes = super::encoder_influxdb::render_line_protocol(snapshot).into_bytes();
 
     let (final_body, gzip_encoded) = if config.gzip {
@@ -115,24 +116,23 @@ async fn post_snapshot(
         (body_bytes, false)
     };
 
-    let mut req = client
-        .post(endpoint)
-        .header("Content-Type", "text/plain; charset=utf-8")
-        .body(final_body);
+    let mut headers: Vec<(HeaderName, String)> = vec![(CONTENT_TYPE, "text/plain; charset=utf-8".to_string())];
 
     if gzip_encoded {
-        req = req.header("Content-Encoding", "gzip");
+        headers.push((CONTENT_ENCODING, "gzip".to_string()));
     }
 
     if let Some(ref token) = config.token {
-        req = req.header("Authorization", format!("Token {token}"));
+        headers.push((AUTHORIZATION, format!("Token {token}")));
     }
 
-    let resp = req.send().await?;
-    if !resp.status().is_success() {
+    let request = build_request(Method::POST, endpoint, &headers, final_body)?;
+    let response = send_request(client, request, HTTP_TIMEOUT, None).await?;
+    if !response.status.is_success() {
         debug!(
-            status = resp.status().as_u16(),
-            endpoint, "influxdb stats exporter: non-2xx response"
+            status = response.status.as_u16(),
+            endpoint,
+            "influxdb stats exporter: non-2xx response"
         );
     }
     Ok(())

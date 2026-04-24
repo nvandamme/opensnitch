@@ -10,6 +10,18 @@ pub mod conntrack;
 pub mod daemon_guard;
 pub mod duration_parse;
 pub mod hex_parse;
+#[cfg(any(
+    feature = "task-http",
+    feature = "subscriptions",
+    feature = "metrics-http-push-text",
+    feature = "metrics-http-push-openmetrics",
+    feature = "metrics-http-push-protobuf",
+    feature = "metrics-http-push-influxdb",
+    feature = "metrics-http-serve-text",
+    feature = "metrics-http-serve-openmetrics",
+    feature = "metrics-http-serve-protobuf"
+))]
+pub mod http_client;
 #[cfg(feature = "subscriptions")]
 pub mod http_response;
 pub mod json_value;

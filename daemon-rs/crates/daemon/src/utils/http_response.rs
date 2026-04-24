@@ -1,4 +1,4 @@
-use reqwest::{Response, StatusCode, header};
+use hyper::{StatusCode, header};
 
 const DEFAULT_HTTP_ERROR_BODY_PREVIEW_BYTES: usize = 160;
 
@@ -10,15 +10,14 @@ pub(crate) fn header_value(value: Option<&header::HeaderValue>) -> String {
         .to_string()
 }
 
-pub(crate) async fn summarize_http_error(status: StatusCode, response: Response) -> String {
-    let body = match response.bytes().await {
-        Ok(bytes) => String::from_utf8_lossy(
-            &bytes[..bytes.len().min(DEFAULT_HTTP_ERROR_BODY_PREVIEW_BYTES)],
-        )
-        .trim()
-        .to_string(),
-        Err(_) => String::new(),
-    };
+pub(crate) fn summarize_http_error(status: StatusCode, response_body: &[u8]) -> String {
+    let body = String::from_utf8_lossy(
+        &response_body[..response_body
+            .len()
+            .min(DEFAULT_HTTP_ERROR_BODY_PREVIEW_BYTES)],
+    )
+    .trim()
+    .to_string();
 
     if body.is_empty() {
         format!("unexpected HTTP status {}", status.as_u16())

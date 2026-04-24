@@ -18,6 +18,7 @@ use transport_wire_core::{
 use super::defaults::{DEFAULT_ROOT_DIR, DEFAULT_STORE_FILE};
 use crate::models::subscription_storage::SubscriptionRecord;
 use crate::services::subscription::storage::SubscriptionStorage;
+use crate::utils::http_client::{HttpClient, build_http_client};
 use crate::utils::time_nonce::unix_epoch_nanos;
 
 /// Maximum entries kept in the subscription event ring.
@@ -35,7 +36,7 @@ const SUB_EVENT_RING_CAPACITY: usize = 64;
 pub struct SubscriptionService {
     pub(super) storage: Arc<SubscriptionStorage>,
     pub(super) root_dir: PathBuf,
-    pub(super) http: reqwest::Client,
+    pub(super) http: HttpClient,
     /// Per-subscription async mutex prevents two concurrent refreshes of the same entry.
     pub(super) locks: Arc<DashMap<String, Arc<AsyncMutex<()>>>>,
     /// Cumulative successful refresh downloads since daemon start.
@@ -48,11 +49,7 @@ pub struct SubscriptionService {
 
 impl SubscriptionService {
     pub fn new(storage: Arc<SubscriptionStorage>, root_dir: impl Into<PathBuf>) -> Self {
-        let http = reqwest::Client::builder()
-            .http1_only()
-            .no_proxy()
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let http = build_http_client();
         Self {
             storage,
             root_dir: root_dir.into(),
