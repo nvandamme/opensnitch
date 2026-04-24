@@ -149,7 +149,7 @@ fn aya_dns_trace_smoke_reports_explicit_runtime_active() {
     let rust_log = dns_smoke_rust_log();
 
     let mut daemon = Command::new("timeout")
-        .arg("18s")
+        .args(["--kill-after=2s", "18s"])
         .arg(&daemon_bin)
         .env("OPENSNITCH_EBPF_PIN_DOMAIN", "aya")
         .env("RUST_LOG", &rust_log)

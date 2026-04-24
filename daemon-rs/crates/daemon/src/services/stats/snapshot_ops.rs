@@ -59,7 +59,12 @@ impl StatsService {
         ev: &mut EventsState,
         rules_count: u64,
     ) -> MetricsSnapshot {
-        let events = ev.events.drain_all();
+        let events = ev
+            .events
+            .drain_all()
+            .into_iter()
+            .map(|event| event.into_wire_event())
+            .collect();
 
         let stats = WireStatistics {
             daemon_version: Self::daemon_version_string(),
@@ -111,14 +116,13 @@ impl StatsService {
             StorageService::global().dropped_ingress_events_count(),
         );
 
-        MetricsSnapshot {
+        MetricsSnapshot::new(
             stats,
-            subscription_stats: self
-                .sub_stats
+            self.sub_stats
                 .lock()
                 .expect("subscription stats mutex poisoned")
                 .clone(),
             by_rule,
-        }
+        )
     }
 }

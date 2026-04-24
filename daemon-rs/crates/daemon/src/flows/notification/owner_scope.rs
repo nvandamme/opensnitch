@@ -7,6 +7,50 @@ use crate::models::{
 };
 
 impl NotificationFlow {
+    fn meta_statement_matches_owner_scope(
+        statement: &FirewallStatement,
+        owner_uid: u32,
+        owner_group_gids: &[u32],
+    ) -> bool {
+        if !statement.name.eq_ignore_ascii_case("meta") {
+            return false;
+        }
+
+        let uid_text = owner_uid.to_string();
+        statement.values.iter().any(|value| {
+            (value.key.eq_ignore_ascii_case("skuid") && value.value.trim() == uid_text)
+                || (value.key.eq_ignore_ascii_case("skgid")
+                    && value
+                        .value
+                        .trim()
+                        .parse::<u32>()
+                        .ok()
+                        .is_some_and(|gid| owner_group_gids.contains(&gid)))
+        })
+    }
+
+    fn meta_statement_has_conflicting_owner_scope(
+        statement: &FirewallStatement,
+        owner_uid: u32,
+        owner_group_gids: &[u32],
+    ) -> bool {
+        if !statement.name.eq_ignore_ascii_case("meta") {
+            return false;
+        }
+
+        let uid_text = owner_uid.to_string();
+        statement.values.iter().any(|value| {
+            (value.key.eq_ignore_ascii_case("skuid") && value.value.trim() != uid_text)
+                || (value.key.eq_ignore_ascii_case("skgid")
+                    && value
+                        .value
+                        .trim()
+                        .parse::<u32>()
+                        .ok()
+                        .is_some_and(|gid| !owner_group_gids.contains(&gid)))
+        })
+    }
+
     pub(super) fn operator_matches_owner_scope(
         operator: &RuleOperator,
         owner_uid: u32,
@@ -152,20 +196,11 @@ impl NotificationFlow {
             return true;
         }
 
-        let uid_text = owner_uid.to_string();
-        let gids_text: Vec<String> = owner_group_gids.iter().map(ToString::to_string).collect();
         rule.expressions.iter().any(|expression| {
             let Some(statement) = expression.statement.as_ref() else {
                 return false;
             };
-            if !statement.name.eq_ignore_ascii_case("meta") {
-                return false;
-            }
-            statement.values.iter().any(|value| {
-                (value.key.eq_ignore_ascii_case("skuid") && value.value.trim() == uid_text)
-                    || (value.key.eq_ignore_ascii_case("skgid")
-                        && gids_text.iter().any(|gid| gid == value.value.trim()))
-            })
+            Self::meta_statement_matches_owner_scope(statement, owner_uid, owner_group_gids)
         })
     }
 
@@ -174,22 +209,11 @@ impl NotificationFlow {
         owner_uid: u32,
         owner_group_gids: &[u32],
     ) -> bool {
-        let uid_text = owner_uid.to_string();
         expressions.iter().any(|expression| {
             let Some(statement) = expression.statement.as_ref() else {
                 return false;
             };
-            statement.name.eq_ignore_ascii_case("meta")
-                && statement.values.iter().any(|value| {
-                    (value.key.eq_ignore_ascii_case("skuid") && value.value.trim() != uid_text)
-                        || (value.key.eq_ignore_ascii_case("skgid")
-                            && value
-                                .value
-                                .trim()
-                                .parse::<u32>()
-                                .ok()
-                                .is_some_and(|gid| !owner_group_gids.contains(&gid)))
-                })
+            Self::meta_statement_has_conflicting_owner_scope(statement, owner_uid, owner_group_gids)
         })
     }
 

@@ -1,12 +1,11 @@
-//! Push-style stats exporter — Prometheus push-gateway (text / protobuf).
+//! Push-style stats exporter — Prometheus push-gateway (text / OpenMetrics / protobuf).
 //!
 //! Feature-gated behind any of:
 //! - `metrics-http-push-text`
 //! - `metrics-http-push-openmetrics`
 //! - `metrics-http-push-protobuf`
 //!
-//! All enabled push format features are sent on every tick — one POST request
-//! per active format.
+//! Sends the configured push format on every tick.
 //! Sends a metrics snapshot payload to a
 //! remote HTTP endpoint on every `StatsFlow` emission tick (1 s cadence when events
 //! are pending).  I/O is off-loaded to a bounded background channel so
@@ -35,7 +34,8 @@
 //!   `https://mimir.example.com/api/v1/push`
 //!   `https://prometheus-blocks-prod-us-central1.grafana.net/api/prom/push`
 //!
-//! The adapter POSTs Prometheus text format 0.0.4 to `{url}/metrics/job/{job}`.
+//! The adapter POSTs the configured Prometheus/OpenMetrics push payload to
+//! `{url}/metrics/job/{job}`.
 //! For Mimir / Grafana Cloud remote-write, set `OPENSNITCH_PUSH_URL` to the full
 //! push endpoint path and `OPENSNITCH_PUSH_JOB` is appended as usual.
 //!
@@ -46,9 +46,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use crate::models::metrics_snapshot::MetricsSnapshot;
+use crate::models::metrics_snapshot::{MetricsExportSnapshot, MetricsSnapshot};
 use crate::platform::ports::stats_exporter_port::StatsExporterPort;
-use transport_wire_core::WireSubscriptionStatistics;
 
 // ---------------------------------------------------------------------------
 // Environment variable keys
@@ -84,6 +83,9 @@ pub enum PushFormat {
     /// Prometheus text format 0.0.4 POSTed to `{url}/metrics/job/{job}`.
     /// Compatible with Prometheus push-gateway, Grafana Mimir, and Grafana Cloud.
     Pushgateway,
+    /// OpenMetrics text 1.0.0 POSTed to `{url}/metrics/job/{job}`.
+    /// Useful when the receiving endpoint expects OpenMetrics semantics/EOF.
+    PushgatewayOpenMetrics,
     /// Prometheus protobuf (`io.prometheus.client.MetricFamily`, delimited) POSTed
     /// to `{url}/metrics/job/{job}`.  Preferred by Prometheus-native backends.
     PushgatewayProto,
@@ -100,58 +102,11 @@ pub struct PushConfig {
     /// Gzip-compress the push body (`Content-Encoding: gzip`).
     /// Activated by `OPENSNITCH_PUSH_GZIP=1/true/yes`.
     pub gzip: bool,
+    pub bucket: String,
+    pub org: String,
 }
 
-pub(crate) struct CompactSnapshot {
-    pub(crate) rules: u64,
-    pub(crate) uptime: u64,
-    pub(crate) dns_responses: u64,
-    pub(crate) connections: u64,
-    pub(crate) ignored: u64,
-    pub(crate) accepted: u64,
-    pub(crate) dropped: u64,
-    pub(crate) rule_hits: u64,
-    pub(crate) rule_misses: u64,
-    pub(crate) subscription_stats: Option<WireSubscriptionStatistics>,
-    pub(crate) by_proto: Vec<(String, u64)>,
-    pub(crate) by_address: Vec<(String, u64)>,
-    pub(crate) by_host: Vec<(String, u64)>,
-    pub(crate) by_port: Vec<(String, u64)>,
-    pub(crate) by_uid: Vec<(String, u64)>,
-    pub(crate) by_executable: Vec<(String, u64)>,
-    pub(crate) by_rule: Vec<(String, u64)>,
-}
-
-impl From<&MetricsSnapshot> for CompactSnapshot {
-    fn from(m: &MetricsSnapshot) -> Self {
-        let s = &m.stats;
-        Self {
-            rules: s.rules,
-            uptime: s.uptime,
-            dns_responses: s.dns_responses,
-            connections: s.connections,
-            ignored: s.ignored,
-            accepted: s.accepted,
-            dropped: s.dropped,
-            rule_hits: s.rule_hits,
-            rule_misses: s.rule_misses,
-            subscription_stats: m.subscription_stats.clone(),
-            by_proto: sorted_pairs(&s.by_proto),
-            by_address: sorted_pairs(&s.by_address),
-            by_host: sorted_pairs(&s.by_host),
-            by_port: sorted_pairs(&s.by_port),
-            by_uid: sorted_pairs(&s.by_uid),
-            by_executable: sorted_pairs(&s.by_executable),
-            by_rule: sorted_pairs(&m.by_rule),
-        }
-    }
-}
-
-fn sorted_pairs(map: &std::collections::HashMap<String, u64>) -> Vec<(String, u64)> {
-    let mut pairs: Vec<_> = map.iter().map(|(k, v)| (k.clone(), *v)).collect();
-    pairs.sort_by(|a, b| b.1.cmp(&a.1));
-    pairs
-}
+pub(crate) type CompactSnapshot = MetricsExportSnapshot;
 
 // ---------------------------------------------------------------------------
 // Compact snapshot (no repeated Events slice — avoids per-tick clone overhead)
@@ -166,7 +121,7 @@ fn sorted_pairs(map: &std::collections::HashMap<String, u64>) -> Vec<(String, u6
 /// Construct with [`PushStatsExporter::new`], passing a resolved [`PushConfig`]
 /// and the daemon shutdown token.  The background push task starts immediately.
 pub struct PushStatsExporter {
-    tx: mpsc::Sender<CompactSnapshot>,
+    tx: mpsc::Sender<Arc<CompactSnapshot>>,
 }
 
 impl PushStatsExporter {
@@ -182,8 +137,7 @@ impl StatsExporterPort for PushStatsExporter {
     /// Non-blocking: enqueue the snapshot for the background push task.
     /// Drops the snapshot if the channel is full (fail-open).
     fn export_snapshot(&self, snapshot: &MetricsSnapshot) {
-        let compact = CompactSnapshot::from(snapshot);
-        if self.tx.try_send(compact).is_err() {
+        if self.tx.try_send(snapshot.export_view()).is_err() {
             debug!("push stats exporter: channel full — snapshot dropped");
         }
     }
@@ -194,7 +148,7 @@ impl StatsExporterPort for PushStatsExporter {
 // ---------------------------------------------------------------------------
 
 async fn push_worker(
-    mut rx: mpsc::Receiver<CompactSnapshot>,
+    mut rx: mpsc::Receiver<Arc<CompactSnapshot>>,
     config: PushConfig,
     shutdown: CancellationToken,
 ) {
@@ -215,7 +169,7 @@ async fn push_worker(
             _ = shutdown.cancelled() => break,
             maybe = rx.recv() => {
                 let Some(snapshot) = maybe else { break };
-                    post_snapshot(&client, &config, &endpoint, &snapshot).await;
+                    let _ = post_snapshot(&client, &config, &endpoint, &snapshot).await;
             }
         }
     }
@@ -225,6 +179,26 @@ async fn push_worker(
 
 /// Pre-compute the endpoint URL so we don't rebuild it on every tick.
 fn build_endpoint(config: &PushConfig) -> String {
+    if config.format == PushFormat::InfluxDb {
+        let url = config.url.trim_end_matches('/');
+        if url.contains("precision=") {
+            return url.to_string();
+        }
+        if url.contains('?') {
+            if url.contains("bucket=") {
+                return format!("{url}&precision=s");
+            }
+            return format!("{url}&bucket={}&precision=s", config.bucket);
+        }
+
+        let mut qs = format!("?bucket={}&precision=s", config.bucket);
+        if !config.org.is_empty() {
+            qs.push_str("&org=");
+            qs.push_str(&config.org);
+        }
+        return format!("{url}{qs}");
+    }
+
     format!(
         "{}/metrics/job/{}",
         config.url.trim_end_matches('/'),
@@ -237,58 +211,61 @@ async fn post_snapshot(
     config: &PushConfig,
     endpoint: &str,
     snapshot: &CompactSnapshot,
-) {
-    // Push every compiled-in push format independently.
-    // One POST per active format feature; errors are logged per-format and do
-    // not prevent the remaining formats from being sent.
-
-    #[cfg(feature = "metrics-http-push-text")]
-    {
-        let body = encode_as_prometheus_text(snapshot);
-        if let Err(e) = post_one_format(
-            client,
-            config,
-            endpoint,
-            body,
-            "text/plain; version=0.0.4; charset=utf-8",
-        )
-        .await
-        {
-            debug!(endpoint, format = "prom-text", "push failed: {e}");
-        }
-    }
-
-    #[cfg(feature = "metrics-http-push-openmetrics")]
-    {
-        let body = encode_as_openmetrics_text(snapshot);
-        if let Err(e) = post_one_format(
-            client,
-            config,
-            endpoint,
-            body,
-            "application/openmetrics-text; version=1.0.0; charset=utf-8",
-        )
-        .await
-        {
-            debug!(endpoint, format = "openmetrics", "push failed: {e}");
-        }
-    }
-
-    #[cfg(feature = "metrics-http-push-protobuf")]
-    {
-        let body = encode_as_prometheus_proto(snapshot);
-        if let Err(e) = post_one_format(
-                client,
-                config,
-                endpoint,
-                body,
-                "application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited",
-            )
-            .await
+) -> Result<(), reqwest::Error> {
+    match config.format {
+        PushFormat::Pushgateway => {
+            #[cfg(feature = "metrics-http-push-text")]
             {
-                debug!(endpoint, format = "prom-proto", "push failed: {e}");
+                let body = encode_as_prometheus_text(snapshot);
+                post_one_format(
+                    client,
+                    config,
+                    endpoint,
+                    body,
+                    "text/plain; version=0.0.4; charset=utf-8",
+                )
+                .await?;
             }
+        }
+        PushFormat::PushgatewayOpenMetrics => {
+            #[cfg(feature = "metrics-http-push-openmetrics")]
+            {
+                let body = encode_as_prometheus_openmetrics(snapshot);
+                post_one_format(
+                    client,
+                    config,
+                    endpoint,
+                    body,
+                    "application/openmetrics-text; version=1.0.0; charset=utf-8",
+                )
+                .await?;
+            }
+        }
+        PushFormat::PushgatewayProto => {
+            #[cfg(feature = "metrics-http-push-protobuf")]
+            {
+                let body = encode_as_prometheus_proto(snapshot);
+                post_one_format(
+                    client,
+                    config,
+                    endpoint,
+                    body,
+                    "application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited",
+                )
+                .await?;
+            }
+        }
+        PushFormat::InfluxDb => {
+            #[cfg(feature = "metrics-http-push-influxdb")]
+            {
+                let body = render_influxdb_line_protocol(snapshot).into_bytes();
+                post_one_format(client, config, endpoint, body, "text/plain; charset=utf-8")
+                    .await?;
+            }
+        }
     }
+
+    Ok(())
 }
 
 /// Issue a single POST for one wire format body.
@@ -331,35 +308,19 @@ async fn post_one_format(
     Ok(())
 }
 
-/// Encode snapshot as OpenMetrics text 1.0.0.
-/// Returns empty bytes when `metrics-http-push-openmetrics` is not active.
-#[allow(unreachable_code, unused_variables)]
-fn encode_as_openmetrics_text(_snapshot: &CompactSnapshot) -> Vec<u8> {
-    #[cfg(feature = "metrics-http-push-openmetrics")]
-    {
-        use super::encoder_prometheus_openmetrics::{OpenMetricsSnapshot, render_openmetrics_text};
-        return render_openmetrics_text(&OpenMetricsSnapshot {
-            rules: _snapshot.rules,
-            uptime: _snapshot.uptime,
-            dns_responses: _snapshot.dns_responses,
-            connections: _snapshot.connections,
-            ignored: _snapshot.ignored,
-            accepted: _snapshot.accepted,
-            dropped: _snapshot.dropped,
-            rule_hits: _snapshot.rule_hits,
-            rule_misses: _snapshot.rule_misses,
-            subscription_stats: _snapshot.subscription_stats.clone(),
-            by_proto: _snapshot.by_proto.clone(),
-            by_address: _snapshot.by_address.clone(),
-            by_host: _snapshot.by_host.clone(),
-            by_port: _snapshot.by_port.clone(),
-            by_uid: _snapshot.by_uid.clone(),
-            by_executable: _snapshot.by_executable.clone(),
-            by_rule: _snapshot.by_rule.clone(),
-        })
-        .into_bytes();
-    }
-    Vec::new()
+#[allow(dead_code)]
+pub(crate) fn render_prometheus_text(snapshot: &CompactSnapshot) -> String {
+    String::from_utf8(encode_as_prometheus_text(snapshot)).unwrap_or_default()
+}
+
+#[allow(dead_code)]
+pub(crate) fn render_prometheus_proto_push(snapshot: &CompactSnapshot) -> Vec<u8> {
+    encode_as_prometheus_proto(snapshot)
+}
+
+#[allow(dead_code)]
+pub(crate) fn render_influxdb_line_protocol(snapshot: &CompactSnapshot) -> String {
+    super::encoder_influxdb::render_line_protocol(snapshot)
 }
 
 /// Encode snapshot as Prometheus text 0.0.4.
@@ -368,27 +329,19 @@ fn encode_as_openmetrics_text(_snapshot: &CompactSnapshot) -> Vec<u8> {
 fn encode_as_prometheus_text(snapshot: &CompactSnapshot) -> Vec<u8> {
     #[cfg(feature = "metrics-http-push-text")]
     {
-        use super::encoder_prometheus_text::{PrometheusTextSnapshot, render_prometheus_text};
-        return render_prometheus_text(&PrometheusTextSnapshot {
-            rules: snapshot.rules,
-            uptime: snapshot.uptime,
-            dns_responses: snapshot.dns_responses,
-            connections: snapshot.connections,
-            ignored: snapshot.ignored,
-            accepted: snapshot.accepted,
-            dropped: snapshot.dropped,
-            rule_hits: snapshot.rule_hits,
-            rule_misses: snapshot.rule_misses,
-            subscription_stats: snapshot.subscription_stats.clone(),
-            by_proto: snapshot.by_proto.clone(),
-            by_address: snapshot.by_address.clone(),
-            by_host: snapshot.by_host.clone(),
-            by_port: snapshot.by_port.clone(),
-            by_uid: snapshot.by_uid.clone(),
-            by_executable: snapshot.by_executable.clone(),
-            by_rule: snapshot.by_rule.clone(),
-        })
-        .into_bytes();
+        return super::encoder_prometheus_text::render_prometheus_text(snapshot).into_bytes();
+    }
+    Vec::new()
+}
+
+/// Encode snapshot as OpenMetrics text 1.0.0.
+/// Returns empty bytes when `metrics-http-push-openmetrics` is not active.
+#[allow(unreachable_code, unused_variables)]
+fn encode_as_prometheus_openmetrics(snapshot: &CompactSnapshot) -> Vec<u8> {
+    #[cfg(feature = "metrics-http-push-openmetrics")]
+    {
+        return super::encoder_prometheus_openmetrics::render_openmetrics_text(snapshot)
+            .into_bytes();
     }
     Vec::new()
 }
@@ -399,26 +352,7 @@ fn encode_as_prometheus_text(snapshot: &CompactSnapshot) -> Vec<u8> {
 fn encode_as_prometheus_proto(snapshot: &CompactSnapshot) -> Vec<u8> {
     #[cfg(feature = "metrics-http-push-protobuf")]
     {
-        use super::encoder_prometheus_protobuf::{ProtoSnapshot, render_prometheus_proto};
-        return render_prometheus_proto(&ProtoSnapshot {
-            rules: snapshot.rules,
-            uptime: snapshot.uptime,
-            dns_responses: snapshot.dns_responses,
-            connections: snapshot.connections,
-            ignored: snapshot.ignored,
-            accepted: snapshot.accepted,
-            dropped: snapshot.dropped,
-            rule_hits: snapshot.rule_hits,
-            rule_misses: snapshot.rule_misses,
-            subscription_stats: snapshot.subscription_stats.clone(),
-            by_proto: snapshot.by_proto.clone(),
-            by_address: snapshot.by_address.clone(),
-            by_host: snapshot.by_host.clone(),
-            by_port: snapshot.by_port.clone(),
-            by_uid: snapshot.by_uid.clone(),
-            by_executable: snapshot.by_executable.clone(),
-            by_rule: snapshot.by_rule.clone(),
-        });
+        return super::encoder_prometheus_protobuf::render_prometheus_proto(snapshot);
     }
     Vec::new()
 }

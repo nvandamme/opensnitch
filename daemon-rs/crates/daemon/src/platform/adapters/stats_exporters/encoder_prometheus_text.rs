@@ -2,33 +2,16 @@
 //!
 //! One encoder, one format.  Used by both the HTTP scrape transport
 //! (`http_serve`) and the HTTP push transport (`http_push`).  Each transport
-//! constructs a [`PrometheusTextSnapshot`] from its own local compact snapshot
-//! and calls [`render_prometheus_text`].
+//! reuses the shared compact exporter snapshot and calls
+//! [`render_prometheus_text`].
 //!
 //! Feature gate: `metrics-http-serve-text` OR `metrics-http-push-text`.
 use std::fmt::Write as _;
 
+use crate::models::metrics_snapshot::MetricsExportSnapshot;
 use transport_wire_core::WireSubscriptionStatistics;
 
-pub(crate) struct PrometheusTextSnapshot {
-    pub(crate) rules: u64,
-    pub(crate) uptime: u64,
-    pub(crate) dns_responses: u64,
-    pub(crate) connections: u64,
-    pub(crate) ignored: u64,
-    pub(crate) accepted: u64,
-    pub(crate) dropped: u64,
-    pub(crate) rule_hits: u64,
-    pub(crate) rule_misses: u64,
-    pub(crate) subscription_stats: Option<WireSubscriptionStatistics>,
-    pub(crate) by_proto: Vec<(String, u64)>,
-    pub(crate) by_address: Vec<(String, u64)>,
-    pub(crate) by_host: Vec<(String, u64)>,
-    pub(crate) by_port: Vec<(String, u64)>,
-    pub(crate) by_uid: Vec<(String, u64)>,
-    pub(crate) by_executable: Vec<(String, u64)>,
-    pub(crate) by_rule: Vec<(String, u64)>,
-}
+pub(crate) type PrometheusTextSnapshot = MetricsExportSnapshot;
 
 pub(crate) fn render_prometheus_text(s: &PrometheusTextSnapshot) -> String {
     let mut buf = String::with_capacity(4096);

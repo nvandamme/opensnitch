@@ -4,6 +4,7 @@
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -14,7 +15,7 @@ use crate::utils::byte_read::read_ne_value_at;
 use crate::utils::name_parsing::normalized_name;
 use crate::utils::nul_terminated::nul_terminated_utf8_lossy;
 
-use super::{DnsEbpfEventDeduper, DnsService};
+use super::{DnsDedupKey, DnsEbpfEventDeduper, DnsService};
 
 pub(crate) fn normalize_dns_host(raw: &str) -> Option<String> {
     let normalized = normalized_name(raw);
@@ -76,15 +77,19 @@ impl DnsEbpfEventDeduper {
             DnsPayload::Answers(record) => record.addresses.first().is_some_and(|ip| {
                 Self::should_emit_at(
                     &mut self.recent_events,
-                    &ip.to_string(),
-                    record.host.as_ref(),
+                    DnsDedupKey::Answer {
+                        ip: *ip,
+                        host: Arc::clone(&record.host),
+                    },
                     Instant::now(),
                 )
             }),
             DnsPayload::Alias { alias, host } => Self::should_emit_at(
                 &mut self.recent_events,
-                alias.as_ref(),
-                host.as_ref(),
+                DnsDedupKey::Alias {
+                    alias: Arc::clone(alias),
+                    host: Arc::clone(host),
+                },
                 Instant::now(),
             ),
             // Resolution failures are not deduplicated: each failure is
@@ -94,15 +99,13 @@ impl DnsEbpfEventDeduper {
     }
 
     pub(crate) fn should_emit_at(
-        recent_events: &mut HashMap<(String, String), Instant>,
-        ip: &str,
-        host: &str,
+        recent_events: &mut HashMap<DnsDedupKey, Instant>,
+        key: DnsDedupKey,
         now: Instant,
     ) -> bool {
         const DEDUP_WINDOW: Duration = Duration::from_secs(5);
         const MAX_RECENT_EVENTS: usize = 4096;
 
-        let key = (ip.to_string(), host.to_string());
         if let Some(seen_at) = recent_events.get(&key)
             && now.duration_since(*seen_at) <= DEDUP_WINDOW
         {

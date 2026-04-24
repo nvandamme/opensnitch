@@ -65,31 +65,31 @@ pub(crate) fn error_alert(text: impl Into<String>) -> UiAlert {
     generic_text_alert(WireAlertType::Error, WireAlertPriority::High, text)
 }
 
-pub(crate) fn warning_connection_alert(conn: WireConnection) -> UiAlert {
+pub(crate) fn warning_connection_alert(conn: &WireConnection) -> UiAlert {
     UiAlert {
         alert_type: WireAlertType::Warning as i32,
         what: WireAlertWhat::Connection as i32,
         action: WireAlertAction::ShowAlert as i32,
         priority: WireAlertPriority::Medium as i32,
         data: UiAlertData::Connection(UiAlertConnection {
-            protocol: conn.protocol,
-            src_ip: conn.src_ip,
+            protocol: conn.protocol.clone(),
+            src_ip: conn.src_ip.clone(),
             src_port: conn.src_port,
-            dst_ip: conn.dst_ip,
-            dst_host: conn.dst_host,
+            dst_ip: conn.dst_ip.clone(),
+            dst_host: conn.dst_host.clone(),
             dst_port: conn.dst_port,
             user_id: conn.user_id,
             process_id: conn.process_id,
-            process_path: conn.process_path,
-            process_cwd: conn.process_cwd,
-            process_args: conn.process_args,
-            process_env: conn.process_env,
-            process_checksums: conn.process_checksums,
+            process_path: conn.process_path.clone(),
+            process_cwd: conn.process_cwd.clone(),
+            process_args: conn.process_args.clone(),
+            process_env: conn.process_env.clone(),
+            process_checksums: conn.process_checksums.clone(),
             process_tree: conn
                 .process_tree
-                .into_iter()
+                .iter()
                 .map(|entry| UiAlertStringInt {
-                    key: entry.key,
+                    key: entry.key.clone(),
                     value: entry.value,
                 })
                 .collect(),

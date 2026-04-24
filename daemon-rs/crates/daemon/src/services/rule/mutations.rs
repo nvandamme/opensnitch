@@ -1,4 +1,4 @@
-use std::io::ErrorKind;
+use std::{collections::HashMap, io::ErrorKind};
 
 use anyhow::Result;
 use tracing::{debug, warn};
@@ -39,6 +39,64 @@ impl RuleService {
 
         self.build_and_publish_snapshot(rules_path, next_rules)
             .await?;
+
+        Ok(())
+    }
+
+    pub(crate) async fn restore_snapshot_records(&self, snapshot: &[RuleRecord]) -> Result<()> {
+        let _update_guard = self.update_lock.lock().await;
+        let current = self.snapshot();
+        let rules_path = current.rules_path.as_path();
+
+        let current_by_name = current
+            .rules
+            .iter()
+            .map(|rule| (rule.name.as_str(), rule))
+            .collect::<HashMap<_, _>>();
+        let target_by_name = snapshot
+            .iter()
+            .map(|rule| (rule.name.as_str(), rule))
+            .collect::<HashMap<_, _>>();
+
+        for old_rule in current.rules.iter() {
+            if !target_by_name.contains_key(old_rule.name.as_str()) {
+                let file_path = Self::rule_storage_path(rules_path, old_rule.name.as_str());
+                Self::remove_rule_file_if_missing_ok(&file_path).await?;
+            }
+        }
+
+        for next_rule in snapshot.iter() {
+            let old_persisted = current_by_name
+                .get(next_rule.name.as_str())
+                .map(|rule| rule_duration_persists_to_disk(&rule.duration))
+                .unwrap_or(false);
+            let new_persisted = rule_duration_persists_to_disk(&next_rule.duration);
+            let file_path = Self::rule_storage_path(rules_path, next_rule.name.as_str());
+
+            if old_persisted && !new_persisted {
+                Self::remove_rule_file_if_missing_ok(&file_path).await?;
+            }
+
+            if new_persisted {
+                StorageService::global()
+                    .convert_and_write_with_storage_format_to_path_and_notify(
+                        "rule",
+                        &file_path,
+                        &RuleFile::from(next_rule),
+                        true,
+                    )
+                    .await?;
+            }
+        }
+
+        self.build_and_publish_snapshot(rules_path, snapshot.to_vec())
+            .await?;
+
+        for rule in snapshot.iter() {
+            if rule.enabled && rule_duration_temporary_spec(&rule.duration).is_some() {
+                self.schedule_temporary_rule(rule.name.clone(), rule.duration.clone());
+            }
+        }
 
         Ok(())
     }

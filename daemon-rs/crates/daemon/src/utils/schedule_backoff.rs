@@ -1,4 +1,4 @@
-#![cfg(any(feature = "subscriptions", test))]
+#![cfg(feature = "subscriptions")]
 
 use std::hash::{Hash, Hasher};
 

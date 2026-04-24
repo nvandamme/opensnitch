@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     env, fs,
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::{Child, Command},
     thread,
@@ -295,27 +296,94 @@ pub(crate) fn stop_daemon_live_logs() -> Result<(), DynError> {
 }
 
 fn wait_for_log_patterns(path: &Path, patterns: &[&str], timeout: Duration) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    while std::time::Instant::now() < deadline {
-        if let Ok(content) = fs::read_to_string(path) {
-            if patterns.iter().all(|pattern| content.contains(pattern)) {
-                return true;
-            }
-        }
-        thread::sleep(Duration::from_millis(200));
-    }
-
-    false
+    wait_for_log_patterns_with_mode(path, patterns, timeout, PatternMatchMode::All)
 }
 
 fn wait_for_any_log_pattern(path: &Path, patterns: &[&str], timeout: Duration) -> bool {
+    wait_for_log_patterns_with_mode(path, patterns, timeout, PatternMatchMode::Any)
+}
+
+#[derive(Clone, Copy)]
+enum PatternMatchMode {
+    All,
+    Any,
+}
+
+fn take_last_chars(input: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let char_count = input.chars().count();
+    if char_count <= max_chars {
+        return input.to_string();
+    }
+    input
+        .chars()
+        .skip(char_count.saturating_sub(max_chars))
+        .collect()
+}
+
+fn wait_for_log_patterns_with_mode(
+    path: &Path,
+    patterns: &[&str],
+    timeout: Duration,
+    mode: PatternMatchMode,
+) -> bool {
+    if patterns.is_empty() {
+        return true;
+    }
+
     let deadline = std::time::Instant::now() + timeout;
+    let mut matched = vec![false; patterns.len()];
+    let mut cursor = 0_u64;
+    let max_pattern_len = patterns
+        .iter()
+        .map(|p| p.chars().count())
+        .max()
+        .unwrap_or(0);
+    let tail_chars = max_pattern_len.saturating_sub(1).max(64);
+    let mut tail = String::new();
+
     while std::time::Instant::now() < deadline {
-        if let Ok(content) = fs::read_to_string(path) {
-            if patterns.iter().any(|pattern| content.contains(pattern)) {
-                return true;
+        if let Ok(mut file) = fs::File::open(path) {
+            if let Ok(meta) = file.metadata()
+                && meta.len() < cursor
+            {
+                cursor = 0;
+                matched.fill(false);
+                tail.clear();
+            }
+
+            if file.seek(SeekFrom::Start(cursor)).is_ok() {
+                let mut chunk = String::new();
+                if file.read_to_string(&mut chunk).is_ok() {
+                    cursor = cursor.saturating_add(chunk.len() as u64);
+
+                    if !chunk.is_empty() {
+                        let mut searchable = String::with_capacity(tail.len() + chunk.len());
+                        searchable.push_str(&tail);
+                        searchable.push_str(&chunk);
+
+                        for (idx, pattern) in patterns.iter().enumerate() {
+                            if !matched[idx] && searchable.contains(pattern) {
+                                matched[idx] = true;
+                            }
+                        }
+
+                        tail = take_last_chars(&searchable, tail_chars);
+                    }
+                }
             }
         }
+
+        let done = match mode {
+            PatternMatchMode::All => matched.iter().all(|v| *v),
+            PatternMatchMode::Any => matched.iter().any(|v| *v),
+        };
+        if done {
+            return true;
+        }
+
         thread::sleep(Duration::from_millis(200));
     }
 
@@ -481,13 +549,13 @@ pub(crate) fn run_daemon_mock_ui_live_session() -> Result<(), DynError> {
     let handshake_markers: Vec<&str> = {
         #[allow(unused_mut)]
         let mut markers = vec![
-        "MOCK_UI Subscribe",
-        "MOCK_UI SubscribeNode",
-        "MOCK_UI Ping",
-        "MOCK_UI Notifications stream open",
-        "MOCK_UI PingStats",
-        // Stable notification command round-trip probe.
-        "MOCK_UI NotificationCommandReply cmd=CHANGE_RULE",
+            "MOCK_UI Subscribe",
+            "MOCK_UI SubscribeNode",
+            "MOCK_UI Ping",
+            "MOCK_UI Notifications stream open",
+            "MOCK_UI PingStats",
+            // Stable notification command round-trip probe.
+            "MOCK_UI NotificationCommandReply cmd=CHANGE_RULE",
         ];
 
         #[cfg(feature = "subscriptions")]
@@ -601,12 +669,12 @@ fn collect_process_tree_pids(root_pid: u32) -> Vec<u32> {
         };
 
         let status_path = entry.path().join("status");
-        let Ok(status_text) = fs::read_to_string(status_path) else {
+        let Ok(status_file) = fs::File::open(status_path) else {
             continue;
         };
 
         let mut parent: Option<u32> = None;
-        for line in status_text.lines() {
+        for line in BufReader::new(status_file).lines().map_while(Result::ok) {
             if let Some(ppid) = line.strip_prefix("PPid:") {
                 parent = ppid.trim().parse::<u32>().ok();
                 break;

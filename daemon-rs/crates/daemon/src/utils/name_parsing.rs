@@ -6,7 +6,7 @@ pub fn normalized_name(name: &str) -> String {
     case_folded(name.trim())
 }
 
-#[cfg(any(feature = "subscriptions", test))]
+#[cfg(feature = "subscriptions")]
 pub(crate) fn sanitize_ascii_name(s: &str) -> String {
     s.chars()
         .map(|c| {

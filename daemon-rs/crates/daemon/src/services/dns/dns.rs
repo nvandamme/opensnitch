@@ -105,11 +105,17 @@ impl Default for DnsService {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum DnsDedupKey {
+    Answer { ip: IpAddr, host: Arc<str> },
+    Alias { alias: Arc<str>, host: Arc<str> },
+}
+
 #[derive(Default)]
 // Used by native eBPF DNS ringbuf ingestion path.
 #[cfg(feature = "native-ebpf-ringbuf")]
 pub(crate) struct DnsEbpfEventDeduper {
-    pub(super) recent_events: HashMap<(String, String), Instant>,
+    pub(super) recent_events: HashMap<DnsDedupKey, Instant>,
 }
 
 impl DnsService {

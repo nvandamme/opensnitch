@@ -22,7 +22,7 @@ pub(super) use crate::models::ebpf_payload::EbpfProcStatePayload;
 pub(super) use crate::models::ebpf_state::RawBpfMap;
 pub(super) use crate::models::kernel_event::KernelEvent;
 #[cfg(feature = "native-ebpf-ringbuf")]
-pub(super) use crate::services::dns::{DnsEbpfEventDeduper, DnsService};
+pub(super) use crate::services::dns::{DnsDedupKey, DnsEbpfEventDeduper, DnsService};
 #[cfg(feature = "native-ebpf-ringbuf")]
 pub(super) use crate::services::ebpf::EbpfRingbufConsumer;
 pub(super) use crate::services::ebpf::{EbpfPinDomain, EbpfService};

@@ -7,7 +7,7 @@ It supersedes:
 - `daemon-rs/FEATURE_PARITY.md`
 - `daemon-rs/SERVICE_ASYNC_AND_MODEL_SCAN_2026-03-15.md`
 
-Last update: 2026-04-06 (reconcile cleanup with origin/daemon-rs TODO + add hybrid eBPF backlog)
+Last update: 2026-04-24 (full daemon-rs optimization scan + implementation plan)
 
 ## Scope
 
@@ -124,7 +124,57 @@ eBPF library policy:
 
 ### Active tasks
 
-- No unfinished slice-local delivery items are currently tracked here; active open work is listed below under future enhancements and design-rule follow-ups.
+- Current slice-local optimization follow-up is tracked below; broader open work remains under future enhancements and design-rule follow-ups.
+- [ ] **PERF/FULL-SCAN-2026-04-24** Full daemon-rs optimization follow-up plan.
+  - **Goal**: implement the next optimization pass found by the 2026-04-24 full workspace scan without weakening hot-path wait-free/read discipline or moving behavior across domain boundaries.
+  - **Scan scope/proof**: reviewed `daemon-rs/crates/{daemon,tools,transport-wire-*,storage-format-*,kernel-caps}` with targeted `rg` scans for clone/allocation-heavy conversions, formatting, JSON encode/decode, lock waits, filesystem/proc reads, snapshot accessors, exporter copies, and >400/>500 line density; cross-checked findings against `DESIGN_RULES.md` hot-path and tracker rules.
+  - **Priority A — shared immutable wire payload snapshots for verdict/event paths** (`crates/daemon/src/flows/verdict/{verdict.rs,helpers.rs}`, `crates/daemon/src/services/stats/*`, `crates/daemon/src/platform/ports/connection_event_exporter_port.rs`):
+    - **Status 2026-04-24**: first implementation slice landed locally. Verdict flow now builds one per-attempt `Arc<WireConnection>` daemon-internal snapshot, stats event history stores shared connection/rule payloads until snapshot drain, warning alerts borrow the shared payload, and `ask_rule` remains the documented owned transport boundary.
+    - treat `WireConnection` as an immutable wire payload DTO, not a transport/session handle; any sharing must preserve the transport/wire split so gRPC, Unix socket, ubus, and future transports remain adapter-owned,
+    - wrap the per-attempt `WireConnection` once as an internal shared snapshot (`Arc<WireConnection>` or a daemon-local newtype) so stats event history, alert/exporter paths, and fallback branches reuse the same payload without deep-cloning `String`/`Vec`/`HashMap` fields,
+    - keep transport-wire-core DTOs plain unless a broader adapter contract change is justified; prefer daemon-internal event records that hold shared wire payload snapshots and materialize owned transport payloads only at final adapter/wire boundaries,
+    - replace `summary_rule_to_wire` static `String` clones with cheaper `&'static str`/owned-at-boundary construction or a shared immutable summary rule snapshot when stats/exporters need the same rule payload,
+    - avoid rebuilding idempotency strings with intermediate `decision_key.to_string()` when a stack-backed formatter or single `write!` into the final buffer is enough.
+    - **Validation/proof**: add/extend verdict flow regression tests for runtime-rule, unknown-default, client-connect-failure, ask-rule-failure, stale-decision, and client-rule persistence; compare `make parity-hot-cold-delta STRESS_ROUNDS=1000` before/after and require no p95/p99 regression. Local proof for the first slice: `cargo fmt --check`; `cargo check -p opensnitchd-rs`; `cargo test -p opensnitchd-rs stats_service -- --nocapture`; `cargo test -p opensnitchd-rs stats_flow -- --nocapture`; elevated `cargo test -p opensnitchd-rs verdict_flow -- --nocapture`.
+    - **Closure condition**: verdict behavior and transport/wire decoupling are unchanged, connection event storage no longer requires repeated deep `WireConnection` clones, and any remaining owned clone happens only at a documented final wire/export boundary.
+  - **Priority A — metrics snapshot/exporter copy reduction** (`crates/daemon/src/services/stats/snapshot_ops.rs`, `crates/daemon/src/platform/adapters/stats_exporters/{http_serve.rs,http_push.rs,http_push_influxdb.rs,syslog_push.rs,encoder_*}.rs`):
+    - **Status 2026-04-24**: implementation slice landed locally. `MetricsSnapshot` now owns a cached shared `Arc<MetricsExportSnapshot>` export view; HTTP serve, HTTP push, InfluxDB push, and syslog exporters reuse that compact pre-sorted view instead of each adapter independently cloning/sorting the same breakdown maps. Syslog now queues the compact shared view rather than a cloned full `MetricsSnapshot`.
+    - split UI ping stats from exporter stats so `StatsFlow` does not deep-clone large breakdown maps unless an exporter is enabled or pending,
+    - store/export compact metrics snapshots behind `Arc` where multiple exporters consume the same tick, instead of independently cloning `subscription_stats`, `by_rule`, and sorted label pairs,
+    - precompute sorted/breakdown vectors once per tick and share them across text/OpenMetrics/protobuf/push/syslog encoders.
+    - **Validation/proof**: run metrics exporter tests (`stats_exporter_prometheus`, `stats_exporter_push`, `stats_exporter_syslog`, `stats_service`) and a metrics-enabled `cargo build`; compare one 60s metrics run with large synthetic breakdown maps. Local proof for this slice: `cargo fmt --check`; `cargo check -p opensnitchd-rs`; all-metrics `cargo check -p opensnitchd-rs --features metrics-http-serve-text,metrics-http-serve-openmetrics,metrics-http-serve-protobuf,metrics-http-push-text,metrics-http-push-openmetrics,metrics-http-push-protobuf,metrics-http-push-influxdb,metrics-syslog`; all-feature `prometheus_exporter_tests`, `push_exporter_tests`, and `syslog_exporter_tests`; `cargo test -p opensnitchd-rs stats_service -- --nocapture`.
+    - **Closure condition**: exporter output remains byte-for-byte compatible where tests assert exact text, and per-tick clone/sort work is centralized.
+  - **Priority B — process and DNS event allocation cleanup** (`crates/daemon/src/services/process/details.rs`, `crates/daemon/src/services/dns/parsing.rs`):
+    - **Status 2026-04-24**: implementation slice landed locally. Process inspection/hash paths now reuse `/proc/<pid>` `PathBuf` joins instead of repeated `format!("/proc/{pid}/...")` construction, and IMA digest hex encoding uses the shared preallocated hex helper. Native eBPF DNS dedupe now uses typed keys (`DnsDedupKey::{Answer,Alias}`) backed by `IpAddr` + `Arc<str>` payloads instead of per-event concatenated `String` keys (`ip|host`).
+    - avoid formatting `/proc/{pid}/...` paths repeatedly by reusing `PathBuf`/small buffers in process inspection and hash lookup,
+    - build `env_preview` and `env_map` without duplicating every environment entry string when only key/value lookup and preview are needed,
+    - change eBPF DNS dedupe key from one concatenated `String` (`ip|host`) to a typed key (`IpAddr` or enum + host `Arc<str>`/boxed string) to avoid per-event `ip.to_string()` plus concatenation.
+    - **Validation/proof**: run `process_service`, `process_hash`, DNS worker/dedup tests, and the rule/process-env matching tests; add a focused DNS dedupe benchmark or timing smoke if no benchmark exists.
+    - **Closure condition**: no regression in hash/env/rule matching semantics, and DNS dedupe no longer allocates an IP text key on every event.
+  - **Priority B — owner-scope and firewall expression matching** (`crates/daemon/src/flows/notification/owner_scope.rs`, firewall adapter expression helpers):
+    - **Status 2026-04-24**: implementation slice landed locally. Firewall owner-scope expression matching now avoids per-call `Vec<String>` GID text materialization and reuses shared parsed `meta` statement helpers for both positive owner-scope checks and conflict detection (`skuid`/`skgid`), keeping behavior aligned while reducing allocation churn on repeated authorization checks.
+    - replace `owner_group_gids.iter().map(ToString::to_string).collect::<Vec<_>>()` with parse-on-demand numeric matching or a temporary `HashSet<u32>` only when group count crosses a small threshold,
+    - reuse parsed owner match fragments for repeated firewall-rule authorization checks during notification command batches.
+    - **Validation/proof**: run notification-flow owner-scope tests under the elevated suite and targeted local tests for UID/GID-scoped firewall/rule mutations.
+    - **Closure condition**: local/remote privilege behavior is unchanged and group matching avoids per-rule string vector allocation.
+  - **Priority B — storage/rule watch metadata churn** (`crates/daemon/src/services/storage/storage.rs`, `crates/daemon/src/services/rule/storage.rs`, `crates/daemon/src/workers/runtime/watch/*`):
+    - **Status 2026-04-24**: implementation slice landed locally. Poll-triggered rule-watch scans now keep a single metadata pass (`read_rules_dir_scan_with_hint`) and hand the discovered main rule file paths directly into `RuleService::reload_from_rule_paths`, avoiding an immediate second rule-directory listing in the same reload cycle while preserving the existing inotify fast path.
+    - keep one directory scan result usable for state comparison and reload target selection instead of re-listing/listing-with-metadata in adjacent watch paths,
+    - preserve the current inotify fast path while adding a cold-path batched metadata snapshot for nested list directories,
+    - keep all storage-format parsing behind adapter boundaries.
+    - **Validation/proof**: run `watch_reload::watch_workers`, `rule_service`, and storage-format adapter tests; compare cold reload timing from existing watch reload smoke tests.
+    - **Closure condition**: add/delete/list-content reload behavior stays Go-compatible and redundant directory metadata scans are removed from the same reload cycle.
+  - **Priority C — adapter/tool cold-path allocation cleanup**:
+    - **Status 2026-04-24**: implementation slices landed locally. `storage-format-uci` now uses keyed accumulation for repeated section list options instead of O(n²) `lists.iter_mut().find(...)`; `transport-wire-grpc-client` TLS identity extraction now uses a preallocated lower-hex encoder for SHA-256 fingerprints (`hex_lower`) instead of per-byte `format!`; tools live-session marker waits now use incremental offset-based log polling (instead of repeated full-file `read_to_string` loops), and process-tree cleanup reads `/proc/<pid>/status` via buffered line scanning up to `PPid:` instead of slurping full status files.
+    - `crates/storage-format-uci/src/serde_bridge.rs`: replace per-section list accumulation with keyed accumulation to avoid O(n²) `lists.iter_mut().find(...)` for sections with many repeated list options,
+    - `crates/transport-wire-grpc-client/src/tls.rs`: reuse the daemon hex encoder pattern for SHA-256 certificate fingerprints instead of per-byte `format!`,
+    - `crates/tools/src/{main.rs,harness_cmds.rs,live_logs.rs,build_cmds.rs}`: split large command files while reducing repeated `/proc` scans/log-file reads in live-session cleanup and perf harness paths.
+    - **Validation/proof**: run storage-format UCI tests, transport-wire gRPC client tests, and `cargo test -p tools --test orchestration_smoke -- --nocapture`.
+    - **Closure condition**: cold-path behavior and fixture output stay unchanged; obvious repeated allocations are removed where the code is touched.
+  - **Blockers/constraints**: full hot-path proof needs elevated/root runner parity because daemon-rs production paths require netlink socket and eBPF map access; do not add new global mutable singletons, protobuf leaks, or async lock waits in verdict/connect/kernel/eBPF paths.
+  - **Overall validation**: `cargo fmt`; `cargo build -p opensnitchd-rs`; targeted tests listed above; `cargo test -p tools --test orchestration_smoke -- --nocapture`; elevated full daemon-rs suite; `make parity-hot-cold-delta STRESS_ROUNDS=1000` for any Priority A/B hot-path implementation.
+  - **Closure condition**: this task closes when Priority A/B items are either implemented with validation and `PERF.md` updated, or explicitly marked no-op with benchmark/profiling evidence; Priority C may move to a separate cold-path cleanup task if it would otherwise delay hot-path closure.
+- [x] **Completed 2026-04-24 daemon-rs optimization scan** — rule service snapshots now share immutable rule records through `Arc<Vec<RuleRecord>>` so rollback/listing capture avoids full rule-set clones, and process hash digest formatting now uses a preallocated hex encoder instead of per-byte `format!` allocation. Validation: `cargo check -p opensnitchd-rs`; `cargo test -p opensnitchd-rs rule_service -- --nocapture`; `cargo test -p opensnitchd-rs rule_command -- --nocapture`; `cargo test -p opensnitchd-rs process_hash -- --nocapture`.
 - [x] **Completed v0.7.0 summary** — subscription proto decoupling, subscription/daemon metrics export, rule↔subscription N:N mapping, per-rule hit metrics, command-layer restructuring, and expanded metrics test coverage landed. Historical detail lives in `CHANGELOG.md` and the relevant release / implementation commit messages.
 - [x] **Completed v0.5.1 runtime/perf summary** — aya-first eBPF userspace migration, hash-safety hardening and persistent cache, `DashMap` / `ArcSwap` / `quick-cache` migrations, and hot-path allocation / contention reductions landed. Historical detail lives in `PERF.md` and the relevant implementation commit messages.
 

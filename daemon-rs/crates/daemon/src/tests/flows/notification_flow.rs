@@ -297,10 +297,22 @@ fn local_unix_principal_check_enforced_when_allowlist_configured() {
     let mut cfg = Config::default();
     cfg.auth_mode = AuthMode::LocalOnly;
     cfg.client_addr = format!("unix:{}", socket_path.display());
-    cfg.local_control_allowed_principals = Some(vec![crate::config::LocalPrincipal {
-        uid: nix::unistd::Uid::current().as_raw(),
-        gid: nix::unistd::Gid::current().as_raw(),
-    }]);
+    let allow_uid = nix::unistd::Uid::current().as_raw();
+    let mut allow_gids: std::collections::HashSet<u32> = nix::unistd::getgroups()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|g| g.as_raw())
+        .collect();
+    allow_gids.insert(nix::unistd::Gid::current().as_raw());
+    cfg.local_control_allowed_principals = Some(
+        allow_gids
+            .into_iter()
+            .map(|gid| crate::config::LocalPrincipal {
+                uid: allow_uid,
+                gid,
+            })
+            .collect(),
+    );
 
     assert!(NotificationFlow::local_peer_principal_allowed(&cfg));
 
@@ -798,10 +810,22 @@ fn local_only_root_can_run_elevated_global_commands() {
     let mut cfg = Config::default();
     cfg.auth_mode = AuthMode::LocalOnly;
     cfg.client_addr = format!("http://127.0.0.1:{port}");
-    cfg.local_control_allowed_principals = Some(vec![crate::config::LocalPrincipal {
-        uid: nix::unistd::Uid::current().as_raw(),
-        gid: nix::unistd::Gid::current().as_raw(),
-    }]);
+    let allow_uid = nix::unistd::Uid::current().as_raw();
+    let mut allow_gids: std::collections::HashSet<u32> = nix::unistd::getgroups()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|g| g.as_raw())
+        .collect();
+    allow_gids.insert(nix::unistd::Gid::current().as_raw());
+    cfg.local_control_allowed_principals = Some(
+        allow_gids
+            .into_iter()
+            .map(|gid| crate::config::LocalPrincipal {
+                uid: allow_uid,
+                gid,
+            })
+            .collect(),
+    );
 
     let session = crate::services::client::ClientSession::for_local_uid(
         0,
@@ -821,20 +845,41 @@ fn local_only_root_can_run_elevated_global_commands() {
 #[cfg(target_os = "linux")]
 #[test]
 fn local_only_non_root_rule_mutation_requires_owner_scope() {
-    use std::net::TcpListener;
+    use std::os::unix::net::UnixListener;
 
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
-    let port = listener.local_addr().expect("local addr").port();
+    let socket_path = std::env::temp_dir().join(format!(
+        "opensnitch-notification-flow-local-only-non-root-rule-mutation-{}-{}.sock",
+        std::process::id(),
+        crate::utils::time_nonce::unix_epoch_nanos()
+    ));
+    let _ = std::fs::remove_file(&socket_path);
+    let _listener = UnixListener::bind(&socket_path).expect("bind unix listener");
 
     let mut cfg = Config::default();
     cfg.auth_mode = AuthMode::LocalOnly;
-    cfg.client_addr = format!("http://127.0.0.1:{port}");
+    cfg.client_addr = format!("unix:{}", socket_path.display());
 
-    let owner_uid = nix::unistd::Uid::current().as_raw();
-    cfg.local_control_allowed_principals = Some(vec![crate::config::LocalPrincipal {
-        uid: owner_uid,
-        gid: nix::unistd::Gid::current().as_raw(),
-    }]);
+    let owner_uid = if nix::unistd::Uid::current().is_root() {
+        1000
+    } else {
+        nix::unistd::Uid::current().as_raw()
+    };
+    let allow_uid = nix::unistd::Uid::current().as_raw();
+    let mut allow_gids: std::collections::HashSet<u32> = nix::unistd::getgroups()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|g| g.as_raw())
+        .collect();
+    allow_gids.insert(nix::unistd::Gid::current().as_raw());
+    cfg.local_control_allowed_principals = Some(
+        allow_gids
+            .into_iter()
+            .map(|gid| crate::config::LocalPrincipal {
+                uid: allow_uid,
+                gid,
+            })
+            .collect(),
+    );
     let session = crate::services::client::ClientSession::for_local_uid(
         owner_uid,
         crate::config::DefaultAction::Deny,
@@ -904,6 +949,8 @@ fn local_only_non_root_rule_mutation_requires_owner_scope() {
         )
         .is_ok()
     );
+
+    let _ = std::fs::remove_file(&socket_path);
 }
 
 #[test]
@@ -941,17 +988,26 @@ fn local_only_owner_scope_normalization_rejects_conflicting_user_id() {
 #[cfg(target_os = "linux")]
 #[test]
 fn local_only_non_root_global_firewall_commands_stay_elevated() {
-    use std::net::TcpListener;
+    use std::os::unix::net::UnixListener;
 
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
-    let port = listener.local_addr().expect("local addr").port();
+    let socket_path = std::env::temp_dir().join(format!(
+        "opensnitch-notification-flow-local-only-non-root-global-firewall-{}-{}.sock",
+        std::process::id(),
+        crate::utils::time_nonce::unix_epoch_nanos()
+    ));
+    let _ = std::fs::remove_file(&socket_path);
+    let _listener = UnixListener::bind(&socket_path).expect("bind unix listener");
 
     let mut cfg = Config::default();
     cfg.auth_mode = AuthMode::LocalOnly;
-    cfg.client_addr = format!("http://127.0.0.1:{port}");
-    let owner_uid = nix::unistd::Uid::current().as_raw();
+    cfg.client_addr = format!("unix:{}", socket_path.display());
+    let owner_uid = if nix::unistd::Uid::current().is_root() {
+        1000
+    } else {
+        nix::unistd::Uid::current().as_raw()
+    };
     cfg.local_control_allowed_principals = Some(vec![crate::config::LocalPrincipal {
-        uid: owner_uid,
+        uid: nix::unistd::Uid::current().as_raw(),
         gid: nix::unistd::Gid::current().as_raw(),
     }]);
     let session = crate::services::client::ClientSession::for_local_uid(
@@ -969,24 +1025,47 @@ fn local_only_non_root_global_firewall_commands_stay_elevated() {
         )
         .is_err()
     );
+
+    let _ = std::fs::remove_file(&socket_path);
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn local_only_non_root_firewall_reload_requires_owner_uid_match() {
-    use std::net::TcpListener;
+    use std::os::unix::net::UnixListener;
 
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
-    let port = listener.local_addr().expect("local addr").port();
+    let socket_path = std::env::temp_dir().join(format!(
+        "opensnitch-notification-flow-local-only-non-root-firewall-reload-{}-{}.sock",
+        std::process::id(),
+        crate::utils::time_nonce::unix_epoch_nanos()
+    ));
+    let _ = std::fs::remove_file(&socket_path);
+    let _listener = UnixListener::bind(&socket_path).expect("bind unix listener");
 
     let mut cfg = Config::default();
     cfg.auth_mode = AuthMode::LocalOnly;
-    cfg.client_addr = format!("http://127.0.0.1:{port}");
-    let owner_uid = nix::unistd::Uid::current().as_raw();
-    cfg.local_control_allowed_principals = Some(vec![crate::config::LocalPrincipal {
-        uid: owner_uid,
-        gid: nix::unistd::Gid::current().as_raw(),
-    }]);
+    cfg.client_addr = format!("unix:{}", socket_path.display());
+    let owner_uid = if nix::unistd::Uid::current().is_root() {
+        1000
+    } else {
+        nix::unistd::Uid::current().as_raw()
+    };
+    let allow_uid = nix::unistd::Uid::current().as_raw();
+    let mut allow_gids: std::collections::HashSet<u32> = nix::unistd::getgroups()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|g| g.as_raw())
+        .collect();
+    allow_gids.insert(nix::unistd::Gid::current().as_raw());
+    cfg.local_control_allowed_principals = Some(
+        allow_gids
+            .into_iter()
+            .map(|gid| crate::config::LocalPrincipal {
+                uid: allow_uid,
+                gid,
+            })
+            .collect(),
+    );
     let session = crate::services::client::ClientSession::for_local_uid(
         owner_uid,
         crate::config::DefaultAction::Deny,
@@ -1057,24 +1136,48 @@ fn local_only_non_root_firewall_reload_requires_owner_uid_match() {
         .is_ok()
     );
 
-    let owner_gid = nix::unistd::Gid::current().as_raw();
-    let gid_scoped_fw = FirewallConfig {
-        rules: vec![FirewallRule {
-            parameters: format!("-m owner --gid-owner {owner_gid} -p tcp --dport 443"),
-            target: "ACCEPT".to_string(),
-            ..Default::default()
-        }],
-        ..Default::default()
+    let owner_group_gids = {
+        use nix::unistd::{Gid, Uid, User, getgrouplist};
+        match User::from_uid(Uid::from_raw(owner_uid)).ok().flatten() {
+            None => Vec::new(),
+            Some(user) => match std::ffi::CString::new(user.name) {
+                Err(_) => vec![user.gid.as_raw()],
+                Ok(username) => {
+                    match getgrouplist(username.as_c_str(), Gid::from_raw(user.gid.as_raw())) {
+                        Ok(groups) => {
+                            let mut gids: Vec<u32> =
+                                groups.into_iter().map(|group| group.as_raw()).collect();
+                            gids.sort_unstable();
+                            gids.dedup();
+                            gids
+                        }
+                        Err(_) => vec![user.gid.as_raw()],
+                    }
+                }
+            },
+        }
     };
+    if let Some(owner_gid) = owner_group_gids.first().copied() {
+        let gid_scoped_fw = FirewallConfig {
+            rules: vec![FirewallRule {
+                parameters: format!("-m owner --gid-owner {owner_gid} -p tcp --dport 443"),
+                target: "ACCEPT".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
 
-    let gid_scoped_firewall_result = NotificationFlow::notification_command_allowed(
-        &cfg,
-        &session,
-        CommandAction::ReloadFwRules,
-        &[],
-        Some(&gid_scoped_fw),
-    );
-    assert_eq!(gid_scoped_firewall_result, Ok(()));
+        let gid_scoped_firewall_result = NotificationFlow::notification_command_allowed(
+            &cfg,
+            &session,
+            CommandAction::ReloadFwRules,
+            &[],
+            Some(&gid_scoped_fw),
+        );
+        assert_eq!(gid_scoped_firewall_result, Ok(()));
+    }
+
+    let _ = std::fs::remove_file(&socket_path);
 }
 
 #[test]

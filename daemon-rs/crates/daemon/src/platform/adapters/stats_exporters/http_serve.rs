@@ -9,7 +9,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
+use arc_swap::ArcSwapOption;
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
@@ -20,60 +20,13 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::models::metrics_snapshot::MetricsSnapshot;
+use crate::models::metrics_snapshot::{MetricsExportSnapshot, MetricsSnapshot};
 use crate::platform::ports::stats_exporter_port::StatsExporterPort;
-use transport_wire_core::WireSubscriptionStatistics;
 
-pub(crate) struct CompactStats {
-    pub(crate) rules: u64,
-    pub(crate) uptime: u64,
-    pub(crate) dns_responses: u64,
-    pub(crate) connections: u64,
-    pub(crate) ignored: u64,
-    pub(crate) accepted: u64,
-    pub(crate) dropped: u64,
-    pub(crate) rule_hits: u64,
-    pub(crate) rule_misses: u64,
-    pub(crate) subscription_stats: Option<WireSubscriptionStatistics>,
-    pub(crate) by_proto: Vec<(String, u64)>,
-    pub(crate) by_address: Vec<(String, u64)>,
-    pub(crate) by_host: Vec<(String, u64)>,
-    pub(crate) by_port: Vec<(String, u64)>,
-    pub(crate) by_uid: Vec<(String, u64)>,
-    pub(crate) by_executable: Vec<(String, u64)>,
-    pub(crate) by_rule: Vec<(String, u64)>,
-}
+pub(crate) type CompactStats = MetricsExportSnapshot;
 
-impl From<&MetricsSnapshot> for CompactStats {
-    fn from(m: &MetricsSnapshot) -> Self {
-        let s = &m.stats;
-        Self {
-            rules: s.rules,
-            uptime: s.uptime,
-            dns_responses: s.dns_responses,
-            connections: s.connections,
-            ignored: s.ignored,
-            accepted: s.accepted,
-            dropped: s.dropped,
-            rule_hits: s.rule_hits,
-            rule_misses: s.rule_misses,
-            subscription_stats: m.subscription_stats.clone(),
-            by_proto: sorted_pairs(&s.by_proto),
-            by_address: sorted_pairs(&s.by_address),
-            by_host: sorted_pairs(&s.by_host),
-            by_port: sorted_pairs(&s.by_port),
-            by_uid: sorted_pairs(&s.by_uid),
-            by_executable: sorted_pairs(&s.by_executable),
-            by_rule: sorted_pairs(&m.by_rule),
-        }
-    }
-}
-
-fn sorted_pairs(map: &std::collections::HashMap<String, u64>) -> Vec<(String, u64)> {
-    let mut pairs: Vec<_> = map.iter().map(|(k, v)| (k.clone(), *v)).collect();
-    pairs.sort_by(|a, b| b.1.cmp(&a.1));
-    pairs
-}
+#[cfg(all(test, feature = "metrics-http-serve-protobuf"))]
+use crate::models::prometheus_wire as prom_proto;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResponseFormat {
@@ -208,13 +161,13 @@ fn client_accepts_gzip(accept_encoding: Option<&str>) -> bool {
 }
 
 pub struct PrometheusStatsExporter {
-    latest: Arc<ArcSwap<Option<CompactStats>>>,
+    latest: Arc<ArcSwapOption<MetricsExportSnapshot>>,
 }
 
 impl PrometheusStatsExporter {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            latest: Arc::new(ArcSwap::from_pointee(None)),
+            latest: Arc::new(ArcSwapOption::from(None)),
         })
     }
 
@@ -264,14 +217,13 @@ impl PrometheusStatsExporter {
 
 impl StatsExporterPort for PrometheusStatsExporter {
     fn export_snapshot(&self, snapshot: &MetricsSnapshot) {
-        self.latest
-            .store(Arc::new(Some(CompactStats::from(snapshot))));
+        self.latest.store(Some(snapshot.export_view()));
     }
 }
 
 async fn serve_metrics(
     req: Request<Incoming>,
-    latest: Arc<ArcSwap<Option<CompactStats>>>,
+    latest: Arc<ArcSwapOption<MetricsExportSnapshot>>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     if req.method() != Method::GET || req.uri().path() != "/metrics" {
         return Ok(Response::builder()
@@ -304,7 +256,7 @@ async fn serve_metrics(
     let want_gzip = client_accepts_gzip(accept_encoding);
 
     let guard = latest.load();
-    let (body_bytes, content_type): (Vec<u8>, &'static str) = match guard.as_ref().as_ref() {
+    let (body_bytes, content_type): (Vec<u8>, &'static str) = match guard.as_deref() {
         Some(stats) => match format {
             ResponseFormat::Text => (
                 render_prometheus_text(stats).into_bytes(),
@@ -349,26 +301,7 @@ async fn serve_metrics(
 pub(crate) fn render_prometheus_text(s: &CompactStats) -> String {
     #[cfg(feature = "metrics-http-serve-text")]
     {
-        use super::encoder_prometheus_text::{PrometheusTextSnapshot, render_prometheus_text};
-        return render_prometheus_text(&PrometheusTextSnapshot {
-            rules: s.rules,
-            uptime: s.uptime,
-            dns_responses: s.dns_responses,
-            connections: s.connections,
-            ignored: s.ignored,
-            accepted: s.accepted,
-            dropped: s.dropped,
-            rule_hits: s.rule_hits,
-            rule_misses: s.rule_misses,
-            subscription_stats: s.subscription_stats.clone(),
-            by_proto: s.by_proto.clone(),
-            by_address: s.by_address.clone(),
-            by_host: s.by_host.clone(),
-            by_port: s.by_port.clone(),
-            by_uid: s.by_uid.clone(),
-            by_executable: s.by_executable.clone(),
-            by_rule: s.by_rule.clone(),
-        });
+        return super::encoder_prometheus_text::render_prometheus_text(s);
     }
     let _ = s;
     String::new()
@@ -378,26 +311,7 @@ pub(crate) fn render_prometheus_text(s: &CompactStats) -> String {
 pub(crate) fn render_openmetrics_text(s: &CompactStats) -> String {
     #[cfg(feature = "metrics-http-serve-openmetrics")]
     {
-        use super::encoder_prometheus_openmetrics::{OpenMetricsSnapshot, render_openmetrics_text};
-        return render_openmetrics_text(&OpenMetricsSnapshot {
-            rules: s.rules,
-            uptime: s.uptime,
-            dns_responses: s.dns_responses,
-            connections: s.connections,
-            ignored: s.ignored,
-            accepted: s.accepted,
-            dropped: s.dropped,
-            rule_hits: s.rule_hits,
-            rule_misses: s.rule_misses,
-            subscription_stats: s.subscription_stats.clone(),
-            by_proto: s.by_proto.clone(),
-            by_address: s.by_address.clone(),
-            by_host: s.by_host.clone(),
-            by_port: s.by_port.clone(),
-            by_uid: s.by_uid.clone(),
-            by_executable: s.by_executable.clone(),
-            by_rule: s.by_rule.clone(),
-        });
+        return super::encoder_prometheus_openmetrics::render_openmetrics_text(s);
     }
     let _ = s;
     String::new()
@@ -407,26 +321,7 @@ pub(crate) fn render_openmetrics_text(s: &CompactStats) -> String {
 pub(crate) fn render_prometheus_proto(s: &CompactStats) -> Vec<u8> {
     #[cfg(feature = "metrics-http-serve-protobuf")]
     {
-        use super::encoder_prometheus_protobuf::{ProtoSnapshot, render_prometheus_proto};
-        return render_prometheus_proto(&ProtoSnapshot {
-            rules: s.rules,
-            uptime: s.uptime,
-            dns_responses: s.dns_responses,
-            connections: s.connections,
-            ignored: s.ignored,
-            accepted: s.accepted,
-            dropped: s.dropped,
-            rule_hits: s.rule_hits,
-            rule_misses: s.rule_misses,
-            subscription_stats: s.subscription_stats.clone(),
-            by_proto: s.by_proto.clone(),
-            by_address: s.by_address.clone(),
-            by_host: s.by_host.clone(),
-            by_port: s.by_port.clone(),
-            by_uid: s.by_uid.clone(),
-            by_executable: s.by_executable.clone(),
-            by_rule: s.by_rule.clone(),
-        });
+        return super::encoder_prometheus_protobuf::render_prometheus_proto(s);
     }
     let _ = s;
     Vec::new()

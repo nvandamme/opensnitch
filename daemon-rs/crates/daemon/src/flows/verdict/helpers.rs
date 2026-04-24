@@ -4,6 +4,8 @@
 /// helpers are a separate concern from the public-API entry points
 /// (`handle_connect_attempt`, `process_connect_attempt`, constructor) that
 /// stay in `verdict.rs`.
+use std::sync::Arc;
+
 use transport_wire_core::{WireConnection, WireProcess, WireRule, WireStringInt};
 
 use crate::{
@@ -118,11 +120,17 @@ impl VerdictFlow {
         }
     }
 
-    pub(super) fn emit_connection_event(&self, conn: WireConnection, rule: Option<WireRule>) {
+    /// Emit a connection event to the event exporter (if configured) and stats service.
+    #[inline]
+    pub(super) fn emit_connection_event(
+        &self,
+        conn: Arc<WireConnection>,
+        rule: Option<Arc<WireRule>>,
+    ) {
         if let Some(ref exporter) = self.event_exporter {
             let config = self.config.get_snapshot();
             exporter.refresh_loggers(&config.loggers);
-            exporter.on_connection_event(&conn, rule.as_ref());
+            exporter.on_connection_event(conn.as_ref(), rule.as_deref());
         }
         self.stats.on_event(conn, rule);
     }
@@ -155,7 +163,7 @@ impl VerdictFlow {
         }
     }
 
-    pub(super) fn enqueue_connection_warning_alert(&self, conn: WireConnection) {
+    pub(super) fn enqueue_connection_warning_alert(&self, conn: &WireConnection) {
         enqueue_alert(
             &self.alert_buffer,
             &self.bus.alert_tx,
@@ -164,29 +172,32 @@ impl VerdictFlow {
     }
 
     pub(super) fn enqueue_process_warning_alert(&self, proc_info: &ProcessInfo) {
-        let mut checksums = std::collections::HashMap::new();
+        // Pre-size checksums HashMap to capacity 3 (max possible hash entries)
+        // to avoid the default 8-bucket allocation + potential reallocation.
+        let mut checksums = std::collections::HashMap::with_capacity(3);
         if let Some(hash) = proc_info
             .process_hash_md5
             .as_ref()
             .filter(|v| !v.is_empty())
         {
-            checksums.insert("md5".to_string(), hash.clone());
+            checksums.insert("md5".into(), hash.clone());
         }
         if let Some(hash) = proc_info
             .process_hash_sha1
             .as_ref()
             .filter(|v| !v.is_empty())
         {
-            checksums.insert("sha1".to_string(), hash.clone());
+            checksums.insert("sha1".into(), hash.clone());
         }
         if let Some(hash) = proc_info.process_hash.as_ref().filter(|v| !v.is_empty()) {
-            checksums.insert("sha256".to_string(), hash.clone());
+            checksums.insert("sha256".into(), hash.clone());
         }
 
         let env = if !proc_info.env_map.is_empty() {
             proc_info.env_map.clone()
         } else {
-            let mut env = std::collections::HashMap::new();
+            // Pre-size to exact env_preview length to avoid reallocation.
+            let mut env = std::collections::HashMap::with_capacity(proc_info.env_preview.len());
             for entry in &proc_info.env_preview {
                 if let Some((key, value)) = entry.split_once('=') {
                     env.insert(key.to_string(), value.to_string());
@@ -224,19 +235,25 @@ impl VerdictFlow {
         );
     }
 
+    /// Emit connection event, enqueue warning alerts, and apply ask-timeout policy.
+    ///
+    /// Inlined at call sites where the compiler can eliminate dead branches
+    /// (e.g., when `nolog` is known at compile time).
+    #[inline]
     pub(super) async fn apply_default_action_on_client_miss(
         &self,
         request_id: u64,
         proc_info: &ProcessInfo,
-        conn: WireConnection,
+        conn: Arc<WireConnection>,
     ) {
-        self.emit_connection_event(conn.clone(), None);
-        self.enqueue_connection_warning_alert(conn);
+        self.emit_connection_event(Arc::clone(&conn), None);
+        self.enqueue_connection_warning_alert(conn.as_ref());
         self.enqueue_process_warning_alert(proc_info);
         self.account_miss_and_apply_ask_timeout_policy(request_id)
             .await;
     }
 
+    #[inline]
     pub(super) async fn apply_action(
         &self,
         request_id: u64,
@@ -244,30 +261,16 @@ impl VerdictFlow {
         count_stats: bool,
         source: &'static str,
     ) {
-        if action.allows() {
-            if count_stats {
-                if let Some(verdict) = self.fast_allow_with_stats_try_send(request_id, source) {
-                    self.send_verdict_when_full(verdict).await;
-                }
-            } else if let Some(verdict) =
-                self.try_send_verdict(request_id, true, false, false, source, None)
-            {
-                self.send_verdict_when_full(verdict).await;
-            }
-            return;
-        }
-
-        if count_stats {
-            if let Some(verdict) =
-                self.fast_deny_with_stats_try_send(request_id, action.rejects(), source, None)
-            {
-                self.send_verdict_when_full(verdict).await;
-            }
-        } else if let Some(verdict) =
-            self.try_send_verdict(request_id, false, action.rejects(), false, source, None)
-        {
-            self.send_verdict_when_full(verdict).await;
-        }
+        let allow = action.allows();
+        self.emit_verdict(
+            request_id,
+            allow,
+            action.rejects(),
+            count_stats,
+            source,
+            None,
+        )
+        .await;
     }
 
     pub(super) async fn apply_ask_timeout_policy(&self, request_id: u64, count_stats: bool) {

@@ -27,14 +27,19 @@ use crate::{
     workers::runtime::{control::WorkerControl, watch::control::WatchWorkerControl},
 };
 
+#[cfg(test)]
+use crate::models::rule_storage::RuleFileOperator;
+
+pub(crate) struct RuleDirScanWithHint {
+    pub(crate) state: BTreeMap<String, Option<SystemTime>>,
+    pub(crate) rule_paths: Vec<PathBuf>,
+}
+
 impl RuleService {
     pub(crate) async fn load_rules_from_path(
         path: &Path,
     ) -> Result<(Vec<RuleRecord>, Vec<(String, RuleDuration)>)> {
-        let mut loaded = Vec::new();
-        let mut temporary_rules = Vec::new();
         let storage = StorageService::global();
-
         let entries = match storage.list_dir("rule", path).await {
             Ok(entries) => entries,
             Err(err) => {
@@ -43,7 +48,19 @@ impl RuleService {
             }
         };
 
-        for file_path in entries {
+        Self::load_rules_from_paths(entries).await
+    }
+
+    pub(crate) async fn load_rules_from_paths(
+        mut rule_paths: Vec<PathBuf>,
+    ) -> Result<(Vec<RuleRecord>, Vec<(String, RuleDuration)>)> {
+        let mut loaded = Vec::new();
+        let mut temporary_rules = Vec::new();
+        let storage = StorageService::global();
+
+        rule_paths.sort();
+
+        for file_path in rule_paths {
             if !storage.path_matches_main_storage_format(&file_path) {
                 continue;
             }
@@ -233,7 +250,7 @@ impl RuleService {
     }
 
     /// Collect all list directory paths referenced by active rules in the snapshot.
-    /// Used to prime the hint for [`read_rules_dir_file_state_with_hint`] so the
+    /// Used to prime the hint for [`read_rules_dir_scan_with_hint`] so the
     /// scan/detection pass can skip re-reading every JSON rule file.
     pub(crate) fn snapshot_list_dirs(rules: &[RuleRecord]) -> BTreeSet<PathBuf> {
         let mut list_dirs = BTreeSet::new();
@@ -247,11 +264,12 @@ impl RuleService {
     /// directories from the in-memory snapshot instead of re-reading every JSON
     /// rule file.  Use this on the watch-worker scan hot path; fall back to
     /// [`read_rules_dir_file_state_async`] when no snapshot is available.
-    pub(crate) async fn read_rules_dir_file_state_with_hint(
+    pub(crate) async fn read_rules_dir_scan_with_hint(
         path: &Path,
         known_list_dirs: &BTreeSet<PathBuf>,
-    ) -> Option<BTreeMap<String, Option<SystemTime>>> {
+    ) -> Option<RuleDirScanWithHint> {
         let mut state = BTreeMap::new();
+        let mut rule_paths = Vec::new();
         let storage = StorageService::global();
         let entries = storage.list_dir_with_metadata("rule", path).await.ok()?;
 
@@ -262,8 +280,11 @@ impl RuleService {
             }
             let name = file_name_lossy(&file_path)?;
             state.insert(name, entry.modified);
+            rule_paths.push(file_path);
             // No JSON read — list dirs come from the caller's snapshot hint.
         }
+
+        rule_paths.sort();
 
         for list_dir in known_list_dirs {
             let Ok(list_entries) = storage.list_dir_with_metadata("rule", list_dir).await else {
@@ -285,11 +306,11 @@ impl RuleService {
             }
         }
 
-        Some(state)
+        Some(RuleDirScanWithHint { state, rule_paths })
     }
 
     /// Fallback when no in-memory snapshot is available.
-    /// Production code uses [`read_rules_dir_file_state_with_hint`] on the hot path;
+    /// Production code uses [`read_rules_dir_scan_with_hint`] on the hot path;
     /// this variant is used by tests.
     #[cfg(test)]
     pub(crate) async fn read_rules_dir_file_state_async(
@@ -422,8 +443,11 @@ impl WatchWorkerControl for RuleWatchControl {
             // Poll-triggered scan: read directory state and compare with
             // previous to avoid unnecessary reloads.
             let known_list_dirs = RuleService::snapshot_list_dirs(&snapshot.rules);
-            let state =
-                RuleService::read_rules_dir_file_state_with_hint(path, &known_list_dirs).await;
+            let scanned = RuleService::read_rules_dir_scan_with_hint(path, &known_list_dirs).await;
+            let (state, scanned_rule_paths) = match scanned {
+                Some(scan) => (Some(scan.state), Some(scan.rule_paths)),
+                None => (None, None),
+            };
 
             let previous = last_state.lock().await.clone();
 
@@ -443,7 +467,13 @@ impl WatchWorkerControl for RuleWatchControl {
                     tracing::info!("Ruleset changed due to {}, reloading ...", file_name);
                 }
                 let previous_rules = rules.get_wire_snapshot();
-                if let Err(err) = rules.reload().await {
+                let reload_result = if let Some(rule_paths) = scanned_rule_paths {
+                    rules.reload_from_rule_paths(rule_paths).await
+                } else {
+                    rules.reload().await
+                };
+
+                if let Err(err) = reload_result {
                     tracing::error!(path = %path.display(), "failed to reload rules after directory change: {err}");
                 } else {
                     for file_name in RuleService::removed_rule_files(previous_files, current_files)

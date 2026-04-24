@@ -37,7 +37,7 @@ async fn stats_flow_sends_stats_when_pending() {
     let dns = DnsService::default();
     let rules = RuleService::default();
     let stats = StatsService::default();
-    stats.on_event(WireConnection::default(), None);
+    stats.on_event(Arc::new(WireConnection::default()), None);
     let kernel_pipeline_counters = Arc::new(crate::daemon::KernelPipelineCounters::default());
 
     let flow_shutdown = CancellationToken::new();

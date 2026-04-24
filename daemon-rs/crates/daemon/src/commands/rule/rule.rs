@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use crate::models::{
     audit::{AuditEvent, AuditEventKind, RuleAction},
     command_rpc::ClientCommand,
@@ -190,7 +188,7 @@ impl RuleCommandService {
         task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         client_service: &ClientService,
     ) {
-        let previous_rules = rules.get_rule_record_snapshot().as_ref().clone();
+        let previous_rules = rules.get_rule_record_snapshot();
         let operation_names = rule_names.clone();
         let owner = Self::owner_from_client(client_service);
         let audit_clone = self.audit.clone();
@@ -238,7 +236,7 @@ impl RuleCommandService {
                         ))
                     }
                 },
-                || async { Self::restore_rules_snapshot(rules, &previous_rules).await },
+                || async { Self::restore_rules_snapshot(rules, previous_rules.as_ref()).await },
             )
             .await;
 
@@ -293,29 +291,10 @@ impl RuleCommandService {
         rules: &RuleService,
         snapshot: &[RuleRecord],
     ) -> Result<(), String> {
-        let target_names = snapshot
-            .iter()
-            .map(|rule| rule.name.clone())
-            .collect::<BTreeSet<_>>();
-        let current = rules.get_rule_record_snapshot();
-
-        for rule in current.as_ref() {
-            if !target_names.contains(&rule.name) {
-                rules
-                    .delete_by_name(&rule.name)
-                    .await
-                    .map_err(|err| format!("rollback delete {}: {err}", rule.name))?;
-            }
-        }
-
-        for rule in snapshot {
-            rules
-                .upsert_rule_record(rule.clone())
-                .await
-                .map_err(|err| format!("rollback upsert {}: {err}", rule.name))?;
-        }
-
-        Ok(())
+        rules
+            .restore_snapshot_records(snapshot)
+            .await
+            .map_err(|err| format!("rollback restore snapshot failed: {err}"))
     }
 }
 
@@ -371,7 +350,7 @@ impl RuleUpdateMode {
         task_reply_tx: &tokio::sync::mpsc::Sender<transport_wire_core::WireNotificationReply>,
         client_service: &ClientService,
     ) {
-        let previous_rules = rules.get_rule_record_snapshot().as_ref().clone();
+        let previous_rules = rules.get_rule_record_snapshot();
         let operation_names: Vec<String> =
             updated_rules.iter().map(|rule| rule.name.clone()).collect();
 
@@ -431,7 +410,7 @@ impl RuleUpdateMode {
                     }
                 },
                 || async {
-                    RuleCommandService::restore_rules_snapshot(rules, &previous_rules).await
+                    RuleCommandService::restore_rules_snapshot(rules, previous_rules.as_ref()).await
                 },
             )
             .await;

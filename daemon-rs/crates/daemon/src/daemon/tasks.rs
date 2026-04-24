@@ -560,6 +560,9 @@ impl Daemon {
                             }
                         });
                     let format = match format_str.as_deref().unwrap_or("").to_lowercase().as_str() {
+                        "pushgateway-openmetrics" | "openmetrics" => {
+                            PushFormat::PushgatewayOpenMetrics
+                        }
                         "pushgateway-proto" | "proto" => PushFormat::PushgatewayProto,
                         "influxdb" => PushFormat::InfluxDb,
                         _ => PushFormat::Pushgateway,
@@ -597,6 +600,8 @@ impl Daemon {
                                         job,
                                         token,
                                         gzip,
+                                        bucket: String::new(),
+                                        org: String::new(),
                                     },
                                     self.runtime.shutdown.clone(),
                                 )
@@ -605,6 +610,28 @@ impl Daemon {
                             #[cfg(not(feature = "metrics-http-push-text"))]
                             tracing::warn!(
                                 "metrics push format 'pushgateway' requires feature metrics-http-push-text"
+                            );
+                        }
+                        PushFormat::PushgatewayOpenMetrics => {
+                            #[cfg(feature = "metrics-http-push-openmetrics")]
+                            {
+                                exporters.push(PushStatsExporter::new(
+                                    PushConfig {
+                                        url,
+                                        format,
+                                        job,
+                                        token,
+                                        gzip,
+                                        bucket: String::new(),
+                                        org: String::new(),
+                                    },
+                                    self.runtime.shutdown.clone(),
+                                )
+                                    as Arc<dyn StatsExporterPort>);
+                            }
+                            #[cfg(not(feature = "metrics-http-push-openmetrics"))]
+                            tracing::warn!(
+                                "metrics push format 'pushgateway-openmetrics' requires feature metrics-http-push-openmetrics"
                             );
                         }
                         PushFormat::PushgatewayProto => {
@@ -617,6 +644,8 @@ impl Daemon {
                                         job,
                                         token,
                                         gzip,
+                                        bucket: String::new(),
+                                        org: String::new(),
                                     },
                                     self.runtime.shutdown.clone(),
                                 )

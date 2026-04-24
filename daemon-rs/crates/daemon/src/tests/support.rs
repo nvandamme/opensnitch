@@ -1,10 +1,14 @@
 #![cfg(test)]
 use std::{
     fs,
+    path::{Path, PathBuf},
+    sync::Once,
+};
+#[cfg(feature = "subscriptions")]
+use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex, Once},
+    sync::{Arc, Mutex},
     thread::JoinHandle,
     time::Duration,
 };
@@ -180,6 +184,7 @@ pub(crate) fn write_text(path: &Path, content: &str) {
     fs::write(path, content).expect("write test file");
 }
 
+#[cfg(feature = "subscriptions")]
 pub(crate) fn write_bytes(path: &Path, content: &[u8]) {
     fs::write(path, content).expect("write test file");
 }
@@ -284,12 +289,14 @@ pub(crate) fn init_test_logging() {
     });
 }
 
+#[cfg(feature = "subscriptions")]
 pub(crate) struct HttpResponseFixture {
     pub(crate) status: String,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) body: Vec<u8>,
 }
 
+#[cfg(feature = "subscriptions")]
 impl HttpResponseFixture {
     pub(crate) fn new(
         status: impl Into<String>,
@@ -304,12 +311,14 @@ impl HttpResponseFixture {
     }
 }
 
+#[cfg(feature = "subscriptions")]
 pub(crate) struct HttpFixture {
     addr: SocketAddr,
     requests: Arc<Mutex<Vec<String>>>,
     handle: Option<JoinHandle<()>>,
 }
 
+#[cfg(feature = "subscriptions")]
 impl HttpFixture {
     pub(crate) fn start(responses: Vec<HttpResponseFixture>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind HTTP fixture");
@@ -370,6 +379,7 @@ impl HttpFixture {
     }
 }
 
+#[cfg(feature = "subscriptions")]
 impl Drop for HttpFixture {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
@@ -385,6 +395,7 @@ impl Drop for HttpFixture {
     }
 }
 
+#[cfg(feature = "subscriptions")]
 fn read_http_request(stream: &mut TcpStream) -> String {
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))

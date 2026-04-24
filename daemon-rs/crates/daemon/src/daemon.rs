@@ -56,7 +56,7 @@ pub(crate) use migration::{
 ///   --migrate-write                         Persist migration changes (default is dry-run).
 ///   --metrics-prometheus-addr  <host:port>  Prometheus /metrics listen address.
 ///   --metrics-push-url         <url>        Push exporter endpoint.
-///   --metrics-push-format      <fmt>        Push format (pushgateway|pushgateway-proto).
+///   --metrics-push-format      <fmt>        Push format (pushgateway|pushgateway-openmetrics|pushgateway-proto).
 ///   --metrics-push-job         <name>       Push-gateway job label.
 ///   --metrics-push-token       <token>      Push auth token.
 ///   --metrics-push-gzip                     Enable gzip compression on push bodies.

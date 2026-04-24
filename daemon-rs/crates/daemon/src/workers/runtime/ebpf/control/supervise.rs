@@ -414,12 +414,11 @@ impl NativeRingbuf {
     // Retained for profile-specific DNS emit diagnostics/probe paths.
     #[allow(dead_code)]
     pub(super) fn should_emit_dns_event_at(
-        recent_events: &mut HashMap<(String, String), Instant>,
-        ip: &str,
-        host: &str,
+        recent_events: &mut HashMap<DnsDedupKey, Instant>,
+        key: DnsDedupKey,
         now: Instant,
     ) -> bool {
-        DnsEbpfEventDeduper::should_emit_at(recent_events, ip, host, now)
+        DnsEbpfEventDeduper::should_emit_at(recent_events, key, now)
     }
 }
 

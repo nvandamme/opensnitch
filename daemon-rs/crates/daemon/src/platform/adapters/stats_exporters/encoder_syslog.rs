@@ -1,25 +1,24 @@
-use crate::models::metrics_snapshot::MetricsSnapshot;
+use crate::models::metrics_snapshot::MetricsExportSnapshot;
 
-pub(crate) fn encode_syslog_metrics(snapshot: &MetricsSnapshot) -> Vec<String> {
+pub(crate) fn encode_syslog_metrics(snapshot: &MetricsExportSnapshot) -> Vec<String> {
     let mut records = Vec::new();
-    let stats = &snapshot.stats;
 
     let mut summary = vec![
         "metric=opensnitch_stats".to_string(),
-        format!("rules={}", stats.rules),
-        format!("uptime_seconds={}", stats.uptime),
-        format!("dns_responses_total={}", stats.dns_responses),
-        format!("connections_total={}", stats.connections),
-        format!("ignored_total={}", stats.ignored),
-        format!("accepted_total={}", stats.accepted),
-        format!("dropped_total={}", stats.dropped),
-        format!("rule_hits_total={}", stats.rule_hits),
-        format!("rule_misses_total={}", stats.rule_misses),
+        format!("rules={}", snapshot.rules),
+        format!("uptime_seconds={}", snapshot.uptime),
+        format!("dns_responses_total={}", snapshot.dns_responses),
+        format!("connections_total={}", snapshot.connections),
+        format!("ignored_total={}", snapshot.ignored),
+        format!("accepted_total={}", snapshot.accepted),
+        format!("dropped_total={}", snapshot.dropped),
+        format!("rule_hits_total={}", snapshot.rule_hits),
+        format!("rule_misses_total={}", snapshot.rule_misses),
     ];
-    if !stats.daemon_version.trim().is_empty() {
+    if !snapshot.daemon_version.trim().is_empty() {
         summary.push(format!(
             "daemon_version=\"{}\"",
-            sanitize_value(&stats.daemon_version)
+            sanitize_value(&snapshot.daemon_version)
         ));
     }
     records.push(summary.join(" "));
@@ -28,37 +27,37 @@ pub(crate) fn encode_syslog_metrics(snapshot: &MetricsSnapshot) -> Vec<String> {
         &mut records,
         "opensnitch_connections_by_proto",
         "proto",
-        &stats.by_proto,
+        &snapshot.by_proto,
     );
     append_breakdown(
         &mut records,
         "opensnitch_connections_by_address",
         "address",
-        &stats.by_address,
+        &snapshot.by_address,
     );
     append_breakdown(
         &mut records,
         "opensnitch_connections_by_host",
         "host",
-        &stats.by_host,
+        &snapshot.by_host,
     );
     append_breakdown(
         &mut records,
         "opensnitch_connections_by_port",
         "port",
-        &stats.by_port,
+        &snapshot.by_port,
     );
     append_breakdown(
         &mut records,
         "opensnitch_connections_by_uid",
         "uid",
-        &stats.by_uid,
+        &snapshot.by_uid,
     );
     append_breakdown(
         &mut records,
         "opensnitch_connections_by_executable",
         "executable",
-        &stats.by_executable,
+        &snapshot.by_executable,
     );
     append_breakdown(
         &mut records,
@@ -84,19 +83,19 @@ pub(crate) fn encode_syslog_metrics(snapshot: &MetricsSnapshot) -> Vec<String> {
             &mut records,
             "opensnitch_subscription_by_status",
             "status",
-            &sub.by_status,
+            &snapshot.by_subscription_status,
         );
         append_breakdown(
             &mut records,
             "opensnitch_subscription_by_group",
             "group",
-            &sub.by_group,
+            &snapshot.by_subscription_group,
         );
         append_breakdown(
             &mut records,
             "opensnitch_subscription_by_node",
             "node",
-            &sub.by_node,
+            &snapshot.by_subscription_node,
         );
 
         let mut rule_subscriptions = sub.rule_subscriptions.clone();
@@ -121,15 +120,9 @@ fn append_breakdown(
     records: &mut Vec<String>,
     metric: &str,
     label_name: &str,
-    values: &std::collections::HashMap<String, u64>,
+    values: &[(String, u64)],
 ) {
-    let mut pairs: Vec<_> = values
-        .iter()
-        .map(|(key, value)| (key.clone(), *value))
-        .collect();
-    pairs.sort_by(|left, right| left.0.cmp(&right.0));
-
-    for (label_value, value) in pairs {
+    for (label_value, value) in values {
         records.push(format!(
             "metric={metric} {label_name}=\"{}\" value={value}",
             sanitize_value(&label_value),

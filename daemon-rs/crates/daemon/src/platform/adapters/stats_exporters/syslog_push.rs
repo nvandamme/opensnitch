@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use syslog::{Facility, Formatter3164};
 use tracing::{debug, warn};
 
-use crate::models::metrics_snapshot::MetricsSnapshot;
+use crate::models::metrics_snapshot::{MetricsExportSnapshot, MetricsSnapshot};
 use crate::platform::ports::stats_exporter_port::StatsExporterPort;
 
 pub const SYSLOG_SERVER_ENV: &str = "OPENSNITCH_METRICS_SYSLOG_SERVER";
@@ -81,7 +81,7 @@ impl Default for SyslogConfig {
 /// remote target is configured, records are framed as RFC3164 or RFC5424 and sent
 /// over UDP or TCP using a bounded background worker.
 pub struct SyslogStatsExporter {
-    tx: SyncSender<MetricsSnapshot>,
+    tx: SyncSender<Arc<MetricsExportSnapshot>>,
 }
 
 impl SyslogStatsExporter {
@@ -94,7 +94,7 @@ impl SyslogStatsExporter {
 
 impl StatsExporterPort for SyslogStatsExporter {
     fn export_snapshot(&self, snapshot: &MetricsSnapshot) {
-        match self.tx.try_send(snapshot.clone()) {
+        match self.tx.try_send(snapshot.export_view()) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
                 debug!("metrics syslog exporter: channel full; snapshot dropped")
@@ -106,7 +106,7 @@ impl StatsExporterPort for SyslogStatsExporter {
     }
 }
 
-fn run_worker(config: SyslogConfig, rx: Receiver<MetricsSnapshot>) {
+fn run_worker(config: SyslogConfig, rx: Receiver<Arc<MetricsExportSnapshot>>) {
     match config
         .server
         .as_deref()
@@ -121,7 +121,7 @@ fn run_worker(config: SyslogConfig, rx: Receiver<MetricsSnapshot>) {
     }
 }
 
-fn run_local_worker(config: &SyslogConfig, rx: Receiver<MetricsSnapshot>) {
+fn run_local_worker(config: &SyslogConfig, rx: Receiver<Arc<MetricsExportSnapshot>>) {
     let formatter = Formatter3164 {
         facility: Facility::LOG_DAEMON,
         hostname: None,
@@ -146,7 +146,7 @@ fn run_local_worker(config: &SyslogConfig, rx: Receiver<MetricsSnapshot>) {
     }
 }
 
-fn run_udp_worker(config: &SyslogConfig, server: &str, rx: Receiver<MetricsSnapshot>) {
+fn run_udp_worker(config: &SyslogConfig, server: &str, rx: Receiver<Arc<MetricsExportSnapshot>>) {
     let socket = match UdpSocket::bind("0.0.0.0:0") {
         Ok(socket) => socket,
         Err(err) => {
@@ -164,7 +164,7 @@ fn run_udp_worker(config: &SyslogConfig, server: &str, rx: Receiver<MetricsSnaps
     }
 }
 
-fn run_tcp_worker(config: &SyslogConfig, server: &str, rx: Receiver<MetricsSnapshot>) {
+fn run_tcp_worker(config: &SyslogConfig, server: &str, rx: Receiver<Arc<MetricsExportSnapshot>>) {
     let mut stream: Option<TcpStream> = None;
 
     for snapshot in rx {

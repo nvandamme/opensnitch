@@ -1,9 +1,10 @@
 use std::sync::{Arc, Mutex, atomic::Ordering};
 
-use transport_wire_core::{WireConnection, WireEvent, WireRule, WireSubscriptionStatistics};
+use transport_wire_core::{WireConnection, WireRule, WireSubscriptionStatistics};
 
 use super::internal::{
-    BreakdownCounters, CacheAlignedAtomicU64, EventsState, STATS_EVENT_RING_CAPACITY, StatsCounters,
+    BreakdownCounters, CacheAlignedAtomicU64, EventsState, STATS_EVENT_RING_CAPACITY,
+    StatsCounters, StatsEvent,
 };
 use crate::config::StatsConfig;
 use crate::models::connection_state::ConnectionAttempt;
@@ -107,7 +108,14 @@ impl StatsService {
         }
     }
 
-    pub fn on_event(&self, connection: WireConnection, rule: Option<WireRule>) {
+    pub fn on_event(&self, connection: Arc<WireConnection>, rule: Option<Arc<WireRule>>) {
+        let unix_nano = i64::try_from(unix_epoch_nanos()).unwrap_or(i64::MAX);
+        let event = StatsEvent {
+            time: Self::format_event_time(unix_nano),
+            connection: Some(connection),
+            rule,
+            unixnano: unix_nano,
+        };
         let mut ev = match self.events_state.try_lock() {
             Ok(ev) => ev,
             Err(std::sync::TryLockError::WouldBlock) => {
@@ -123,13 +131,7 @@ impl StatsService {
                 return;
             }
         };
-        let unix_nano = i64::try_from(unix_epoch_nanos()).unwrap_or(i64::MAX);
-        ev.events.push_overwrite(WireEvent {
-            time: Self::format_event_time(unix_nano),
-            connection: Some(connection),
-            rule,
-            unixnano: unix_nano,
-        });
+        ev.events.push_overwrite(event);
     }
     // Retained for optional diagnostics surfaces that expose stats queue contention.
     #[allow(dead_code)]

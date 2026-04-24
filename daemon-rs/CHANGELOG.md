@@ -16,6 +16,27 @@ Versioning baseline:
 
 ### Added
 
+- **2026-04-24 optimization follow-up — shared metrics snapshots, OpenMetrics push restore, watch/storage cold-path cleanup, and Aya smoke stabilization**
+  (`crates/daemon/src/{daemon.rs,daemon/tasks.rs,flows/notification/owner_scope.rs,flows/verdict/{helpers.rs,verdict.rs},models/{metrics_config.rs,metrics_snapshot.rs},platform/adapters/stats_exporters/{encoder_influxdb.rs,encoder_prometheus_openmetrics.rs,encoder_prometheus_protobuf.rs,encoder_prometheus_text.rs,encoder_syslog.rs,http_push.rs,http_push_influxdb.rs,http_serve.rs,syslog_push.rs},services/{client/alerts.rs,dns/{dns.rs,parsing.rs},process/details.rs,rule/{rule.rs,storage.rs},stats/{internal.rs,snapshot_ops.rs,stats.rs}},tests/{flows/stats_flow.rs,metrics/{stats_exporter_prometheus.rs,stats_exporter_push.rs,stats_exporter_syslog.rs},services/stats_service.rs,smoke/{aya_proc_trace.rs,aya_dns_trace.rs,aya_conn_trace.rs,aya_tunnel_trace.rs},workers/ebpf_control_lifecycle_probe_support.rs},workers/runtime/ebpf/control/{lifecycle.rs,mod.rs,supervise.rs}}`,
+  `crates/{storage-format-uci/src/serde_bridge.rs,tools/src/live_logs.rs,transport-wire-grpc-client/src/tls.rs}`,
+  `TODO.md`):
+  - Verdict and statistics paths now reuse daemon-internal shared snapshots so alerts, event history, HTTP exporters, push exporters, and syslog exporters avoid repeated deep cloning and per-adapter sort work.
+  - Restored OpenMetrics push support across config parsing, runtime dispatch, HTTP push encoding, and metrics regression coverage.
+  - Reduced hot and cold path allocation churn in process inspection, DNS dedupe, owner-scope matching, rule-watch reload scans, UCI serde list accumulation, TLS certificate fingerprint encoding, and tools live-log/session cleanup polling.
+  - Moved eBPF lifecycle probe helpers out of implementation files into `src/tests/` wiring-only support to satisfy DESIGN_RULES test placement constraints.
+  - Hardened Aya smoke tests by forcing bounded daemon teardown (`timeout --kill-after`) and verified `cargo ost aya-smoke-proc`, `aya-smoke-dns`, `aya-smoke-conn`, and `aya-smoke-tunnel` all pass after clearing stale singleton daemons.
+  - Updated active PERF tracker status entries to record the landed Priority B and Priority C optimization slices.
+
+- **Dead-code cleanup and full-suite parity hardening**
+  (`crates/tools/src/{build_cmds.rs,cli.rs}`,
+  `crates/daemon/src/{flows/verdict/verdict.rs,services/client/runtime_lifecycle.rs,services/ebpf/ebpf.rs,services/firewall/runtime.rs,services/process/details.rs,services/rule/{rule.rs,runtime_lifecycle.rs},services/subscription/{conversions.rs,subscription.rs},models/{subscription_refresh.rs,subscription_rpc.rs,subscription_storage.rs},utils/{mod.rs,list_shape.rs,name_parsing.rs,schedule_backoff.rs,schedule_wake.rs,stable_id.rs},tests/{support.rs,runtime_tasks/task_runtime.rs,firewall/firewall_probe_support.rs,flows/notification_flow.rs}}`):
+  - `cargo ost test` now runs the full `opensnitchd-rs` suite by default instead of hardcoded filtered namespaces.
+  - Tools CLI help text now documents full-suite parity-test behavior.
+  - Removed unused helpers across verdict, client runtime lifecycle, eBPF, process, firewall runtime, rule lifecycle, and subscription service paths.
+  - Replaced broad/stale dead-code suppressions with feature-aware gating for subscription-only utility and model surfaces.
+  - Hardened local-only non-root notification flow tests for privileged full-suite execution by using resilient local principal/group setup and owner-scope assertions that tolerate unresolved synthetic UID group mappings.
+  - Made downloader runtime-task payload tests feature-correct by gating success-shape checks to `task-http` and asserting the non-`task-http` error payload shape.
+
 - **OpenWrt guidance and tracker alignment for ubus-only LuCI integration path**
   (`OPENWRT.md`, `TODO.md`, `DESIGN_RULES.md`):
   - Updated OpenWrt transport ownership language to a single ubus surface and removed
@@ -1011,6 +1032,15 @@ Versioning baseline:
     for zero-alloc count; `BufReader` for `/proc/net/packet` and `/proc/net/xdp`;
     stack buffer `[u64;8]` for `/proc/stat` CPU parsing; session snapshot CoW via
     `Arc::make_mut`.
+- **Daemon optimization follow-up** (`services/rule/rule.rs`,
+  `commands/rule/rule.rs`, `services/process/details.rs`,
+  `tests/flows/notification_flow.rs`, `TODO.md`):
+  - Rule snapshots now share immutable `Arc<Vec<RuleRecord>>` records so rollback/listing
+    capture avoids full rule-set clones.
+  - Rule command rollback paths keep the shared immutable snapshot handle until restore.
+  - Process hash digest formatting uses a preallocated lowercase hex encoder instead of
+    per-byte `format!` allocation.
+  - Folded notification-flow formatting cleanup into the functional commit.
 
 - **Cache typed eBPF map handles** in `services/connection/ebpf.rs` — `MapData::from_id`
   opened once per connection instead of 3× (exact key, wildcard dst, swapped); 2 fd-open

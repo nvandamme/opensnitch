@@ -42,8 +42,8 @@ fn make_snapshot() -> MetricsSnapshot {
     let mut by_rule = HashMap::new();
     by_rule.insert("allow-dns".to_string(), 8u64);
 
-    MetricsSnapshot {
-        stats: WireStatistics {
+    MetricsSnapshot::new(
+        WireStatistics {
             rules: 8,
             uptime: 7200,
             dns_responses: 150,
@@ -57,9 +57,9 @@ fn make_snapshot() -> MetricsSnapshot {
             by_host,
             ..Default::default()
         },
-        subscription_stats: None,
+        None,
         by_rule,
-    }
+    )
 }
 
 fn make_sub_stats() -> WireSubscriptionStatistics {
@@ -627,8 +627,11 @@ fn proto_connections_counter_value_is_correct() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn negotiate_none_defaults_to_text() {
-    assert!(matches!(negotiate_format(None), ResponseFormat::Text));
+fn negotiate_none_uses_compiled_default_format() {
+    assert!(matches!(
+        negotiate_format(None),
+        Some(ResponseFormat::OpenMetrics)
+    ));
 }
 
 #[test]
@@ -636,7 +639,7 @@ fn negotiate_openmetrics_beats_plain_text() {
     let accept = "application/openmetrics-text; version=1.0.0; charset=utf-8, text/plain;q=0.9";
     assert!(matches!(
         negotiate_format(Some(accept)),
-        ResponseFormat::OpenMetrics
+        Some(ResponseFormat::OpenMetrics)
     ));
 }
 
@@ -647,17 +650,14 @@ fn negotiate_proto_wins_when_explicitly_requested() {
                   text/plain;q=0.1";
     assert!(matches!(
         negotiate_format(Some(accept)),
-        ResponseFormat::Proto
+        Some(ResponseFormat::Proto)
     ));
 }
 
 #[test]
-fn negotiate_text_fallback_for_unknown_mime() {
+fn negotiate_rejects_unknown_mime_when_accept_is_explicit() {
     let accept = "application/json, application/xml";
-    assert!(matches!(
-        negotiate_format(Some(accept)),
-        ResponseFormat::Text
-    ));
+    assert!(negotiate_format(Some(accept)).is_none());
 }
 
 #[test]
@@ -666,20 +666,20 @@ fn negotiate_proto_requires_all_required_params() {
     let accept = "application/vnd.google.protobuf; encoding=delimited";
     assert!(!matches!(
         negotiate_format(Some(accept)),
-        ResponseFormat::Proto
+        Some(ResponseFormat::Proto)
     ));
 }
 
 #[test]
 fn negotiate_empty_accept_string_defaults_to_text() {
-    assert!(matches!(negotiate_format(Some("")), ResponseFormat::Text));
+    assert!(negotiate_format(Some("")).is_none());
 }
 
 #[test]
 fn negotiate_wildcard_accept_defaults_to_text() {
     assert!(matches!(
         negotiate_format(Some("*/*")),
-        ResponseFormat::Text
+        Some(ResponseFormat::Text)
     ));
 }
 

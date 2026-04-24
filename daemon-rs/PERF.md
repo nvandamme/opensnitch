@@ -77,7 +77,7 @@ Policy audit command:
 
 Prioritized hot-path findings from full codebase scan. Tracked as actionable items in TODO.md.
 
-**Status as of 2026-03-27: all HIGH/MEDIUM items and two LOW items fully implemented.**
+**Status as of 2026-04-24: all HIGH/MEDIUM/LOW backlog items are implemented.**
 
 ### HIGH priority — ✅ all implemented
 
@@ -100,14 +100,14 @@ Prioritized hot-path findings from full codebase scan. Tracked as actionable ite
 | 10 | `services/dns/parsing.rs` L72 | `ip.to_string()` + `host.to_string()` per event for dedup key | Deferred (DNS parsing not on per-connection hot path) |
 | 11 | `services/rule/matching.rs` L707 | (covered by #2 above) | Resolved as part of item 2 |
 
-### LOW priority — ✅ implemented (2 of 4)
+### LOW priority — ✅ all implemented
 
 | # | Location | Issue | Resolution |
 |---|---|---|---|
 | 12 | `workers/runtime/control/control.rs` | Sequential `join_all` on shutdown | `tokio::task::JoinSet` for concurrent shutdown awaiting |
 | 13 | `services/storage/event_bus.rs` L64 | Full `StorageEvent` clone per broadcast recipient (including `PathBuf`) | Broadcast `Arc<StorageEvent>` — Arc clone per recipient instead of struct clone |
-| 14 | `services/firewall/config_ops.rs` L14 | Reload/reconcile repeats disk read in separate ops | Deferred — rare operator-triggered path, negligible impact |
-| 15 | `commands/rule/rule.rs` L236 | Sequential async delete/upsert for large rule sets on rollback | Deferred — rollback path only; large rule set counts uncommon |
+| 14 | `services/firewall/config_ops.rs` L14 | Reload/reconcile repeats disk read in separate ops | Durable `replace_system_firewall()` now reuses in-memory payload for reconcile when available, avoiding immediate post-persist disk reread |
+| 15 | `commands/rule/rule.rs` L236 | Sequential async delete/upsert for large rule sets on rollback | Added bulk `RuleService::restore_snapshot_records()` rollback path with single lock/snapshot rebuild; removed per-rule rollback churn |
 
 ### Already well-optimized (no action needed)
 
@@ -159,6 +159,9 @@ The `update-run-perf` tools command runs the current Rust release harness and cu
 
 | Date | Backend | Profile | Rounds | Commit | p50 ms | p95 ms | p99 ms | max ms | drop_total | Baseline Check | Go Ref | vs Go p50 | vs Go p95 | vs Go p99 | vs Go max | vs Go drop | Prev Commit Ref | vs Prev p50 | vs Prev p95 | vs Prev p99 | vs Prev max | vs Prev drop | Notes |
 |---|---|---|---:|---|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---|
+| 2026-04-22 | Rust | release (ThinLTO) | 500 | `bbd0e660` | 0.001 | 0.001 | 0.003 | 0.047 | 0 | pass | Go default same run | +0.000 | -0.001 | -0.001 | +0.007 | +0 | `e1ce7fc3` | +0.000 | +0.000 | +0.000 | -0.005 | +0 | Auto-updated current reference Rust run (daemon-rs: collapse dependency/runtime slices + stats exporter split + dead_code triage); workspace dirty. |
+| 2026-04-22 | Go | default | 500 | `bbd0e660` | 0.001 | 0.002 | 0.004 | 0.040 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated current Go comparison row paired with Rust actual. |
+| 2026-04-22 | Rust | release (ThinLTO) | 500 | `e1ce7fc3` | 0.001 | 0.001 | 0.003 | 0.052 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated previous commit benchmark (daemon-rs: close transport adapter/pluggability backlog slices) using cached previous-commit worktree/results when available. |
 | 2026-04-22 | Rust | release (ThinLTO) | 500 | `39e79768` | 0.001 | 0.001 | 0.003 | 0.060 | 0 | pass | Go default same run | +0.000 | -0.001 | -0.004 | +0.039 | +0 | `6b7feecd` | +0.000 | -0.001 | +0.000 | -0.010 | +0 | Auto-updated current reference Rust run (daemon-rs: openwrt docs — align ubus boundary and plan); workspace dirty. |
 | 2026-04-22 | Go | default | 500 | `39e79768` | 0.001 | 0.002 | 0.007 | 0.021 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated current Go comparison row paired with Rust actual. |
 | 2026-04-22 | Rust | release (ThinLTO) | 500 | `6b7feecd` | 0.001 | 0.002 | 0.003 | 0.070 | 0 | pass | - | - | - | - | - | - | - | - | - | - | - | - | Auto-updated previous commit benchmark (daemon-rs: tracker - define Bandix-inspired future perf/metrics objective) using cached previous-commit worktree/results when available. |
@@ -257,6 +260,7 @@ Track explicit Rust-vs-Go deltas emitted by `parity-hot-cold-delta`.
 
 | Date | Delta Target | Rounds | Commit | Hot Mixed Go verdict ms | Hot Mixed Rust verdict ms | Hot Mixed Δ ms (Rust-Go) | Hot Throughput Go time/op us | Hot Throughput Rust time/op us | Hot Throughput Go op/s | Hot Throughput Rust op/s | Hot Δ p50 ms | Hot Δ p95 ms | Hot Δ p99 ms | Hot Δ max ms | Hot Δ drop_total | Cold Go rule s | Cold Rust rule s | Cold Δ rule s | Cold Go ui s | Cold Rust ui s | Cold Δ ui s | Cold Go tasks s | Cold Rust tasks s | Cold Δ tasks s | Cold Go total s | Cold Rust total s | Cold Δ total s (Rust-Go) | Result | Notes |
 |---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| 2026-04-22 | `make parity-hot-cold-delta` | 500 | `bbd0e660` | 0.009 | 0.017 | +0.008 | 1.454 | 1.045 | 687687.9 | 956866.4 | +0.000 | -0.001 | -0.006 | +0.032 | +0 | 0.011 | 0.018 | +0.007 | 4.001 | 4.007 | +0.006 | 0.245 | 0.244 | -0.000 | 4.257 | 4.269 | +0.013 | PASS | Auto-updated parity hot/cold delta row from tools command. |
 | 2026-04-22 | `make parity-hot-cold-delta` | 500 | `39e79768` | 0.007 | 0.022 | +0.015 | 1.219 | 1.002 | 820621.9 | 997790.9 | +0.000 | -0.001 | -0.001 | +0.041 | +0 | 0.010 | 0.016 | +0.006 | 4.001 | 4.007 | +0.006 | 0.244 | 0.244 | -0.000 | 4.255 | 4.267 | +0.012 | PASS | Auto-updated parity hot/cold delta row from tools command. |
 | 2026-04-06 | `make parity-hot-cold-delta` | 500 | `52d48734` | 0.017 | 0.134 | +0.117 | 4.087 | 2.903 | 244691.4 | 344530.3 | -0.001 | -0.004 | -0.007 | +0.057 | +0 | 0.011 | 0.019 | +0.008 | 4.001 | 4.010 | +0.009 | 0.253 | 0.246 | -0.007 | 4.265 | 4.275 | +0.010 | PASS | Auto-updated parity hot/cold delta row from tools command. |
 | 2026-04-01 | `make parity-hot-cold-delta` | 500 | `7debb430` | 0.006 | 0.008 | +0.002 | 1.241 | 0.989 | 805779.7 | 1011245.0 | +0.000 | -0.001 | +0.000 | -0.002 | +0 | 0.010 | 0.020 | +0.010 | 4.000 | 4.010 | +0.010 | 0.247 | 0.245 | -0.002 | 4.257 | 4.275 | +0.018 | PASS | Auto-updated parity hot/cold delta row from tools command. |

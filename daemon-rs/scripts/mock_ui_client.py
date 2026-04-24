@@ -660,6 +660,24 @@ class MockUiService(ui_pb2_grpc.UIServicer):
                 # sees "SessionRecap status=PASS" in the log and shuts down.
                 return
 
+        # Stream ended before every pending command was explicitly acked.
+        # Emit the recap anyway so orchestration can classify the run, with
+        # unresolved commands represented as warnings.
+        if not recap_printed:
+            if pending:
+                print(
+                    f"MOCK_UI NotificationDrainIncomplete pending={len(pending)}",
+                    flush=True,
+                )
+            recap_printed = True
+            self._print_session_recap(
+                [
+                    (lbl, {"OK": "✓", "ERROR": "✗"}.get(reply_codes.get(nid, ""), "⚠"))
+                    for nid, lbl in sent_order
+                ]
+            )
+            return
+
 
     def _print_session_recap(self, notif_rows: list[tuple[str, str]]) -> None:
         """Print a full-session box-drawing recap table.

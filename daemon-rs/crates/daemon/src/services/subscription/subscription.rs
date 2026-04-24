@@ -218,13 +218,6 @@ impl SubscriptionService {
         entries
     }
 
-    /// Returns the current subscription list, sorted by id.
-    // Public list endpoint retained for subscription command parity.
-    #[allow(dead_code)]
-    pub fn list(&self) -> Vec<WireSubscription> {
-        self.storage.list()
-    }
-
     /// Returns the current subscription records as canonical domain models.
     pub fn list_records(&self) -> Vec<SubscriptionRecord> {
         self.storage.list_records()

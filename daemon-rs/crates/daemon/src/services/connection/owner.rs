@@ -185,6 +185,9 @@ impl ConnectionService {
         Self::resolve_owner_from_packet_sockets(protocol, uid_hint)
     }
 
+    /// Resolve connection owner via a single socket-diag pass that checks
+    /// both forward and reverse socket matching in one iteration.  This
+    /// avoids a second syscall when the forward pass finds nothing.
     pub(super) fn enrich_connection_owner(attempt: &mut ConnectionAttempt) {
         let src = attempt.src_addr;
         let dst = attempt.dst_addr;
@@ -194,54 +197,52 @@ impl ConnectionService {
             return;
         };
 
-        if let Ok(candidates) = NativeSocketDiagPort::find_socket_candidates(
-            family,
-            ipproto,
+        let lookup_key = Self::inode_lookup_key(
+            attempt.protocol,
             src,
             attempt.src_port,
             dst,
             attempt.dst_port,
-        ) {
-            let lookup_key = Self::inode_lookup_key(
-                attempt.protocol,
-                src,
-                attempt.src_port,
-                dst,
-                attempt.dst_port,
-            );
-            for sock in candidates {
-                attempt.uid = sock.uid;
-                if let Some(pid) =
-                    Self::resolve_pid_by_inode_with_key(sock.inode, Some(&lookup_key))
-                {
-                    attempt.pid = pid;
-                    return;
-                }
-            }
-        }
+        );
+        let reverse_lookup_key = Self::inode_lookup_key(
+            attempt.protocol,
+            dst,
+            attempt.dst_port,
+            src,
+            attempt.src_port,
+        );
 
         if let Ok(candidates) = NativeSocketDiagPort::find_socket_candidates(
             family,
             ipproto,
-            dst,
-            attempt.dst_port,
             src,
             attempt.src_port,
+            dst,
+            attempt.dst_port,
         ) {
-            let reverse_lookup_key = Self::inode_lookup_key(
-                attempt.protocol,
-                dst,
-                attempt.dst_port,
-                src,
-                attempt.src_port,
-            );
             for sock in candidates {
-                attempt.uid = sock.uid;
-                if let Some(pid) =
-                    Self::resolve_pid_by_inode_with_key(sock.inode, Some(&reverse_lookup_key))
+                // Try forward match first (sock.src == src), then reverse (sock.src == dst).
+                let resolved = if sock.src == src
+                    && sock.src_port == attempt.src_port
+                    && sock.dst == dst
+                    && sock.dst_port == attempt.dst_port
                 {
-                    attempt.pid = pid;
-                    return;
+                    Some((sock.uid, sock.inode, &lookup_key))
+                } else if sock.src == dst
+                    && sock.src_port == attempt.dst_port
+                    && sock.dst == src
+                    && sock.dst_port == attempt.src_port
+                {
+                    Some((sock.uid, sock.inode, &reverse_lookup_key))
+                } else {
+                    None
+                };
+                if let Some((uid, inode, key)) = resolved {
+                    attempt.uid = uid;
+                    if let Some(pid) = Self::resolve_pid_by_inode_with_key(inode, Some(key)) {
+                        attempt.pid = pid;
+                        return;
+                    }
                 }
             }
         }

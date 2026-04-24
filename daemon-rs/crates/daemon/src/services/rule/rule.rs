@@ -29,7 +29,7 @@ pub(super) struct ActiveRuleCompiled {
 #[derive(Default)]
 pub(super) struct RuleSnapshot {
     pub(super) rules_path: Arc<PathBuf>,
-    pub(super) rules: Vec<RuleRecord>,
+    pub(super) rules: Arc<Vec<RuleRecord>>,
     pub(super) active_rules: Vec<ActiveRuleCompiled>,
     pub(super) attempt_text_needs: AttemptTextNeeds,
     pub(super) wire_rules: Arc<Vec<WireRule>>,
@@ -122,7 +122,7 @@ impl RuleService {
         let wire_rules = Arc::new(rules.iter().map(wire_rule_from_record).collect());
         self.publish_snapshot(RuleSnapshot {
             rules_path: Arc::new(rules_path.to_path_buf()),
-            rules,
+            rules: Arc::new(rules),
             active_rules,
             attempt_text_needs,
             wire_rules,
@@ -152,6 +152,21 @@ impl RuleService {
         self.load_path(snapshot.rules_path.as_path()).await
     }
 
+    pub async fn reload_from_rule_paths(&self, rule_paths: Vec<PathBuf>) -> Result<usize> {
+        let _update_guard = self.update_lock.lock().await;
+        let snapshot = self.snapshot();
+        let (loaded, temporary_rules) = Self::load_rules_from_paths(rule_paths).await?;
+        let loaded_count = self
+            .build_and_publish_snapshot(snapshot.rules_path.as_path(), loaded)
+            .await?;
+
+        for (rule_name, duration) in temporary_rules {
+            self.schedule_temporary_rule(rule_name, duration);
+        }
+
+        Ok(loaded_count)
+    }
+
     /// Rebuilds rule match caches from the current in-memory snapshot (no disk I/O).
     ///
     /// Called after a firewall reload so that network alias entries stay
@@ -162,31 +177,12 @@ impl RuleService {
         let _update_guard = self.update_lock.lock().await;
         let (rules_path, rules) = {
             let snap = self.snapshot();
-            (snap.rules_path.as_ref().clone(), snap.rules.clone())
+            (
+                snap.rules_path.as_ref().clone(),
+                snap.rules.as_ref().clone(),
+            )
         };
         self.build_and_publish_snapshot(&rules_path, rules).await
-    }
-
-    /// Reload using synchronous file I/O batched in a single blocking call.
-    /// Uses `spawn_blocking` to keep the tokio thread free. Prefer
-    /// `reload_inline` on fast paths where the blocking-pool hop is costly.
-    // Compatibility helper retained for synchronous reload call sites.
-    #[allow(dead_code)]
-    pub async fn reload_sync(&self) -> Result<usize> {
-        let _update_guard = self.update_lock.lock().await;
-        let snapshot = self.snapshot();
-        let path = snapshot.rules_path.clone();
-        let (loaded, temporary_rules) =
-            tokio::task::spawn_blocking(move || Self::load_rules_from_path_sync(&path))
-                .await
-                .map_err(|e| anyhow::anyhow!("sync rule load join: {e}"))??;
-        let loaded_count = self
-            .build_and_publish_snapshot(snapshot.rules_path.as_path(), loaded)
-            .await?;
-        for (rule_name, duration) in temporary_rules {
-            self.schedule_temporary_rule(rule_name, duration);
-        }
-        Ok(loaded_count)
     }
 
     /// Reload rules inline on the current thread — no `spawn_blocking` hop.
@@ -308,7 +304,7 @@ impl RuleService {
     }
 
     pub fn get_rule_record_snapshot(&self) -> Arc<Vec<RuleRecord>> {
-        Arc::new(self.snapshot().rules.clone())
+        Arc::clone(&self.snapshot().rules)
     }
 }
 

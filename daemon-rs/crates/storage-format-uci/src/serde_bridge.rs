@@ -33,7 +33,8 @@ pub fn document_to_value(doc: &UciDocument) -> Value {
             .or_insert_with(|| Value::Object(Map::new()));
 
         let mut section_map = Map::new();
-        let mut lists: Vec<(String, Vec<String>)> = Vec::new();
+        let mut lists_by_name: HashMap<String, Vec<String>> = HashMap::new();
+        let mut list_order: Vec<String> = Vec::new();
 
         for entry in &section.entries {
             match entry {
@@ -41,16 +42,20 @@ pub fn document_to_value(doc: &UciDocument) -> Value {
                     section_map.insert(name.clone(), Value::String(value.clone()));
                 }
                 UciEntry::List { name, value } => {
-                    if let Some((_, values)) = lists.iter_mut().find(|(k, _)| k == name) {
+                    if let Some(values) = lists_by_name.get_mut(name) {
                         values.push(value.clone());
                     } else {
-                        lists.push((name.clone(), vec![value.clone()]));
+                        list_order.push(name.clone());
+                        lists_by_name.insert(name.clone(), vec![value.clone()]);
                     }
                 }
             }
         }
 
-        for (name, values) in lists {
+        for name in list_order {
+            let Some(values) = lists_by_name.remove(&name) else {
+                continue;
+            };
             section_map.insert(
                 name,
                 Value::Array(values.into_iter().map(Value::String).collect()),

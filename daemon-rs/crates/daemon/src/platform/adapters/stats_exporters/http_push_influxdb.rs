@@ -5,9 +5,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use crate::models::metrics_snapshot::MetricsSnapshot;
+use crate::models::metrics_snapshot::{MetricsExportSnapshot, MetricsSnapshot};
 use crate::platform::ports::stats_exporter_port::StatsExporterPort;
-use transport_wire_core::WireSubscriptionStatistics;
 
 pub const INFLUX_URL_ENV: &str = "OPENSNITCH_INFLUXDB_URL";
 pub(crate) const INFLUX_TOKEN_ENV: &str = "OPENSNITCH_INFLUXDB_TOKEN";
@@ -28,59 +27,10 @@ pub struct InfluxDbConfig {
 }
 
 pub struct InfluxDbStatsExporter {
-    tx: mpsc::Sender<CompactSnapshot>,
+    tx: mpsc::Sender<Arc<CompactSnapshot>>,
 }
 
-pub(crate) struct CompactSnapshot {
-    pub(crate) rules: u64,
-    pub(crate) uptime: u64,
-    pub(crate) dns_responses: u64,
-    pub(crate) connections: u64,
-    pub(crate) ignored: u64,
-    pub(crate) accepted: u64,
-    pub(crate) dropped: u64,
-    pub(crate) rule_hits: u64,
-    pub(crate) rule_misses: u64,
-    pub(crate) subscription_stats: Option<WireSubscriptionStatistics>,
-    pub(crate) by_proto: Vec<(String, u64)>,
-    pub(crate) by_address: Vec<(String, u64)>,
-    pub(crate) by_host: Vec<(String, u64)>,
-    pub(crate) by_port: Vec<(String, u64)>,
-    pub(crate) by_uid: Vec<(String, u64)>,
-    pub(crate) by_executable: Vec<(String, u64)>,
-    pub(crate) by_rule: Vec<(String, u64)>,
-}
-
-impl From<&MetricsSnapshot> for CompactSnapshot {
-    fn from(m: &MetricsSnapshot) -> Self {
-        let s = &m.stats;
-        Self {
-            rules: s.rules,
-            uptime: s.uptime,
-            dns_responses: s.dns_responses,
-            connections: s.connections,
-            ignored: s.ignored,
-            accepted: s.accepted,
-            dropped: s.dropped,
-            rule_hits: s.rule_hits,
-            rule_misses: s.rule_misses,
-            subscription_stats: m.subscription_stats.clone(),
-            by_proto: sorted_pairs(&s.by_proto),
-            by_address: sorted_pairs(&s.by_address),
-            by_host: sorted_pairs(&s.by_host),
-            by_port: sorted_pairs(&s.by_port),
-            by_uid: sorted_pairs(&s.by_uid),
-            by_executable: sorted_pairs(&s.by_executable),
-            by_rule: sorted_pairs(&m.by_rule),
-        }
-    }
-}
-
-fn sorted_pairs(map: &std::collections::HashMap<String, u64>) -> Vec<(String, u64)> {
-    let mut pairs: Vec<_> = map.iter().map(|(k, v)| (k.clone(), *v)).collect();
-    pairs.sort_by(|a, b| b.1.cmp(&a.1));
-    pairs
-}
+pub(crate) type CompactSnapshot = MetricsExportSnapshot;
 
 impl InfluxDbStatsExporter {
     pub fn new(config: InfluxDbConfig, shutdown: CancellationToken) -> Arc<Self> {
@@ -93,15 +43,14 @@ impl InfluxDbStatsExporter {
 
 impl StatsExporterPort for InfluxDbStatsExporter {
     fn export_snapshot(&self, snapshot: &MetricsSnapshot) {
-        let compact = CompactSnapshot::from(snapshot);
-        if self.tx.try_send(compact).is_err() {
+        if self.tx.try_send(snapshot.export_view()).is_err() {
             debug!("influxdb stats exporter: channel full - snapshot dropped");
         }
     }
 }
 
 async fn push_worker(
-    mut rx: mpsc::Receiver<CompactSnapshot>,
+    mut rx: mpsc::Receiver<Arc<CompactSnapshot>>,
     config: InfluxDbConfig,
     shutdown: CancellationToken,
 ) {

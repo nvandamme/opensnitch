@@ -4,11 +4,10 @@ use anyhow::Result;
 
 use std::sync::Arc;
 
+#[cfg(feature = "openwrt")]
+use crate::models::firewall_state::FirewallBackend;
 use crate::{
-    models::{
-        firewall_config::FirewallConfig, firewall_runtime::FirewallRuntime,
-        firewall_state::FirewallBackend,
-    },
+    models::{firewall_config::FirewallConfig, firewall_runtime::FirewallRuntime},
     services::firewall::FirewallService,
 };
 
@@ -24,6 +23,7 @@ impl FirewallService {
     pub(crate) fn probe_load_system_firewall(path: &Path) -> Result<Option<FirewallConfig>> {
         Self::load_system_firewall_from_path(path)
     }
+    #[cfg(feature = "openwrt")]
     pub(crate) fn probe_load_system_firewall_for_backend(
         path: &Path,
         backend: FirewallBackend,
@@ -33,12 +33,5 @@ impl FirewallService {
 
     pub(crate) fn probe_save_system_firewall(path: &Path, fw: &FirewallConfig) -> Result<()> {
         Self::save_system_firewall_to_path(path, fw)
-    }
-    pub(crate) fn probe_save_system_firewall_for_backend(
-        path: &Path,
-        fw: &FirewallConfig,
-        backend: FirewallBackend,
-    ) -> Result<()> {
-        Self::save_system_firewall_to_backend_and_path(path, fw, backend)
     }
 }

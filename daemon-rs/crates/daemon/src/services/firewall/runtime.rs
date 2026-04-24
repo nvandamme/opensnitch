@@ -350,12 +350,6 @@ impl FirewallService {
 
         Err(last_err.unwrap_or_else(|| anyhow!("no firewall introspection backend available")))
     }
-    // Retained for optional diagnostics/control workflows that inspect backend state.
-    #[allow(dead_code)]
-    pub async fn extract_system_firewall_from_backend(&self) -> Result<FirewallConfig> {
-        self.introspect_system_firewall().await
-    }
-
     #[cfg(test)]
     pub(crate) fn probe_runtime_backend_for_target(preferred: FirewallBackend) -> FirewallBackend {
         Self::persistence_backend_for_target(preferred)

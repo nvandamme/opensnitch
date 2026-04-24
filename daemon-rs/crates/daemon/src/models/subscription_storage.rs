@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 
 /// Mirror of `pb::Subscription` for JSON persistence.
 // Storage-facing subscription record model used by the optional subscriptions runtime.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct SubscriptionRecord {
     #[serde(default)]
@@ -44,7 +43,7 @@ pub(crate) struct SubscriptionRecord {
 }
 
 // Storage-facing subscription document model used by the optional subscriptions runtime.
-#[allow(dead_code)]
+#[cfg(feature = "subscriptions")]
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub(crate) struct SubscriptionStorageDocument {
     #[serde(default)]

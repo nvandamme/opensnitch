@@ -63,7 +63,7 @@ pub(crate) fn help_text() -> &'static str {
         "  check-kernel-caps                    Run kernel capability check (in-process, no build required)\n",
         "\n",
         "Test commands:\n",
-        "  test                                 Run parity test suites (config, firewall, client)\n",
+        "  test                                 Run full crate test suite (no name filter)\n",
         "  test-kernel-it                       Run kernel integration tests (privileged + strict)\n",
         "  test-filter                          Run tests matching --filter=PATTERN\n",
         "\n",

@@ -103,13 +103,15 @@ impl ConnectionService {
     async fn enrich_connection_owner_fallback_async(
         attempt: ConnectionAttempt,
     ) -> ConnectionAttempt {
-        let fallback = attempt.clone();
+        // Keep a clone for panic fallback since attempt is moved into spawn_blocking.
+        // The fallback clone is only needed if the blocking task panics, which is extremely rare.
+        let panic_fallback = attempt.clone();
         tokio::task::spawn_blocking(move || {
-            let mut attempt = attempt;
-            Self::enrich_connection_owner(&mut attempt);
-            attempt
+            let mut enriched = attempt;
+            Self::enrich_connection_owner(&mut enriched);
+            enriched
         })
         .await
-        .unwrap_or(fallback)
+        .unwrap_or(panic_fallback)
     }
 }

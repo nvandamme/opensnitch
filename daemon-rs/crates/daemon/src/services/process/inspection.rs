@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::fmt::Write as _;
 use std::time::Instant;
 
 use crate::models::{proc_event::ProcEventKind, process_state::ProcessInfo};
@@ -119,11 +120,31 @@ impl ProcessService {
         pid: u32,
         starttime: Option<u64>,
     ) {
+        if let Some(entry) = cache.entries.peek(&pid)
+            && entry.starttime == starttime
+            && entry.info.process_hash_md5.is_some()
+            && entry.info.process_hash_sha1.is_some()
+            && entry.info.process_hash.is_some()
+        {
+            return;
+        }
+
+        let inflight_key = (pid, starttime);
+        if cache
+            .hash_updates_inflight
+            .insert(inflight_key, ())
+            .is_some()
+        {
+            return;
+        }
+
         tokio::spawn(async move {
             let hash_cache = cache.hash_cache.clone();
             let hashes = tokio::task::spawn_blocking(move || {
                 // Resolve the exe path for persistent-cache lookup.
-                let exe_path = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+                let mut exe_link = String::with_capacity(32);
+                let _ = write!(&mut exe_link, "/proc/{pid}/exe");
+                let exe_path = std::fs::read_link(exe_link).ok();
 
                 // Try the persistent on-disk cache first (avoids reading the binary).
                 if let Some(ref exe) = exe_path {
@@ -153,6 +174,8 @@ impl ProcessService {
                     }
                 }
             }
+
+            let _ = cache.hash_updates_inflight.remove(&inflight_key);
         });
     }
 }

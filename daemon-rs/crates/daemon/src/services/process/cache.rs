@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use dashmap::DashMap;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -20,6 +21,7 @@ pub(super) struct ProcessCache {
     pub(super) entries: Arc<ConcurrentLruCache<u32, CachedProcessEntry, ProcessInfoWeighter>>,
     pub(super) exit_deadlines: tokio::sync::Mutex<HashMap<u32, Instant>>,
     pub(super) hash_cache: Arc<PersistentHashCache>,
+    pub(super) hash_updates_inflight: DashMap<(u32, Option<u64>), ()>,
 }
 
 impl Default for ProcessCache {
@@ -56,6 +58,7 @@ impl ProcessCache {
             )),
             exit_deadlines: tokio::sync::Mutex::new(HashMap::new()),
             hash_cache: Arc::new(PersistentHashCache::load_or_new(path)),
+            hash_updates_inflight: DashMap::new(),
         }
     }
 }

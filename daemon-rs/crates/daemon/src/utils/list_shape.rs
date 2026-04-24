@@ -1,4 +1,4 @@
-#![cfg(any(feature = "subscriptions", test))]
+#![cfg(feature = "subscriptions")]
 
 pub(crate) fn sample_content_lines_match<F>(sample: &[String], mut predicate: F) -> bool
 where

@@ -70,12 +70,14 @@ pub(crate) fn run_build() -> Result<(), DynError> {
 pub(crate) fn run_check_kernel_caps() -> Result<(), DynError> {
     #[cfg(feature = "kernel-caps-diag")]
     {
-    let diag = opensnitch_kernel_caps::run();
-    diag.print_report();
-    if !diag.all_pass {
-        return Err("kernel capability check reported missing features (see output above)".into());
-    }
-    Ok(())
+        let diag = opensnitch_kernel_caps::run();
+        diag.print_report();
+        if !diag.all_pass {
+            return Err(
+                "kernel capability check reported missing features (see output above)".into(),
+            );
+        }
+        Ok(())
     }
 
     #[cfg(not(feature = "kernel-caps-diag"))]
@@ -491,36 +493,58 @@ pub(crate) fn run_build_ebpf() -> Result<(), DynError> {
     Ok(())
 }
 
-/// `test`: run the three parity test suites in order:
-/// `tests::config_service::`, `tests::firewall_service::`, `tests::client::`.
+/// `test`: run the full crate test suite (no name filter).
 ///
-/// Flags: `--test-log=LEVEL` [`OPENSNITCH_TEST_LOG_LEVEL`],
-///        `--crate=NAME` [`OPENSNITCH_BUILD_CRATE`].
+/// Flags:
+/// - `--test-log=LEVEL`               [`OPENSNITCH_TEST_LOG_LEVEL`]
+/// - `--crate=NAME`                   [`OPENSNITCH_BUILD_CRATE`]
+/// - `--privileged`                   [`OPENSNITCH_RUN_PRIVILEGED_TESTS`]
+/// - `--kernel-it-strict`             [`OPENSNITCH_KERNEL_IT_STRICT`]
+/// - `--release`                      [`OPENSNITCH_TEST_RELEASE`]
+/// - `--ignored`                      [`OPENSNITCH_TEST_IGNORED`]
 pub(crate) fn run_parity_tests() -> Result<(), DynError> {
     crate::test_guard::with_guard("test", || {
         let (daemon_rs, crate_name, target) = common_params()?;
         let log = rust_test_log_level();
-        for suite in &[
-            "tests::config_service::",
-            "tests::firewall_service::",
-            "tests::client::",
-        ] {
-            run_live(
-                &daemon_rs,
-                &[
-                    "test",
-                    "--manifest-path",
-                    "Cargo.toml",
-                    "-p",
-                    &crate_name,
-                    suite,
-                    "--",
-                    "--nocapture",
-                ],
-                &[("CARGO_TARGET_DIR", &target), ("RUST_LOG", &log)],
-            )?;
+
+        let privileged = if env_flag("OPENSNITCH_RUN_PRIVILEGED_TESTS") {
+            "1"
+        } else {
+            "0"
+        };
+        let strict = if env_flag("OPENSNITCH_KERNEL_IT_STRICT") {
+            "1"
+        } else {
+            "0"
+        };
+
+        let mut owned: Vec<String> = vec![
+            "test".into(),
+            "--manifest-path".into(),
+            "Cargo.toml".into(),
+            "-p".into(),
+            crate_name,
+        ];
+        if env_flag("OPENSNITCH_TEST_RELEASE") {
+            owned.push("--release".into());
         }
-        Ok(())
+        owned.push("--".into());
+        owned.push("--nocapture".into());
+        if env_flag("OPENSNITCH_TEST_IGNORED") {
+            owned.push("--ignored".into());
+        }
+
+        let args: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+        run_live(
+            &daemon_rs,
+            &args,
+            &[
+                ("CARGO_TARGET_DIR", &target),
+                ("RUST_LOG", &log),
+                ("OPENSNITCH_RUN_PRIVILEGED_TESTS", privileged),
+                ("OPENSNITCH_KERNEL_IT_STRICT", strict),
+            ],
+        )
     }) // with_guard
 }
 

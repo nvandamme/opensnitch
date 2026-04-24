@@ -1,32 +1,15 @@
 //! OpenMetrics text format 1.0.0 encoder.
 //!
-//! One encoder, one format.  Used exclusively by the HTTP scrape transport
-//! (`http_serve`); OpenMetrics is a scrape-only wire format.
+//! One encoder, one format.  HTTP scrape/push transports reuse the shared
+//! compact exporter snapshot.
 //!
 //! Feature gate: `metrics-http-serve-openmetrics` OR `metrics-http-push-openmetrics`.
 use std::fmt::Write as _;
 
+use crate::models::metrics_snapshot::MetricsExportSnapshot;
 use transport_wire_core::WireSubscriptionStatistics;
 
-pub(crate) struct OpenMetricsSnapshot {
-    pub(crate) rules: u64,
-    pub(crate) uptime: u64,
-    pub(crate) dns_responses: u64,
-    pub(crate) connections: u64,
-    pub(crate) ignored: u64,
-    pub(crate) accepted: u64,
-    pub(crate) dropped: u64,
-    pub(crate) rule_hits: u64,
-    pub(crate) rule_misses: u64,
-    pub(crate) subscription_stats: Option<WireSubscriptionStatistics>,
-    pub(crate) by_proto: Vec<(String, u64)>,
-    pub(crate) by_address: Vec<(String, u64)>,
-    pub(crate) by_host: Vec<(String, u64)>,
-    pub(crate) by_port: Vec<(String, u64)>,
-    pub(crate) by_uid: Vec<(String, u64)>,
-    pub(crate) by_executable: Vec<(String, u64)>,
-    pub(crate) by_rule: Vec<(String, u64)>,
-}
+pub(crate) type OpenMetricsSnapshot = MetricsExportSnapshot;
 
 pub(crate) fn render_openmetrics_text(s: &OpenMetricsSnapshot) -> String {
     let created = std::time::SystemTime::now()

@@ -87,6 +87,15 @@ impl RuleService {
             }
         }
 
+        if total_regex_count == 0 {
+            return ListRegexCache {
+                aho_regexes,
+                fallback_regexes,
+                aho: None,
+                aho_pattern_to_regex_indices: Vec::new(),
+            };
+        }
+
         let should_enable_aho = RuleService::should_enable_aho(
             total_regex_count,
             literal_hint_count,
@@ -95,24 +104,20 @@ impl RuleService {
 
         let (aho, aho_pattern_to_regex_indices) =
             if !should_enable_aho || literal_to_indices.is_empty() {
-                fallback_regexes.extend(aho_regexes);
-                aho_regexes = Vec::new();
+                fallback_regexes.append(&mut aho_regexes);
                 (None, Vec::new())
             } else {
-                let mut literals = literal_to_indices.keys().collect::<Vec<_>>();
-                literals.sort_unstable();
+                let mut literal_pairs = literal_to_indices.into_iter().collect::<Vec<_>>();
+                literal_pairs.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
 
-                let mut mapping = Vec::with_capacity(literals.len());
-                for literal in &literals {
-                    mapping.push(
-                        literal_to_indices
-                            .get(literal.as_str())
-                            .cloned()
-                            .unwrap_or_default(),
-                    );
+                let mut literals = Vec::with_capacity(literal_pairs.len());
+                let mut mapping = Vec::with_capacity(literal_pairs.len());
+                for (literal, indices) in literal_pairs {
+                    literals.push(literal);
+                    mapping.push(indices);
                 }
 
-                let aho = AhoCorasick::new(literals.iter().map(|literal| literal.as_str())).ok();
+                let aho = AhoCorasick::new(literals.iter().map(String::as_str)).ok();
                 (aho, mapping)
             };
 

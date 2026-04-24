@@ -33,6 +33,8 @@ pub enum PushFormatConfig {
     /// Prometheus text 0.0.4 posted to `{url}/metrics/job/{job}`.
     #[default]
     Pushgateway,
+    /// OpenMetrics text 1.0.0 posted to `{url}/metrics/job/{job}`.
+    PushgatewayOpenmetrics,
     /// Prometheus protobuf (MetricFamily delimited) posted to
     /// `{url}/metrics/job/{job}`.
     PushgatewayProto,
@@ -51,6 +53,7 @@ impl PushFormatConfig {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pushgateway => "pushgateway",
+            Self::PushgatewayOpenmetrics => "pushgateway-openmetrics",
             Self::PushgatewayProto => "pushgateway-proto",
             Self::InfluxDb => "influxdb",
         }

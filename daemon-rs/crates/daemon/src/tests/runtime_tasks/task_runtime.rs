@@ -439,6 +439,7 @@ async fn ioc_scanner_without_schedule_emits_no_periodic_results() {
     let _ = timeout(Duration::from_secs(1), handle).await;
 }
 
+#[cfg(feature = "task-http")]
 #[tokio::test]
 async fn downloader_notify_payload_matches_go_success_message_shape() {
     use crate::services::process::ProcessService;
@@ -468,6 +469,42 @@ async fn downloader_notify_payload_matches_go_success_message_shape() {
     assert_eq!(reply.id, 15_001);
     assert_eq!(reply.code, WireNotificationReplyCode::Ok as i32);
     assert_eq!(reply.data, "[blocklists] lists updated");
+
+    token.cancel();
+    let _ = timeout(Duration::from_secs(1), handle).await;
+}
+
+#[cfg(not(feature = "task-http"))]
+#[tokio::test]
+async fn downloader_notify_payload_reports_missing_task_http_feature() {
+    use crate::services::process::ProcessService;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<WireNotificationReply>(4);
+    let token = CancellationToken::new();
+    let handle = TaskService.spawn_task_monitor_snapshot(
+        "downloader",
+        15_001,
+        crate::services::task::TaskRuntimePayload::from_task_data(
+            "downloader",
+            json!({
+                "interval": "100ms",
+                "notify": {"enabled": true},
+                "urls": []
+            }),
+        ),
+        token.clone(),
+        ProcessService::default(),
+        tx,
+    );
+
+    let reply = timeout(Duration::from_millis(900), rx.recv())
+        .await
+        .expect("downloader first sample timeout")
+        .expect("downloader reply missing");
+    assert_eq!(reply.id, 15_001);
+    assert_eq!(reply.code, WireNotificationReplyCode::Error as i32);
+    assert!(reply.data.contains("\"Task\":\"downloader\""));
+    assert!(reply.data.contains("requires feature `task-http`"));
 
     token.cancel();
     let _ = timeout(Duration::from_secs(1), handle).await;

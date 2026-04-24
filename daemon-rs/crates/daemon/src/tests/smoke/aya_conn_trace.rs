@@ -264,7 +264,7 @@ fn aya_conn_trace_smoke_reports_explicit_runtime_active() {
         std::env::temp_dir().join(format!("opensnitch-aya-conn-trace-test-{unique}.log"));
 
     let mut daemon = Command::new("timeout")
-        .arg("20s")
+        .args(["--kill-after=2s", "20s"])
         .arg(&daemon_bin)
         .env("OPENSNITCH_EBPF_PIN_DOMAIN", "aya")
         .env("RUST_LOG", "debug")

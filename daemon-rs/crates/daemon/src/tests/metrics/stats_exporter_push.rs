@@ -45,8 +45,8 @@ fn make_snapshot() -> MetricsSnapshot {
     let mut by_rule = HashMap::new();
     by_rule.insert("block-ads".to_string(), 5u64);
 
-    MetricsSnapshot {
-        stats: WireStatistics {
+    MetricsSnapshot::new(
+        WireStatistics {
             rules: 5,
             uptime: 1800,
             dns_responses: 80,
@@ -59,9 +59,9 @@ fn make_snapshot() -> MetricsSnapshot {
             by_proto,
             ..Default::default()
         },
-        subscription_stats: None,
+        None,
         by_rule,
-    }
+    )
 }
 
 fn make_sub_stats() -> WireSubscriptionStatistics {
@@ -818,6 +818,49 @@ async fn push_gateway_proto_posts_protobuf_body() {
 }
 
 #[tokio::test]
+async fn push_gateway_openmetrics_posts_openmetrics_body() {
+    let (base_url, captured) = spawn_capture_server().await;
+    let config = PushConfig {
+        url: base_url,
+        format: PushFormat::PushgatewayOpenMetrics,
+        job: "opensnitchd".to_string(),
+        token: None,
+        gzip: false,
+        bucket: String::new(),
+        org: String::new(),
+    };
+    let endpoint = build_endpoint(&config);
+
+    let mut snap = make_snapshot();
+    snap.subscription_stats = Some(make_sub_stats());
+    let cs = CompactSnapshot::from(&snap);
+
+    let client = reqwest::Client::new();
+    post_snapshot(&client, &config, &endpoint, &cs)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let guard = captured.lock().await;
+    let (ct, body_bytes) = guard.as_ref().expect("no request captured");
+    assert!(
+        ct.contains("application/openmetrics-text"),
+        "content-type: {ct}"
+    );
+
+    let body = std::str::from_utf8(body_bytes).unwrap();
+    assert!(
+        body.contains("opensnitch_connections_total 200"),
+        "connections\n{body}"
+    );
+    assert!(
+        body.contains("# EOF"),
+        "missing openmetrics eof marker\n{body}"
+    );
+}
+
+#[tokio::test]
 async fn influxdb_push_posts_line_protocol_body() {
     let (base_url, captured) = spawn_capture_server().await;
     let config = influx_config(&base_url);
@@ -859,8 +902,6 @@ async fn influxdb_push_posts_line_protocol_body() {
 
 #[tokio::test]
 async fn push_gateway_bearer_token_sent_in_authorization_header() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     let received_auth: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let received_auth_outer = received_auth.clone();
 

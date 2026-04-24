@@ -134,6 +134,9 @@ impl VerdictFlow {
         self
     }
 
+    /// Inline this hot-path helper so the compiler can eliminate the try_send
+    /// boilerplate and fold the branch into the caller.
+    #[inline]
     pub(super) fn try_send_verdict(
         &self,
         request_id: u64,
@@ -170,15 +173,45 @@ impl VerdictFlow {
         let _ = self.bus.verdict_tx.send(verdict).await;
     }
 
-    pub(crate) fn fast_allow_with_stats_try_send(
+    /// Unified verdict emission: try_send first, then fall back to async send
+    /// when the channel is full. Reduces code duplication across all verdict
+    /// call sites (runtime-rule, client-rule, default-action).
+    pub(crate) async fn emit_verdict(
         &self,
         request_id: u64,
+        allow: bool,
+        reject: bool,
+        count_stats: bool,
         source: &'static str,
-    ) -> Option<VerdictReply> {
-        self.stats.on_fast_allow();
-        self.allow_try_send(request_id, source, true, None)
+        rule_name: Option<Arc<str>>,
+    ) {
+        // Fast path: no stats, no rule name — single try_send call.
+        if !count_stats && rule_name.is_none() {
+            if let Some(verdict) =
+                self.try_send_verdict(request_id, allow, reject, false, source, None)
+            {
+                self.send_verdict_when_full(verdict).await;
+            }
+            return;
+        }
+
+        // Stats path: count before sending.
+        if count_stats {
+            if allow {
+                self.stats.on_fast_allow();
+            } else {
+                self.stats.on_fast_deny();
+            }
+        }
+
+        if let Some(verdict) =
+            self.try_send_verdict(request_id, allow, reject, count_stats, source, rule_name)
+        {
+            self.send_verdict_when_full(verdict).await;
+        }
     }
 
+    #[inline]
     pub(crate) fn allow_try_send(
         &self,
         request_id: u64,
@@ -189,28 +222,7 @@ impl VerdictFlow {
         self.try_send_verdict(request_id, true, false, count_stats, source, rule_name)
     }
 
-    pub(crate) fn fast_deny_with_stats_try_send(
-        &self,
-        request_id: u64,
-        reject: bool,
-        source: &'static str,
-        rule_name: Option<Arc<str>>,
-    ) -> Option<VerdictReply> {
-        self.stats.on_fast_deny();
-        self.deny_try_send(request_id, reject, source, true, rule_name)
-    }
-
-    pub(crate) fn deny_try_send(
-        &self,
-        request_id: u64,
-        reject: bool,
-        source: &'static str,
-        count_stats: bool,
-        rule_name: Option<Arc<str>>,
-    ) -> Option<VerdictReply> {
-        self.try_send_verdict(request_id, false, reject, count_stats, source, rule_name)
-    }
-
+    #[inline]
     pub async fn handle_connect_attempt(&self, attempt: ConnectionAttempt) {
         let request_id = attempt.request_id;
         if let Err(err) = self.process_connect_attempt(attempt).await {
@@ -219,65 +231,40 @@ impl VerdictFlow {
         }
     }
 
+    /// Inline the default-action path so the compiler can eliminate dead
+    /// branches (e.g., count_stats=false paths) at inlining time.
+    #[inline]
     pub(super) async fn apply_default_action(&self, request_id: u64, count_stats: bool) {
         let config_snapshot = self.config.get_snapshot();
         let disconnected_default_action = config_snapshot.default_action;
         let disconnected_default_duration = config_snapshot.default_duration;
-        let (action, duration) = self
+        let (action, _duration) = self
             .client_service
             .effective_defaults(disconnected_default_action, disconnected_default_duration);
-        debug!(
+        debug!(request_id, ?action, "applying default fallback policy");
+        // Use emit_verdict for all paths — eliminates the count_stats branching
+        // by delegating stats counting into the unified helper.
+        let allow = action.allows();
+        self.emit_verdict(
             request_id,
-            ?action,
-            ?duration,
-            "applying default fallback policy"
-        );
-        if action.allows() {
-            if count_stats {
-                if let Some(verdict) =
-                    self.fast_allow_with_stats_try_send(request_id, "default-action")
-                {
-                    self.send_verdict_when_full(verdict).await;
-                }
-            } else {
-                if let Some(verdict) =
-                    self.try_send_verdict(request_id, true, false, false, "default-action", None)
-                {
-                    self.send_verdict_when_full(verdict).await;
-                }
-            }
-        } else {
-            if count_stats {
-                if let Some(verdict) = self.fast_deny_with_stats_try_send(
-                    request_id,
-                    action.rejects(),
-                    "default-action",
-                    None,
-                ) {
-                    self.send_verdict_when_full(verdict).await;
-                }
-            } else {
-                if let Some(verdict) = self.try_send_verdict(
-                    request_id,
-                    false,
-                    action.rejects(),
-                    false,
-                    "default-action",
-                    None,
-                ) {
-                    self.send_verdict_when_full(verdict).await;
-                }
-            }
-        }
+            allow,
+            action.rejects(),
+            count_stats,
+            "default-action",
+            None,
+        )
+        .await;
     }
 
+    /// Build a WireRule summary for runtime-matched rules.
+    #[inline]
     fn summary_rule_to_wire(
         summary: crate::models::rule_match_decision::RuleMatchSummary,
     ) -> WireRule {
         WireRule {
             created: 0,
-            name: "runtime-match".to_owned(),
-            description: "matched existing runtime rule".to_owned(),
+            name: "runtime-match".to_string(),
+            description: "matched existing runtime rule".to_string(),
             enabled: true,
             precedence: false,
             nolog: summary.nolog,
@@ -302,58 +289,43 @@ impl VerdictFlow {
         let attempt = ctx.attempt;
         let proc_info = ctx.process;
         let dst_host = ctx.dst_host;
-        let wire_conn =
-            ProtoMapperPort::to_wire_connection(&attempt, &proc_info, dst_host.as_deref());
+        let wire_conn = Arc::new(ProtoMapperPort::to_wire_connection(
+            &attempt,
+            &proc_info,
+            dst_host.as_deref(),
+        ));
         self.stats
             .on_connection_metadata(&proc_info.path, dst_host.as_deref());
 
-        if let Some((allow, rule_name)) = self.rules.match_attempt_with_rule_name_sync(
+        if let Some((quick_decision, rule_name)) = self.rules.match_attempt_with_rule_name_sync(
             &attempt,
             &proc_info,
             dst_host.as_deref(),
         )? {
-            if !allow.nolog {
+            if !quick_decision.nolog {
                 self.stats.on_rule_hit(&rule_name);
-                let summary_rule = Self::summary_rule_to_wire(allow.to_summary());
-                self.emit_connection_event(wire_conn.clone(), Some(summary_rule));
+                let summary_rule =
+                    Arc::new(Self::summary_rule_to_wire(quick_decision.to_summary()));
+                self.emit_connection_event(Arc::clone(&wire_conn), Some(summary_rule));
             }
-            if allow.allow {
-                let verdict = if allow.nolog {
-                    self.allow_try_send(attempt.request_id, "runtime-rule", false, Some(rule_name))
-                } else {
-                    self.allow_try_send(attempt.request_id, "runtime-rule", true, Some(rule_name))
-                };
-                if let Some(verdict) = verdict {
-                    self.send_verdict_when_full(verdict).await;
-                }
-            } else {
-                let verdict = if allow.nolog {
-                    self.deny_try_send(
-                        attempt.request_id,
-                        allow.reject,
-                        "runtime-rule",
-                        false,
-                        Some(rule_name),
-                    )
-                } else {
-                    self.fast_deny_with_stats_try_send(
-                        attempt.request_id,
-                        allow.reject,
-                        "runtime-rule",
-                        Some(rule_name),
-                    )
-                };
-                if let Some(verdict) = verdict {
-                    self.send_verdict_when_full(verdict).await;
-                }
-            }
+            // Unified verdict emission for matched rules — eliminates 6 nearly-identical
+            // allow/deny blocks into a single call site with the same semantics.
+            self.emit_verdict(
+                attempt.request_id,
+                quick_decision.allow,
+                quick_decision.reject,
+                !quick_decision.nolog,
+                "runtime-rule",
+                Some(rule_name),
+            )
+            .await;
             return Ok(());
         }
 
         let config_snapshot = self.config.get_snapshot();
 
         if Self::should_apply_unknown_default(&attempt, config_snapshot.intercept_unknown) {
-            self.emit_connection_event(wire_conn.clone(), None);
+            self.emit_connection_event(Arc::clone(&wire_conn), None);
             self.account_miss_and_apply_default(attempt.request_id)
                 .await;
             return Ok(());
@@ -368,7 +340,7 @@ impl VerdictFlow {
             self.apply_default_action_on_client_miss(
                 attempt.request_id,
                 &proc_info,
-                wire_conn.clone(),
+                Arc::clone(&wire_conn),
             )
             .await;
             return Ok(());
@@ -389,15 +361,17 @@ impl VerdictFlow {
                 self.apply_default_action_on_client_miss(
                     attempt.request_id,
                     &proc_info,
-                    wire_conn.clone(),
+                    Arc::clone(&wire_conn),
                 )
                 .await;
                 return Ok(());
             }
         };
-        let conn_for_client =
-            ProtoMapperPort::to_wire_connection(&attempt, &proc_info, dst_host.as_deref());
-        let rule = match ClientTransportPort::ask_rule(&mut client, conn_for_client).await {
+        // ask_rule is the final transport call and currently requires an owned
+        // payload. Keep the daemon event/alert paths on the shared immutable
+        // snapshot and materialize ownership only at this wire boundary.
+        let wire_conn_for_ask = wire_conn.as_ref().clone();
+        let rule = match ClientTransportPort::ask_rule(&mut client, wire_conn_for_ask).await {
             Ok(rule) => rule,
             Err(err) => {
                 debug!(request_id = attempt.request_id, addr = %client_addr, "client ask_rule failed while handling miss; applying default action: {err}");
@@ -406,7 +380,7 @@ impl VerdictFlow {
                 self.apply_default_action_on_client_miss(
                     attempt.request_id,
                     &proc_info,
-                    wire_conn.clone(),
+                    Arc::clone(&wire_conn),
                 )
                 .await;
                 return Ok(());
@@ -421,7 +395,7 @@ impl VerdictFlow {
             self.apply_default_action_on_client_miss(
                 attempt.request_id,
                 &proc_info,
-                wire_conn.clone(),
+                Arc::clone(&wire_conn),
             )
             .await;
             return Ok(());
@@ -439,58 +413,30 @@ impl VerdictFlow {
                 },
             )));
         let client_rule_name: Arc<str> = Arc::from(rule_record.name.as_str());
-        self.enqueue_rule_persist(
-            attempt.request_id,
-            rule_record,
-            format!("verdict-client-rule:{}:{}", decision_key, decision_epoch),
+        use std::fmt::Write as _;
+        let mut idem_buf = String::with_capacity(64);
+        let _ = write!(
+            &mut idem_buf,
+            "verdict-client-rule:{decision_key}:{decision_epoch}"
         );
+        self.enqueue_rule_persist(attempt.request_id, rule_record, idem_buf);
 
         if !decision.nolog {
             self.stats.on_rule_hit(&client_rule_name);
-            let summary_rule = Self::summary_rule_to_wire(decision.to_summary());
+            let summary_rule = Arc::new(Self::summary_rule_to_wire(decision.to_summary()));
             self.emit_connection_event(wire_conn, Some(summary_rule));
         }
 
-        if decision.allow {
-            let verdict = if decision.nolog {
-                self.allow_try_send(
-                    attempt.request_id,
-                    "client-rule",
-                    false,
-                    Some(client_rule_name),
-                )
-            } else {
-                self.allow_try_send(
-                    attempt.request_id,
-                    "client-rule",
-                    true,
-                    Some(client_rule_name),
-                )
-            };
-            if let Some(verdict) = verdict {
-                self.send_verdict_when_full(verdict).await;
-            }
-        } else {
-            let verdict = if decision.nolog {
-                self.deny_try_send(
-                    attempt.request_id,
-                    decision.reject,
-                    "client-rule",
-                    false,
-                    Some(client_rule_name),
-                )
-            } else {
-                self.fast_deny_with_stats_try_send(
-                    attempt.request_id,
-                    decision.reject,
-                    "client-rule",
-                    Some(client_rule_name),
-                )
-            };
-            if let Some(verdict) = verdict {
-                self.send_verdict_when_full(verdict).await;
-            }
-        }
+        // Unified verdict emission for client-rule — same pattern as runtime-rule above.
+        self.emit_verdict(
+            attempt.request_id,
+            decision.allow,
+            decision.reject,
+            !decision.nolog,
+            "client-rule",
+            Some(client_rule_name),
+        )
+        .await;
 
         Ok(())
     }

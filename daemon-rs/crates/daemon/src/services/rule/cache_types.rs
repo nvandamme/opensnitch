@@ -51,22 +51,20 @@ pub(crate) struct DomainWildcardTrie {
 
 impl DomainWildcardTrie {
     pub(crate) fn insert_suffix(&mut self, suffix: &str) {
-        let labels = suffix
-            .split('.')
-            .filter(|label| !label.is_empty())
-            .collect::<Vec<_>>();
-        if labels.is_empty() {
-            return;
-        }
-
         let mut node = &mut self.root;
-        for label in labels.iter().rev() {
+        let mut label_count = 0usize;
+        for label in suffix.rsplit('.').filter(|label| !label.is_empty()) {
+            label_count += 1;
             // Normalise to lower-case: trie lookups are case-insensitive
             // regardless of capitalisation in the source list file.
             node = node.children.entry(label.to_lowercase()).or_default();
         }
 
-        let required = labels.len() + 1;
+        if label_count == 0 {
+            return;
+        }
+
+        let required = label_count + 1;
         node.min_host_labels_required = Some(
             node.min_host_labels_required
                 .map(|current| current.min(required))
@@ -85,22 +83,20 @@ impl DomainWildcardTrie {
     /// which per the specification block `example.org` **and** all its subdomains
     /// such as `www.example.org`.
     pub(crate) fn insert_domain_and_subdomains(&mut self, domain: &str) {
-        let labels = domain
-            .split('.')
-            .filter(|label| !label.is_empty())
-            .collect::<Vec<_>>();
-        if labels.is_empty() {
-            return;
+        let mut node = &mut self.root;
+        let mut label_count = 0usize;
+        for label in domain.rsplit('.').filter(|label| !label.is_empty()) {
+            label_count += 1;
+            node = node.children.entry(label.to_lowercase()).or_default();
         }
 
-        let mut node = &mut self.root;
-        for label in labels.iter().rev() {
-            node = node.children.entry(label.to_lowercase()).or_default();
+        if label_count == 0 {
+            return;
         }
 
         // required = labels.len(): matches the domain itself (exact) and any deeper
         // subdomain (which has strictly more labels).
-        let required = labels.len();
+        let required = label_count;
         node.min_host_labels_required = Some(
             node.min_host_labels_required
                 .map(|current| current.min(required))

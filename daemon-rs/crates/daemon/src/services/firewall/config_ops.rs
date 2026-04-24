@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use anyhow::Result;
 
@@ -14,6 +14,23 @@ use crate::{
 use super::{firewall::FirewallService, runtime_store::FirewallRuntime};
 
 impl FirewallService {
+    /// Load system firewall config from disk on the blocking thread pool.
+    ///
+    /// Shared helper used by `reload_from_config` and `reconcile_from_config`
+    /// to avoid duplicating blocking file I/O glue.
+    async fn load_system_firewall_from_disk(
+        path: &Path,
+        backend: FirewallBackend,
+    ) -> Result<Option<FirewallConfig>, String> {
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            Self::load_system_firewall_from_backend_and_path(&path, backend)
+        })
+        .await
+        .map_err(|err| format!("firewall disk read task join error: {err}"))?
+        .map_err(|err| format!("firewall disk read panicked: {err}"))
+    }
+
     fn effective_firewall_persistence_mode(config: &Config) -> FirewallPersistenceMode {
         #[cfg(feature = "openwrt")]
         if matches!(config.firewall_backend, FirewallBackend::OpenWrtUci) {
@@ -94,21 +111,16 @@ impl FirewallService {
             path = %config.firewall_config_path.display(),
             "reloading firewall service from config"
         );
-        let path = config.firewall_config_path.clone();
-        let backend = config.firewall_backend;
-        let system_firewall = match tokio::task::spawn_blocking(move || {
-            Self::load_system_firewall_from_backend_and_path(&path, backend)
-        })
+        let system_firewall = match Self::load_system_firewall_from_disk(
+            &config.firewall_config_path,
+            config.firewall_backend,
+        )
         .await
         {
-            Ok(Ok(system_firewall)) => system_firewall,
-            Ok(Err(err)) => {
-                self.emit_error(format!("failed to reload firewall config from disk: {err}"));
-                return Err(err);
-            }
+            Ok(result) => result,
             Err(err) => {
-                self.emit_error(format!("failed to join firewall reload task: {err}"));
-                return Err(err.into());
+                self.emit_error(format!("failed to reload firewall config from disk: {err}"));
+                return Err(anyhow::anyhow!("{err}"));
             }
         };
         let current = self.runtime_snapshot();
@@ -129,23 +141,18 @@ impl FirewallService {
 
     pub async fn reconcile_from_config(&self, config: &Config) -> Result<()> {
         tracing::info!(backend = ?config.firewall_backend, path = %config.firewall_config_path.display(), "reconciling firewall runtime from config");
-        let path = config.firewall_config_path.clone();
-        let backend = config.firewall_backend;
-        let system_firewall = match tokio::task::spawn_blocking(move || {
-            Self::load_system_firewall_from_backend_and_path(&path, backend)
-        })
+        let system_firewall = match Self::load_system_firewall_from_disk(
+            &config.firewall_config_path,
+            config.firewall_backend,
+        )
         .await
         {
-            Ok(Ok(system_firewall)) => system_firewall,
-            Ok(Err(err)) => {
+            Ok(result) => result,
+            Err(err) => {
                 self.emit_error(format!(
                     "failed to read firewall config during reconcile: {err}"
                 ));
-                return Err(err);
-            }
-            Err(err) => {
-                self.emit_error(format!("failed to join firewall reconcile task: {err}"));
-                return Err(err.into());
+                return Err(anyhow::anyhow!("{err}"));
             }
         };
 
@@ -211,6 +218,7 @@ impl FirewallService {
             Self::effective_firewall_persistence_mode(config),
             FirewallPersistenceMode::Durable
         ) {
+            let mut persisted_payload = system_firewall.clone();
             if let Some(sysfw) = system_firewall.as_ref() {
                 let path = config.firewall_config_path.clone();
                 let backend = config.firewall_backend;
@@ -236,7 +244,15 @@ impl FirewallService {
                 }
             }
 
-            if let Err(err) = self.reconcile_from_config(config).await {
+            let reconcile_result = if let Some(payload) = persisted_payload.take() {
+                self.reconcile_with_system_firewall(config, Some(payload))
+                    .await
+            } else {
+                // Preserve existing behavior for `None`: durable mode continues
+                // to source runtime payload from persisted backend state.
+                self.reconcile_from_config(config).await
+            };
+            if let Err(err) = reconcile_result {
                 self.emit_error(format!("failed to reconcile firewall after replace: {err}"));
                 return Err(err);
             }

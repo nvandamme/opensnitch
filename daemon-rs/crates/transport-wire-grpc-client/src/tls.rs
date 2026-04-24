@@ -15,6 +15,16 @@ use x509_cert::der::Decode;
 
 use crate::{WireEndpoint, WireSession, wire_connect_https_session};
 
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct WireServerCertIdentity {
     pub fingerprint_sha256: Option<String>,
@@ -183,7 +193,7 @@ impl CertCapturingVerifier {
     fn extract_identity(cert_der: &CertificateDer<'_>) -> WireServerCertIdentity {
         let fingerprint = {
             let digest = Sha256::digest(cert_der.as_ref());
-            let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+            let hex = hex_lower(digest.as_ref());
             Some(hex)
         };
 

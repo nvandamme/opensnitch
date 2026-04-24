@@ -23,24 +23,36 @@ pub(crate) fn render_line_protocol(s: &super::http_push_influxdb::CompactSnapsho
     buf.push_str(&ts.to_string());
     buf.push('\n');
 
-    if let Some(sub) = &s.subscription_stats {
-        for (status, count) in &sub.by_status {
+    if s.subscription_stats.is_some() {
+        for (status, count) in &s.by_subscription_status {
             let st = escape_tag_value(status);
             buf.push_str(&format!(
                 "opensnitch_subscription_by_status,status={st} count={count}i {ts}\n"
             ));
         }
-        for (group, count) in &sub.by_group {
+        for (group, count) in &s.by_subscription_group {
             let g = escape_tag_value(group);
             buf.push_str(&format!(
                 "opensnitch_subscription_by_group,group={g} count={count}i {ts}\n"
             ));
         }
-        for (node, count) in &sub.by_node {
+        for (node, count) in &s.by_subscription_node {
             let n = escape_tag_value(node);
             buf.push_str(&format!(
                 "opensnitch_subscription_by_node,node={n} count={count}i {ts}\n"
             ));
+        }
+
+        if let Some(sub) = &s.subscription_stats {
+            for entry in &sub.rule_subscriptions {
+                let rule = escape_tag_value(&entry.rule);
+                for subscription in &entry.subscriptions {
+                    let subscription = escape_tag_value(subscription);
+                    buf.push_str(&format!(
+                        "opensnitch_subscription_rule,rule={rule},subscription={subscription} info=1i {ts}\n"
+                    ));
+                }
+            }
         }
     }
 

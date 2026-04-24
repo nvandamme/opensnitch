@@ -15,6 +15,7 @@ pub mod http_response;
 pub mod json_value;
 #[cfg(feature = "kernel-caps-diag")]
 pub mod kernel_caps;
+#[cfg(feature = "subscriptions")]
 pub mod list_shape;
 pub mod lru_cache;
 pub mod name_parsing;
@@ -25,10 +26,13 @@ pub mod path_text;
 pub mod proc_fs;
 pub mod proc_net;
 pub mod ring_buffer;
+#[cfg(feature = "subscriptions")]
 pub mod schedule_backoff;
+#[cfg(feature = "subscriptions")]
 pub mod schedule_wake;
 pub mod serde_helpers;
 pub mod sort_key;
+#[cfg(feature = "subscriptions")]
 pub mod stable_id;
 pub mod string_iter;
 pub mod systemd_notify;

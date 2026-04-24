@@ -40,22 +40,6 @@ impl EbpfService {
             Err(_) => EbpfObjectAvailability::default(),
         }
     }
-    // Optional helper retained for profile-specific process map introspection paths.
-    #[allow(dead_code)]
-    pub fn process_pin_root(&self) -> &'static str {
-        let Some(obj) = self.process_obj.as_ref() else {
-            return self.pin_domain.conn_root();
-        };
-
-        let file_name = obj.file_name().and_then(|v| v.to_str()).unwrap_or_default();
-
-        if file_name.to_lowercase().contains("procs") {
-            self.pin_domain.proc_root()
-        } else {
-            self.pin_domain.conn_root()
-        }
-    }
-
     pub(crate) fn pin_domain(&self) -> EbpfPinDomain {
         self.pin_domain
     }

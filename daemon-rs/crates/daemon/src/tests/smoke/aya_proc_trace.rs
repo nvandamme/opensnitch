@@ -146,7 +146,7 @@ fn aya_proc_trace_smoke_reports_explicit_runtime_active() {
         std::env::temp_dir().join(format!("opensnitch-aya-proc-trace-test-{unique}.log"));
 
     let mut daemon = Command::new("timeout")
-        .arg("18s")
+        .args(["--kill-after=2s", "18s"])
         .arg(&daemon_bin)
         .env("OPENSNITCH_EBPF_PIN_DOMAIN", "aya")
         .env("OPENSNITCH_TUNE_KERNEL_PROCESS_QUEUE_CAPACITY", "8192")

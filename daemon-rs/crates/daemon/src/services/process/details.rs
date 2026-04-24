@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::Read,
+    path::PathBuf,
 };
 
 use anyhow::{Context, Result};
@@ -15,20 +16,20 @@ use crate::models::process_state::{ProcessInfo, ProcessNode};
 use super::ProcessService;
 
 impl ProcessService {
-    /// Full process inspection including exe hash computation.
-    ///
-    /// Prefer [`inspect_process_no_hash`] + background [`compute_process_hashes`] on
-    /// the connection hot path to avoid blocking the thread pool on large binaries.
-    // Sync inspector retained for optional call paths that cannot await in hot control flow.
-    #[allow(dead_code)]
-    pub(super) fn inspect_process(pid: u32) -> Result<ProcessInfo> {
-        let mut info = Self::inspect_process_no_hash(pid)?;
-        if let Some((md5, sha1, sha256)) = Self::compute_process_hashes(pid) {
-            info.process_hash_md5 = Some(md5);
-            info.process_hash_sha1 = Some(sha1);
-            info.process_hash = Some(sha256);
+    fn proc_base_path(pid: u32) -> PathBuf {
+        let mut path = PathBuf::from("/proc");
+        path.push(pid.to_string());
+        path
+    }
+
+    fn hex_lower(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0x0f) as usize] as char);
         }
-        Ok(info)
+        out
     }
 
     /// Process inspection without exe hash computation.
@@ -37,23 +38,25 @@ impl ProcessService {
     /// [`compute_process_hashes`] asynchronously and update the process cache when
     /// complete to enable hash-based rule matching on subsequent connections.
     pub(super) fn inspect_process_no_hash(pid: u32) -> Result<ProcessInfo> {
-        let path = fs::read_link(format!("/proc/{pid}/exe"))
+        let proc_base = Self::proc_base_path(pid);
+
+        let path = fs::read_link(proc_base.join("exe"))
             .with_context(|| format!("read exe for pid {pid}"))?
             .to_string_lossy()
             .into_owned();
 
-        let args: Vec<String> = fs::read(format!("/proc/{pid}/cmdline"))
+        let args: Vec<String> = fs::read(proc_base.join("cmdline"))
             .unwrap_or_default()
             .split(|&b| b == 0)
             .filter(|s| !s.is_empty())
             .map(|s| String::from_utf8_lossy(s).into_owned())
             .collect();
 
-        let cwd = fs::read_link(format!("/proc/{pid}/cwd"))
+        let cwd = fs::read_link(proc_base.join("cwd"))
             .ok()
             .map(|p| p.to_string_lossy().into_owned());
 
-        let raw_environ = fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+        let raw_environ = fs::read(proc_base.join("environ")).unwrap_or_default();
         let env_entries_hint = if raw_environ.is_empty() {
             0
         } else {
@@ -62,11 +65,12 @@ impl ProcessService {
         let mut env_preview = Vec::with_capacity(env_entries_hint);
         let mut env_map = HashMap::with_capacity(env_entries_hint);
         for entry in raw_environ.split(|&b| b == 0).filter(|s| !s.is_empty()) {
-            let entry_text = String::from_utf8_lossy(entry).into_owned();
-            if let Some((key, value)) = entry_text.split_once('=') {
-                env_map.insert(key.to_string(), value.to_string());
+            if let Some(eq_index) = entry.iter().position(|&byte| byte == b'=') {
+                let key = String::from_utf8_lossy(&entry[..eq_index]).into_owned();
+                let value = String::from_utf8_lossy(&entry[eq_index + 1..]).into_owned();
+                env_map.insert(key, value);
             }
-            env_preview.push(entry_text);
+            env_preview.push(String::from_utf8_lossy(entry).into_owned());
         }
 
         let parent_chain = Self::build_parent_chain(pid);
@@ -86,7 +90,7 @@ impl ProcessService {
     }
 
     pub(super) fn compute_process_hashes(pid: u32) -> Option<(String, String, String)> {
-        let exe_path = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+        let exe_path = fs::read_link(Self::proc_base_path(pid).join("exe")).ok()?;
 
         // Fast path: if IMA has already measured this file, read the SHA-256 digest
         // directly from the `security.ima` xattr — avoids reading the whole binary.
@@ -154,7 +158,7 @@ impl ProcessService {
 
         if header_type == IMA_HASH_TYPE && algo == HASH_ALGO_SHA256 {
             let digest = &buf[4..36];
-            return Some(digest.iter().map(|b| format!("{b:02x}")).collect());
+            return Some(Self::hex_lower(digest));
         }
 
         None
@@ -174,16 +178,8 @@ impl ProcessService {
             hasher_sha1.update(&buf[..n]);
         }
         Some((
-            hasher_md5
-                .finalize()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect(),
-            hasher_sha1
-                .finalize()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect(),
+            Self::hex_lower(&hasher_md5.finalize()),
+            Self::hex_lower(&hasher_sha1.finalize()),
         ))
     }
 
@@ -208,9 +204,9 @@ impl ProcessService {
         let digest_sha1 = hasher_sha1.finalize();
         let digest = hasher.finalize();
         Some((
-            digest_md5.iter().map(|b| format!("{b:02x}")).collect(),
-            digest_sha1.iter().map(|b| format!("{b:02x}")).collect(),
-            digest.iter().map(|b| format!("{b:02x}")).collect(),
+            Self::hex_lower(&digest_md5),
+            Self::hex_lower(&digest_sha1),
+            Self::hex_lower(&digest),
         ))
     }
 
@@ -224,7 +220,9 @@ impl ProcessService {
                 break;
             }
 
-            let exe = fs::read_link(format!("/proc/{current}/exe"))
+            let current_base = Self::proc_base_path(current);
+
+            let exe = fs::read_link(current_base.join("exe"))
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| format!("[{current}]"));
 
@@ -237,7 +235,7 @@ impl ProcessService {
                 break;
             }
 
-            let status = match fs::read_to_string(format!("/proc/{current}/status")) {
+            let status = match fs::read_to_string(current_base.join("status")) {
                 Ok(s) => s,
                 Err(_) => break,
             };
@@ -258,7 +256,7 @@ impl ProcessService {
     }
 
     pub(super) fn read_proc_starttime(pid: u32) -> Option<u64> {
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let stat = fs::read_to_string(Self::proc_base_path(pid).join("stat")).ok()?;
         let after_comm = stat.rsplit_once(") ")?.1;
         after_comm
             .split_whitespace()

@@ -2,11 +2,14 @@ use std::{
     collections::HashMap,
     hash::Hash,
     net::IpAddr,
-    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
     time::Instant,
 };
 
-use transport_wire_core::WireEvent;
+use transport_wire_core::{WireConnection, WireEvent, WireRule};
 
 use crate::utils::ring_buffer::RingBuffer;
 
@@ -89,7 +92,7 @@ impl Default for BreakdownCounters {
 /// with breakdown counter updates.
 pub(super) struct EventsState {
     pub(super) started_at: Option<Instant>,
-    pub(super) events: RingBuffer<WireEvent>,
+    pub(super) events: RingBuffer<StatsEvent>,
     pub(super) max_events: usize,
     pub(super) workers: usize,
 }
@@ -102,6 +105,24 @@ impl Default for EventsState {
             events: RingBuffer::new(max_events),
             max_events,
             workers: 6,
+        }
+    }
+}
+
+pub(super) struct StatsEvent {
+    pub(super) time: String,
+    pub(super) connection: Option<Arc<WireConnection>>,
+    pub(super) rule: Option<Arc<WireRule>>,
+    pub(super) unixnano: i64,
+}
+
+impl StatsEvent {
+    pub(super) fn into_wire_event(self) -> WireEvent {
+        WireEvent {
+            time: self.time,
+            connection: self.connection.map(|connection| (*connection).clone()),
+            rule: self.rule.map(|rule| (*rule).clone()),
+            unixnano: self.unixnano,
         }
     }
 }
@@ -131,9 +152,11 @@ impl LimitedCountersString {
             self.evict_min();
         }
 
-        let owned = key.to_string();
-        self.map.insert(owned.clone(), 1);
-        self.min_key = Some(owned);
+        // Use `String::from` (single allocation) and clone only for the map entry.
+        // `min_key` owns the canonical String; the map entry is a secondary copy.
+        let canonical = String::from(key);
+        self.map.insert(canonical.clone(), 1);
+        self.min_key = Some(canonical);
         self.min_dirty = false;
     }
 

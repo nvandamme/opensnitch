@@ -25,8 +25,8 @@ fn make_snapshot() -> MetricsSnapshot {
     let mut by_node = HashMap::new();
     by_node.insert("node-a".to_string(), 2u64);
 
-    MetricsSnapshot {
-        stats: WireStatistics {
+    MetricsSnapshot::new(
+        WireStatistics {
             rules: 5,
             uptime: 1800,
             dns_responses: 99,
@@ -41,7 +41,7 @@ fn make_snapshot() -> MetricsSnapshot {
             by_executable,
             ..Default::default()
         },
-        subscription_stats: Some(WireSubscriptionStatistics {
+        Some(WireSubscriptionStatistics {
             total: 2,
             ready: 2,
             error: 0,
@@ -57,13 +57,13 @@ fn make_snapshot() -> MetricsSnapshot {
             }],
         }),
         by_rule,
-    }
+    )
 }
 
 #[test]
 fn syslog_encoder_emits_rich_metric_records() {
     let snapshot = make_snapshot();
-    let out = super::super::encoder_syslog::encode_syslog_metrics(&snapshot);
+    let out = super::super::encoder_syslog::encode_syslog_metrics(&snapshot.export_view());
 
     assert!(
         out.iter()

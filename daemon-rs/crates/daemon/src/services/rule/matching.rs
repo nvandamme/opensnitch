@@ -460,7 +460,9 @@ impl RuleService {
                 Self::operator_matches_text(&compiled.operator, hash.as_ref(), caches)
             }
             ActiveOperatorDispatch::ListComposite => compiled.operator.list.iter().all(|item| {
-                Self::operator_matches_against(item, attempt, process, dst_host, caches)
+                Self::operator_matches_against_with_derived(
+                    item, attempt, derived, process, dst_host, caches,
+                )
             }),
             ActiveOperatorDispatch::ProcessParentPath => {
                 process.parent_chain.iter().any(|parent| {
@@ -555,15 +557,21 @@ impl RuleService {
         dst_host: Option<&str>,
         caches: &RuleMatchCaches,
     ) -> bool {
-        let Some(slot_idx) = slot_idx else {
-            return Self::operator_matches_lists(
-                operator, attempt, derived, process, dst_host, caches,
-            );
-        };
-        let Some(slot) = caches.list_slots.get(slot_idx) else {
-            return Self::operator_matches_lists(
-                operator, attempt, derived, process, dst_host, caches,
-            );
+        let slot = match compiled_operand {
+            CompiledListOperand::Other => {
+                return Self::operator_matches_lists(
+                    operator, attempt, derived, process, dst_host, caches,
+                );
+            }
+            _ => {
+                let Some(slot_idx) = slot_idx else {
+                    return false;
+                };
+                let Some(slot) = caches.list_slots.get(slot_idx) else {
+                    return false;
+                };
+                slot
+            }
         };
 
         let ip_text = Self::list_candidate_ip_text(derived, source_scope);
@@ -600,12 +608,11 @@ impl RuleService {
             CompiledListOperand::HashMd5 => {
                 Self::match_hash_md5(process, Some(&slot.trimmed_values))
             }
-            CompiledListOperand::Other => {
-                Self::operator_matches_lists(operator, attempt, derived, process, dst_host, caches)
-            }
+            CompiledListOperand::Other => false,
         }
     }
 
+    #[cfg(test)]
     pub(super) fn operator_matches_against(
         operator: &RuleOperator,
         attempt: &ConnectionAttempt,
