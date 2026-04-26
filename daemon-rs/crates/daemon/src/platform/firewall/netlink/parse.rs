@@ -1,8 +1,12 @@
 use super::exprs::{
     NftExpression, NftRule,
+    connlimit::parse_connlimit_condition,
     counter::parse_counter_condition,
     ct::parse_ct_conditions,
+    dynset::parse_dynset_action,
+    exthdr::parse_exthdr_conditions,
     fib::parse_fib_conditions,
+    hash::parse_hash_conditions,
     limit::parse_limit_condition,
     log::parse_log_condition,
     meta::parse_meta_conditions,
@@ -12,6 +16,7 @@ use super::exprs::{
     payload::parse_payload_family,
     queue::parse_queue_action,
     quota::parse_quota_condition,
+    rt::parse_rt_conditions,
     shared::push_condition,
     socket::parse_socket_conditions,
     verdict::{NftVerdict, parse_reject_action},
@@ -217,6 +222,13 @@ impl NftRule {
                     i = next;
                     continue;
                 }
+                Some(&"ct") if tokens.get(i + 1) == Some(&"count") => {
+                    let (condition, next) = parse_connlimit_condition(&tokens, i, end)
+                        .ok_or(ParseError::invalid_value(ParseFamily::Connlimit))?;
+                    push_condition(&mut expansions, condition);
+                    i = next;
+                    continue;
+                }
                 Some(&"ct") => {
                     let (next_expansions, next) = parse_ct_conditions(&tokens, i, end, expansions)
                         .ok_or(ParseError::invalid_value(ParseFamily::CtState))?;
@@ -228,6 +240,41 @@ impl NftRule {
                     let (next_expansions, next) =
                         parse_socket_conditions(&tokens, i, end, expansions)
                             .ok_or(ParseError::invalid_value(ParseFamily::Socket))?;
+                    expansions = next_expansions;
+                    i = next;
+                    continue;
+                }
+                Some(&"jhash") | Some(&"symhash") => {
+                    let (next_expansions, next) =
+                        parse_hash_conditions(&tokens, i, end, expansions)
+                            .ok_or(ParseError::invalid_value(ParseFamily::Hash))?;
+                    expansions = next_expansions;
+                    i = next;
+                    continue;
+                }
+                Some(&"rt") => {
+                    let (next_expansions, next) =
+                        parse_rt_conditions(&tokens, i, end, expansions)
+                            .ok_or(ParseError::invalid_value(ParseFamily::Rt))?;
+                    expansions = next_expansions;
+                    i = next;
+                    continue;
+                }
+                Some(&"add") | Some(&"update")
+                    if tokens
+                        .get(i + 1)
+                        .is_some_and(|t| t.starts_with('@')) =>
+                {
+                    let (action, next) = parse_dynset_action(&tokens, i, end)
+                        .ok_or(ParseError::invalid_value(ParseFamily::Dynset))?;
+                    push_condition(&mut expansions, action);
+                    i = next;
+                    continue;
+                }
+                Some(&"tcp") if tokens.get(i + 1) == Some(&"option") => {
+                    let (next_expansions, next) =
+                        parse_exthdr_conditions(&tokens, i, end, expansions)
+                            .ok_or(ParseError::invalid_value(ParseFamily::Exthdr))?;
                     expansions = next_expansions;
                     i = next;
                     continue;
@@ -570,6 +617,21 @@ fn classify_expression_family(expression: &str) -> ParseFamily {
     let expr = expression.to_ascii_lowercase();
     if expr.contains('/') {
         return ParseFamily::Cidr;
+    }
+    if expr.contains("ct count") {
+        return ParseFamily::Connlimit;
+    }
+    if expr.contains("tcp option") || expr.contains("ip6 exthdr") {
+        return ParseFamily::Exthdr;
+    }
+    if expr.starts_with("jhash ") || expr.contains(" jhash ") || expr.starts_with("symhash ") || expr.contains(" symhash ") {
+        return ParseFamily::Hash;
+    }
+    if expr.starts_with("rt ") || expr.contains(" rt ") {
+        return ParseFamily::Rt;
+    }
+    if expr.starts_with("add @") || expr.starts_with("update @") || expr.contains(" add @") || expr.contains(" update @") {
+        return ParseFamily::Dynset;
     }
     if expr.starts_with("ct ") || expr.contains(" ct ") {
         return ParseFamily::CtState;

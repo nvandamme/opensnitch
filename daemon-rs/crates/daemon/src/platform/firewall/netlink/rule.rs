@@ -4,9 +4,13 @@ use netlink_bindings::utils::Rec;
 use super::NftTable;
 use super::exprs::bitwise::NftBitwise;
 use super::exprs::cmp::NftCmp;
+use super::exprs::connlimit::NftConnlimit;
 use super::exprs::counter::NftCounter;
 use super::exprs::ct::NftCt;
+use super::exprs::dynset::NftDynset;
+use super::exprs::exthdr::NftExthdr;
 use super::exprs::fib::NftFib;
+use super::exprs::hash::NftHash;
 use super::exprs::immediate::NftImmediate;
 use super::exprs::limit::NftLimit;
 use super::exprs::log::NftLog;
@@ -18,6 +22,8 @@ use super::exprs::numgen::NftNumgen;
 use super::exprs::payload::NftPayload;
 use super::exprs::queue::NftQueue;
 use super::exprs::quota::NftQuota;
+use super::exprs::range::NftRange;
+use super::exprs::rt::NftRt;
 use super::exprs::socket::NftSocket;
 use super::exprs::verdict::NftVerdict;
 
@@ -25,17 +31,23 @@ use super::exprs::verdict::NftVerdict;
 pub(super) enum NftExpression {
     Bitwise(NftBitwise),
     Cmp(NftCmp),
+    Connlimit(NftConnlimit),
     Immediate(NftImmediate),
     Lookup(NftLookup),
     Socket(NftSocket),
     Meta(NftMeta),
     Ct(NftCt),
+    Dynset(NftDynset),
+    Exthdr(NftExthdr),
     Payload(NftPayload),
     Fib(NftFib),
+    Hash(NftHash),
     Numgen(NftNumgen),
     Limit(NftLimit),
     Log(NftLog),
     Counter(NftCounter),
+    Range(NftRange),
+    Rt(NftRt),
     Verdict(NftVerdict),
     Queue(NftQueue),
     Quota(NftQuota),
@@ -51,17 +63,23 @@ impl NftExpression {
         match self {
             Self::Bitwise(e) => e.encode(exprs),
             Self::Cmp(e) => e.encode(exprs),
+            Self::Connlimit(e) => e.encode(exprs),
             Self::Immediate(e) => e.encode(exprs),
             Self::Lookup(e) => e.encode(exprs),
             Self::Socket(e) => e.encode(exprs),
             Self::Meta(e) => e.encode(exprs),
             Self::Ct(e) => e.encode(exprs),
+            Self::Dynset(e) => e.encode(exprs),
+            Self::Exthdr(e) => e.encode(exprs),
             Self::Payload(e) => e.encode(exprs),
             Self::Fib(e) => e.encode(exprs),
+            Self::Hash(e) => e.encode(exprs),
             Self::Numgen(e) => e.encode(exprs),
             Self::Limit(e) => e.encode(exprs),
             Self::Log(e) => e.encode(exprs),
             Self::Counter(e) => e.encode(exprs),
+            Self::Range(e) => e.encode(exprs),
+            Self::Rt(e) => e.encode(exprs),
             Self::Verdict(e) => e.encode(exprs),
             Self::Queue(e) => e.encode(exprs),
             Self::Quota(e) => e.encode(exprs),

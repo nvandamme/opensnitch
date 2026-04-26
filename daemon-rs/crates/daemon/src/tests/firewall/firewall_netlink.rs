@@ -430,6 +430,31 @@ fn system_rule_expression_supports_safe_netlink_subset() {
         "icmpv6 type echo-request accept",
         "icmpv6 checksum 1234 accept",
         "queue num 3 bypass",
+        // exthdr (tcp option)
+        "tcp option maxseg size 1460 accept",
+        "tcp option maxseg exists accept",
+        "tcp option window size 7 accept",
+        "tcp option timestamp size 12345 accept",
+        "tcp option sack-perm exists accept",
+        // connlimit (ct count)
+        "ct count 20 accept",
+        "ct count over 20 drop",
+        // hash (jhash/symhash)
+        "jhash ip saddr mod 10 seed 0xdeadbeef < 3 accept",
+        "symhash mod 10 < 5 accept",
+        "jhash ip daddr mod 100 < 50 drop",
+        "jhash ip6 saddr mod 16 seed 42 offset 5 < 8 accept",
+        "symhash mod 256 offset 10 < 128 accept",
+        // rt
+        "rt classid 100 accept",
+        "rt mtu < 1500 accept",
+        "rt nexthop 192.168.1.1 accept",
+        "rt nexthop 2001:db8::1 accept",
+        "rt ipsec exists accept",
+        // dynset (add/update @set)
+        "add @blacklist { ip saddr } accept",
+        "update @myset { ip saddr } accept",
+        "update @myset { ip daddr } drop",
     ];
 
     for expression in supported {
@@ -1370,6 +1395,21 @@ fn system_rule_expression_rejects_unsupported_forms() {
         "tcp dport 22 jump",
         "tcp dport 22 goto",
         "queue bogus 3",
+        // exthdr invalid
+        "tcp option bogus size 1460 accept",
+        "tcp option sack-perm size 10 accept",
+        // connlimit invalid
+        "ct count bogus accept",
+        // hash invalid
+        "jhash ip saddr mod 0 < 3 accept",
+        "symhash mod 0 < 5 accept",
+        "jhash bogus saddr mod 10 < 3 accept",
+        // rt invalid
+        "rt bogus 100 accept",
+        "rt ipsec accept",
+        // dynset invalid
+        "add @blacklist accept",
+        "update @ { ip saddr } accept",
     ];
 
     for expression in unsupported {

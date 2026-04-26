@@ -20,6 +20,33 @@ pub(super) const NFTA_LIMIT_BURST: u16 = 3;
 pub(super) const NFTA_LIMIT_TYPE: u16 = 4;
 pub(super) const NFTA_LIMIT_FLAGS: u16 = 5;
 
+pub(super) const NFTA_EXTHDR_DREG: u16 = 1;
+pub(super) const NFTA_EXTHDR_TYPE: u16 = 2;
+pub(super) const NFTA_EXTHDR_OFFSET: u16 = 3;
+pub(super) const NFTA_EXTHDR_LEN: u16 = 4;
+pub(super) const NFTA_EXTHDR_FLAGS: u16 = 5;
+pub(super) const NFTA_EXTHDR_OP: u16 = 6;
+
+pub(super) const NFTA_CONNLIMIT_COUNT: u16 = 1;
+pub(super) const NFTA_CONNLIMIT_FLAGS: u16 = 2;
+
+pub(super) const NFTA_HASH_SREG: u16 = 1;
+pub(super) const NFTA_HASH_DREG: u16 = 2;
+pub(super) const NFTA_HASH_LEN: u16 = 3;
+pub(super) const NFTA_HASH_MODULUS: u16 = 4;
+pub(super) const NFTA_HASH_SEED: u16 = 5;
+pub(super) const NFTA_HASH_OFFSET: u16 = 6;
+pub(super) const NFTA_HASH_TYPE: u16 = 7;
+
+pub(super) const NFTA_RT_DREG: u16 = 1;
+pub(super) const NFTA_RT_KEY: u16 = 2;
+
+pub(super) const NFTA_DYNSET_SET_NAME: u16 = 1;
+pub(super) const NFTA_DYNSET_SET_ID: u16 = 2;
+pub(super) const NFTA_DYNSET_OP: u16 = 3;
+pub(super) const NFTA_DYNSET_SREG: u16 = 4;
+pub(super) const NFTA_DYNSET_TIMEOUT: u16 = 5;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FirewallNetlinkOperation {
     EnsureBaseChains {
@@ -132,7 +159,11 @@ impl Error for NetlinkFallbackRequired {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum ParseFamily {
     Cidr,
+    Connlimit,
     CtState,
+    Dynset,
+    Exthdr,
+    Hash,
     Queue,
     Notrack,
     Reject,
@@ -144,6 +175,7 @@ pub(super) enum ParseFamily {
     Quota,
     Nat,
     Lookup,
+    Rt,
     Socket,
     SetOrList,
     Meta,
@@ -156,7 +188,11 @@ impl ParseFamily {
     pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Cidr => "cidr",
+            Self::Connlimit => "connlimit",
             Self::CtState => "ct_state",
+            Self::Dynset => "dynset",
+            Self::Exthdr => "exthdr",
+            Self::Hash => "hash",
             Self::Queue => "queue",
             Self::Notrack => "notrack",
             Self::Reject => "reject",
@@ -168,6 +204,7 @@ impl ParseFamily {
             Self::Quota => "quota",
             Self::Nat => "nat",
             Self::Lookup => "lookup",
+            Self::Rt => "rt",
             Self::Socket => "socket",
             Self::SetOrList => "set_or_list",
             Self::Meta => "meta",
