@@ -130,7 +130,7 @@ eBPF library policy:
   - `ARCH/NETLINK-PROBE-AND-MONITOR-PRIMITIVE-ALIGNMENT`: done — firewall netlink preflight + monitor paths both use `netlink-socket2::MulticastSocketRaw` (no direct `libc::socket`/`close` probe path remains in platform firewall netlink preflight/monitor flows).
   - `platform/firewall/port.rs`: removed `OPENSNITCH_NFT_NETLINK_EXPERIMENT` env gating; nft netlink path selection now depends on runtime availability/recovery gate only (fallback behavior unchanged).
   - `ARCH/FIREWALL-NETLINK-THIN-PARSER-TYPED-IR`: only Phase 5 remains (typed unsupported/error-category routing). Substantially complete — `ParseFamily` now covers all 24 expression families including newly added `Connlimit`, `Exthdr`, `Hash`, `Rt`, `Dynset`, `Range`.
-  - `ARCH/FIREWALL-NFT-EXPR-MAP-PARITY`: high-priority expression families landed (range, exthdr, connlimit, hash, rt, dynset). Coverage audit reports 50/50 (100%). Remaining gap is low-priority/niche families only (see parity matrix below).
+  - `ARCH/FIREWALL-NFT-EXPR-MAP-PARITY`: high-priority expression families landed (range, exthdr, connlimit, hash, rt, dynset). IPv6 extension header support wired into exthdr parser (hbh/rt/frag/dst/mh/ah). Coverage audit reports 50/50 (100%). Remaining gap is low-priority/niche families only (see parity matrix below).
   - Future/architecture epics (`PERF/FUTURE-HYBRID-BANDIX`, `ARCH/OPENWRT`, `ARCH/FIREWALL-PERSISTENCE`, `PERF/ARCH`, `Privileged Control Boundary`, proto `Operator.scope`, daemon-as-server gRPC, HTTP+WS client, OpenWrt integration feature, `redb` evaluation) remain open by design and require dedicated scoped slices.
 
 - [ ] **ARCH/NETLINK-OPS-REFERENCE-BASELINE** Standardize all daemon-rs netlink operation work on `netlink-bindings` API reference as the canonical baseline.
@@ -353,7 +353,7 @@ eBPF library policy:
     | counter | ✅ implemented | `exprs/counter.rs` | Inline + named object ref |
     | ct | ✅ implemented | `exprs/ct.rs` | state/status/direction/mark/helper/src-dst/pkts/bytes/protocol |
     | dynset | ✅ implemented | `exprs/dynset.rs` | `add @set`/`update @set` with timeout |
-    | exthdr | ✅ implemented | `exprs/exthdr.rs` | TCP options (maxseg/window/sack-perm/sack/timestamp) + exists |
+    | exthdr | ✅ implemented | `exprs/exthdr.rs` | TCP options (maxseg/window/sack-perm/sack/timestamp) + exists; IPv6 extension headers (hbh/rt/frag/dst/mh/ah) exists |
     | fib | ✅ implemented | `exprs/fib.rs` | saddr/daddr × iif/oif → oif/oifname/addrtype |
     | flow_offload | ⏸ deferred | — | Hardware NIC offload; niche |
     | fwd | ⏸ deferred | — | Direct device forwarding; XDP-like, specialized |

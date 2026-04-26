@@ -14,7 +14,6 @@ const NFT_EXTHDR_F_PRESENT: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::platform::firewall::netlink) enum ExthdrOp {
-    #[allow(dead_code)]
     Ipv6 = 0,
     TcpOpt = 1,
 }
@@ -71,6 +70,20 @@ const TCP_OPTION_SPECS: &[TcpOptionSpec] = &[
 
 fn find_tcp_option(name: &str) -> Option<&'static TcpOptionSpec> {
     TCP_OPTION_SPECS.iter().find(|spec| spec.name == name)
+}
+
+/// IPv6 extension header type → IPPROTO number mapping.
+/// Kernel uses IPPROTO values as the exthdr `hdr_type` for IPv6 extensions.
+fn ipv6_exthdr_type(name: &str) -> Option<u8> {
+    match name {
+        "hbh" => Some(0),   // IPPROTO_HOPOPTS
+        "rt" => Some(43),   // IPPROTO_ROUTING
+        "frag" => Some(44), // IPPROTO_FRAGMENT
+        "dst" => Some(60),  // IPPROTO_DSTOPTS
+        "mh" => Some(135),  // IPPROTO_MH (mobility)
+        "ah" => Some(51),   // IPPROTO_AH (authentication)
+        _ => None,
+    }
 }
 
 pub(crate) fn parse_exthdr_conditions(
@@ -140,6 +153,36 @@ pub(crate) fn parse_exthdr_conditions(
     );
 
     Some((expansions, value_idx + 1))
+}
+
+/// Parse `ip6 exthdr <type> exists` — IPv6 extension header presence test.
+pub(crate) fn parse_ipv6_exthdr_condition(
+    tokens: &[&str],
+    i: usize,
+    mut expansions: Vec<Vec<NftExpression>>,
+) -> Option<(Vec<Vec<NftExpression>>, usize)> {
+    // Expect: "ip6" "exthdr" "<type>" "exists"
+    if tokens.get(i) != Some(&"ip6") || tokens.get(i + 1) != Some(&"exthdr") {
+        return None;
+    }
+
+    let type_name = *tokens.get(i + 2)?;
+    let hdr_type = ipv6_exthdr_type(type_name)?;
+
+    if tokens.get(i + 3) != Some(&"exists") {
+        return None;
+    }
+
+    let exthdr = NftExthdr {
+        dreg: None,
+        hdr_type,
+        offset: 0,
+        len: 0,
+        op: ExthdrOp::Ipv6,
+        flags: NFT_EXTHDR_F_PRESENT,
+    };
+    push_condition(&mut expansions, NftExpression::Exthdr(exthdr));
+    Some((expansions, i + 4))
 }
 
 impl NftExthdr {

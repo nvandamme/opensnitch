@@ -57,6 +57,7 @@ Versioning baseline:
   - Extended `NftExpression` enum and `encode()` dispatch in `rule.rs` with 6 new variants.
   - Added test coverage for both supported forms (correct parsing + encoding) and unsupported/invalid forms (rejection without panic) in `firewall_netlink.rs`.
   - Firewall-netlink coverage audit now reports 50/50 (100%) shipped-shape support with all 6 new families included.
+  - Wired IPv6 extension header matching into exthdr parser (`ip6 exthdr <type> exists` for hbh/rt/frag/dst/mh/ah); added dispatch arm in `parse.rs` and test fixtures for supported + invalid forms.
 
 - **Dead code cleanup, typed proc connector structs, and ifaces dedup**
   (`crates/daemon/src/platform/procmon/{connector.rs,audit.rs}`,

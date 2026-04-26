@@ -436,6 +436,13 @@ fn system_rule_expression_supports_safe_netlink_subset() {
         "tcp option window size 7 accept",
         "tcp option timestamp size 12345 accept",
         "tcp option sack-perm exists accept",
+        // exthdr (ipv6 extension headers)
+        "ip6 exthdr hbh exists accept",
+        "ip6 exthdr rt exists accept",
+        "ip6 exthdr frag exists drop",
+        "ip6 exthdr dst exists accept",
+        "ip6 exthdr mh exists accept",
+        "ip6 exthdr ah exists accept",
         // connlimit (ct count)
         "ct count 20 accept",
         "ct count over 20 drop",
@@ -1028,6 +1035,8 @@ fn system_rule_expression_shipped_coverage_audit_report() {
         "quota 128 kbytes accept",
         "limit rate 10/second accept",
         "udp length 128 accept",
+        "ip6 exthdr hbh exists accept",
+        "ip6 exthdr frag exists drop",
     ];
 
     let mut supported = 0usize;
@@ -1398,6 +1407,9 @@ fn system_rule_expression_rejects_unsupported_forms() {
         // exthdr invalid
         "tcp option bogus size 1460 accept",
         "tcp option sack-perm size 10 accept",
+        // exthdr ipv6 invalid
+        "ip6 exthdr bogus exists accept",
+        "ip6 exthdr hbh accept",
         // connlimit invalid
         "ct count bogus accept",
         // hash invalid

@@ -4,7 +4,7 @@ use super::exprs::{
     counter::parse_counter_condition,
     ct::parse_ct_conditions,
     dynset::parse_dynset_action,
-    exthdr::parse_exthdr_conditions,
+    exthdr::{parse_exthdr_conditions, parse_ipv6_exthdr_condition},
     fib::parse_fib_conditions,
     hash::parse_hash_conditions,
     limit::parse_limit_condition,
@@ -274,6 +274,14 @@ impl NftRule {
                 Some(&"tcp") if tokens.get(i + 1) == Some(&"option") => {
                     let (next_expansions, next) =
                         parse_exthdr_conditions(&tokens, i, end, expansions)
+                            .ok_or(ParseError::invalid_value(ParseFamily::Exthdr))?;
+                    expansions = next_expansions;
+                    i = next;
+                    continue;
+                }
+                Some(&"ip6") if tokens.get(i + 1) == Some(&"exthdr") => {
+                    let (next_expansions, next) =
+                        parse_ipv6_exthdr_condition(&tokens, i, expansions)
                             .ok_or(ParseError::invalid_value(ParseFamily::Exthdr))?;
                     expansions = next_expansions;
                     i = next;
