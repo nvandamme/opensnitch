@@ -42,6 +42,22 @@ Versioning baseline:
   - Wired generic netlink IR families into live encode paths: payload CIDR/tcp-flag masking and CT mask conditions now emit `NftExpression::Bitwise`, payload set lookups now emit `NftExpression::Lookup`, and NAT register loads now emit `NftExpression::Immediate`; this removes unreachable `Bitwise/Cmp/Immediate/Lookup/Socket` dispatch variants from the firewall netlink IR.
   - Current firewall-netlink validation is 17/17 tests with a 50/50 shipped-shape coverage audit.
 
+- **Firewall netlink IR: 6 additional expression families**
+  (`crates/daemon/src/platform/firewall/netlink/{exprs/{range.rs,exthdr.rs,connlimit.rs,hash.rs,rt.rs,dynset.rs,mod.rs},parse.rs,rule.rs,types.rs}`,
+  `crates/daemon/src/tests/firewall/firewall_netlink.rs`):
+  - Added `range` expression family: standalone `NftRange` IR struct for discrete range comparison nodes, using `netlink-bindings` `nested_data_range()` builder with `RangeOps`.
+  - Added `exthdr` expression family: TCP option matching (`tcp option maxseg size`, `tcp option <name> exists`, `tcp option window/timestamp/sack-perm`) with manual NLA encoding (`NFTA_EXTHDR_*` attrs) since `netlink-bindings` has no exthdr builder.
+  - Added `connlimit` expression family: per-source connection limiting (`ct count [over] N`) with `NFTA_CONNLIMIT_COUNT`/`FLAGS` manual NLA encoding.
+  - Added `hash` expression family: Jenkins hash (`jhash`) and symmetric hash (`symhash`) with payload source, modulus, seed, and offset support; manual NLA encoding (`NFTA_HASH_*` attrs).
+  - Added `rt` expression family: routing information matching (`rt classid/mtu/nexthop/ipsec`) with manual NLA encoding (`NFTA_RT_*` attrs); IPv4/IPv6 nexthop and `ipsec exists` variants.
+  - Added `dynset` expression family: dynamic set operations (`add @set`, `update @set`) with timeout support and nested inner-expression composition; manual NLA encoding (`NFTA_DYNSET_*` attrs).
+  - Extended `ParseFamily` enum with `Connlimit`, `Exthdr`, `Hash`, `Rt`, `Dynset`, `Range` variants and wired classifier routing for both supported-path parsing and unsupported-shape error classification.
+  - Added `NFTA_*` constants for all 6 families in `types.rs` (exthdr, connlimit, hash, rt, dynset attr ids and op/flag enums).
+  - Added parser hooks in `parse.rs` for `tcp option`, `ct count`, `jhash`/`symhash`, `rt`, and `add @`/`update @` token prefixes.
+  - Extended `NftExpression` enum and `encode()` dispatch in `rule.rs` with 6 new variants.
+  - Added test coverage for both supported forms (correct parsing + encoding) and unsupported/invalid forms (rejection without panic) in `firewall_netlink.rs`.
+  - Firewall-netlink coverage audit now reports 50/50 (100%) shipped-shape support with all 6 new families included.
+
 - **ABI constant hardening across netlink/NFQUEUE/proc-connector paths (libc/binding constants first)**
   (`crates/daemon/src/platform/{firewall/monitor.rs,nfqueue/netlink.rs,procmon/connector.rs}`,
   `crates/daemon/src/platform/nfqueue/ffi/types.rs`,

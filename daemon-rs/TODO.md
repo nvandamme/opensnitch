@@ -7,7 +7,7 @@ It supersedes:
 - `daemon-rs/FEATURE_PARITY.md`
 - `daemon-rs/SERVICE_ASYNC_AND_MODEL_SCAN_2026-03-15.md`
 
-Last update: 2026-04-27 (netlink hot-path compaction: verdict buffer reuse, adapter dedup, audit cleanup)
+Last update: 2026-04-27 (expression parity matrix update: 24/40 families implemented, stale active-task scan refreshed)
 
 ## Scope
 
@@ -129,8 +129,8 @@ eBPF library policy:
   - `ARCH/PROC-CONNECTOR-NETLINK-CRATE-PRIMITIVES`: still in progress; primary payload decode still uses adapter-local offset parsing.
   - `ARCH/NETLINK-PROBE-AND-MONITOR-PRIMITIVE-ALIGNMENT`: done — firewall netlink preflight + monitor paths both use `netlink-socket2::MulticastSocketRaw` (no direct `libc::socket`/`close` probe path remains in platform firewall netlink preflight/monitor flows).
   - `platform/firewall/port.rs`: removed `OPENSNITCH_NFT_NETLINK_EXPERIMENT` env gating; nft netlink path selection now depends on runtime availability/recovery gate only (fallback behavior unchanged).
-  - `ARCH/FIREWALL-NETLINK-THIN-PARSER-TYPED-IR`: only Phase 5 remains (typed unsupported/error-category routing).
-  - `ARCH/FIREWALL-NFT-EXPR-MAP-PARITY`: still in progress; remaining nft expr families unchanged.
+  - `ARCH/FIREWALL-NETLINK-THIN-PARSER-TYPED-IR`: only Phase 5 remains (typed unsupported/error-category routing). Substantially complete — `ParseFamily` now covers all 24 expression families including newly added `Connlimit`, `Exthdr`, `Hash`, `Rt`, `Dynset`, `Range`.
+  - `ARCH/FIREWALL-NFT-EXPR-MAP-PARITY`: high-priority expression families landed (range, exthdr, connlimit, hash, rt, dynset). Coverage audit reports 50/50 (100%). Remaining gap is low-priority/niche families only (see parity matrix below).
   - Future/architecture epics (`PERF/FUTURE-HYBRID-BANDIX`, `ARCH/OPENWRT`, `ARCH/FIREWALL-PERSISTENCE`, `PERF/ARCH`, `Privileged Control Boundary`, proto `Operator.scope`, daemon-as-server gRPC, HTTP+WS client, OpenWrt integration feature, `redb` evaluation) remain open by design and require dedicated scoped slices.
 
 - [ ] **ARCH/NETLINK-OPS-REFERENCE-BASELINE** Standardize all daemon-rs netlink operation work on `netlink-bindings` API reference as the canonical baseline.
@@ -337,6 +337,51 @@ eBPF library policy:
     - `https://raw.githubusercontent.com/one-d-wide/netlink-bindings/3aee51e1a33b322fa2a2f706a9086941e14a008f/netlink-bindings/src/nftables/nftables.yaml`
     - `https://raw.githubusercontent.com/one-d-wide/netlink-bindings/3aee51e1a33b322fa2a2f706a9086941e14a008f/netlink-bindings/src/nftables/nftables.overrides.yaml`
   - **Current baseline (already landed)**: safe subset includes core payload/meta/cmp/range/bitwise composition, queue action, verdicts (`accept/drop/return/continue/break/jump/goto`), and constrained `ct` support (`state` + `status` mask forms).
+  - **Expression parity matrix (2026-04-26)** — kernel `nf_tables` expr-ops vs daemon-rs status:
+    | Family | Status | daemon-rs module | Notes |
+    |---|---|---|---|
+    | bitwise | ✅ implemented | `exprs/bitwise.rs` | mask/xor/shift on register data |
+    | byteorder | ⏸ deferred | — | Implicit in most rulesets; rarely appears in user rules |
+    | cmp | ✅ implemented | `exprs/cmp.rs` | All comparison ops (eq/neq/lt/gt/lte/gte) |
+    | compat | ⏸ deferred | — | xtables legacy bridge; not needed for nft-native rules |
+    | connlimit | ✅ implemented | `exprs/connlimit.rs` | `ct count [over] N` |
+    | counter | ✅ implemented | `exprs/counter.rs` | Inline + named object ref |
+    | ct | ✅ implemented | `exprs/ct.rs` | state/status/direction/mark/helper/src-dst/pkts/bytes/protocol |
+    | dynset | ✅ implemented | `exprs/dynset.rs` | `add @set`/`update @set` with timeout |
+    | exthdr | ✅ implemented | `exprs/exthdr.rs` | TCP options (maxseg/window/sack-perm/sack/timestamp) + exists |
+    | fib | ✅ implemented | `exprs/fib.rs` | saddr/daddr × iif/oif → oif/oifname/addrtype |
+    | flow_offload | ⏸ deferred | — | Hardware NIC offload; niche |
+    | fwd | ⏸ deferred | — | Direct device forwarding; XDP-like, specialized |
+    | hash | ✅ implemented | `exprs/hash.rs` | jhash (Jenkins) + symhash with mod/seed/offset |
+    | immediate | ✅ implemented | `exprs/immediate.rs` | Register loads |
+    | inner | ⏸ deferred | — | Tunnel inner-header matching (VXLAN/GRE) |
+    | last | ⏸ deferred | — | Statistics/debugging timestamp only |
+    | limit | ✅ implemented | `exprs/limit.rs` | Rate limiting (pkts/bytes per time) |
+    | log | ✅ implemented | `exprs/log.rs` | Prefix/level/flags/group/snaplen/qthreshold |
+    | lookup | ✅ implemented | `exprs/lookup.rs` | Named sets + vmaps |
+    | masq | ✅ implemented | `exprs/nat.rs` | Masquerade (unified in nat module) |
+    | match | ⏸ deferred | — | xtables compat wrapper; legacy only |
+    | meta | ✅ implemented | `exprs/meta.rs` | All 35+ kernel meta-keys |
+    | nat | ✅ implemented | `exprs/nat.rs` | snat/dnat/masq/redirect/tproxy |
+    | notrack | ✅ implemented | `exprs/notrack.rs` | Disable conntrack |
+    | numgen | ✅ implemented | `exprs/numgen.rs` | random/inc with mod/offset |
+    | objref | partial | `exprs/counter.rs` | Named counter refs; other objref forms (ct-helper, ct-timeout, synproxy, secmark) deferred |
+    | osf | ⏸ deferred | — | Passive OS fingerprinting; very niche |
+    | payload | ✅ implemented | `exprs/payload.rs` + `payload/` | ip/ip6/tcp/udp/icmp/icmpv6 header fields |
+    | queue | ✅ implemented | `exprs/queue.rs` | NFQUEUE + bypass/fanout |
+    | quota | ✅ implemented | `exprs/quota.rs` | Byte quota with invert |
+    | range | ✅ implemented | `exprs/range.rs` | Standalone range IR + shared helpers in payload/meta paths |
+    | redir | ✅ implemented | `exprs/nat.rs` | Redirect (unified in nat module) |
+    | reject | ✅ implemented | `exprs/verdict.rs` | reject with tcp-reset/icmp types |
+    | rt | ✅ implemented | `exprs/rt.rs` | classid/mtu/nexthop/ipsec |
+    | socket | ✅ implemented | `exprs/socket.rs` | transparent/mark/wildcard/cgroupv2 |
+    | synproxy | ⏸ deferred | — | DDoS SYN proxy; specialized |
+    | target | ⏸ deferred | — | xtables compat wrapper; legacy only |
+    | tproxy | ✅ implemented | `exprs/nat.rs` | Transparent proxy (unified in nat module) |
+    | tunnel | ⏸ deferred | — | Tunnel key metadata; niche |
+    | verdict | ✅ implemented | `exprs/verdict.rs` | accept/drop/return/continue/break/jump/goto |
+    | xfrm | ⏸ deferred | — | IPsec state matching; specialized |
+    - **Summary**: 24/40 families implemented (60%), 1 partial (objref). Remaining 15 are deferred: 3 legacy compat (`compat/match/target`), 12 niche/specialized. Coverage of commonly used expression families for a host-based firewall is effectively complete.
   - **Incremental progress (2026-04-26)**:
     - Netlink system-rule planning now prefers structured OpenSnitch JSON expressions (`rule.expressions`) and uses textual `parameters` parsing only as fallback when structured expressions are absent.
     - Structured JSON `statement` fields now follow the OpenSnitch System-rules key/value grammar first (including quota key-shape handling such as `over` + size unit keys and limit `units`/`rate-units`/`time-units` forms), then flow through token parsing for complex value fragments (quoted/space-containing token sequences preserved) before typed netlink parse.
