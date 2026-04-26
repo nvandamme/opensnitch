@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
+#[cfg(test)]
+use anyhow::bail;
+#[cfg(test)]
 use netlink_bindings::builtin;
 use netlink_bindings::traits::{NetlinkRequest, Protocol};
 use netlink_socket2::MulticastSocketRaw;

@@ -50,6 +50,10 @@ const DEFAULT_SOCKET_RCVBUF_BYTES: i32 = 8 * 1024 * 1024;
 const RECV_BUF_LEN: usize = (DEFAULT_PACKET_SIZE * 2) as usize;
 const ACK_RECV_BUF_LEN: usize = 512;
 
+/// Pre-computed verdict message capacity: nlmsg_hdr + nfgenmsg + verdict_hdr NLA + mark NLA.
+const VERDICT_BUF_CAPACITY: usize =
+    NLMSG_HDR_LEN + NFGENMSG_LEN + (NLA_HDR_LEN + 8) + (NLA_HDR_LEN + 4);
+
 struct ParsedNlmsgHeader {
     len: usize,
     msg_type: u16,
@@ -726,9 +730,7 @@ impl NfqueueNetlinkSocket {
         let mut buf = [0u8; RECV_BUF_LEN];
         // Pre-allocate a verdict buffer that is reused across iterations,
         // avoiding per-packet Vec allocation in the hot loop.
-        let mut verdict_buf = Vec::with_capacity(
-            NLMSG_HDR_LEN + NFGENMSG_LEN + (NLA_HDR_LEN + 8) + (NLA_HDR_LEN + 4),
-        );
+        let mut verdict_buf = Vec::with_capacity(VERDICT_BUF_CAPACITY);
         let mut last_metrics_log = Instant::now();
         // SAFETY: self.fd remains valid until the loop exits.
         let borrowed_fd = unsafe { BorrowedFd::borrow_raw(self.fd.as_raw_fd()) };
@@ -789,12 +791,7 @@ impl NfqueueNetlinkSocket {
                                 Ok(returned_buf) => verdict_buf = returned_buf,
                                 Err(err) => {
                                     // Buffer is lost on error; re-allocate for next iteration.
-                                    verdict_buf = Vec::with_capacity(
-                                        NLMSG_HDR_LEN
-                                            + NFGENMSG_LEN
-                                            + (NLA_HDR_LEN + 8)
-                                            + (NLA_HDR_LEN + 4),
-                                    );
+                                    verdict_buf = Vec::with_capacity(VERDICT_BUF_CAPACITY);
                                     warn!(detail = %err, "nfqueue netlink: verdict send failed");
                                 }
                             }

@@ -14,6 +14,7 @@ const NFT_EXTHDR_F_PRESENT: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::platform::firewall::netlink) enum ExthdrOp {
+    #[allow(dead_code)]
     Ipv6 = 0,
     TcpOpt = 1,
 }

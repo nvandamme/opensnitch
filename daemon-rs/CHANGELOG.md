@@ -58,6 +58,22 @@ Versioning baseline:
   - Added test coverage for both supported forms (correct parsing + encoding) and unsupported/invalid forms (rejection without panic) in `firewall_netlink.rs`.
   - Firewall-netlink coverage audit now reports 50/50 (100%) shipped-shape support with all 6 new families included.
 
+- **Dead code cleanup, typed proc connector structs, and ifaces dedup**
+  (`crates/daemon/src/platform/procmon/{connector.rs,audit.rs}`,
+  `crates/daemon/src/platform/netlink/{ifaces.rs,io.rs}`,
+  `crates/daemon/src/platform/firewall/netlink/{adapter.rs,mod.rs,rule.rs,zone.rs,exprs/{range.rs,exthdr.rs}}`,
+  `crates/daemon/src/platform/nfqueue/netlink.rs`):
+  - Replaced manual byte-offset proc connector payload construction (`build_listen_payload`) with typed `#[repr(C)]` structs (`CnMsg`, `CnMsgListenPayload`) and `mem::transmute` for zero-copy wire serialization; eliminated 6 `copy_from_slice` calls.
+  - Replaced manual offset parsing in `parse_pid_event_payload` with typed `#[repr(C)]` struct overlays (`ProcEventHeader`, `ExecExitProcEventData`, `ForkProcEventData`) using `ptr::read_unaligned`; field names are now self-documenting instead of magic offset constants.
+  - Scoped test-only constants (`CN_MSG_LEN`, `PROC_EVENT_EXEC_PID_OFFSET`, `PROC_EVENT_FORK_CHILD_PID_OFFSET`) and imports (`bail`, `builtin`, `read_ne_value_at`) to `#[cfg(test)]` to eliminate non-test dead code.
+  - Deduplicated `NetIfaceAdapter::interface_name_by_index` sync/async: sync variant now delegates to async impl via `run_on_netlink_rt`, removing ~30 lines of duplicated cache-check + fallback logic.
+  - Scoped `interface_name_map` sync accessor to `#[cfg(test)]` (only used in test harnesses).
+  - Extracted `VERDICT_BUF_CAPACITY` constant in NFQUEUE verdict hot path to eliminate duplicated capacity expression in 2 allocation sites.
+  - Removed unused `new_request_socket`/`open_multicast_socket` imports from firewall adapter; switched `probe_netfilter_netlink_socket` to full path.
+  - Suppressed warnings for legitimate not-yet-wired nft constructs (`NftZone`, `NftRange`, `NftExpression::Range`, `ExthdrOp::Ipv6`, `NftRule` builder methods) with `#[allow(dead_code)]`.
+  - Suppressed warning for `collect_replies` shared helper (legitimate future-use helper parallel to `for_each_reply`).
+  - Build now produces **zero warnings** (was 11).
+
 - **ABI constant hardening across netlink/NFQUEUE/proc-connector paths (libc/binding constants first)**
   (`crates/daemon/src/platform/{firewall/monitor.rs,nfqueue/netlink.rs,procmon/connector.rs}`,
   `crates/daemon/src/platform/nfqueue/ffi/types.rs`,

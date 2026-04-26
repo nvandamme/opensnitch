@@ -33,6 +33,7 @@ impl NetIfaceAdapter {
         Self::local_ip_addrs_netlink_async_impl().await
     }
 
+    #[cfg(test)]
     pub(crate) fn interface_name_map() -> Result<HashMap<u32, String>> {
         crate::platform::netlink::runtime::run_on_netlink_rt(
             Self::interface_name_map_netlink_async_impl(),
@@ -44,34 +45,9 @@ impl NetIfaceAdapter {
     }
 
     pub(crate) fn interface_name_by_index(index: u32) -> Result<Option<String>> {
-        if index == 0 {
-            return Ok(None);
-        }
-
-        if let Some(name) = {
-            let cache = interface_name_cache()
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            cache.get(&index).cloned()
-        } {
-            return Ok(Some(name));
-        }
-
-        match crate::platform::netlink::runtime::run_on_netlink_rt(
-            Self::interface_name_by_index_netlink_async_impl(index),
-        ) {
-            Ok(Some(name)) => {
-                Self::cache_insert(index, &name);
-                Ok(Some(name))
-            }
-            Ok(None) => Ok(None),
-            Err(_) => {
-                let refreshed = Self::interface_name_map()?;
-                let hit = refreshed.get(&index).cloned();
-                Self::replace_cache(refreshed);
-                Ok(hit)
-            }
-        }
+        crate::platform::netlink::runtime::run_on_netlink_rt(
+            Self::interface_name_by_index_async(index),
+        )
     }
 
     pub(crate) async fn interface_name_by_index_async(index: u32) -> Result<Option<String>> {

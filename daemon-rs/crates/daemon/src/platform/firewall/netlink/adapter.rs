@@ -13,7 +13,7 @@ use super::{
 use crate::models::firewall_config::{FirewallChain, FirewallConfig, FirewallRule};
 use crate::platform::firewall::nftables::FirewallNftablesAdapter;
 use crate::platform::netlink::io::{
-    ReplyVisit, for_each_reply, for_each_reply_until, new_request_socket, open_multicast_socket,
+    ReplyVisit, for_each_reply, for_each_reply_until,
 };
 use crate::utils::conntrack::flush_conntrack_table;
 
@@ -824,7 +824,7 @@ impl FirewallNetlinkAdapter {
     }
 
     fn probe_netfilter_netlink_socket() -> Result<()> {
-        let _ = open_multicast_socket(libc::NETLINK_NETFILTER as u16)
+        let _ = crate::platform::netlink::io::open_multicast_socket(libc::NETLINK_NETFILTER as u16)
             .context("failed to open NETLINK_NETFILTER socket")?;
         Ok(())
     }

@@ -167,6 +167,7 @@ where
 
 /// Collect reply items into a pre-allocated `Vec`.
 /// Avoids the closure-capture pattern for simple accumulation loops.
+#[allow(dead_code)]
 pub(crate) async fn collect_replies<R, T, MapIo, MapReply, MapItem>(
     sock: &mut NetlinkSocket,
     request: &R,

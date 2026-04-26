@@ -15,23 +15,80 @@ use crate::{
         open_and_listen_multicast_socket, recv_with_timeout, request_with_ack_timeout,
     },
     platform::netlink::runtime::run_on_netlink_rt,
-    utils::byte_read::read_ne_value_at,
 };
+#[cfg(test)]
+use crate::utils::byte_read::read_ne_value_at;
 
 #[cfg(test)]
 pub(crate) const NLMSG_HDR_LEN: usize = builtin::Nlmsghdr::len();
-pub(crate) const CN_MSG_LEN: usize = 20;
-pub(crate) const PROC_EVENT_HEADER_LEN: usize = 16;
-pub(crate) const PROC_EVENT_EXEC_PID_OFFSET: usize = 16;
-pub(crate) const PROC_EVENT_FORK_CHILD_PID_OFFSET: usize = 24;
+#[cfg(test)]
+pub(crate) const CN_MSG_LEN: usize = std::mem::size_of::<CnMsg>();
+pub(crate) const PROC_EVENT_HEADER_LEN: usize = std::mem::size_of::<ProcEventHeader>();
+/// Offset of `process_pid` from start of proc_event (after header).
+#[cfg(test)]
+pub(crate) const PROC_EVENT_EXEC_PID_OFFSET: usize = PROC_EVENT_HEADER_LEN;
+/// Offset of `child_pid` from start of proc_event (header + parent_pid + parent_tgid).
+#[cfg(test)]
+pub(crate) const PROC_EVENT_FORK_CHILD_PID_OFFSET: usize = PROC_EVENT_HEADER_LEN + 8;
 const PROC_CONNECTOR_OPEN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Kernel `struct cb_id` + `struct cn_msg` header (20 bytes).
+/// NOTE(netlink-baseline): no typed cn_msg in netlink-bindings; hand-defined
+/// to match `<linux/connector.h>`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CnMsg {
+    id_idx: u32,
+    id_val: u32,
+    seq: u32,
+    ack: u32,
+    len: u16,
+    flags: u16,
+}
+
+/// Kernel `struct proc_event` common header (16 bytes):
+/// `what` discriminant + `cpu` + `timestamp_ns`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ProcEventHeader {
+    what: u32,
+    _cpu: u32,
+    _timestamp_ns: u64,
+}
+
+/// Kernel `struct exec_proc_event` / `struct exit_proc_event` prefix:
+/// `process_pid` + `process_tgid` (8 bytes at header offset 0).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ExecExitProcEventData {
+    process_pid: u32,
+    _process_tgid: u32,
+}
+
+/// Kernel `struct fork_proc_event`: parent pid/tgid + child pid/tgid.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ForkProcEventData {
+    _parent_pid: u32,
+    _parent_tgid: u32,
+    child_pid: u32,
+    _child_tgid: u32,
+}
+
+/// Listen/ignore payload: `CnMsg` header + `enum proc_cn_mcast_op` (4 bytes).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CnMsgListenPayload {
+    cn: CnMsg,
+    op: u32,
+}
 
 pub struct ProcEventSocket {
     pub(crate) event_sock: MulticastSocketRaw,
 }
 
 struct ProcListenRequest {
-    payload: [u8; CN_MSG_LEN + 4],
+    payload: [u8; std::mem::size_of::<CnMsgListenPayload>()],
 }
 
 impl NetlinkRequest for ProcListenRequest {
@@ -87,8 +144,10 @@ impl ProcEventSocket {
         }
 
         let payload = &frame[payload_offset..];
+        // cn_msg.len lives at byte 16 within CnMsg (after id_idx(4)+id_val(4)+seq(4)+ack(4)).
+        const CN_MSG_LEN_FIELD_OFFSET: usize = 16;
         let cn_msg_data_len =
-            read_ne_value_at(frame, NLMSG_HDR_LEN + 16, u16::from_ne_bytes)? as usize;
+            read_ne_value_at(frame, NLMSG_HDR_LEN + CN_MSG_LEN_FIELD_OFFSET, u16::from_ne_bytes)? as usize;
         if cn_msg_data_len == 0 {
             return None;
         }
@@ -122,27 +181,44 @@ impl ProcEventSocket {
     }
 
     fn parse_pid_event_payload(payload: &[u8]) -> Option<ProcPidEvent> {
-        let what = read_ne_value_at(payload, 0, u32::from_ne_bytes)?;
+        if payload.len() < PROC_EVENT_HEADER_LEN {
+            return None;
+        }
+        // SAFETY: ProcEventHeader is #[repr(C)], 16 bytes, and we verified
+        // length above. read_unaligned handles any alignment.
+        let hdr: ProcEventHeader =
+            unsafe { std::ptr::read_unaligned(payload.as_ptr() as *const ProcEventHeader) };
+        let event_data = &payload[PROC_EVENT_HEADER_LEN..];
 
-        match what {
+        match hdr.what {
             x if x == libc::PROC_EVENT_EXEC as u32 || x == libc::PROC_EVENT_EXIT as u32 => {
-                let pid =
-                    read_ne_value_at(payload, PROC_EVENT_EXEC_PID_OFFSET, u32::from_ne_bytes)?;
-                let kind = if what == libc::PROC_EVENT_EXEC as u32 {
+                if event_data.len() < std::mem::size_of::<ExecExitProcEventData>() {
+                    return None;
+                }
+                let data: ExecExitProcEventData = unsafe {
+                    std::ptr::read_unaligned(
+                        event_data.as_ptr() as *const ExecExitProcEventData,
+                    )
+                };
+                let kind = if x == libc::PROC_EVENT_EXEC as u32 {
                     ProcEventKind::Exec
                 } else {
                     ProcEventKind::Exit
                 };
-                Some(ProcPidEvent { pid, kind })
+                Some(ProcPidEvent {
+                    pid: data.process_pid,
+                    kind,
+                })
             }
             x if x == libc::PROC_EVENT_FORK as u32 => {
-                let pid = read_ne_value_at(
-                    payload,
-                    PROC_EVENT_FORK_CHILD_PID_OFFSET,
-                    u32::from_ne_bytes,
-                )?;
+                if event_data.len() < std::mem::size_of::<ForkProcEventData>() {
+                    return None;
+                }
+                let data: ForkProcEventData = unsafe {
+                    std::ptr::read_unaligned(event_data.as_ptr() as *const ForkProcEventData)
+                };
                 Some(ProcPidEvent {
-                    pid,
+                    pid: data.child_pid,
                     kind: ProcEventKind::Fork,
                 })
             }
@@ -165,21 +241,21 @@ impl ProcEventSocket {
         Ok(())
     }
 
-    fn build_listen_payload() -> [u8; CN_MSG_LEN + 4] {
-        let mut msg = [0_u8; CN_MSG_LEN + 4];
-
-        // cn_msg
-        msg[0..4].copy_from_slice(&(libc::CN_IDX_PROC as u32).to_ne_bytes());
-        msg[4..8].copy_from_slice(&(libc::CN_VAL_PROC as u32).to_ne_bytes());
-        msg[8..12].copy_from_slice(&(0_u32).to_ne_bytes());
-        msg[12..16].copy_from_slice(&(0_u32).to_ne_bytes());
-        msg[16..18].copy_from_slice(&(4_u16).to_ne_bytes());
-        msg[18..20].copy_from_slice(&(0_u16).to_ne_bytes());
-
-        // proc_cn_mcast_op
-        msg[20..24].copy_from_slice(&(libc::PROC_CN_MCAST_LISTEN as u32).to_ne_bytes());
-
-        msg
+    fn build_listen_payload() -> [u8; std::mem::size_of::<CnMsgListenPayload>()] {
+        let msg = CnMsgListenPayload {
+            cn: CnMsg {
+                id_idx: libc::CN_IDX_PROC as u32,
+                id_val: libc::CN_VAL_PROC as u32,
+                seq: 0,
+                ack: 0,
+                len: 4,
+                flags: 0,
+            },
+            op: libc::PROC_CN_MCAST_LISTEN as u32,
+        };
+        // SAFETY: CnMsgListenPayload is #[repr(C)] with no padding on all
+        // Linux targets (all fields are naturally aligned).
+        unsafe { std::mem::transmute(msg) }
     }
 
     pub fn open() -> Result<Self> {

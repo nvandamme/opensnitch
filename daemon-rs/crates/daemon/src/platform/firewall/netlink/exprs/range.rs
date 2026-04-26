@@ -3,6 +3,7 @@ use netlink_bindings::utils::Rec;
 
 use super::shared::push_range_from_reg1;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(in crate::platform::firewall::netlink) struct NftRange {
     pub(super) sreg: nftables::Registers,

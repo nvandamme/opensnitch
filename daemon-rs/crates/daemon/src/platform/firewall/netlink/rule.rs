@@ -46,6 +46,7 @@ pub(super) enum NftExpression {
     Limit(NftLimit),
     Log(NftLog),
     Counter(NftCounter),
+    #[allow(dead_code)]
     Range(NftRange),
     Rt(NftRt),
     Verdict(NftVerdict),
@@ -115,6 +116,7 @@ impl PartialEq for NftRule {
 
 impl Eq for NftRule {}
 
+#[allow(dead_code)]
 impl NftRule {
     pub(crate) fn new(table: NftTable, chain: impl Into<String>, tag: impl Into<String>) -> Self {
         Self {

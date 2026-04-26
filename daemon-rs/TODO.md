@@ -7,7 +7,7 @@ It supersedes:
 - `daemon-rs/FEATURE_PARITY.md`
 - `daemon-rs/SERVICE_ASYNC_AND_MODEL_SCAN_2026-03-15.md`
 
-Last update: 2026-04-27 (expression parity matrix update: 24/40 families implemented, stale active-task scan refreshed)
+Last update: 2026-04-27 (typed proc connector structs, ifaces dedup, zero-warning build)
 
 ## Scope
 
@@ -268,6 +268,11 @@ eBPF library policy:
   - **Primary API reference**: `https://docs.rs/netlink-bindings/0.3.0/netlink_bindings/`
   - **Incremental progress (2026-04-26)**:
     - `ProcEventSocket::open()` now reuses shared `platform/netlink/runtime.rs::run_on_netlink_rt` for sync↔async bridge behavior, aligning proc connector runtime orchestration with current netlink domain conventions.
+  - **Incremental progress (2026-04-27)**:
+    - Replaced manual `build_listen_payload()` byte construction with `#[repr(C)]` typed structs (`CnMsg`, `CnMsgListenPayload`) and `mem::transmute`, eliminating 6 `copy_from_slice` calls with magic ranges.
+    - Replaced `parse_pid_event_payload()` magic-offset parsing (`read_ne_value_at` at hard-coded byte offsets) with typed `#[repr(C)]` struct overlays (`ProcEventHeader`, `ExecExitProcEventData`, `ForkProcEventData`) using `ptr::read_unaligned`; field access is now self-documenting.
+    - Scoped test-only constants and imports to `#[cfg(test)]`.
+    - NOTE(netlink-baseline): `netlink-bindings` 0.3.0 has no `connector` module — no typed cn_msg/proc_event decoder available. Hand-defined `#[repr(C)]` structs are justified.
   - **Why**:
     - Current proc connector path still manually decodes netlink/cn_msg payload offsets and event headers.
     - This is a high-risk area for protocol drift and offset mistakes as kernels evolve.
