@@ -7,7 +7,7 @@ It supersedes:
 - `daemon-rs/FEATURE_PARITY.md`
 - `daemon-rs/SERVICE_ASYNC_AND_MODEL_SCAN_2026-03-15.md`
 
-Last update: 2026-04-26 (platform/<domain> migration aligned to Go key trees: firewall/procmon/conman/statistics)
+Last update: 2026-04-27 (netlink hot-path compaction: verdict buffer reuse, adapter dedup, audit cleanup)
 
 ## Scope
 
@@ -245,6 +245,11 @@ eBPF library policy:
     - Added `collect_replies()` accumulation helper in `platform/netlink/io.rs` for simple vector-collect reply patterns.
     - Converted firewall adapter string helpers to zero-alloc: `hook_num_to_name`, `policy_num_to_name`, `chain_type_name` now return `&'static str`; `zone_name_from_chain` returns `Option<&str>`. `DumpChain.hook` and `DumpChain.policy` store `&'static str` instead of `String`.
     - Reduced socket-diag kill-path copy overhead: `kill_socket` sync boundary clones `SocketInfo` once at the sync→async bridge; async path takes owned value directly.
+    - Added NFQUEUE verdict buffer reuse: `NlMsg::reuse()` + `finalize_send_reuse()` enable pre-allocated verdict buffer carry through the hot recv/verdict loop in `platform/nfqueue/netlink.rs`, eliminating per-packet `Vec<u8>` allocation.
+    - Fixed double-alloc in `cstr_to_string()` and `tagged_uuid_from_userdata()` (`platform/firewall/netlink/adapter.rs`): `.to_string()` → `.into_owned()` on `from_utf8_lossy` results to avoid extra allocation when payload is valid UTF-8.
+    - Extracted `push_chain_operations()` helper in firewall adapter to deduplicate chain+zone-chain operation-push logic in `plan_apply_system_firewall`, reducing clone cascade and ~40 lines of duplicated iteration code.
+    - Replaced `to_ascii_lowercase()` allocation in `chain_hook_num`, `chain_priority`, `chain_policy` (`platform/firewall/netlink/batch.rs`) with `eq_ignore_ascii_case()` for zero-alloc case-insensitive matching.
+    - Cleaned up proc-audit dead code (`platform/procmon/audit.rs`): removed unused `NetlinkHeader` struct and private helpers (`parse_header`, `normalized_msg_len`, `align_len`); scoped `parse_event_datagram` and `NLMSG_HDR_LEN` to `#[cfg(test)]`; fixed `from_utf8_lossy().to_string()` → `.to_owned()` in event data construction.
   - **Constraints**:
     - Keep NFQUEUE runtime policy fail-closed on backend startup errors (no silent fallback to legacy FFI path).
     - Preserve queue configuration sequence semantics (PF bind, queue bind, copy params, maxlen, UID/GID flags best-effort).

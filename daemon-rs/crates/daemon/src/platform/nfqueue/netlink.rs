@@ -199,11 +199,33 @@ impl NlMsg {
     ) -> Self {
         let mut buf = Vec::with_capacity(NLMSG_HDR_LEN + expected_payload_len);
         buf.resize(NLMSG_HDR_LEN, 0u8); // nlmsg_len placeholder + zeros
+        Self::write_header(&mut buf, msg_type, flags, seq);
+        Self(buf)
+    }
+
+    /// Reuse an existing buffer for a new message, avoiding allocation when
+    /// the buffer already has sufficient capacity.  This is the hot-path
+    /// entrypoint for per-packet verdict messages.
+    pub(crate) fn reuse(
+        buf: Vec<u8>,
+        msg_type: u16,
+        flags: u16,
+        seq: u32,
+        expected_payload_len: usize,
+    ) -> Self {
+        let mut buf = buf;
+        buf.clear();
+        buf.reserve(NLMSG_HDR_LEN + expected_payload_len);
+        buf.resize(NLMSG_HDR_LEN, 0u8);
+        Self::write_header(&mut buf, msg_type, flags, seq);
+        Self(buf)
+    }
+
+    fn write_header(buf: &mut Vec<u8>, msg_type: u16, flags: u16, seq: u32) {
         buf[4..6].copy_from_slice(&msg_type.to_ne_bytes());
         buf[6..8].copy_from_slice(&flags.to_ne_bytes());
         buf[8..12].copy_from_slice(&seq.to_ne_bytes());
         // nlmsg_pid = 0  (kernel fills in our portid on receipt)
-        Self(buf)
     }
 
     /// Begin a new message.  `nlmsg_len` is left as a zero placeholder and
@@ -285,6 +307,19 @@ impl NlMsg {
         let len = self.0.len() as u32;
         self.0[0..4].copy_from_slice(&len.to_ne_bytes());
         self.0
+    }
+
+    /// Patch `nlmsg_len` in-place, send through the provided closure, then
+    /// return the buffer for reuse.  Avoids the ownership transfer of
+    /// [`finalize`] so the caller can reclaim the allocation.
+    pub(crate) fn finalize_send_reuse(
+        mut self,
+        send_fn: impl FnOnce(&[u8]) -> Result<()>,
+    ) -> Result<Vec<u8>> {
+        let len = self.0.len() as u32;
+        self.0[0..4].copy_from_slice(&len.to_ne_bytes());
+        send_fn(&self.0)?;
+        Ok(self.0)
     }
 }
 
@@ -583,7 +618,14 @@ impl NfqueueNetlinkSocket {
 
     // ── Verdict sender ──────────────────────────────────────────────────────
 
-    fn send_verdict(&self, packet_id: u32, verdict: &PacketVerdict) -> Result<()> {
+    /// Send a verdict for a packet, reusing `verdict_buf` to avoid per-packet
+    /// allocation.  Returns the buffer (possibly grown) for the next call.
+    fn send_verdict_reuse(
+        &self,
+        packet_id: u32,
+        verdict: &PacketVerdict,
+        verdict_buf: Vec<u8>,
+    ) -> Result<Vec<u8>> {
         let (v, vmark) = NfqueueVerdictEngine::packet_verdict_to_c(verdict);
         let seq = self.next_seq();
         let payload = NfqueueVerdictEngine::packet_verdict_payload(verdict);
@@ -592,7 +634,8 @@ impl NfqueueNetlinkSocket {
             + if vmark != 0 { NLA_HDR_LEN + 4 } else { 0 }
             + payload.map_or(0, |pkt| NLA_HDR_LEN + nla_align(pkt.len()));
 
-        let mut msg = NlMsg::new_with_capacity(
+        let mut msg = NlMsg::reuse(
+            verdict_buf,
             NFQNL_MSG_VERDICT,
             libc::NLM_F_REQUEST as u16,
             seq,
@@ -608,7 +651,7 @@ impl NfqueueNetlinkSocket {
             msg = msg.nla_bytes(libc::NFQA_PAYLOAD as u16, pkt);
         }
 
-        self.send_raw(&msg.finalize())
+        msg.finalize_send_reuse(|buf| self.send_raw(buf))
     }
 
     // ── Socket I/O ──────────────────────────────────────────────────────────
@@ -681,6 +724,11 @@ impl NfqueueNetlinkSocket {
 
     fn run(self, shutdown: CancellationToken) -> Result<()> {
         let mut buf = [0u8; RECV_BUF_LEN];
+        // Pre-allocate a verdict buffer that is reused across iterations,
+        // avoiding per-packet Vec allocation in the hot loop.
+        let mut verdict_buf = Vec::with_capacity(
+            NLMSG_HDR_LEN + NFGENMSG_LEN + (NLA_HDR_LEN + 8) + (NLA_HDR_LEN + 4),
+        );
         let mut last_metrics_log = Instant::now();
         // SAFETY: self.fd remains valid until the loop exits.
         let borrowed_fd = unsafe { BorrowedFd::borrow_raw(self.fd.as_raw_fd()) };
@@ -737,8 +785,18 @@ impl NfqueueNetlinkSocket {
                                 pkt.iface_out_idx,
                             );
                             NfqueueMetricsState::record_packet_verdict(self.queue_num, &verdict);
-                            if let Err(err) = self.send_verdict(pkt.packet_id, &verdict) {
-                                warn!(detail = %err, "nfqueue netlink: verdict send failed");
+                            match self.send_verdict_reuse(pkt.packet_id, &verdict, verdict_buf) {
+                                Ok(returned_buf) => verdict_buf = returned_buf,
+                                Err(err) => {
+                                    // Buffer is lost on error; re-allocate for next iteration.
+                                    verdict_buf = Vec::with_capacity(
+                                        NLMSG_HDR_LEN
+                                            + NFGENMSG_LEN
+                                            + (NLA_HDR_LEN + 8)
+                                            + (NLA_HDR_LEN + 4),
+                                    );
+                                    warn!(detail = %err, "nfqueue netlink: verdict send failed");
+                                }
                             }
                         } else {
                             NfqueueMetricsState::record_recv_error(self.queue_num);

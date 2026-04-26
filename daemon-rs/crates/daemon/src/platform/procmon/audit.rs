@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use netlink_bindings::builtin;
 use netlink_bindings::traits::{NetlinkRequest, Protocol};
 use netlink_socket2::MulticastSocketRaw;
@@ -11,6 +11,7 @@ use crate::platform::netlink::{
     io::{new_request_socket, open_multicast_socket, recv_with_timeout, request_with_ack_timeout},
 };
 
+#[cfg(test)]
 const NLMSG_HDR_LEN: usize = builtin::Nlmsghdr::len();
 const STATUS_MESSAGE_LEN: usize = 40;
 
@@ -26,12 +27,6 @@ const AUDIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) struct AuditEventMessage {
     pub(crate) kind: u16,
     pub(crate) data: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct NetlinkHeader {
-    len: u32,
-    msg_type: u16,
 }
 
 pub(crate) struct AuditNetlinkSocket {
@@ -119,7 +114,7 @@ impl AuditNetlinkSocket {
         if (AUDIT_EVENT_MESSAGE_MIN..=AUDIT_EVENT_MESSAGE_MAX).contains(&msg_type) {
             let data = String::from_utf8_lossy(payload)
                 .trim_end_matches('\0')
-                .to_string();
+                .to_owned();
             return Ok(Some(AuditEventMessage {
                 kind: msg_type,
                 data,
@@ -129,54 +124,43 @@ impl AuditNetlinkSocket {
         Ok(None)
     }
 
+    /// Parse a framed audit datagram containing one or more netlink messages.
+    /// Used by tests that construct full datagram payloads.
+    #[cfg(test)]
     fn parse_event_datagram(datagram: &[u8]) -> Result<Option<AuditEventMessage>> {
         let mut offset = 0_usize;
         while offset + NLMSG_HDR_LEN <= datagram.len() {
-            let header = Self::parse_header(&datagram[offset..])
-                .ok_or_else(|| anyhow!("audit event packet too short for header"))?;
-            let msg_len = Self::normalized_msg_len(header.len as usize, datagram.len() - offset);
+            let (msg_len, msg_type) = {
+                let hdr = &datagram[offset..];
+                if hdr.len() < NLMSG_HDR_LEN {
+                    break;
+                }
+                let len = u32::from_ne_bytes(hdr[0..4].try_into().unwrap()) as usize;
+                let mtype = u16::from_ne_bytes(hdr[4..6].try_into().unwrap());
+                let normalized = if len == 0 {
+                    0
+                } else if datagram.len() - offset >= len
+                    && (datagram.len() - offset).saturating_sub(len) <= NLMSG_HDR_LEN
+                {
+                    datagram.len() - offset
+                } else {
+                    len
+                };
+                (normalized, mtype)
+            };
             if msg_len < NLMSG_HDR_LEN || offset + msg_len > datagram.len() {
                 bail!("audit event packet has invalid message length");
             }
 
             let payload = &datagram[(offset + NLMSG_HDR_LEN)..(offset + msg_len)];
-            if let Some(event) = Self::parse_event_message(header.msg_type, payload)? {
+            if let Some(event) = Self::parse_event_message(msg_type, payload)? {
                 return Ok(Some(event));
             }
 
-            offset += Self::align_len(msg_len);
+            offset += (msg_len + 3) & !3;
         }
 
         Ok(None)
-    }
-
-    fn parse_header(buf: &[u8]) -> Option<NetlinkHeader> {
-        if buf.len() < NLMSG_HDR_LEN {
-            return None;
-        }
-
-        Some(NetlinkHeader {
-            len: u32::from_ne_bytes(buf[0..4].try_into().ok()?),
-            msg_type: u16::from_ne_bytes(buf[4..6].try_into().ok()?),
-        })
-    }
-
-    fn normalized_msg_len(declared_len: usize, remaining_len: usize) -> usize {
-        if declared_len == 0 {
-            return 0;
-        }
-
-        if remaining_len >= declared_len
-            && remaining_len.saturating_sub(declared_len) <= NLMSG_HDR_LEN
-        {
-            return remaining_len;
-        }
-
-        declared_len
-    }
-
-    fn align_len(len: usize) -> usize {
-        (len + 3) & !3
     }
 
     #[cfg(test)]

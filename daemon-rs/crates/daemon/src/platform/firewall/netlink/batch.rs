@@ -417,14 +417,20 @@ impl NetfilterTransactionBuilder {
 }
 
 fn chain_hook_num(hook: &str) -> Option<u32> {
-    Some(match hook.to_ascii_lowercase().as_str() {
-        "prerouting" => libc::NF_INET_PRE_ROUTING as u32,
-        "input" => libc::NF_INET_LOCAL_IN as u32,
-        "forward" => libc::NF_INET_FORWARD as u32,
-        "output" => libc::NF_INET_LOCAL_OUT as u32,
-        "postrouting" => libc::NF_INET_POST_ROUTING as u32,
-        "ingress" => libc::NF_INET_INGRESS as u32,
-        _ => return None,
+    Some(if hook.eq_ignore_ascii_case("prerouting") {
+        libc::NF_INET_PRE_ROUTING as u32
+    } else if hook.eq_ignore_ascii_case("input") {
+        libc::NF_INET_LOCAL_IN as u32
+    } else if hook.eq_ignore_ascii_case("forward") {
+        libc::NF_INET_FORWARD as u32
+    } else if hook.eq_ignore_ascii_case("output") {
+        libc::NF_INET_LOCAL_OUT as u32
+    } else if hook.eq_ignore_ascii_case("postrouting") {
+        libc::NF_INET_POST_ROUTING as u32
+    } else if hook.eq_ignore_ascii_case("ingress") {
+        libc::NF_INET_INGRESS as u32
+    } else {
+        return None;
     })
 }
 
@@ -433,24 +439,36 @@ fn chain_priority(priority: &str) -> Result<i32> {
         return Ok(value);
     }
 
-    Ok(match priority.to_ascii_lowercase().as_str() {
-        "" => 0,
-        "raw" => libc::NF_IP_PRI_RAW,
-        "conntrack" => libc::NF_IP_PRI_CONNTRACK,
-        "mangle" => libc::NF_IP_PRI_MANGLE,
-        "natdest" | "dnat" => libc::NF_IP_PRI_NAT_DST,
-        "filter" => libc::NF_IP_PRI_FILTER,
-        "security" => libc::NF_IP_PRI_SECURITY,
-        "natsource" | "snat" => libc::NF_IP_PRI_NAT_SRC,
-        other => anyhow::bail!("unsupported nft priority: {other}"),
+    if priority.is_empty() {
+        return Ok(0);
+    }
+
+    Ok(if priority.eq_ignore_ascii_case("raw") {
+        libc::NF_IP_PRI_RAW
+    } else if priority.eq_ignore_ascii_case("conntrack") {
+        libc::NF_IP_PRI_CONNTRACK
+    } else if priority.eq_ignore_ascii_case("mangle") {
+        libc::NF_IP_PRI_MANGLE
+    } else if priority.eq_ignore_ascii_case("natdest") || priority.eq_ignore_ascii_case("dnat") {
+        libc::NF_IP_PRI_NAT_DST
+    } else if priority.eq_ignore_ascii_case("filter") {
+        libc::NF_IP_PRI_FILTER
+    } else if priority.eq_ignore_ascii_case("security") {
+        libc::NF_IP_PRI_SECURITY
+    } else if priority.eq_ignore_ascii_case("natsource") || priority.eq_ignore_ascii_case("snat") {
+        libc::NF_IP_PRI_NAT_SRC
+    } else {
+        anyhow::bail!("unsupported nft priority: {priority}");
     })
 }
 
 fn chain_policy(policy: &str) -> Option<u32> {
-    match policy.to_ascii_lowercase().as_str() {
-        "accept" => Some(nftables::VerdictCode::Accept as u32),
-        "drop" => Some(nftables::VerdictCode::Drop as u32),
-        _ => None,
+    if policy.eq_ignore_ascii_case("accept") {
+        Some(nftables::VerdictCode::Accept as u32)
+    } else if policy.eq_ignore_ascii_case("drop") {
+        Some(nftables::VerdictCode::Drop as u32)
+    } else {
+        None
     }
 }
 

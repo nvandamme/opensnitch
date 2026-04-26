@@ -126,7 +126,7 @@ const NFT_DUMP_FAMILIES: [&str; 5] = ["inet", "ip", "ip6", "bridge", "netdev"];
 // Netlink string helper retained for optional dump/introspection paths.
 #[allow(dead_code)]
 fn cstr_to_string(value: &CStr) -> String {
-    value.to_string_lossy().to_string()
+    value.to_string_lossy().into_owned()
 }
 
 // Netlink hook-name helper retained for optional dump/introspection paths.
@@ -172,7 +172,7 @@ fn tagged_uuid_from_userdata(userdata: &[u8]) -> String {
     if !userdata.starts_with(super::SYSFW_TAG_PREFIX) {
         return String::new();
     }
-    String::from_utf8_lossy(&userdata[super::SYSFW_TAG_PREFIX.len()..]).to_string()
+    String::from_utf8_lossy(&userdata[super::SYSFW_TAG_PREFIX.len()..]).into_owned()
 }
 
 impl FirewallNetlinkAdapter {
@@ -708,111 +708,72 @@ impl FirewallNetlinkAdapter {
         }
 
         let mut operations = Vec::new();
-        for chain in &sysfw.chains {
-            let family = FirewallNftablesAdapter::probe_family_or_default(chain).to_string();
-            let table = FirewallNftablesAdapter::probe_table_or_default(chain).to_string();
-            let name = FirewallNftablesAdapter::probe_chain_name_or_default(chain).to_string();
-            let hook = if chain.hook.is_empty() {
-                "output".to_string()
-            } else {
-                chain.hook.clone()
-            };
-            let policy = if chain.policy.is_empty() {
-                "accept".to_string()
-            } else {
-                chain.policy.clone()
-            };
-            let priority = if chain.priority.is_empty() {
-                "0".to_string()
-            } else {
-                chain.priority.clone()
-            };
-            let chain_type = chain_type_name(chain);
 
-            operations.push(FirewallNetlinkOperation::EnsureSystemChain {
-                family: family.clone(),
-                table: table.clone(),
-                name: name.clone(),
-                hook,
-                priority,
-                policy,
-                chain_type: chain_type.to_string(),
-            });
+        let all_chains = sysfw
+            .chains
+            .iter()
+            .chain(sysfw.zones.iter().flat_map(|z| z.chains.iter()));
 
-            for rule in &chain.rules {
-                if !rule.enabled {
-                    continue;
-                }
-
-                if let Some(parsed_rules) = Self::parse_system_rule(rule, queue_num) {
-                    for parsed in parsed_rules {
-                        operations.push(FirewallNetlinkOperation::ApplySystemRule {
-                            rule: parsed
-                                .with_target(
-                                    NftTable::new(family.clone(), table.clone()),
-                                    name.clone(),
-                                )
-                                .with_tag(FirewallNftablesAdapter::probe_rule_tag(chain, rule)),
-                        });
-                    }
-                }
-            }
-        }
-
-        for zone in &sysfw.zones {
-            for chain in &zone.chains {
-                let family = FirewallNftablesAdapter::probe_family_or_default(chain).to_string();
-                let table = FirewallNftablesAdapter::probe_table_or_default(chain).to_string();
-                let name = FirewallNftablesAdapter::probe_chain_name_or_default(chain).to_string();
-                let hook = if chain.hook.is_empty() {
-                    "output".to_string()
-                } else {
-                    chain.hook.clone()
-                };
-                let policy = if chain.policy.is_empty() {
-                    "accept".to_string()
-                } else {
-                    chain.policy.clone()
-                };
-                let priority = if chain.priority.is_empty() {
-                    "0".to_string()
-                } else {
-                    chain.priority.clone()
-                };
-                let chain_type = chain_type_name(chain);
-
-                operations.push(FirewallNetlinkOperation::EnsureSystemChain {
-                    family: family.clone(),
-                    table: table.clone(),
-                    name: name.clone(),
-                    hook,
-                    priority,
-                    policy,
-                    chain_type: chain_type.to_string(),
-                });
-
-                for rule in &chain.rules {
-                    if !rule.enabled {
-                        continue;
-                    }
-
-                    if let Some(parsed_rules) = Self::parse_system_rule(rule, queue_num) {
-                        for parsed in parsed_rules {
-                            operations.push(FirewallNetlinkOperation::ApplySystemRule {
-                                rule: parsed
-                                    .with_target(
-                                        NftTable::new(family.clone(), table.clone()),
-                                        name.clone(),
-                                    )
-                                    .with_tag(FirewallNftablesAdapter::probe_rule_tag(chain, rule)),
-                            });
-                        }
-                    }
-                }
-            }
+        for chain in all_chains {
+            Self::push_chain_operations(&mut operations, chain, queue_num);
         }
 
         operations
+    }
+
+    fn push_chain_operations(
+        operations: &mut Vec<FirewallNetlinkOperation>,
+        chain: &FirewallChain,
+        queue_num: u16,
+    ) {
+        let family = FirewallNftablesAdapter::probe_family_or_default(chain);
+        let table = FirewallNftablesAdapter::probe_table_or_default(chain);
+        let name = FirewallNftablesAdapter::probe_chain_name_or_default(chain);
+        let hook = if chain.hook.is_empty() {
+            "output"
+        } else {
+            &chain.hook
+        };
+        let policy = if chain.policy.is_empty() {
+            "accept"
+        } else {
+            &chain.policy
+        };
+        let priority = if chain.priority.is_empty() {
+            "0"
+        } else {
+            &chain.priority
+        };
+        let chain_type = chain_type_name(chain);
+
+        operations.push(FirewallNetlinkOperation::EnsureSystemChain {
+            family: family.to_string(),
+            table: table.to_string(),
+            name: name.to_string(),
+            hook: hook.to_string(),
+            priority: priority.to_string(),
+            policy: policy.to_string(),
+            chain_type: chain_type.to_string(),
+        });
+
+        for rule in &chain.rules {
+            if !rule.enabled {
+                continue;
+            }
+
+            if let Some(parsed_rules) = Self::parse_system_rule(rule, queue_num) {
+                for parsed in parsed_rules {
+                    operations.push(FirewallNetlinkOperation::ApplySystemRule {
+                        rule: parsed
+                            .with_target(
+                                NftTable::new(family, table),
+                                name,
+                            )
+                            .with_tag(FirewallNftablesAdapter::probe_rule_tag(chain, rule)),
+                    });
+                }
+            }
+        }
     }
 
     fn count_dropped_system_fw_rules(sysfw: &FirewallConfig, queue_num: u16) -> usize {
