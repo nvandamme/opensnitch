@@ -1,6 +1,5 @@
 use crate::models::socket_state::SocketInfo;
-use crate::platform::adapters::socket_diag::SocketDiagAdapter;
-use crate::platform::adapters::socket_diag_bindings::SocketDiagBindingsAdapter;
+use crate::platform::netstat::socket_diag::SocketDiagAdapter;
 use nix::libc::{AF_INET, IPPROTO_TCP};
 
 #[test]
@@ -25,11 +24,7 @@ fn build_kill_req_v2_preserves_socket_identity() {
         cookie1: 0xaabbccdd,
     };
 
-    let req = SocketDiagBindingsAdapter::probe_build_kill_req_v2(
-        AF_INET as u8,
-        IPPROTO_TCP as u8,
-        &socket,
-    );
+    let req = SocketDiagAdapter::probe_build_kill_req_v2(AF_INET as u8, IPPROTO_TCP as u8, &socket);
 
     assert_eq!(req.family, AF_INET as u8);
     assert_eq!(req.protocol, IPPROTO_TCP as u8);

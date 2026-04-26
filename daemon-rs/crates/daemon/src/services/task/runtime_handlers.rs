@@ -24,7 +24,7 @@ use crate::{
             PidMonitorResult, PidMonitorStatm, PidMonitorTreeNode, TaskErrorPayload,
         },
     },
-    platform::ports::socket_diag_port::NativeSocketDiagPort,
+    platform::netstat::socket_diag::SocketDiagAdapter,
     services::{process::ProcessService, storage::StorageService},
     utils::{
         duration_parse::{TASK_INTERVAL_OPTIONS, parse_human_duration},
@@ -408,7 +408,7 @@ impl TaskService {
                             break;
                         }
 
-                        match NativeSocketDiagPort::dump_sockets_async(family, proto).await {
+                        match SocketDiagAdapter::dump_sockets_async(family, proto).await {
                             Ok(sockets) => {
                                 let rtnl_iface_map =
                                     socket_monitor::fetch_iface_name_map_rtnetlink().await;
@@ -465,7 +465,7 @@ impl TaskService {
                                     }
                                 }
 
-                                if (family == 0 || family == socket_monitor::AF_XDP_FAMILY)
+                                if (family == 0 || family == nix::libc::AF_XDP as u8)
                                     && state_filter == 0
                                 {
                                     for xdp in read_proc_net_xdp_rows() {

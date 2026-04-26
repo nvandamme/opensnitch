@@ -791,9 +791,9 @@ if subscriptions_pb2 is not None and subscriptions_pb2_grpc is not None:
         """
 
         def _accepted_reply(
-            self, request: subscriptions_pb2.SubscriptionRequest
-        ) -> subscriptions_pb2.SubscriptionReply:
-            return subscriptions_pb2.SubscriptionReply(
+            self, request: subscriptions_pb2.SubscriptionRequest # type: ignore[param-type]
+        ) -> subscriptions_pb2.SubscriptionReply: # type: ignore[return]
+            return subscriptions_pb2.SubscriptionReply( # type: ignore[return]
                 operation=request.operation,
                 accepted=True,
                 message="mock-ui-ok",
@@ -847,11 +847,12 @@ if subscriptions_pb2 is not None and subscriptions_pb2_grpc is not None:
             """
             cmd_id = 0
 
-            def _cmd(action: int, data: str = "") -> subscriptions_pb2.SubscriptionCommand:
+            def _cmd(action: int, data: str = "") -> subscriptions_pb2.SubscriptionCommand: # type: ignore[return]
                 nonlocal cmd_id
                 cmd_id += 1
                 print(f"MOCK_UI SubscriptionsCommandSend id={cmd_id} action={action}", flush=True)
-                return subscriptions_pb2.SubscriptionCommand(id=cmd_id, action=action, data=data)
+                action = subscriptions_pb2.SubscriptionAction(action) if isinstance(action, int) else action # type: ignore[assignment]
+                return subscriptions_pb2.SubscriptionCommand(id=cmd_id, action=action, data=data) # type: ignore[return]
 
             def _drain_acks() -> None:
                 try:
@@ -867,11 +868,11 @@ if subscriptions_pb2 is not None and subscriptions_pb2_grpc is not None:
 
             threading.Thread(target=_drain_acks, daemon=True).start()
 
-            yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_LIST)
-            yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_APPLY, _SUBSCRIPTION_APPLY_DATA)
-            yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_DELETE, _SUBSCRIPTION_DELETE_DATA)
-            yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_REFRESH, _SUBSCRIPTION_REFRESH_DATA)
-            yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_DEPLOY)
+            yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_LIST) # type: ignore[attr-defined]
+            yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_APPLY, _SUBSCRIPTION_APPLY_DATA) # type: ignore[attr-defined]
+            yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_DELETE, _SUBSCRIPTION_DELETE_DATA) # type: ignore[attr-defined]
+            yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_REFRESH, _SUBSCRIPTION_REFRESH_DATA) # type: ignore[attr-defined]
+            yield _cmd(subscriptions_pb2.SUBSCRIPTION_ACTION_DEPLOY) # type: ignore[attr-defined]
 
 
 def main() -> int:
@@ -934,7 +935,7 @@ def main() -> int:
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
     ui_pb2_grpc.add_UIServicer_to_server(MockUiService(enable_subscriptions=effective_subscriptions), server)
     if effective_subscriptions:
-        subscriptions_pb2_grpc.add_SubscriptionsServicer_to_server(MockSubscriptionsService(), server)
+        subscriptions_pb2_grpc.add_SubscriptionsServicer_to_server(MockSubscriptionsService(), server) # type: ignore[attr-defined]
     bound = server.add_insecure_port(endpoint)
     if bound == 0:
         print(f"MOCK_UI failed to bind endpoint={endpoint}", flush=True)

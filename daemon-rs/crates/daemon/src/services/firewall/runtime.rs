@@ -4,14 +4,12 @@ use anyhow::{Result, anyhow};
 
 use crate::{
     models::{firewall_config::FirewallConfig, firewall_state::FirewallBackend},
-    platform::adapters::{
-        firewall_netlink::FirewallNetlinkAdapter, firewall_nftables::FirewallNftablesAdapter,
-    },
-    platform::ports::firewall_port::InterceptionHealth,
-    platform::ports::firewall_port::{
+    platform::firewall::port::InterceptionHealth,
+    platform::firewall::port::{
         FirewallIntrospectionPort, FirewallPersistencePort, IptablesFirewallPort,
         NftablesFirewallPort,
     },
+    platform::firewall::{netlink::FirewallNetlinkAdapter, nftables::FirewallNftablesAdapter},
     services::lifecycle::ServiceState,
     utils::command_path::resolve_command_path,
 };
@@ -19,7 +17,7 @@ use crate::{
 use super::{FirewallService, runtime_store::FirewallRuntime};
 
 #[cfg(feature = "openwrt")]
-use crate::platform::adapters::openwrt_uci_firewall::OpenWrtUciFirewallAdapter;
+use crate::platform::firewall::openwrt_uci::OpenWrtUciFirewallAdapter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // Optional introspection source ordering used by selected diagnostics/control paths.

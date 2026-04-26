@@ -3,13 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::models::firewall_state::FirewallBackend;
-use crate::{
-    models::firewall_config::FirewallConfig,
-    platform::{
-        adapters::loadable_state_file_store::FileLoadableStateStoreAdapter,
-        ports::loadable_state_store_port::FirewallStorePort,
-    },
-};
+use crate::{models::firewall_config::FirewallConfig, services::storage::FileLoadableStateStore};
 
 use super::FirewallService;
 
@@ -24,7 +18,7 @@ impl FirewallService {
         path: &Path,
         backend: FirewallBackend,
     ) -> Result<Option<FirewallConfig>> {
-        FileLoadableStateStoreAdapter::load_firewall(path, backend)
+        FileLoadableStateStore::load_firewall(path, backend)
     }
     // Retained for optional introspection/recovery paths and backend parity helpers.
     #[allow(dead_code)]
@@ -37,6 +31,6 @@ impl FirewallService {
         sysfw: &FirewallConfig,
         backend: FirewallBackend,
     ) -> Result<()> {
-        FileLoadableStateStoreAdapter::save_firewall(path, sysfw, backend)
+        FileLoadableStateStore::save_firewall(path, sysfw, backend)
     }
 }

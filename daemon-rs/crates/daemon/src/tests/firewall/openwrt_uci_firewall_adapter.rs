@@ -8,10 +8,7 @@ use crate::models::firewall_config::{
     FirewallChain, FirewallConfig, FirewallExpression, FirewallRule, FirewallStatement,
     FirewallStatementValue, FirewallZone,
 };
-use crate::platform::{
-    adapters::openwrt_uci_firewall::OpenWrtUciFirewallAdapter,
-    ports::openwrt_uci_firewall_port::{FirewallPersistencePort, FirewallUciCommandRunnerPort},
-};
+use crate::platform::firewall::openwrt_uci::{FirewallUciCommandRunner, OpenWrtUciFirewallAdapter};
 
 struct RecordingRunner {
     commands: Mutex<Vec<String>>,
@@ -29,7 +26,7 @@ impl RecordingRunner {
     }
 }
 
-impl FirewallUciCommandRunnerPort for RecordingRunner {
+impl FirewallUciCommandRunner for RecordingRunner {
     fn run_uci_cli_command(&self, command: &str) -> anyhow::Result<()> {
         self.commands
             .lock()
@@ -182,10 +179,7 @@ fn canonical_firewall_fixture() -> FirewallConfig {
 
 #[test]
 fn builds_firewall_persistence_plan_from_uci_text() {
-    let commands =
-        <OpenWrtUciFirewallAdapter as FirewallPersistencePort>::build_firewall_persistence_plan(
-            export_fixture(),
-        )
+    let commands = OpenWrtUciFirewallAdapter::build_firewall_persistence_plan(export_fixture())
         .expect("build cli plan");
 
     assert!(commands.iter().any(|c| c == "uci add firewall rule"));
@@ -204,11 +198,8 @@ fn builds_firewall_persistence_plan_from_uci_text() {
 fn executes_firewall_persistence_plan_via_runner() {
     let runner = RecordingRunner::new();
 
-    <OpenWrtUciFirewallAdapter as FirewallPersistencePort>::persist_firewall_from_uci_text(
-        export_fixture(),
-        &runner,
-    )
-    .expect("persist via runner");
+    OpenWrtUciFirewallAdapter::persist_firewall_from_uci_text(export_fixture(), &runner)
+        .expect("persist via runner");
 
     let commands = runner.take();
     assert!(!commands.is_empty(), "expected executed command list");
@@ -221,10 +212,8 @@ fn executes_firewall_persistence_plan_via_runner() {
 #[test]
 fn builds_expected_luci_visible_rule_cli_sequence() {
     let commands =
-        <OpenWrtUciFirewallAdapter as FirewallPersistencePort>::build_firewall_persistence_plan(
-            luci_visible_rule_fixture(),
-        )
-        .expect("build cli plan");
+        OpenWrtUciFirewallAdapter::build_firewall_persistence_plan(luci_visible_rule_fixture())
+            .expect("build cli plan");
 
     assert_eq!(
         commands,
@@ -244,11 +233,8 @@ fn builds_expected_luci_visible_rule_cli_sequence() {
 fn persists_luci_visible_rule_via_uci_cli_runner() {
     let runner = RecordingRunner::new();
 
-    <OpenWrtUciFirewallAdapter as FirewallPersistencePort>::persist_firewall_from_uci_text(
-        luci_visible_rule_fixture(),
-        &runner,
-    )
-    .expect("persist luci-visible rule via runner");
+    OpenWrtUciFirewallAdapter::persist_firewall_from_uci_text(luci_visible_rule_fixture(), &runner)
+        .expect("persist luci-visible rule via runner");
 
     assert_eq!(
         runner.take(),
@@ -352,10 +338,7 @@ config rule 'opensnitch_allow_ssh'\n\
 
 #[test]
 fn preserves_explicit_named_rule_section_when_present() {
-    let commands =
-        <OpenWrtUciFirewallAdapter as FirewallPersistencePort>::build_firewall_persistence_plan(
-            named_rule_fixture(),
-        )
+    let commands = OpenWrtUciFirewallAdapter::build_firewall_persistence_plan(named_rule_fixture())
         .expect("build named cli plan");
 
     assert_eq!(
@@ -375,10 +358,8 @@ fn preserves_explicit_named_rule_section_when_present() {
 #[test]
 fn passes_through_firewall_rule_fields_to_uci_mapped_fields() {
     let commands =
-        <OpenWrtUciFirewallAdapter as FirewallPersistencePort>::build_firewall_persistence_plan(
-            passthrough_rule_fixture(),
-        )
-        .expect("build passthrough cli plan");
+        OpenWrtUciFirewallAdapter::build_firewall_persistence_plan(passthrough_rule_fixture())
+            .expect("build passthrough cli plan");
 
     assert_eq!(
         commands,

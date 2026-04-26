@@ -17,8 +17,6 @@ use crate::{
     services::{connection::ConnectionService, process::ProcessService},
 };
 
-pub(super) const AF_XDP_FAMILY: u8 = 44;
-
 // ── Process cache helpers ─────────────────────────────────────────────────
 
 pub(super) async fn ensure_process_entry(
@@ -115,7 +113,7 @@ pub(super) async fn resolve_cached_iface_name(
     let name = if let Some(name) = rtnl_iface_map.and_then(|m| m.get(&iface).cloned()) {
         name
     } else {
-        match crate::platform::ports::net_iface_port::NetIfacePort::interface_name_by_index_async(
+        match crate::platform::netlink::ifaces::NetIfaceAdapter::interface_name_by_index_async(
             iface,
         )
         .await
@@ -133,7 +131,7 @@ pub(super) async fn resolve_cached_iface_name(
 }
 
 pub(super) async fn fetch_iface_name_map_rtnetlink() -> Option<HashMap<u32, String>> {
-    match crate::platform::ports::net_iface_port::NetIfacePort::interface_name_map_async().await {
+    match crate::platform::netlink::ifaces::NetIfaceAdapter::interface_name_map_async().await {
         Ok(map) if map.is_empty() => None,
         Ok(map) => Some(map),
         Err(err) => {
@@ -286,7 +284,7 @@ pub(super) fn socket_monitor_xdp_row(
         0,
         xdp.uid,
         xdp.inode,
-        AF_XDP_FAMILY,
+        nix::libc::AF_XDP as u8,
         0,
         0,
         0,

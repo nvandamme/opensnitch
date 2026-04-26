@@ -1,5 +1,5 @@
 use crate::models::firewall_config::{FirewallChain, FirewallRule};
-use crate::platform::adapters::firewall_iptables::FirewallIptablesAdapter;
+use crate::platform::firewall::iptables::FirewallIptablesAdapter;
 
 #[test]
 fn chain_policy_args_builds_expected_iptables_policy_command() {

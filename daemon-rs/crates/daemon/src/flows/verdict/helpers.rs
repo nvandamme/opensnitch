@@ -15,7 +15,7 @@ use crate::{
     models::effective_tunables::NfqueueOverloadPolicy,
     models::process_state::ProcessInfo,
     models::rule_record::RuleRecord,
-    platform::ports::nfqueue_runtime_port::NfqueueRuntimePort,
+    platform::nfqueue::state::NfqueueRuntimeState,
     services::client::enqueue_alert,
     services::client::{warning_connection_alert, warning_process_alert},
     services::policy_tx::PolicyOwner,
@@ -148,7 +148,7 @@ impl VerdictFlow {
 
     pub(super) fn strict_miss_accounting_enabled(&self) -> bool {
         matches!(
-            NfqueueRuntimePort::overload_policy(),
+            NfqueueRuntimeState::overload_policy(),
             NfqueueOverloadPolicy::DropFast
         )
     }

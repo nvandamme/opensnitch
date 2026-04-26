@@ -3,9 +3,8 @@ use std::{thread, thread::JoinHandle, time::Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::models::audit::{AuditEvent, AuditEventKind, KernelAction};
-use crate::platform::ports::nfqueue_netlink_port::NfqueueBackendPort;
-use crate::platform::ports::nfqueue_runtime_port::NfqueueRuntimePort;
+use crate::platform::nfqueue::netlink::NfqueueNetlinkAdapter;
+use crate::platform::nfqueue::state::NfqueueRuntimeState;
 use crate::services::audit::AuditService;
 use crate::{bus::Bus, config::DefaultAction, tunables::NfqueueOverloadPolicy};
 
@@ -20,27 +19,23 @@ impl NfqueueWorkerControl {
         queue_num: u16,
         default_action: DefaultAction,
         overload_policy: NfqueueOverloadPolicy,
-        audit: AuditService,
+        _audit: AuditService,
         shutdown: CancellationToken,
     ) -> JoinHandle<()> {
         thread::spawn(move || {
-            NfqueueRuntimePort::init(bus, queue_num, default_action, overload_policy);
+            NfqueueRuntimeState::init(bus, queue_num, default_action, overload_policy);
 
             let repeat_shutdown = shutdown.clone();
             let repeat_queue_num = queue_num.saturating_add(1);
-            let repeat_audit = audit.clone();
             let repeat_handle = thread::spawn(move || {
-                if let Err(err) = Self::run_queue_backend(
-                    repeat_queue_num,
-                    &repeat_audit,
-                    repeat_shutdown.clone(),
-                ) {
+                if let Err(err) = Self::run_queue_backend(repeat_queue_num, repeat_shutdown.clone())
+                {
                     warn!("nfqueue repeat queue unavailable: {err}");
                     Self::wait_until_cancelled(&repeat_shutdown);
                 }
             });
 
-            match Self::run_queue_backend(queue_num, &audit, shutdown.clone()) {
+            match Self::run_queue_backend(queue_num, shutdown.clone()) {
                 Ok(()) => info!("nfqueue worker exited"),
                 Err(err) => {
                     warn!("nfqueue worker unavailable: {err}");
@@ -63,21 +58,8 @@ impl NfqueueWorkerControl {
         }
     }
 
-    /// Run the default netlink NFQUEUE backend (unless explicitly disabled by
-    /// `OPENSNITCH_NFQUEUE_NETLINK_EXPERIMENT=0`) and gracefully fall back to
-    /// the legacy FFI backend on startup errors.
-    ///
-    /// While degraded, subsequent startup attempts use legacy FFI directly; a
-    /// short recovery loop clears degraded mode after netlink preflight recovers.
-    fn run_queue_backend(
-        queue_num: u16,
-        audit: &AuditService,
-        shutdown: CancellationToken,
-    ) -> anyhow::Result<()> {
-        NfqueueBackendPort::run(queue_num, shutdown, |queue_num| {
-            audit.emit(AuditEvent::cold(AuditEventKind::KernelAction(
-                KernelAction::KernelInterfaceReattached { queue: queue_num },
-            )));
-        })
+    /// Run the canonical NFQUEUE netlink backend.
+    fn run_queue_backend(queue_num: u16, shutdown: CancellationToken) -> anyhow::Result<()> {
+        NfqueueNetlinkAdapter::run(queue_num, shutdown)
     }
 }

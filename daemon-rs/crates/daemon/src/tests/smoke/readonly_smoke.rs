@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use crate::platform::adapters::proc_connector::ProcEventSocket;
-use crate::platform::adapters::socket_diag::SocketDiagAdapter;
+use crate::platform::netstat::socket_diag::SocketDiagAdapter;
+use crate::platform::procmon::connector::ProcEventSocket;
 use crate::services::connection::ConnectionService;
 use crate::tests::gates::{skip_if_not_opted_in, strict_mode};
 

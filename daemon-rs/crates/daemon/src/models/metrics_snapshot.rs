@@ -19,7 +19,7 @@ use std::{
 };
 use transport_wire_core::{WireStatistics, WireSubscriptionStatistics};
 
-/// Snapshot sent to [`crate::platform::ports::stats_exporter_port::StatsExporterPort`].
+/// Snapshot sent to [`crate::platform::stats::exporter_port::StatsExporterPort`].
 ///
 /// Bundles the standard transport stats payload with daemon-rs-only fields:
 /// - `subscription_stats`: mirrored-shape block (scalars + breakdowns + event log),

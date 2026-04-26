@@ -88,8 +88,7 @@ async fn iptables_nfqueue_rules_privileged_smoke() {
     }
 
     let ensure_res =
-        crate::platform::adapters::firewall_iptables::FirewallIptablesAdapter::ensure(0, true)
-            .await;
+        crate::platform::firewall::iptables::FirewallIptablesAdapter::ensure(0, true).await;
     if let Err(err) = &ensure_res {
         if strict_mode() {
             if strict_mode_requires_iptables() {
@@ -105,8 +104,7 @@ async fn iptables_nfqueue_rules_privileged_smoke() {
     // Always attempt cleanup if ensure succeeded.
     if ensure_res.is_ok() {
         let disable_res =
-            crate::platform::adapters::firewall_iptables::FirewallIptablesAdapter::disable(0, true)
-                .await;
+            crate::platform::firewall::iptables::FirewallIptablesAdapter::disable(0, true).await;
         if let Err(err) = disable_res
             && strict_mode()
         {
@@ -140,8 +138,7 @@ async fn nftables_nfqueue_rules_privileged_smoke() {
     }
 
     let ensure_res =
-        crate::platform::adapters::firewall_nftables::FirewallNftablesAdapter::ensure(0, true)
-            .await;
+        crate::platform::firewall::nftables::FirewallNftablesAdapter::ensure(0, true).await;
     if let Err(err) = &ensure_res {
         if strict_mode() {
             panic!("nft ensure failed in strict mode: {err}");
@@ -150,7 +147,7 @@ async fn nftables_nfqueue_rules_privileged_smoke() {
 
     if ensure_res.is_ok() {
         let disable_res =
-            crate::platform::adapters::firewall_nftables::FirewallNftablesAdapter::disable().await;
+            crate::platform::firewall::nftables::FirewallNftablesAdapter::disable().await;
         if let Err(err) = disable_res
             && strict_mode()
         {
@@ -179,8 +176,7 @@ async fn nftables_interception_rules_present_then_removed() {
     }
 
     let ensure_res =
-        crate::platform::adapters::firewall_nftables::FirewallNftablesAdapter::ensure(0, true)
-            .await;
+        crate::platform::firewall::nftables::FirewallNftablesAdapter::ensure(0, true).await;
     if let Err(err) = &ensure_res {
         if strict_mode() {
             panic!("nft ensure failed in strict mode: {err}");
@@ -199,8 +195,7 @@ async fn nftables_interception_rules_present_then_removed() {
     assert!(output.contains("opensnitch-queue-connections-non-tcp"));
     assert!(output.contains("opensnitch-queue-connections-tcp-syn"));
 
-    let disable_res =
-        crate::platform::adapters::firewall_nftables::FirewallNftablesAdapter::disable().await;
+    let disable_res = crate::platform::firewall::nftables::FirewallNftablesAdapter::disable().await;
     if let Err(err) = disable_res {
         if strict_mode() {
             panic!("nft disable failed in strict mode: {err}");
@@ -233,10 +228,9 @@ async fn nftables_apply_and_clear_system_firewall_rules() {
         return;
     }
 
-    let _ = crate::platform::adapters::firewall_nftables::FirewallNftablesAdapter::disable().await;
+    let _ = crate::platform::firewall::nftables::FirewallNftablesAdapter::disable().await;
     let ensure_res =
-        crate::platform::adapters::firewall_nftables::FirewallNftablesAdapter::ensure(0, true)
-            .await;
+        crate::platform::firewall::nftables::FirewallNftablesAdapter::ensure(0, true).await;
     if let Err(err) = &ensure_res {
         if strict_mode() {
             panic!("nft ensure failed in strict mode: {err}");
@@ -246,13 +240,12 @@ async fn nftables_apply_and_clear_system_firewall_rules() {
 
     let sysfw = make_privileged_sysfw_rule();
     let apply_res =
-        crate::platform::adapters::firewall_nftables::FirewallNftablesAdapter::apply_system_firewall(
+        crate::platform::firewall::nftables::FirewallNftablesAdapter::apply_system_firewall(
             &sysfw, 0,
         )
         .await;
     if let Err(err) = &apply_res {
-        let _ =
-            crate::platform::adapters::firewall_nftables::FirewallNftablesAdapter::disable().await;
+        let _ = crate::platform::firewall::nftables::FirewallNftablesAdapter::disable().await;
         if strict_mode() {
             panic!("nft apply system firewall failed in strict mode: {err}");
         }
@@ -265,11 +258,10 @@ async fn nftables_apply_and_clear_system_firewall_rules() {
     assert!(output.contains("opensnitch-sysfw:it-sysfw-uuid-1"));
 
     let clear_res =
-        crate::platform::adapters::firewall_nftables::FirewallNftablesAdapter::clear_system_firewall(&sysfw)
+        crate::platform::firewall::nftables::FirewallNftablesAdapter::clear_system_firewall(&sysfw)
             .await;
     if let Err(err) = &clear_res {
-        let _ =
-            crate::platform::adapters::firewall_nftables::FirewallNftablesAdapter::disable().await;
+        let _ = crate::platform::firewall::nftables::FirewallNftablesAdapter::disable().await;
         if strict_mode() {
             panic!("nft clear system firewall failed in strict mode: {err}");
         }
@@ -281,5 +273,5 @@ async fn nftables_apply_and_clear_system_firewall_rules() {
         .unwrap_or_default();
     assert!(!output_after_clear.contains("opensnitch-sysfw:it-sysfw-uuid-1"));
 
-    let _ = crate::platform::adapters::firewall_nftables::FirewallNftablesAdapter::disable().await;
+    let _ = crate::platform::firewall::nftables::FirewallNftablesAdapter::disable().await;
 }

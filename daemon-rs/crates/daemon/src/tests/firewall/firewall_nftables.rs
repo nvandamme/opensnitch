@@ -1,7 +1,7 @@
 use crate::models::firewall_config::{
     FirewallChain, FirewallExpression, FirewallRule, FirewallStatement, FirewallStatementValue,
 };
-use crate::platform::adapters::firewall_nftables::FirewallNftablesAdapter;
+use crate::platform::firewall::nftables::FirewallNftablesAdapter;
 
 #[test]
 fn chain_defaults_and_rule_tag_match_expected_values() {
@@ -250,7 +250,7 @@ fn parse_nft_handle_returns_none_when_marker_missing_or_empty() {
 }
 
 #[test]
-fn nft_expression_with_parameters_ignores_statement_fallback() {
+fn nft_expression_prefers_structured_statements_over_legacy_parameters() {
     let rule = FirewallRule {
         parameters: "ip protocol tcp".to_string(),
         expressions: vec![FirewallExpression {
@@ -269,7 +269,7 @@ fn nft_expression_with_parameters_ignores_statement_fallback() {
 
     assert_eq!(
         FirewallNftablesAdapter::probe_nft_expression(&rule, 0),
-        "ip protocol tcp accept"
+        "meta l4proto == udp accept"
     );
 }
 

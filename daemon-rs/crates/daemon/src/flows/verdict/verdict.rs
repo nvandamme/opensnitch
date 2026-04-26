@@ -10,8 +10,8 @@ use crate::{
         connection_state::ConnectionAttempt,
         verdict_rpc::VerdictReply,
     },
-    platform::ports::connection_event_exporter_port::ConnectionEventExporterPort,
-    platform::ports::proto_mapper_port::ProtoMapperPort,
+    platform::conman::event_exporter::ConnectionEventExporterPort,
+    platform::netstat::proto_mapper::ProtoMapperAdapter,
     services::rule::rule_record_from_wire,
     services::{
         audit::AuditService,
@@ -128,7 +128,7 @@ impl VerdictFlow {
     /// Go `LoggerManager.Log(con.Serialize(), action, rname)` call in
     /// `statistics.OnConnectionEvent()`.
     ///
-    /// See `platform::ports::connection_event_exporter_port::ConnectionEventExporterPort`.
+    /// See `platform::conman::event_exporter::ConnectionEventExporterPort`.
     pub fn with_event_exporter(mut self, exporter: Arc<dyn ConnectionEventExporterPort>) -> Self {
         self.event_exporter = Some(exporter);
         self
@@ -289,7 +289,7 @@ impl VerdictFlow {
         let attempt = ctx.attempt;
         let proc_info = ctx.process;
         let dst_host = ctx.dst_host;
-        let wire_conn = Arc::new(ProtoMapperPort::to_wire_connection(
+        let wire_conn = Arc::new(ProtoMapperAdapter::to_wire_connection(
             &attempt,
             &proc_info,
             dst_host.as_deref(),

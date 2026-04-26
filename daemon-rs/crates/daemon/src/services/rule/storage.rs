@@ -17,11 +17,7 @@ use crate::{
         rule_record::{RuleDuration, RuleOperator, RuleRecord},
         rule_storage::RuleFile,
     },
-    platform::{
-        adapters::loadable_state_file_store::FileLoadableStateStoreAdapter,
-        ports::loadable_state_store_port::{AliasStorePort, RuleStorePort},
-    },
-    services::storage::StorageService,
+    services::storage::{FileLoadableStateStore, StorageService},
     utils::path_text::file_name_lossy,
     utils::transient_files::is_transient_artifact_name,
     workers::runtime::{control::WorkerControl, watch::control::WatchWorkerControl},
@@ -65,7 +61,7 @@ impl RuleService {
                 continue;
             }
 
-            let rule_file: RuleFile = FileLoadableStateStoreAdapter::load_rule_file(&file_path)
+            let rule_file: RuleFile = FileLoadableStateStore::load_rule_file(&file_path)
                 .await
                 .with_context(|| format!("failed to load rule file {}", file_path.display()))?;
             let record = RuleRecord::from(rule_file);
@@ -207,7 +203,7 @@ impl RuleService {
     }
 
     pub(crate) async fn load_network_aliases_map(path: &Path) -> HashMap<String, Vec<String>> {
-        let Ok(Some(map)) = FileLoadableStateStoreAdapter::load_alias_map(path).await else {
+        let Ok(Some(map)) = FileLoadableStateStore::load_alias_map(path).await else {
             return HashMap::new();
         };
         map

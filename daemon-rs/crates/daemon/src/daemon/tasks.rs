@@ -461,7 +461,7 @@ impl Daemon {
             feature = "metrics-syslog"
         ))]
         let flow = {
-            use crate::platform::ports::stats_exporter_port::StatsExporterPort;
+            use crate::platform::stats::exporter_port::StatsExporterPort;
 
             #[allow(unused_variables)]
             let mc = &self.runtime.metrics_config;
@@ -475,7 +475,7 @@ impl Daemon {
                 feature = "metrics-http-serve-protobuf"
             ))]
             {
-                use crate::platform::adapters::stats_exporters::http_serve::{
+                use crate::platform::stats::exporters::http_serve::{
                     PROMETHEUS_ADDR_ENV, PrometheusStatsExporter,
                 };
 
@@ -527,7 +527,7 @@ impl Daemon {
                 feature = "metrics-http-push-protobuf"
             ))]
             {
-                use crate::platform::adapters::stats_exporters::http_push::{
+                use crate::platform::stats::exporters::http_push::{
                     PUSH_FORMAT_ENV, PUSH_GZIP_ENV, PUSH_JOB_ENV, PUSH_TOKEN_ENV, PUSH_URL_ENV,
                     PushConfig, PushFormat, PushStatsExporter,
                 };
@@ -667,7 +667,7 @@ impl Daemon {
 
             #[cfg(feature = "metrics-http-push-influxdb")]
             {
-                use crate::platform::adapters::stats_exporters::http_push_influxdb::{
+                use crate::platform::stats::exporters::http_push_influxdb::{
                     INFLUX_BUCKET_ENV, INFLUX_GZIP_ENV, INFLUX_ORG_ENV, INFLUX_TOKEN_ENV,
                     INFLUX_URL_ENV, InfluxDbConfig, InfluxDbStatsExporter,
                 };
@@ -714,7 +714,7 @@ impl Daemon {
 
             #[cfg(feature = "metrics-syslog")]
             {
-                use crate::platform::adapters::stats_exporters::syslog_push::{
+                use crate::platform::stats::exporters::syslog_push::{
                     SYSLOG_FORMAT_ENV, SYSLOG_PROTOCOL_ENV, SYSLOG_SERVER_ENV, SYSLOG_TAG_ENV,
                     SyslogConfig, SyslogFormat, SyslogProtocol, SyslogStatsExporter,
                 };
@@ -778,7 +778,7 @@ impl Daemon {
                 0 => flow,
                 1 => flow.with_stats_exporter(exporters.pop().expect("single exporter exists")),
                 _ => {
-                    use crate::platform::adapters::stats_exporters::multi::MultiStatsExporter;
+                    use crate::platform::stats::exporters::multi::MultiStatsExporter;
                     flow.with_stats_exporter(MultiStatsExporter::new(exporters))
                 }
             }

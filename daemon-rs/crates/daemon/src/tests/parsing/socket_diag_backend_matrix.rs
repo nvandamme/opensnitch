@@ -1,6 +1,5 @@
 use crate::models::socket_state::SocketInfo;
-use crate::platform::adapters::socket_diag::SocketDiagAdapter;
-use crate::platform::adapters::socket_diag_bindings::SocketDiagBindingsAdapter;
+use crate::platform::netstat::socket_diag::SocketDiagAdapter;
 use nix::libc::{AF_INET, AF_INET6, IPPROTO_TCP, IPPROTO_UDP};
 use std::collections::HashSet;
 
@@ -20,31 +19,33 @@ fn socket_diag_backend_matrix_smoke() {
     ];
 
     for (family, protocol) in matrix {
-        let bindings = SocketDiagBindingsAdapter::dump_sockets(family, protocol)
-            .expect("netlink-bindings backend must complete");
+        let sockets = SocketDiagAdapter::dump_sockets(family, protocol)
+            .expect("socket-diag backend must complete");
 
-        // A smoke contract: bindings backend must complete and yield stable keyable results.
-        let _bindings_keys: HashSet<_> = bindings.iter().map(socket_key).collect();
+        // A smoke contract: backend must complete and yield stable keyable results.
+        let _keys: HashSet<_> = sockets.iter().map(socket_key).collect();
     }
 }
 
 #[test]
-fn socket_diag_adapter_prefers_bindings_under_feature() {
-    let via_adapter = SocketDiagAdapter::dump_sockets(AF_INET as u8, IPPROTO_TCP as u8)
-        .expect("adapter dump should succeed with feature enabled");
-    let via_bindings = SocketDiagBindingsAdapter::dump_sockets(AF_INET as u8, IPPROTO_TCP as u8)
-        .expect("bindings dump should succeed");
+fn socket_diag_sync_and_async_outputs_overlap() {
+    let via_sync = SocketDiagAdapter::dump_sockets(AF_INET as u8, IPPROTO_TCP as u8)
+        .expect("sync dump should succeed");
+    let via_async = crate::platform::netlink::runtime::run_on_netlink_rt(
+        SocketDiagAdapter::dump_sockets_async(AF_INET as u8, IPPROTO_TCP as u8),
+    )
+    .expect("async dump should succeed");
 
-    if via_bindings.is_empty() {
+    if via_async.is_empty() {
         return;
     }
 
-    let adapter_keys: HashSet<_> = via_adapter.iter().map(socket_key).collect();
-    let bindings_keys: HashSet<_> = via_bindings.iter().map(socket_key).collect();
-    let overlap = adapter_keys.intersection(&bindings_keys).count();
+    let sync_keys: HashSet<_> = via_sync.iter().map(socket_key).collect();
+    let async_keys: HashSet<_> = via_async.iter().map(socket_key).collect();
+    let overlap = sync_keys.intersection(&async_keys).count();
 
     assert!(
         overlap > 0,
-        "adapter output should overlap bindings output when feature is enabled"
+        "sync and async outputs should overlap for the same family/protocol"
     );
 }

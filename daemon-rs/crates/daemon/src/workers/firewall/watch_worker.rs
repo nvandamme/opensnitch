@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    platform::ports::nft_monitor_port::NftMonitorPort,
     services::{config::ConfigService, firewall::FirewallService, rule::RuleService},
     utils::duration_parse::{DurationParseOptions, parse_human_duration},
     workers::{
@@ -101,7 +100,11 @@ pub(crate) fn start(
     rules: RuleService,
     shutdown: CancellationToken,
 ) -> Box<dyn WorkerControl> {
-    NftMonitorPort::spawn_nft_drift_listener(firewall.clone(), rules.clone(), shutdown.clone());
+    crate::platform::firewall::monitor::spawn_nft_drift_listener(
+        firewall.clone(),
+        rules.clone(),
+        shutdown.clone(),
+    );
     FirewallWatchControl {
         firewall,
         config,

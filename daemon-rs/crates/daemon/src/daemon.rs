@@ -186,9 +186,8 @@ pub(crate) struct MetricsServerSlot {
     /// Shared exporter — survives server address changes.  The `StatsFlow` holds
     /// another `Arc` clone and keeps calling `export_snapshot` regardless of
     /// whether the HTTP server is running.
-    pub(crate) exporter: std::sync::Arc<
-        crate::platform::adapters::stats_exporters::http_serve::PrometheusStatsExporter,
-    >,
+    pub(crate) exporter:
+        std::sync::Arc<crate::platform::stats::exporters::http_serve::PrometheusStatsExporter>,
     /// Currently bound address, or `None` when the server is not running.
     pub(crate) effective_addr: Option<std::net::SocketAddr>,
     /// Cancellation token for the current HTTP server task.

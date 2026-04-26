@@ -82,8 +82,14 @@ async fn collect_response(
         let frame = frame.context("response body frame error")?;
         if let Some(chunk) = frame.data_ref() {
             bytes.extend_from_slice(chunk);
-            if let Some(limit) = max_body_bytes && (bytes.len() as u64) > limit {
-                anyhow::bail!("response exceeds max-bytes limit ({} > {})", bytes.len(), limit);
+            if let Some(limit) = max_body_bytes
+                && (bytes.len() as u64) > limit
+            {
+                anyhow::bail!(
+                    "response exceeds max-bytes limit ({} > {})",
+                    bytes.len(),
+                    limit
+                );
             }
         }
     }

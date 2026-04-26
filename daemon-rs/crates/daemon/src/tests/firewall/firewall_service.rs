@@ -9,7 +9,7 @@ use crate::models::firewall_config::{
 };
 use crate::models::firewall_state::FirewallBackend;
 #[cfg(feature = "openwrt")]
-use crate::platform::adapters::openwrt_uci_firewall::OpenWrtUciFirewallAdapter;
+use crate::platform::firewall::openwrt_uci::OpenWrtUciFirewallAdapter;
 use crate::services::firewall::FirewallService;
 use crate::tests::support::TestDir;
 

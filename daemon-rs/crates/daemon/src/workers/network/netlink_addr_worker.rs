@@ -9,7 +9,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::platform::ports::local_addr_port::LocalAddrPort;
+use crate::platform::netlink::ifaces::NetIfaceAdapter;
 use crate::workers::runtime::support::build_current_thread_runtime;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -87,6 +87,6 @@ impl NetlinkAddrWorkerControl {
     }
 
     async fn fetch_local_addrs() -> anyhow::Result<HashSet<String>> {
-        LocalAddrPort::local_ip_addrs().await
+        NetIfaceAdapter::local_ip_addrs_async().await
     }
 }

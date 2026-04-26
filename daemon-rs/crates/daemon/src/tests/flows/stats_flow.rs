@@ -9,7 +9,7 @@ use transport_wire_core::WireConnection;
 use crate::{
     config::Config,
     flows::stats::{StatsFlow, WorkerTelemetrySnapshot},
-    platform::ports::stats_exporter_port::StatsExporterPort,
+    platform::stats::exporter_port::StatsExporterPort,
     services::{
         client::ClientService, config::ConfigService, dns::DnsService, rule::RuleService,
         stats::StatsService,

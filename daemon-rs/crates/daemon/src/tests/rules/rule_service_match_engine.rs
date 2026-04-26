@@ -7,7 +7,7 @@ use crate::models::{
     process_state::{ProcessInfo, ProcessNode},
     rule_record::RuleOperator,
 };
-use crate::platform::adapters::net_iface::NetIfaceAdapter;
+use crate::platform::netlink::ifaces::NetIfaceAdapter;
 use crate::services::rule::{
     CidrTrieIndex, DomainWildcardTrie, ListRegexCache, ListRegexCacheKey, RegexCacheKey,
     RuleMatchCaches, RuleService,

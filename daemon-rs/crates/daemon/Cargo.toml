@@ -55,7 +55,7 @@ time = { workspace = true, features = ["formatting", "parsing", "macros", "local
 ebpf_common = { package = "opensnitch-ebpf-common", path = "../ebpf-common" }
 libbpf-rs = { workspace = true, optional = true }
 aya = { workspace = true, optional = true }
-netlink-bindings = { workspace = true, features = ["inet-diag", "rt-link", "rt-addr", "nftables"] }
+netlink-bindings = { workspace = true, features = ["inet-diag", "rt-link", "rt-addr", "nftables", "conntrack"] }
 netlink-socket2 = { workspace = true, features = ["tokio"] }
 rustix = { workspace = true, features = ["net", "event", "thread", "system"] }
 hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "http2", "tokio"], optional = true }

@@ -152,7 +152,7 @@ impl RuleService {
             "source.network" => Some(Cow::Borrowed(derived.src_ip_text())),
             "source.port" => Some(Cow::Borrowed(derived.src_port_text(attempt.src_port))),
             "iface.in" => {
-                crate::platform::ports::net_iface_port::NetIfacePort::interface_name_by_index(
+                crate::platform::netlink::ifaces::NetIfaceAdapter::interface_name_by_index(
                     attempt.iface_in_idx,
                 )
                 .ok()
@@ -160,7 +160,7 @@ impl RuleService {
                 .map(Cow::Owned)
             }
             "iface.out" => {
-                crate::platform::ports::net_iface_port::NetIfacePort::interface_name_by_index(
+                crate::platform::netlink::ifaces::NetIfaceAdapter::interface_name_by_index(
                     attempt.iface_out_idx,
                 )
                 .ok()

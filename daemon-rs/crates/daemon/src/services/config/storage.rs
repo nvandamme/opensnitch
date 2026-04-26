@@ -14,16 +14,12 @@ use super::{ConfigService, ProcWorkerReconfigure};
 use crate::{
     config::{Config, ProcMonitorMethod},
     models::ui_alert::UiAlert,
-    platform::{
-        adapters::loadable_state_file_store::FileLoadableStateStoreAdapter,
-        ports::loadable_state_store_port::ConfigStorePort,
-    },
     services::{
         client::{AlertBuffer, enqueue_alert, warning_alert},
         firewall::FirewallService,
         rule::RuleService,
         stats::StatsService,
-        storage::StorageService,
+        storage::{FileLoadableStateStore, StorageService},
     },
     utils::{
         atomic_write::unique_sibling_temp_path,
@@ -50,7 +46,7 @@ impl ConfigService {
         let current = self.get_snapshot();
         let path = current.config_path.as_path();
         tracing::debug!(path = %path.display(), "loading config from disk");
-        let config = FileLoadableStateStoreAdapter::load_config(path).await?;
+        let config = FileLoadableStateStore::load_config(path).await?;
         tracing::info!(
             addr = %config.client_addr,
             log_level = config.log_level,

@@ -6,7 +6,7 @@ use tracing::{debug, info, warn};
 use crate::{
     bus::Bus,
     models::{kernel_event::KernelEvent, proc_event::ProcEventKind},
-    platform::ports::proc_connector_port::{NativeProcConnectorPort, ProcConnectorPlatformPort},
+    platform::procmon::connector::ProcEventSocket,
     workers::{KernelEventDispatch, runtime::support::build_current_thread_runtime},
 };
 
@@ -75,7 +75,7 @@ impl NetlinkProcWorkerControl {
             runtime.block_on(async move {
                 while !shutdown.is_cancelled() {
                     debug!("MonitorProcEvents start");
-                    let mut socket = match NativeProcConnectorPort::open() {
+                    let mut socket = match ProcEventSocket::open() {
                         Ok(sock) => sock,
                         Err(err) => {
                             warn!("unable to start netlink.ProcEventMonitor (0): {err}");

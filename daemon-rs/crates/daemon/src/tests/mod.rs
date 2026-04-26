@@ -56,6 +56,8 @@ mod ebpf_service;
 mod firewall_backend_fixtures;
 #[path = "firewall/firewall_iptables.rs"]
 mod firewall_iptables;
+#[path = "parsing/firewall_monitor.rs"]
+mod firewall_monitor;
 #[path = "firewall/firewall_netlink.rs"]
 mod firewall_netlink;
 #[path = "firewall/firewall_nftables.rs"]
@@ -76,6 +78,10 @@ mod lifecycle_flow;
 mod lru_cache;
 #[path = "workers/netlink_addr_worker.rs"]
 mod netlink_addr_worker;
+#[path = "parsing/netlink_control.rs"]
+mod netlink_control;
+#[path = "parsing/netlink_io.rs"]
+mod netlink_io;
 #[path = "smoke/netlink_sync_async_harness.rs"]
 mod netlink_sync_async_harness;
 #[path = "firewall/nfqueue.rs"]

@@ -23,7 +23,7 @@ use crate::utils::http_client::{build_http_client, build_request, send_request};
 use transport_wire_core::{WireRuleSubscriptionEntry, WireStatistics, WireSubscriptionStatistics};
 
 use crate::models::metrics_snapshot::MetricsSnapshot;
-use crate::platform::ports::stats_exporter_port::StatsExporterPort;
+use crate::platform::stats::exporter_port::StatsExporterPort;
 
 // Pull all private items from the parent adapter module.
 use super::{
@@ -799,7 +799,10 @@ async fn http_endpoint_returns_openmetrics_on_accept_header() {
     let req = build_request(
         Method::GET,
         &format!("http://{addr}/metrics"),
-        &[(ACCEPT, "application/openmetrics-text; version=1.0.0; charset=utf-8".to_string())],
+        &[(
+            ACCEPT,
+            "application/openmetrics-text; version=1.0.0; charset=utf-8".to_string(),
+        )],
         vec![],
     )
     .unwrap();
@@ -832,8 +835,12 @@ async fn http_endpoint_returns_proto_on_accept_header() {
     let req = build_request(
         Method::GET,
         &format!("http://{addr}/metrics"),
-        &[(ACCEPT, "application/vnd.google.protobuf; \
-             proto=io.prometheus.client.MetricFamily; encoding=delimited".to_string())],
+        &[(
+            ACCEPT,
+            "application/vnd.google.protobuf; \
+             proto=io.prometheus.client.MetricFamily; encoding=delimited"
+                .to_string(),
+        )],
         vec![],
     )
     .unwrap();

@@ -14,6 +14,131 @@ Versioning baseline:
 
 ## Unreleased
 
+### Changed
+
+- **Firewall netlink planning now binds OpenSnitch JSON rules through structured expressions first; textual parsing is fallback-only**
+  (`crates/daemon/src/platform/firewall/{netlink/{adapter.rs,parse.rs,rule.rs,types.rs,exprs/{mod.rs,quota.rs}},nftables.rs}`,
+  `crates/daemon/src/services/firewall/persistence_rule_parser.rs`,
+  `crates/daemon/src/tests/firewall/{firewall_netlink.rs,firewall_nftables.rs}`,
+  `TODO.md`):
+  - Added structured rule parsing path for netlink apply planning so rules with populated `expressions` no longer depend on legacy textual `parameters`.
+  - Structured JSON `statement` parsing now aligns with OpenSnitch System-rules key/value grammar first (including quota `over` + unit-key forms and limit `units` + `rate-units` + `time-units` forms), then uses token parsing for complex value fragments (quoted/space-containing token sequences preserved) before typed netlink parse.
+  - Kept textual parsing for compatibility-only fallback paths (legacy/system-file style rules).
+  - Added `quota`, `limit`, and `notrack` nft expression family support (parser + netlink encode), including `quota <size>` / `quota over <size>` with byte units and `limit rate [over] <rate>` parsing for packet/byte rate-unit + time-unit forms.
+  - Expanded payload-field support in the typed netlink payload family to cover additional selectors from nft payload maps: `ip ttl`, `ip6 hoplimit`, `udp length/len`, `icmp code`, and `icmp checksum`.
+  - Replaced `TcpSynFlags` hardcoded flag bytes with named TCP control-flag enums/constants (`Fin|Syn|Rst|Ack`, `Syn`) in payload encoding.
+  - Expanded firewall-netlink support/classifier/audit tests and updated nftables adapter preference semantics to align with structured-rule precedence (`supported=50/50`, `100%` in current shipped-shape audit).
+
+- **Firewall netlink IR: per-family struct+impl types with dispatch enums**
+  (`crates/daemon/src/platform/firewall/netlink/{exprs/{mod.rs,meta.rs,ct.rs,payload.rs,payload/{ip.rs,ip6.rs,transport.rs,icmp.rs},nat.rs,fib.rs,numgen.rs,log.rs,limit.rs,counter.rs,queue.rs,lookup.rs,verdict.rs,quota.rs,notrack.rs},parse.rs,apply.rs,adapter.rs,types.rs,rule.rs}`,
+  `TODO.md`):
+  - Replaced legacy monolithic netlink parse/apply IR with `NftExpression` + `NftRule` and per-family `Nft*` expression types (meta/ct/payload/nat/fib/numgen/log/limit/counter/queue/lookup/verdict/quota/notrack).
+  - Each per-family type owns its `encode()` method, co-locating netlink encoding with type definition.
+  - Simplified `apply.rs` dispatch by iterating `NftRule.expressions` and calling family `encode()` directly instead of old `is_*/push_*` cascades.
+  - `parse.rs` now builds typed `Vec<NftRule>` with typed parse-failure classification in `types.rs`.
+  - Unsupported-expression summary/classifier routing in `adapter.rs` now prioritizes parser-produced `ParseError` family outcomes before heuristic fallback classification when parser family is `other`.
+  - Added `ParseFailureClass::AmbiguousForm` for set/list-shaped ambiguous expressions in thin-parser fallback paths and wired classifier routing to preserve `set_or_list` family reporting for that parser-classified ambiguity.
+  - Wired `exprs/socket.rs` into the thin parser and netlink encode path (`socket <key> [level N] <cmp> <value>`): socket expressions now parse as typed `NftExpression::Socket + NftExpression::Cmp` sequences instead of staying unreachable/dead code.
+  - Wired generic netlink IR families into live encode paths: payload CIDR/tcp-flag masking and CT mask conditions now emit `NftExpression::Bitwise`, payload set lookups now emit `NftExpression::Lookup`, and NAT register loads now emit `NftExpression::Immediate`; this removes unreachable `Bitwise/Cmp/Immediate/Lookup/Socket` dispatch variants from the firewall netlink IR.
+  - Current firewall-netlink validation is 17/17 tests with a 50/50 shipped-shape coverage audit.
+
+- **ABI constant hardening across netlink/NFQUEUE/proc-connector paths (libc/binding constants first)**
+  (`crates/daemon/src/platform/{firewall/monitor.rs,nfqueue/netlink.rs,procmon/connector.rs}`,
+  `crates/daemon/src/platform/nfqueue/ffi/types.rs`,
+  `crates/daemon/src/services/task/socket_monitor.rs`,
+  `crates/daemon/src/tests/nfqueue/nfqueue_netlink.rs`,
+  `TODO.md`):
+  - Replaced raw protocol numeric mappings in touched netlink/NFQUEUE/proc-connector encode/decode paths with `nix::libc` constants wherever available (`NLM_F_*`, `NLMSG_*`, `NFQNL_*`, `NFQA_*`, `NETLINK_NETFILTER`, connector/proc event constants, `AF_XDP`, etc.).
+  - Extended the same constant policy to focused NFQUEUE netlink unit tests so test wire-shape assertions derive message types/flags from symbolic kernel ABI constants instead of inline literals.
+  - Removed libc alias/shim constants (`const X = libc::X as ...`) in NFQUEUE (netlink + FFI), proc-connector, socket-diag, firewall-monitor, and socket-monitor paths/tests; call sites now use direct `libc` constants/enums rather than local re-export constants.
+  - Reworked netlink CT state/status mask mapping to typed internal enums, eliminating anonymous state/status mask literals in parser call sites while preserving current netlink encoding behavior.
+  - Reworked netlink CT direction token mapping to use `netlink_bindings::nftables::CtDirection` enum values rather than inline `0/1` literals, so direction encoding stays tied to binding-defined ABI values.
+  - Enabled `netlink-bindings` `conntrack` feature and switched CT status mask mapping to `netlink_bindings::conntrack::NfCtStatus` flag values instead of local status-bit definitions.
+  - Updated firewall-netlink expression encoders to use direct libc nft constants where available (`NFT_QUEUE_FLAG_BYPASS`, `NFT_QUOTA_F_INV`, `NFT_LIMIT_PKTS`, `NFT_LIMIT_PKT_BYTES`, `NFT_LIMIT_F_INV`) and removed duplicate local definitions from `firewall/netlink/types.rs`; retained only `NFTA_*` attr ids that are not currently exposed by libc.
+  - Migrated quota expression encoding from manual netlink attr-id writes to `netlink_bindings` generated quota builders (`nested_data_quota().push_bytes().push_flags()`), and removed now-unused local quota attr-id constants from `firewall/netlink/types.rs`.
+  - Replaced NFQUEUE netlink message op literals (`| 0/1/2`) with direct `libc::NFQNL_MSG_{PACKET,VERDICT,CONFIG}` constants in both adapter and focused netlink tests while keeping full `nfnetlink` subsystem+op message type composition.
+  - Replaced platform-local netlink header-size literals with `netlink_bindings` struct-derived lengths where available: `builtin::Nlmsghdr::len()` (NFQUEUE/audit/proc-connector paths) and `nftables::Nfgenmsg::len()` (NFQUEUE parser/builder path).
+  - Reduced platform binding/FFI surface exposure by removing stale `socket_diag_bindings_probe.rs` and collapsing socket-diag implementation layers into a single `platform/netstat/socket_diag.rs` netlink-bindings adapter (legacy `socket_diag_bindings.rs` removed).
+  - Socket-diag adapter now derives `SOCK_DESTROY` request type from `netlink_bindings` inet-diag operation metadata (no extra sock-diag dependency) and derives the “all TCP states” request mask from `netlink_bindings::inet_diag::TcpState` enum values instead of maintaining raw inline bitmask literals.
+  - For ABI values not exposed by `libc`/binding crates, retained named local constants rather than anonymous numeric literals to keep drift risk explicit and reviewable.
+
+- **NFQUEUE backend policy: netlink is canonical (no experiment gate / targeted FFI fallback on netlink socket-open failure)**
+  (`crates/daemon/src/platform/{mod.rs,netlink/{mod.rs,runtime.rs,ifaces.rs},netstat/{mod.rs,socket_diag.rs,proto_mapper.rs},nfqueue/{mod.rs,netlink.rs},firewall/{mod.rs,port.rs,monitor.rs,iptables.rs,nftables.rs,netlink/*},procmon/{mod.rs,audit.rs,connector.rs},conman/{mod.rs,event_logger.rs,event_exporter.rs},stats/{mod.rs,exporter_port.rs,exporters/*}}`,
+  `crates/daemon/src/{workers/runtime/nfqueue/worker.rs,workers/{firewall/watch_worker.rs,process/{audit_worker.rs,netlink_worker.rs},network/netlink_addr_worker.rs},services/{firewall/runtime.rs,connection/owner.rs,task/runtime_handlers.rs,rule/matching_operators.rs,task/socket_monitor.rs,storage/{mod.rs,loadable_state.rs},config/storage.rs,rule/storage.rs,firewall/storage.rs},daemon/{serve.rs,reload.rs,tasks.rs},flows/{verdict/{helpers.rs,submit.rs,verdict.rs},stats/stats.rs}}`,
+  `TODO.md`):
+  - Removed `OPENSNITCH_NFQUEUE_NETLINK_EXPERIMENT` runtime gating from NFQUEUE backend selection and removed automatic legacy FFI fallback in the backend port.
+  - NFQUEUE worker runtime now runs the netlink backend directly and no longer emits `KernelInterfaceReattached` fallback-recovery audit events from backend-switch callbacks.
+  - Completed ownership migration of key platform domain trees to mirror Go runtime domains: `platform/firewall`, `platform/procmon`, `platform/conman`, and `platform/stats` (plus `platform/nfqueue` canonical runtime backend).
+  - Completed removal of the remaining `platform/adapters` and `platform/ports` module surfaces: shared netlink sync runtime moved to `platform/netlink/runtime.rs`, loadable-state file store moved to `services/storage/loadable_state.rs`, and OpenWrt UCI command/persistence boundaries were inlined into `platform/firewall/openwrt_uci.rs`.
+  - Moved legacy NFQUEUE FFI internals into the NFQUEUE domain tree (`platform/nfqueue/ffi/*`) and removed the generic `platform/ffi` module surface; all runtime/flow/command/test call sites now import `platform::nfqueue::ffi::*` directly.
+- Moved shared NFQUEUE runtime public types/state into their owning NFQUEUE domain modules: verdict ownership (`PacketVerdict`, `NfqueueVerdictEngine`) now lives in `platform/nfqueue/verdict.rs`, and queue metrics ownership (`NfqueueMetricsState`) now lives in `platform/nfqueue/metrics.rs`.
+  - NFQUEUE FFI boundary is now strict: `platform/nfqueue/ffi/` contains only raw unsafe libc bindings, and all non-binding runtime logic moved to `platform/nfqueue/*` domain modules.
+  - Relocated the C ABI queue callback entrypoint to `platform/nfqueue/ffi/callback.rs` (`nfqueue_callback`) and wired lifecycle queue registration to use that FFI-owned callback symbol directly.
+  - Removed direct FFI type usage from shared `platform/nfqueue/packet.rs`; uid/gid extraction for the libc fallback callback now lives alongside the callback in `platform/nfqueue/ffi/callback.rs`, keeping shared packet parsing domain-only.
+  - Moved the fallback queue runtime loop (`QueueRuntime` open/run/drop and socket tuning) from `platform/nfqueue/lifecycle.rs` to `platform/nfqueue/ffi/lifecycle.rs`, so libc/unsafe fallback code is fully contained under `platform/nfqueue/ffi/*` while `platform/nfqueue/netlink.rs` remains the canonical backend path.
+- Clarified NFQUEUE state/runtime ownership boundaries: keep a single shared runtime state struct (`NfqueueRuntimeState`) in `state.rs` behind `RUNTIME`, while decision/parser ownership remains in `decision.rs` and `packet.rs`.
+- Netlink backend now delegates to FFI fallback on netlink socket-open failure only: if `socket(AF_NETLINK, SOCK_RAW, NETLINK_NETFILTER)` fails in `platform/nfqueue/netlink.rs`, `NfqueueNetlinkAdapter::run()` falls back to `platform/nfqueue/ffi/lifecycle.rs::NfqueueFfiAdapter::run()` for that queue.
+- Ownership realignment follow-up: `PacketVerdict` and `NfqueueVerdictEngine` now live in `platform/nfqueue/verdict.rs`; queue metrics ownership moved to `platform/nfqueue/metrics.rs` (`NfqueueMetricsState`).
+- Collapsed dual runtime naming into a single runtime-state type: removed `RuntimeState` and use only `NfqueueRuntimeState` as the shared runtime state struct behind `RUNTIME`.
+- Netlink fallback delegation now targets the FFI-owned adapter directly (`platform/nfqueue/ffi/lifecycle.rs::NfqueueFfiAdapter::run`) instead of routing through runtime-state methods.
+- Removed standalone `NfqueueNetlinkAdapter::preflight()` and switched NFQUEUE adapter probe coverage to the canonical runtime entrypoint: `tests/nfqueue/nfqueue_netlink.rs` now probes startup behavior through `NfqueueNetlinkAdapter::run()` with a pre-cancelled token, preserving netlink-first runtime semantics.
+- Added NFQUEUE fallback-routing unit coverage in `platform/nfqueue/netlink.rs` for `should_fallback_to_ffi_backend` so tests explicitly lock the intended delegation trigger to netlink socket-open failures (and reject non-socket config/runtime errors).
+- Tightened firewall netlink socket lifecycle to avoid duplicate NETLINK_NETFILTER opens per operation: removed per-call `probe_netfilter_netlink_socket()` probes from ensure/disable/validate/apply/clear/extract paths and retained preflight probing only in the recovery-gate path (`platform/firewall/port.rs`), aligning runtime behavior with Go-side direct operation execution.
+- Removed now-unused `NetlinkFallbackReason::PreflightProbeFailed` since operation-level preflight probe failures are no longer emitted by the firewall netlink adapter.
+- Platform test sweep alignment for netlink-first behavior:
+  - Revalidated/kept matching platform-facing tests for NFQUEUE netlink runtime+fallback, firewall netlink planning/coverage, proc connector parsing, audit netlink parsing, socket-diag backend matrix, and netlink sync/async harness.
+  - Removed stale platform dead-code retention in proc connector runtime by dropping the unused stored `request_sock` field (`platform/procmon/connector.rs`) while keeping connector LISTEN ACK setup on a local request socket during `open_async()`.
+  - Scoped `SocketDiagAdapter::dump_sockets()` to test builds (`#[cfg(test)]`) since production paths use async/specialized socket-diag entrypoints; tests continue to exercise the sync wrapper via harness/matrix suites.
+- Began NFQUEUE netlink thin-encode hot-path compaction in `platform/nfqueue/netlink.rs`:
+  - Added direct scalar-field NLA writers for `NFQA_CFG_CMD`, `NFQA_CFG_PARAMS`, and `NFQA_VERDICT_HDR`.
+  - Switched queue config and verdict senders to those direct writers, removing transient stack payload arrays from the netlink push path while preserving wire shape.
+  - Tightened config ACK receive handling: `recv_ack` now uses a stack buffer and scans netlink headers for matching `seq` + `NLMSG_ERROR` ACK frames, reducing heap churn and avoiding accidental consumption of unrelated interleaved messages.
+  - Added shared parsed-netlink-header decode helper and reused it in ACK + main recv loops to remove panic-prone `unwrap()` header reads from NFQUEUE hot receive paths.
+  - Added reusable netlink/NLA iterators (`NlmsgIter`, `NlaIter`) and migrated ACK parsing, recv-loop message walking, and `parse_nfq_packet` attribute decode to that shared iterator model.
+  - Updated queue teardown UNBIND encode path to use direct `nla_cfg_cmd` writer, removing the remaining transient command payload buffer in the config push path.
+  - Added pre-sized netlink message builder entrypoint (`NlMsg::new_with_capacity`) and wired NFQUEUE config/verdict/UNBIND message paths to reserve expected payload capacity, reducing dynamic vector growth in the netlink push hot path.
+  - Scoped fallback generic constructor `NlMsg::new` to test builds only after runtime migration to capacity-aware message construction.
+  - Replaced NFQUEUE netlink send path with `rustix::net::send` and explicit full-length send checks, and switched main receive buffer to stack storage to reduce hot-loop heap churn.
+  - Added shared 32-bit decode helpers (`read_be_u32`, `read_ne_i32`) and reused them across NFQUEUE packet/ACK/error parsing to remove repeated manual slice decoding in hot paths.
+  - Reduced proc-audit netlink receive-path copies: `platform/procmon/audit.rs::recv_event` now decodes audit events directly from `(message_type, payload)` returned by `MulticastSocketRaw::recv()` instead of reconstructing synthetic netlink datagrams, while framed parser coverage remains via shared `parse_event_message` logic and updated `tests/parsing/audit_netlink.rs`.
+  - Reduced socket-diag netlink copy/allocation pressure: `platform/netstat/socket_diag.rs` now carries `ReqV2` directly in `KillSocketRequest` (no `as_slice().to_vec()` payload copy), iterates fixed AF/protocol matrices without temporary selector vectors, and moves candidate sockets through priority buckets without clone-heavy re-selection.
+  - Extended socket-diag netlink compaction with shared allocation-free family/protocol pair iteration and pre-sized inet-diag hostcond bytecode buffers, reducing transient selector/bytecode allocation churn in dump/filter request paths.
+  - Proc connector receive path now uses netlink message metadata (`meta.message_type`) to classify pull events: `platform/procmon/connector.rs` surfaces non-zero `NLMSG_ERROR` errno payloads as errors, ignores `NLMSG_NOOP`/`NLMSG_DONE`, and preserves existing fork/exec/exit payload decode for event message types; parsing tests updated accordingly.
+  - Firewall nft drift listener now classifies netlink control messages before drift-heal execution: `platform/firewall/monitor.rs` ignores `NLMSG_NOOP`/`NLMSG_DONE`, treats zero-code `NLMSG_ERROR` as control ACK, and surfaces non-zero errno control frames without triggering heal/cache rebuild work.
+  - Net-iface lookup path now uses typed `RTM_GETLINK` single-object requests for index misses: `platform/netlink/ifaces.rs` performs `op_getlink_do` first and updates cache on hit, falling back to full map dump only on request failure for compatibility.
+  - Added shared netlink control-frame classifier (`platform/netlink/control.rs`) and migrated proc-audit, proc-connector, and firewall-monitor receive paths to it, unifying `NLMSG_NOOP`/`NLMSG_DONE`/`NLMSG_ERROR` handling across platform netlink pull loops.
+  - Added focused shared-control parser coverage in `tests/parsing/netlink_control.rs` and integrated it with existing adapter-level parsing suites.
+  - Added shared netlink I/O helpers (`platform/netlink/io.rs`) for multicast receive timeouts and request+ACK timeout orchestration, then migrated proc-audit and proc-connector adapters to those primitives to remove duplicated timeout/error scaffolding in hot netlink pull/setup paths.
+  - Added focused shared netlink I/O helper tests in `tests/parsing/netlink_io.rs`.
+  - Net-iface cache writes now avoid full-map copy-on-write cloning: `platform/netlink/ifaces.rs` switched cache storage from `ArcSwap<HashMap<...>>` snapshot replacement to in-place `RwLock<HashMap<...>>` updates for single-index inserts and clears.
+  - Firewall netlink dump paths now reuse a shared static family matrix and carry family as `&'static str` through `DumpChain`/`DumpRule`, reducing repeated per-entry family `String` allocation in chain/rule dump loops.
+  - Added shared generic netlink reply-loop helper (`platform/netlink/io.rs::for_each_reply`) plus shared extack/errno decoding helpers, and migrated `platform/netlink/ifaces.rs`, `platform/netstat/socket_diag.rs`, and `platform/firewall/netlink/adapter.rs` to those shared primitives.
+  - Added shared netlink error/logging macros (`platform/netlink/io.rs`) and migrated net-iface + socket-diag adapters to macro-backed io/reply/extack mapping, reducing repeated per-adapter netlink error boilerplate.
+  - Migrated firewall netlink batch query paths (`platform/firewall/netlink/batch.rs`) and generation-id read path (`GenerationId::new_latest` in `platform/firewall/netlink/adapter.rs`) to the shared netlink reply iterator helper.
+  - Added early-break shared reply iteration (`platform/netlink/io.rs::for_each_reply_until`) and migrated short-circuit reply consumers to stop at first-match/first-value (`platform/netlink/ifaces.rs` single-index getlink lookup, `platform/firewall/netlink/batch.rs::has_rule_with_userdata`, and `platform/firewall/netlink/adapter.rs::GenerationId::new_latest`).
+  - Added shared `platform/netlink/io.rs::request_with_ack` and migrated socket-diag `sock_destroy` ACK orchestration (`platform/netstat/socket_diag.rs`) to the shared netlink request+ack helper path.
+  - Added shared multicast netlink socket helpers in `platform/netlink/io.rs` (`open_multicast_socket`, `open_and_listen_multicast_socket`) and migrated platform netlink socket setup paths to them (`platform/procmon/audit.rs`, `platform/procmon/connector.rs`, `platform/firewall/monitor.rs`, `platform/firewall/netlink/adapter.rs`), reducing duplicated socket-open/group-listen wiring.
+  - Removed `OPENSNITCH_NFT_NETLINK_EXPERIMENT` / `nft_netlink_experiment_enabled()` gating from `platform/firewall/port.rs`; nft netlink usage is now controlled by runtime availability/recovery gate only (with existing CLI fallback behavior).
+  - Firewall netlink preflight/monitor paths now use `netlink-socket2::MulticastSocketRaw` (`NETLINK_NETFILTER`) instead of direct low-level probe socket calls, and proc connector sync-open path now reuses shared `platform/netlink/runtime.rs::run_on_netlink_rt`.
+  - Added explicit `NOTE(netlink-baseline)` rationale annotations on remaining manual netlink segments in `platform/nfqueue/netlink.rs` and `platform/procmon/connector.rs` where generated crate surfaces are still incomplete for those wire shapes.
+  - Removed transitional re-export/compat shim wrappers and legacy port facades for these migrated surfaces; call sites now import/use domain-owned modules/types directly.
+  - Centralized request-socket construction: added `platform/netlink/io.rs::new_request_socket` factory and `collect_replies` accumulation helper, then migrated all `NetlinkSocket::new()` call sites across `platform/netlink/ifaces.rs` (3 sites), `platform/netstat/socket_diag.rs` (3 sites), `platform/procmon/audit.rs`, `platform/procmon/connector.rs`, and `platform/firewall/netlink/adapter.rs` to the shared factory. Callers no longer import `netlink_socket2::NetlinkSocket` for construction.
+  - Centralized firewall batch commit: added `platform/netlink/io.rs::commit_chained_transaction` helper and migrated `platform/firewall/netlink/batch.rs::commit` to it, removing duplicated `request_chained().recv_all()` orchestration.
+  - Reduced socket-diag copy pressure: `kill_socket` sync boundary now clones `SocketInfo` at the sync→async bridge instead of requiring callers to pass owned values; async path takes owned `SocketInfo` directly.
+  - Converted firewall netlink helpers to `&'static str` returns: `hook_num_to_name`, `policy_num_to_name`, `chain_type_name` now return `&'static str` instead of `String`; `zone_name_from_chain` returns `Option<&str>` slicing into input. `DumpChain.hook` and `DumpChain.policy` changed from `String` to `&'static str`.
+  - Removed `zone_from_chain` wrapper function from firewall netlink adapter; callers use `zone_name_from_chain` directly.
+  - Completed broad platform ownership migration away from `platform/adapters` + `platform/ports` into domain-owned trees:
+    - `platform/firewall/*` (iptables, nftables, monitor, openwrt_uci, port, netlink/*),
+    - `platform/procmon/*` (audit, connector),
+    - `platform/netlink/*` (runtime/control/io/ifaces),
+    - `platform/netstat/*` (socket_diag/proto_mapper),
+    - `platform/conman/*` and `platform/stats/*`,
+    - `platform/nfqueue/*` including `platform/nfqueue/ffi/*`.
+  - Removed obsolete adapter/port surfaces and stale socket-diag probe/bindings shim files, and rewired runtime/service/worker call sites to direct domain modules.
+  - Added and wired typed firewall netlink expression families (`meta`, `ct`, `payload`, `nat`, `fib`, `numgen`, `log`, `limit`, `counter`, `queue`, `lookup`, `verdict`, `quota`, `notrack`, plus `bitwise/cmp/immediate/socket`) through parse/apply dispatch so live encoding paths no longer rely on dead expression branches.
+  - Expanded parser + monitoring + control coverage for migrated netlink behavior with dedicated suites (`tests/parsing/{netlink_control,netlink_io,firewall_monitor}.rs`) and updated adapter-level parsing tests to lock control-frame and ACK/error semantics.
+  - Maintained netlink-first runtime policy while preserving targeted NFQUEUE fallback semantics (socket-open failure only), with fallback ownership contained under `platform/nfqueue/ffi/*`.
+
 ### Added
 
 - **2026-04-24 optimization follow-up — shared metrics snapshots, OpenMetrics push restore, watch/storage cold-path cleanup, and Aya smoke stabilization**

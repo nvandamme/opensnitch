@@ -151,7 +151,7 @@ impl CommandControlService {
         let previous = firewall.get_snapshot();
         let owner = Self::owner_from_client(client_service);
         tracing::info!(notification_id, backend = ?current.firewall_backend, "received firewall reload command");
-        crate::platform::ffi::nfqueue::NfqueueRuntimeState::set_default_action(
+        crate::platform::nfqueue::state::NfqueueRuntimeState::set_default_action(
             current.default_action,
         );
 

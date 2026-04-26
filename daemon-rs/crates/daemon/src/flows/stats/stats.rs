@@ -25,7 +25,7 @@ use crate::{
 
 pub(crate) use crate::models::worker_telemetry::WorkerTelemetrySnapshot;
 
-use crate::platform::ports::stats_exporter_port::StatsExporterPort;
+use crate::platform::stats::exporter_port::StatsExporterPort;
 use crate::services::client::transport::ClientPingRequest;
 
 pub(crate) struct StatsFlow {
@@ -81,7 +81,7 @@ impl StatsFlow {
     /// identically to before.  Call sites that do not need the exporter
     /// do not need to change.
     ///
-    /// See `platform::ports::stats_exporter_port::StatsExporterPort`.
+    /// See `platform::stats::exporter_port::StatsExporterPort`.
     // Called only inside metrics exporter wiring in daemon/tasks.rs; dead when both
     // metrics endpoint features are disabled.
     #[cfg(any(

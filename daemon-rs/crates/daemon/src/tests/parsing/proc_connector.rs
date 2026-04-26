@@ -1,8 +1,9 @@
 use crate::models::proc_event::ProcEventKind;
-use crate::platform::adapters::proc_connector::{
-    CN_MSG_LEN, NLMSG_HDR_LEN, PROC_EVENT_EXEC, PROC_EVENT_EXEC_PID_OFFSET, PROC_EVENT_EXIT,
-    PROC_EVENT_FORK, PROC_EVENT_FORK_CHILD_PID_OFFSET, PROC_EVENT_HEADER_LEN, ProcEventSocket,
+use crate::platform::procmon::connector::{
+    CN_MSG_LEN, NLMSG_HDR_LEN, PROC_EVENT_EXEC_PID_OFFSET, PROC_EVENT_FORK_CHILD_PID_OFFSET,
+    PROC_EVENT_HEADER_LEN, ProcEventSocket,
 };
+use nix::libc;
 
 fn build_frame(what: u32, pid: u32, is_fork: bool) -> Vec<u8> {
     let total = NLMSG_HDR_LEN + CN_MSG_LEN + 32;
@@ -28,7 +29,7 @@ fn build_frame(what: u32, pid: u32, is_fork: bool) -> Vec<u8> {
 
 #[test]
 fn parse_proc_pid_event_exec() {
-    let frame = build_frame(PROC_EVENT_EXEC, 1234, false);
+    let frame = build_frame(libc::PROC_EVENT_EXEC as u32, 1234, false);
     let parsed = ProcEventSocket::probe_parse_pid_event(&frame).expect("exec event should parse");
     assert_eq!(parsed.pid, 1234);
     assert!(matches!(parsed.kind, ProcEventKind::Exec));
@@ -36,7 +37,7 @@ fn parse_proc_pid_event_exec() {
 
 #[test]
 fn parse_proc_pid_event_exit() {
-    let frame = build_frame(PROC_EVENT_EXIT, 4321, false);
+    let frame = build_frame(libc::PROC_EVENT_EXIT as u32, 4321, false);
     let parsed = ProcEventSocket::probe_parse_pid_event(&frame).expect("exit event should parse");
     assert_eq!(parsed.pid, 4321);
     assert!(matches!(parsed.kind, ProcEventKind::Exit));
@@ -44,7 +45,7 @@ fn parse_proc_pid_event_exit() {
 
 #[test]
 fn parse_proc_pid_event_fork_uses_child_pid() {
-    let frame = build_frame(PROC_EVENT_FORK, 777, true);
+    let frame = build_frame(libc::PROC_EVENT_FORK as u32, 777, true);
     let parsed = ProcEventSocket::probe_parse_pid_event(&frame).expect("fork event should parse");
     assert_eq!(parsed.pid, 777);
     assert!(matches!(parsed.kind, ProcEventKind::Fork));
@@ -54,11 +55,11 @@ fn parse_proc_pid_event_fork_uses_child_pid() {
 fn parse_proc_pid_event_rejects_short_or_empty_frames() {
     assert!(ProcEventSocket::probe_parse_pid_event(&[]).is_none());
 
-    let mut frame = build_frame(PROC_EVENT_EXEC, 10, false);
+    let mut frame = build_frame(libc::PROC_EVENT_EXEC as u32, 10, false);
     frame.truncate(NLMSG_HDR_LEN + CN_MSG_LEN + PROC_EVENT_HEADER_LEN - 1);
     assert!(ProcEventSocket::probe_parse_pid_event(&frame).is_none());
 
-    let mut frame = build_frame(PROC_EVENT_EXEC, 10, false);
+    let mut frame = build_frame(libc::PROC_EVENT_EXEC as u32, 10, false);
     frame[NLMSG_HDR_LEN + 16..NLMSG_HDR_LEN + 18].copy_from_slice(&(0_u16).to_ne_bytes());
     assert!(ProcEventSocket::probe_parse_pid_event(&frame).is_none());
 }
@@ -71,7 +72,7 @@ fn parse_proc_pid_event_returns_none_for_unknown_event_kind() {
 
 #[test]
 fn connector_payload_rejects_when_cn_len_exceeds_frame() {
-    let mut frame = build_frame(PROC_EVENT_EXEC, 123, false);
+    let mut frame = build_frame(libc::PROC_EVENT_EXEC as u32, 123, false);
     let too_large = (frame.len() as u16).saturating_add(32);
     frame[NLMSG_HDR_LEN + 16..NLMSG_HDR_LEN + 18].copy_from_slice(&too_large.to_ne_bytes());
 
@@ -81,7 +82,7 @@ fn connector_payload_rejects_when_cn_len_exceeds_frame() {
 
 #[test]
 fn parse_proc_pid_event_handles_missing_pid_bytes_as_none() {
-    let mut frame = build_frame(PROC_EVENT_EXEC, 999, false);
+    let mut frame = build_frame(libc::PROC_EVENT_EXEC as u32, 999, false);
     let payload_offset = NLMSG_HDR_LEN + CN_MSG_LEN;
     frame.truncate(payload_offset + PROC_EVENT_EXEC_PID_OFFSET + 2);
 
@@ -90,7 +91,7 @@ fn parse_proc_pid_event_handles_missing_pid_bytes_as_none() {
 
 #[test]
 fn connector_read_helpers_return_none_out_of_bounds() {
-    let frame = build_frame(PROC_EVENT_EXEC, 321, false);
+    let frame = build_frame(libc::PROC_EVENT_EXEC as u32, 321, false);
 
     assert!(ProcEventSocket::probe_read_u16_ne_at(&frame, frame.len() - 1).is_none());
     assert!(ProcEventSocket::probe_read_u32_ne_at(&frame, frame.len() - 2).is_none());
@@ -98,7 +99,7 @@ fn connector_read_helpers_return_none_out_of_bounds() {
 
 #[test]
 fn connector_payload_requires_minimum_proc_event_header_bytes() {
-    let mut frame = build_frame(PROC_EVENT_EXEC, 456, false);
+    let mut frame = build_frame(libc::PROC_EVENT_EXEC as u32, 456, false);
     let short_len = (PROC_EVENT_HEADER_LEN - 1) as u16;
     frame[NLMSG_HDR_LEN + 16..NLMSG_HDR_LEN + 18].copy_from_slice(&short_len.to_ne_bytes());
 
@@ -107,4 +108,32 @@ fn connector_payload_requires_minimum_proc_event_header_bytes() {
         Some((PROC_EVENT_HEADER_LEN - 1) as usize)
     );
     assert!(ProcEventSocket::probe_parse_pid_event(&frame).is_none());
+}
+
+#[test]
+fn parse_proc_pid_event_message_rejects_netlink_error() {
+    let payload = (-libc::EPERM).to_ne_bytes();
+    let err = ProcEventSocket::probe_parse_pid_event_message(libc::NLMSG_ERROR as u16, &payload)
+        .expect_err("expected NLMSG_ERROR with errno to fail");
+
+    let io = err.downcast_ref::<std::io::Error>().expect("io error");
+    assert_eq!(io.raw_os_error(), Some(libc::EPERM));
+}
+
+#[test]
+fn parse_proc_pid_event_message_ignores_noop_and_done() {
+    let frame = build_frame(libc::PROC_EVENT_EXEC as u32, 111, false);
+    let payload_offset = NLMSG_HDR_LEN + CN_MSG_LEN;
+    let payload = &frame[payload_offset..];
+
+    assert!(
+        ProcEventSocket::probe_parse_pid_event_message(libc::NLMSG_NOOP as u16, payload)
+            .expect("noop parse")
+            .is_none()
+    );
+    assert!(
+        ProcEventSocket::probe_parse_pid_event_message(libc::NLMSG_DONE as u16, payload)
+            .expect("done parse")
+            .is_none()
+    );
 }

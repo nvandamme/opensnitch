@@ -1,4 +1,4 @@
-use crate::platform::adapters::audit_netlink::AuditNetlinkSocket;
+use crate::platform::procmon::audit::AuditNetlinkSocket;
 use nix::libc;
 
 const NLMSG_HDR_LEN: usize = 16;
@@ -51,11 +51,35 @@ fn parse_event_datagram_extracts_audit_payload() {
 }
 
 #[test]
+fn parse_event_message_extracts_audit_payload_without_datagram_copy() {
+    let event = AuditNetlinkSocket::probe_parse_event_message(
+        1300,
+        b"type=SYSCALL msg=audit(1:2): pid=4242 key=\"opensnitch\"\0",
+    )
+    .expect("parse event payload")
+    .expect("event payload");
+
+    assert_eq!(event.kind, 1300);
+    assert!(event.data.contains("pid=4242"));
+    assert!(event.data.contains("key=\"opensnitch\""));
+}
+
+#[test]
 fn parse_error_datagram_returns_errno() {
     let payload = (-libc::EPERM).to_ne_bytes();
     let datagram = build_datagram(libc::NLMSG_ERROR as u16, &payload);
     let err = AuditNetlinkSocket::probe_parse_event_datagram(&datagram)
         .expect_err("expected error datagram to fail");
+
+    let io = err.downcast_ref::<std::io::Error>().expect("io error");
+    assert_eq!(io.raw_os_error(), Some(libc::EPERM));
+}
+
+#[test]
+fn parse_event_message_returns_errno() {
+    let payload = (-libc::EPERM).to_ne_bytes();
+    let err = AuditNetlinkSocket::probe_parse_event_message(libc::NLMSG_ERROR as u16, &payload)
+        .expect_err("expected error payload to fail");
 
     let io = err.downcast_ref::<std::io::Error>().expect("io error");
     assert_eq!(io.raw_os_error(), Some(libc::EPERM));

@@ -9,7 +9,9 @@ pub(crate) fn apply_runtime_core(
     stats: &crate::services::stats::StatsService,
 ) {
     refresh_runtime_reloadable_singletons();
-    crate::platform::ffi::nfqueue::NfqueueRuntimeState::set_default_action(updated.default_action);
+    crate::platform::nfqueue::state::NfqueueRuntimeState::set_default_action(
+        updated.default_action,
+    );
     stats.apply_config(updated.stats);
     apply_gc_percent(updated.gc_percent);
 }
@@ -22,7 +24,7 @@ fn refresh_runtime_reloadable_singletons() {
     );
 
     crate::services::stats::StatsService::reload_daemon_version_from_env();
-    crate::platform::adapters::net_iface::NetIfaceAdapter::clear_interface_name_cache();
+    crate::platform::netlink::ifaces::NetIfaceAdapter::clear_interface_name_cache();
     crate::services::connection::ConnectionService::reset_pid_owner_caches();
     let _ = crate::services::storage::StorageService::reload_global();
     tracing::debug!("reloaded storage runtime singleton");

@@ -2,7 +2,7 @@ use crate::models::{
     connection_owner::{ConnectionOwner, ConnectionOwnerCacheKey},
     connection_state::{ConnectionAttempt, TransportProtocol},
 };
-use crate::platform::ports::socket_diag_port::{NativeSocketDiagPort, SocketDiagPlatformPort};
+use crate::platform::netstat::socket_diag::SocketDiagAdapter;
 use crate::utils::proc_fs::proc_pid_exists;
 use crate::utils::proc_net::read_proc_net_packet_rows;
 use std::io::{BufRead, BufReader};
@@ -212,7 +212,7 @@ impl ConnectionService {
             attempt.src_port,
         );
 
-        if let Ok(candidates) = NativeSocketDiagPort::find_socket_candidates(
+        if let Ok(candidates) = SocketDiagAdapter::find_socket_candidates(
             family,
             ipproto,
             src,

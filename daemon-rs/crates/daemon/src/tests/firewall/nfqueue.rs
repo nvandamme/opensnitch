@@ -5,6 +5,7 @@ use std::{
 };
 
 use dashmap::DashMap;
+use nix::libc;
 
 use crate::{
     bus::{BusCaps, BusState},
@@ -12,13 +13,16 @@ use crate::{
     models::connection_state::{ConnectionAttempt, TransportProtocol},
     models::dns_payload::DnsPayload,
     models::kernel_event::KernelEvent,
+    models::queue_metrics_snapshot::QueueMetricsSnapshot,
 };
 
-use crate::platform::ffi::nfqueue::{
-    Decision, NF_ACCEPT, NF_DROP, NF_QUEUE, NfqueueDecisionState, NfqueueMetricsState,
-    NfqueueRuntimeState, NfqueueVerdictEngine, PRIMARY_DECISION_TIMEOUT, PacketVerdict,
-    QueueMetricsSnapshot, REPEAT_DECISION_TIMEOUT, RUNTIME, RequeueAlias,
+use crate::platform::nfqueue::decision::NfqueueDecisionState;
+use crate::platform::nfqueue::metrics::NfqueueMetricsState;
+use crate::platform::nfqueue::state::NfqueueRuntimeState;
+use crate::platform::nfqueue::state::{
+    Decision, PRIMARY_DECISION_TIMEOUT, REPEAT_DECISION_TIMEOUT, RUNTIME, RequeueAlias,
 };
+use crate::platform::nfqueue::verdict::{NfqueueVerdictEngine, PacketVerdict};
 use crate::tunables::NfqueueOverloadPolicy;
 
 fn reset_queue_metrics() {
@@ -395,18 +399,18 @@ fn drop_fast_policy_drops_without_requeue() {
 fn c_verdict_encoding_matches_expected_values() {
     assert_eq!(
         NfqueueVerdictEngine::packet_verdict_to_c(&PacketVerdict::Accept { mark: 7 }),
-        (NF_ACCEPT, 7)
+        (libc::NF_ACCEPT as u32, 7)
     );
     assert_eq!(
         NfqueueVerdictEngine::packet_verdict_to_c(&PacketVerdict::Drop),
-        (NF_DROP, 0)
+        (libc::NF_DROP as u32, 0)
     );
     assert_eq!(
         NfqueueVerdictEngine::packet_verdict_to_c(&PacketVerdict::Requeue {
             queue_num: 6,
             mark: 77,
         }),
-        (NF_QUEUE | ((6_u32) << 16), 77)
+        ((libc::NF_QUEUE as u32) | ((6_u32) << 16), 77)
     );
 }
 
@@ -419,7 +423,7 @@ fn verdict_with_packet_exposes_payload_for_nfq_set_verdict2() {
 
     assert_eq!(
         NfqueueVerdictEngine::packet_verdict_to_c(&verdict),
-        (NF_ACCEPT, 7)
+        (libc::NF_ACCEPT as u32, 7)
     );
     assert_eq!(
         NfqueueVerdictEngine::packet_verdict_payload(&verdict),

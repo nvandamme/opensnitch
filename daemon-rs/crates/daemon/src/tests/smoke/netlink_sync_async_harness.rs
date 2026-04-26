@@ -46,26 +46,6 @@ fn print_comparison(label: &str, sync: TimingSummary, async_direct: TimingSummar
     );
 }
 
-fn print_three_way_comparison(
-    label: &str,
-    sync_wrapper: TimingSummary,
-    sync_bridge_persistent_rt: TimingSummary,
-    async_adapter: TimingSummary,
-) {
-    println!(
-        "{label}: sync-wrapper mean/p50/p95 = {:.3}/{:.3}/{:.3} ms; sync-bridge(persistent-rt) = {:.3}/{:.3}/{:.3} ms; async-adapter = {:.3}/{:.3}/{:.3} ms",
-        sync_wrapper.mean_ms,
-        sync_wrapper.p50_ms,
-        sync_wrapper.p95_ms,
-        sync_bridge_persistent_rt.mean_ms,
-        sync_bridge_persistent_rt.p50_ms,
-        sync_bridge_persistent_rt.p95_ms,
-        async_adapter.mean_ms,
-        async_adapter.p50_ms,
-        async_adapter.p95_ms,
-    );
-}
-
 #[test]
 fn net_iface_sync_vs_async_harness() {
     if skip_if_not_opted_in() {
@@ -81,9 +61,9 @@ fn net_iface_sync_vs_async_harness() {
     const ITERS: usize = 30;
 
     for _ in 0..WARMUP {
-        let _ = crate::platform::adapters::net_iface::NetIfaceAdapter::interface_name_map();
+        let _ = crate::platform::netlink::ifaces::NetIfaceAdapter::interface_name_map();
         let _ = rt.block_on(
-            crate::platform::adapters::net_iface::NetIfaceAdapter::interface_name_map_async(),
+            crate::platform::netlink::ifaces::NetIfaceAdapter::interface_name_map_async(),
         );
     }
 
@@ -92,8 +72,7 @@ fn net_iface_sync_vs_async_harness() {
 
     for _ in 0..ITERS {
         let t0 = Instant::now();
-        let sync_result =
-            crate::platform::adapters::net_iface::NetIfaceAdapter::interface_name_map();
+        let sync_result = crate::platform::netlink::ifaces::NetIfaceAdapter::interface_name_map();
         sync_samples.push(t0.elapsed());
 
         if let Err(err) = sync_result {
@@ -105,7 +84,7 @@ fn net_iface_sync_vs_async_harness() {
 
         let t1 = Instant::now();
         let async_result = rt.block_on(
-            crate::platform::adapters::net_iface::NetIfaceAdapter::interface_name_map_async(),
+            crate::platform::netlink::ifaces::NetIfaceAdapter::interface_name_map_async(),
         );
         async_samples.push(t1.elapsed());
 
@@ -144,30 +123,30 @@ fn socket_diag_sync_vs_async_harness() {
     const ITERS: usize = 20;
 
     for _ in 0..WARMUP {
-        let _ = crate::platform::adapters::socket_diag_bindings::SocketDiagBindingsAdapter::dump_sockets(
+        let _ = crate::platform::netstat::socket_diag::SocketDiagAdapter::dump_sockets(
             family, protocol,
         );
         let _ = rt.block_on(
-            crate::platform::adapters::socket_diag_bindings::SocketDiagBindingsAdapter::dump_sockets_async(
+            crate::platform::netstat::socket_diag::SocketDiagAdapter::dump_sockets_async(
                 family, protocol,
             ),
         );
         let _ = rt.block_on(
-            crate::platform::adapters::socket_diag::SocketDiagAdapter::dump_sockets_async(
+            crate::platform::netstat::socket_diag::SocketDiagAdapter::dump_sockets_async(
                 family, protocol,
             ),
         );
     }
 
     let mut sync_wrapper_samples = Vec::with_capacity(ITERS);
-    let mut sync_bridge_persistent_rt_samples = Vec::with_capacity(ITERS);
     let mut async_adapter_samples = Vec::with_capacity(ITERS);
 
     for _ in 0..ITERS {
         let t0 = Instant::now();
-        let sync_wrapper_result = crate::platform::adapters::socket_diag_bindings::SocketDiagBindingsAdapter::dump_sockets(
-            family, protocol,
-        );
+        let sync_wrapper_result =
+            crate::platform::netstat::socket_diag::SocketDiagAdapter::dump_sockets(
+                family, protocol,
+            );
         sync_wrapper_samples.push(t0.elapsed());
 
         if let Err(err) = sync_wrapper_result {
@@ -177,24 +156,9 @@ fn socket_diag_sync_vs_async_harness() {
             return;
         }
 
-        let t1 = Instant::now();
-        let sync_bridge_result = rt.block_on(
-            crate::platform::adapters::socket_diag_bindings::SocketDiagBindingsAdapter::dump_sockets_async(
-                family, protocol,
-            ),
-        );
-        sync_bridge_persistent_rt_samples.push(t1.elapsed());
-
-        if let Err(err) = sync_bridge_result {
-            if strict_mode() {
-                panic!("socket diag async harness failed in strict mode: {err}");
-            }
-            return;
-        }
-
         let t2 = Instant::now();
         let async_adapter_result = rt.block_on(
-            crate::platform::adapters::socket_diag::SocketDiagAdapter::dump_sockets_async(
+            crate::platform::netstat::socket_diag::SocketDiagAdapter::dump_sockets_async(
                 family, protocol,
             ),
         );
@@ -209,12 +173,10 @@ fn socket_diag_sync_vs_async_harness() {
     }
 
     let sync_wrapper_summary = summarize(&sync_wrapper_samples);
-    let sync_bridge_summary = summarize(&sync_bridge_persistent_rt_samples);
     let async_adapter_summary = summarize(&async_adapter_samples);
-    print_three_way_comparison(
-        "socket_diag",
+    print_comparison(
+        "socket_diag (sync-wrapper vs async)",
         sync_wrapper_summary,
-        sync_bridge_summary,
         async_adapter_summary,
     );
 }

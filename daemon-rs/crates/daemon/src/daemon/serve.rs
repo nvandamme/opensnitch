@@ -46,7 +46,7 @@ impl Daemon {
         );
 
         let exporter = Arc::new(
-            crate::platform::adapters::connection_event_logger::ConnectionEventLoggerAdapter::new(
+            crate::platform::conman::event_logger::ConnectionEventLoggerAdapter::new(
                 &config.loggers,
             ),
         );

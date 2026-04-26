@@ -1,16 +1,23 @@
-use crate::platform::adapters::nfqueue_netlink::{
-    NFGENMSG_LEN, NFQA_CFG_CMD, NFQA_CFG_FLAGS, NFQA_CFG_MASK, NFQA_CFG_PARAMS,
-    NFQA_CFG_QUEUE_MAXLEN, NFQA_IFINDEX_INDEV, NFQA_IFINDEX_OUTDEV, NFQA_MARK, NFQA_PACKET_HDR,
-    NFQA_PAYLOAD, NFQA_UID, NFQA_VERDICT_HDR, NLA_HDR_LEN, NLMSG_HDR_LEN, NfqPacket,
-    NfqueueNetlinkAdapter, NlMsg, nla_align, nlmsg_align, parse_nfq_packet,
+use crate::platform::nfqueue::netlink::{
+    NFGENMSG_LEN, NLA_HDR_LEN, NLMSG_HDR_LEN, NfqPacket, NfqueueNetlinkAdapter, NlMsg, nla_align,
+    nlmsg_align, parse_nfq_packet,
 };
+use nix::libc;
+use tokio_util::sync::CancellationToken;
+
+const NFQNL_MSG_VERDICT: u16 =
+    ((libc::NFNL_SUBSYS_QUEUE as u16) << 8) | (libc::NFQNL_MSG_VERDICT as u16);
+const NFQNL_MSG_CONFIG: u16 =
+    ((libc::NFNL_SUBSYS_QUEUE as u16) << 8) | (libc::NFQNL_MSG_CONFIG as u16);
 
 // ─── NlMsg wire-shape tests ───────────────────────────────────────────────────
 
 /// Minimum well-formed message: nlmsghdr + nfgenmsg only, no attributes.
 #[test]
 fn nlmsg_bare_shape_is_correct() {
-    let buf = NlMsg::new(0x302, 0x01, 1).nfgenmsg(0, 0).finalize();
+    let buf = NlMsg::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 1)
+        .nfgenmsg(0, 0)
+        .finalize();
 
     assert_eq!(buf.len(), NLMSG_HDR_LEN + NFGENMSG_LEN);
 
@@ -18,13 +25,13 @@ fn nlmsg_bare_shape_is_correct() {
     let declared_len = u32::from_ne_bytes(buf[0..4].try_into().unwrap()) as usize;
     assert_eq!(declared_len, buf.len());
 
-    // nlmsg_type = 0x302 (NFQNL_MSG_CONFIG) as native-endian u16
+    // nlmsg_type = NFQNL_MSG_CONFIG as native-endian u16
     let msg_type = u16::from_ne_bytes(buf[4..6].try_into().unwrap());
-    assert_eq!(msg_type, 0x302);
+    assert_eq!(msg_type, NFQNL_MSG_CONFIG);
 
     // nlmsg_flags = NLM_F_REQUEST (1)
     let flags = u16::from_ne_bytes(buf[6..8].try_into().unwrap());
-    assert_eq!(flags, 0x01);
+    assert_eq!(flags, libc::NLM_F_REQUEST as u16);
 
     // nlmsg_seq = 1 (native-endian u32)
     let seq = u32::from_ne_bytes(buf[8..12].try_into().unwrap());
@@ -44,7 +51,9 @@ fn nlmsg_bare_shape_is_correct() {
 /// nfgenmsg.res_id is written in big-endian (queue_num=7 → bytes [0x00, 0x07]).
 #[test]
 fn nfgenmsg_res_id_is_big_endian() {
-    let buf = NlMsg::new(0x302, 0x01, 1).nfgenmsg(0, 7).finalize();
+    let buf = NlMsg::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 1)
+        .nfgenmsg(0, 7)
+        .finalize();
     assert_eq!(buf[18], 0x00);
     assert_eq!(buf[19], 0x07);
 }
@@ -52,15 +61,11 @@ fn nfgenmsg_res_id_is_big_endian() {
 /// A config CMD message targeting queue 7 with BIND command has correct wire shape.
 #[test]
 fn nlmsg_config_bind_cmd_wire_shape() {
-    const NFQNL_MSG_CONFIG: u16 = (3 << 8) | 2; // 0x302
-    const NLM_F_REQUEST: u16 = 0x01;
-    const NFQNL_CFG_CMD_BIND: u8 = 1;
-
     // cmd = { command=BIND(1), pad=0, pf=0 }
-    let cmd_payload: [u8; 4] = [NFQNL_CFG_CMD_BIND, 0, 0, 0];
-    let buf = NlMsg::new(NFQNL_MSG_CONFIG, NLM_F_REQUEST, 2)
+    let cmd_payload: [u8; 4] = [libc::NFQNL_CFG_CMD_BIND as u8, 0, 0, 0];
+    let buf = NlMsg::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 2)
         .nfgenmsg(0, 7)
-        .nla_bytes(NFQA_CFG_CMD, &cmd_payload)
+        .nla_bytes(libc::NFQA_CFG_CMD as u16, &cmd_payload)
         .finalize();
 
     // Total = 16 (nlmsghdr) + 4 (nfgenmsg) + NLA(4 hdr + 4 data) = 28
@@ -70,10 +75,10 @@ fn nlmsg_config_bind_cmd_wire_shape() {
     let nla_len = u16::from_ne_bytes(buf[20..22].try_into().unwrap()) as usize;
     let nla_type = u16::from_ne_bytes(buf[22..24].try_into().unwrap());
     assert_eq!(nla_len, NLA_HDR_LEN + 4); // 8
-    assert_eq!(nla_type, NFQA_CFG_CMD); // 1
+    assert_eq!(nla_type, libc::NFQA_CFG_CMD as u16); // 1
 
     // NLA data: command byte first
-    assert_eq!(buf[24], NFQNL_CFG_CMD_BIND);
+    assert_eq!(buf[24], libc::NFQNL_CFG_CMD_BIND as u8);
     assert_eq!(buf[25], 0); // pad
     assert_eq!(buf[26], 0); // pf high (AF_UNSPEC)
     assert_eq!(buf[27], 0); // pf low
@@ -82,17 +87,15 @@ fn nlmsg_config_bind_cmd_wire_shape() {
 /// PF_BIND for AF_INET puts pf=2 in big-endian at bytes [high, low].
 #[test]
 fn nlmsg_pf_bind_af_inet_pf_field_is_big_endian() {
-    const AF_INET: u16 = 2;
-    const NFQNL_CFG_CMD_PF_BIND: u8 = 3;
     let cmd_payload: [u8; 4] = [
-        NFQNL_CFG_CMD_PF_BIND,
+        libc::NFQNL_CFG_CMD_PF_BIND as u8,
         0,
-        (AF_INET >> 8) as u8,
-        AF_INET as u8,
+        ((libc::AF_INET as u16) >> 8) as u8,
+        libc::AF_INET as u8,
     ];
-    let buf = NlMsg::new(0x302, 0x01, 1)
+    let buf = NlMsg::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 1)
         .nfgenmsg(0, 0)
-        .nla_bytes(NFQA_CFG_CMD, &cmd_payload)
+        .nla_bytes(libc::NFQA_CFG_CMD as u16, &cmd_payload)
         .finalize();
     // pf bytes are at NLA data offset [2..4] = buf[26..28]
     assert_eq!(buf[26], 0x00); // AF_INET high byte
@@ -102,9 +105,9 @@ fn nlmsg_pf_bind_af_inet_pf_field_is_big_endian() {
 /// nla_u32_be stores the value in network byte order.
 #[test]
 fn nla_u32_be_stores_value_in_network_byte_order() {
-    let buf = NlMsg::new(0x302, 0x01, 1)
+    let buf = NlMsg::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 1)
         .nfgenmsg(0, 0)
-        .nla_u32_be(NFQA_CFG_QUEUE_MAXLEN, 0x00001000) // 4096
+        .nla_u32_be(libc::NFQA_CFG_QUEUE_MAXLEN as u16, 0x00001000) // 4096
         .finalize();
     // NLA starts at offset 20, data at offset 24
     assert_eq!(&buf[24..28], &[0x00, 0x00, 0x10, 0x00]);
@@ -115,9 +118,9 @@ fn nla_u32_be_stores_value_in_network_byte_order() {
 fn nla_bytes_pads_to_4_byte_alignment() {
     // 5-byte payload → aligned to 8 bytes → NLA total = 4 + 8 = 12, but nla_len = 4+5=9
     let payload = [1u8, 2, 3, 4, 5];
-    let buf = NlMsg::new(0x302, 0x01, 1)
+    let buf = NlMsg::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 1)
         .nfgenmsg(0, 0)
-        .nla_bytes(NFQA_CFG_PARAMS, &payload)
+        .nla_bytes(libc::NFQA_CFG_PARAMS as u16, &payload)
         .finalize();
 
     let nla_start = NLMSG_HDR_LEN + NFGENMSG_LEN;
@@ -134,26 +137,24 @@ fn nla_bytes_pads_to_4_byte_alignment() {
 /// A verdict message (NFQNL_MSG_VERDICT) places NFQA_VERDICT_HDR at NLA offset.
 #[test]
 fn nlmsg_verdict_wire_shape_accept() {
-    const NFQNL_MSG_VERDICT: u16 = (3 << 8) | 1; // 0x301
-    const NF_ACCEPT: u32 = 1;
     const PACKET_ID: u32 = 42;
 
     let mut verdict_hdr = [0u8; 8];
-    verdict_hdr[0..4].copy_from_slice(&NF_ACCEPT.to_be_bytes());
+    verdict_hdr[0..4].copy_from_slice(&(libc::NF_ACCEPT as u32).to_be_bytes());
     verdict_hdr[4..8].copy_from_slice(&PACKET_ID.to_be_bytes());
 
-    let buf = NlMsg::new(NFQNL_MSG_VERDICT, 0x01, 5)
+    let buf = NlMsg::new(NFQNL_MSG_VERDICT, libc::NLM_F_REQUEST as u16, 5)
         .nfgenmsg(0, 7)
-        .nla_bytes(NFQA_VERDICT_HDR, &verdict_hdr)
+        .nla_bytes(libc::NFQA_VERDICT_HDR as u16, &verdict_hdr)
         .finalize();
 
     // NLA at offset 20
     let nla_type = u16::from_ne_bytes(buf[22..24].try_into().unwrap());
-    assert_eq!(nla_type, NFQA_VERDICT_HDR); // 2
+    assert_eq!(nla_type, libc::NFQA_VERDICT_HDR as u16); // 2
 
     // verdict = NF_ACCEPT (1) in BE
     let verdict = u32::from_be_bytes(buf[24..28].try_into().unwrap());
-    assert_eq!(verdict, NF_ACCEPT);
+    assert_eq!(verdict, libc::NF_ACCEPT as u32);
 
     // id = PACKET_ID in BE
     let id = u32::from_be_bytes(buf[28..32].try_into().unwrap());
@@ -163,22 +164,20 @@ fn nlmsg_verdict_wire_shape_accept() {
 /// A requeue verdict encodes `NF_QUEUE | (queue_num << 16)`.
 #[test]
 fn nlmsg_verdict_wire_shape_requeue() {
-    const NFQNL_MSG_VERDICT: u16 = (3 << 8) | 1;
-    const NF_QUEUE: u32 = 3;
     let queue_num: u16 = 8;
-    let verdict_val: u32 = NF_QUEUE | ((queue_num as u32) << 16);
+    let verdict_val: u32 = (libc::NF_QUEUE as u32) | ((queue_num as u32) << 16);
 
     let mut verdict_hdr = [0u8; 8];
     verdict_hdr[0..4].copy_from_slice(&verdict_val.to_be_bytes());
     verdict_hdr[4..8].copy_from_slice(&99u32.to_be_bytes());
 
-    let buf = NlMsg::new(NFQNL_MSG_VERDICT, 0x01, 1)
+    let buf = NlMsg::new(NFQNL_MSG_VERDICT, libc::NLM_F_REQUEST as u16, 1)
         .nfgenmsg(0, 7)
-        .nla_bytes(NFQA_VERDICT_HDR, &verdict_hdr)
+        .nla_bytes(libc::NFQA_VERDICT_HDR as u16, &verdict_hdr)
         .finalize();
 
     let v = u32::from_be_bytes(buf[24..28].try_into().unwrap());
-    assert_eq!(v, NF_QUEUE | ((queue_num as u32) << 16));
+    assert_eq!(v, (libc::NF_QUEUE as u32) | ((queue_num as u32) << 16));
 }
 
 // ─── Alignment helpers ────────────────────────────────────────────────────────
@@ -223,35 +222,35 @@ fn build_packet_body(
     };
     let nla_len = (NLA_HDR_LEN + 7) as u16;
     body.extend_from_slice(&nla_len.to_ne_bytes());
-    body.extend_from_slice(&NFQA_PACKET_HDR.to_ne_bytes());
+    body.extend_from_slice(&(libc::NFQA_PACKET_HDR as u16).to_ne_bytes());
     body.extend_from_slice(&pkt_hdr_data);
     body.push(0); // pad to 8 bytes
 
     // NFQA_MARK (3)
     let nla_len = (NLA_HDR_LEN + 4) as u16;
     body.extend_from_slice(&nla_len.to_ne_bytes());
-    body.extend_from_slice(&NFQA_MARK.to_ne_bytes());
+    body.extend_from_slice(&(libc::NFQA_MARK as u16).to_ne_bytes());
     body.extend_from_slice(&mark.to_be_bytes());
 
     // NFQA_IFINDEX_INDEV (5)
     body.extend_from_slice(&nla_len.to_ne_bytes());
-    body.extend_from_slice(&NFQA_IFINDEX_INDEV.to_ne_bytes());
+    body.extend_from_slice(&(libc::NFQA_IFINDEX_INDEV as u16).to_ne_bytes());
     body.extend_from_slice(&iface_in.to_be_bytes());
 
     // NFQA_IFINDEX_OUTDEV (6)
     body.extend_from_slice(&nla_len.to_ne_bytes());
-    body.extend_from_slice(&NFQA_IFINDEX_OUTDEV.to_ne_bytes());
+    body.extend_from_slice(&(libc::NFQA_IFINDEX_OUTDEV as u16).to_ne_bytes());
     body.extend_from_slice(&iface_out.to_be_bytes());
 
     // NFQA_UID (16)
     body.extend_from_slice(&nla_len.to_ne_bytes());
-    body.extend_from_slice(&NFQA_UID.to_ne_bytes());
+    body.extend_from_slice(&(libc::NFQA_UID as u16).to_ne_bytes());
     body.extend_from_slice(&uid.to_be_bytes());
 
     // NFQA_PAYLOAD (10)
     let payload_nla_len = (NLA_HDR_LEN + payload.len()) as u16;
     body.extend_from_slice(&payload_nla_len.to_ne_bytes());
-    body.extend_from_slice(&NFQA_PAYLOAD.to_ne_bytes());
+    body.extend_from_slice(&(libc::NFQA_PAYLOAD as u16).to_ne_bytes());
     body.extend_from_slice(payload);
     let pad = nla_align(payload.len()) - payload.len();
     body.extend(std::iter::repeat_n(0u8, pad));
@@ -298,9 +297,9 @@ fn parse_nfq_packet_strips_nla_flag_bits_from_type() {
     while offset + NLA_HDR_LEN <= body.len() {
         let nla_len = u16::from_ne_bytes([body[offset], body[offset + 1]]) as usize;
         let nla_type = u16::from_ne_bytes([body[offset + 2], body[offset + 3]]);
-        if nla_type == NFQA_UID {
+        if nla_type == libc::NFQA_UID as u16 {
             // Set NLA_F_NET_BYTEORDER flag
-            let new_type = NFQA_UID | 0x4000;
+            let new_type = (libc::NFQA_UID as u16) | 0x4000;
             body[offset + 2] = new_type.to_ne_bytes()[0];
             body[offset + 3] = new_type.to_ne_bytes()[1];
             break;
@@ -317,33 +316,36 @@ fn parse_nfq_packet_strips_nla_flag_bits_from_type() {
 
 #[test]
 fn config_attr_type_values_match_kernel_uapi() {
-    assert_eq!(NFQA_CFG_CMD, 1);
-    assert_eq!(NFQA_CFG_PARAMS, 2);
-    assert_eq!(NFQA_CFG_QUEUE_MAXLEN, 3);
-    assert_eq!(NFQA_CFG_MASK, 4);
-    assert_eq!(NFQA_CFG_FLAGS, 5);
+    assert_eq!(libc::NFQA_CFG_CMD as u16, 1);
+    assert_eq!(libc::NFQA_CFG_PARAMS as u16, 2);
+    assert_eq!(libc::NFQA_CFG_QUEUE_MAXLEN as u16, 3);
+    assert_eq!(libc::NFQA_CFG_MASK as u16, 4);
+    assert_eq!(libc::NFQA_CFG_FLAGS as u16, 5);
 }
 
 #[test]
 fn packet_attr_type_values_match_kernel_uapi() {
-    assert_eq!(NFQA_PACKET_HDR, 1);
-    assert_eq!(NFQA_VERDICT_HDR, 2);
-    assert_eq!(NFQA_MARK, 3);
-    assert_eq!(NFQA_IFINDEX_INDEV, 5);
-    assert_eq!(NFQA_IFINDEX_OUTDEV, 6);
-    assert_eq!(NFQA_PAYLOAD, 10);
-    assert_eq!(NFQA_UID, 16);
+    assert_eq!(libc::NFQA_PACKET_HDR as u16, 1);
+    assert_eq!(libc::NFQA_VERDICT_HDR as u16, 2);
+    assert_eq!(libc::NFQA_MARK as u16, 3);
+    assert_eq!(libc::NFQA_IFINDEX_INDEV as u16, 5);
+    assert_eq!(libc::NFQA_IFINDEX_OUTDEV as u16, 6);
+    assert_eq!(libc::NFQA_PAYLOAD as u16, 10);
+    assert_eq!(libc::NFQA_UID as u16, 16);
 }
 
-// ─── Preflight test ───────────────────────────────────────────────────────────
+// ─── Runtime startup probe test ──────────────────────────────────────────────
 
-/// Verify that opening a NETLINK_NETFILTER socket is either possible or
-/// produces a clear permission error.  This test does not require privileges.
+/// Verify that starting the netlink adapter either succeeds (already-cancelled
+/// shutdown token) or reports a clear permission/setup error in unprivileged
+/// environments.
 #[test]
-fn preflight_reports_socket_availability() {
-    match NfqueueNetlinkAdapter::preflight() {
+fn run_reports_socket_availability_or_permission_error() {
+    let shutdown = CancellationToken::new();
+    shutdown.cancel();
+    match NfqueueNetlinkAdapter::run(0, shutdown) {
         Ok(()) => {
-            // Socket open succeeded — kernel supports NETLINK_NETFILTER.
+            // Startup/open succeeded and exited cleanly because shutdown is cancelled.
         }
         Err(err) => {
             // Acceptable: sandboxed environment or missing kernel module.
@@ -354,7 +356,7 @@ fn preflight_reports_socket_availability() {
                     || msg.contains("eacces")
                     || msg.contains("eperm")
                     || msg.contains("failed"),
-                "unexpected preflight error: {err}"
+                "unexpected run startup error: {err}"
             );
         }
     }
@@ -367,9 +369,11 @@ fn preflight_reports_socket_availability() {
 #[test]
 fn adapter_pub_surface_is_stable() {
     // Verify key types and functions compile and are accessible.
-    let _ = NlMsg::new(0x302, 0x01, 1).nfgenmsg(0, 0).finalize();
+    let _ = NlMsg::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 1)
+        .nfgenmsg(0, 0)
+        .finalize();
     let _ = parse_nfq_packet(&[]);
-    let _ = NfqueueNetlinkAdapter::preflight;
+    let _ = NfqueueNetlinkAdapter::run;
     let _ = nlmsg_align(1);
     let _ = nla_align(1);
 }

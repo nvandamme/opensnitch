@@ -76,57 +76,6 @@ pub(super) fn collect_enabled_firewall_rules_with_zone(
 
 pub(super) fn parse_rule_parameters(rule: &FirewallRule) -> ParsedRuleParameters {
     let mut parsed = ParsedRuleParameters::default();
-    let tokens = rule.parameters.split_whitespace().collect::<Vec<_>>();
-    let mut i = 0usize;
-
-    while i < tokens.len() {
-        match tokens[i] {
-            "-p" | "--protocol" => {
-                if let Some(value) = tokens.get(i + 1) {
-                    parsed.proto = Some((*value).to_string());
-                    i += 1;
-                }
-            }
-            "-s" | "--source" => {
-                if let Some(value) = tokens.get(i + 1) {
-                    parsed.src_ip = Some((*value).to_string());
-                    i += 1;
-                }
-            }
-            "-d" | "--destination" => {
-                if let Some(value) = tokens.get(i + 1) {
-                    parsed.dest_ip = Some((*value).to_string());
-                    i += 1;
-                }
-            }
-            "--sport" | "--source-port" => {
-                if let Some(value) = tokens.get(i + 1) {
-                    parsed.src_port = Some((*value).to_string());
-                    i += 1;
-                }
-            }
-            "--dport" | "--destination-port" => {
-                if let Some(value) = tokens.get(i + 1) {
-                    parsed.dest_port = Some((*value).to_string());
-                    i += 1;
-                }
-            }
-            "-i" => {
-                if let Some(value) = tokens.get(i + 1) {
-                    parsed.in_interface = Some((*value).to_string());
-                    i += 1;
-                }
-            }
-            "-o" => {
-                if let Some(value) = tokens.get(i + 1) {
-                    parsed.out_interface = Some((*value).to_string());
-                    i += 1;
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
 
     for expression in &rule.expressions {
         let Some(statement) = expression.statement.as_ref() else {
@@ -179,6 +128,61 @@ pub(super) fn parse_rule_parameters(rule: &FirewallRule) -> ParsedRuleParameters
                 }
             }
         }
+    }
+
+    let tokens = rule.parameters.split_whitespace().collect::<Vec<_>>();
+    let mut i = 0usize;
+    while i < tokens.len() {
+        match tokens[i] {
+            "-p" | "--protocol" => {
+                if let Some(value) = tokens.get(i + 1) {
+                    parsed.proto.get_or_insert_with(|| (*value).to_string());
+                    i += 1;
+                }
+            }
+            "-s" | "--source" => {
+                if let Some(value) = tokens.get(i + 1) {
+                    parsed.src_ip.get_or_insert_with(|| (*value).to_string());
+                    i += 1;
+                }
+            }
+            "-d" | "--destination" => {
+                if let Some(value) = tokens.get(i + 1) {
+                    parsed.dest_ip.get_or_insert_with(|| (*value).to_string());
+                    i += 1;
+                }
+            }
+            "--sport" | "--source-port" => {
+                if let Some(value) = tokens.get(i + 1) {
+                    parsed.src_port.get_or_insert_with(|| (*value).to_string());
+                    i += 1;
+                }
+            }
+            "--dport" | "--destination-port" => {
+                if let Some(value) = tokens.get(i + 1) {
+                    parsed.dest_port.get_or_insert_with(|| (*value).to_string());
+                    i += 1;
+                }
+            }
+            "-i" => {
+                if let Some(value) = tokens.get(i + 1) {
+                    parsed
+                        .in_interface
+                        .get_or_insert_with(|| (*value).to_string());
+                    i += 1;
+                }
+            }
+            "-o" => {
+                if let Some(value) = tokens.get(i + 1) {
+                    parsed
+                        .out_interface
+                        .get_or_insert_with(|| (*value).to_string());
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
     }
 
     parsed
