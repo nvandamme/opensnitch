@@ -4,7 +4,10 @@
 //! Each function is a standalone reader that accesses `/proc/<pid>/*` directly.
 //! No caching, no service dependencies — callers own the caching layer.
 
-use std::{collections::HashMap, fs, os::unix::fs::MetadataExt, path::PathBuf};
+use std::{collections::HashMap, fs, path::Path, path::PathBuf, time::SystemTime};
+
+use crate::platform::netstat::socket_diag::SocketDiagAdapter;
+use crate::platform::netstat::socket_state::SocketInfo;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -20,15 +23,10 @@ const DELETED_SUFFIX: &str = " (deleted)";
 pub(crate) struct ProcStatm {
     pub size: i64,
     pub resident: i64,
-    #[allow(dead_code)]
     pub shared: i64,
-    #[allow(dead_code)]
     pub text: i64,
-    #[allow(dead_code)]
     pub lib: i64,
-    #[allow(dead_code)]
     pub data: i64,
-    #[allow(dead_code)]
     pub dt: i64,
 }
 
@@ -44,12 +42,14 @@ pub(crate) struct ProcIoStats {
     pub write_bytes: i64,
 }
 
-/// A file-descriptor entry from `/proc/<pid>/fd/`.
+/// File descriptor entry from `/proc/<pid>/fd/`.
+/// Matches Go `procDescriptors` in `process.go`.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) struct ProcDescriptor {
     pub name: String,
     pub sym_link: String,
+    pub size: i64,
+    pub mod_time: Option<SystemTime>,
 }
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
@@ -161,6 +161,24 @@ pub(crate) fn read_uid(pid: u32) -> Option<u32> {
         .and_then(|s| s.parse().ok())
 }
 
+/// Read `/proc/<pid>/status` raw content.
+/// Go: `readStatus()` — first file read.
+pub(crate) fn read_status(pid: u32) -> String {
+    fs::read_to_string(proc_path(pid).join("status")).unwrap_or_default()
+}
+
+/// Read `/proc/<pid>/stat` raw content.
+/// Go: `readStatus()` — second file read.
+pub(crate) fn read_stat(pid: u32) -> String {
+    fs::read_to_string(proc_path(pid).join("stat")).unwrap_or_default()
+}
+
+/// Read `/proc/<pid>/stack` raw content.
+/// Go: `readStatus()` — third file read.
+pub(crate) fn read_stack(pid: u32) -> String {
+    fs::read_to_string(proc_path(pid).join("stack")).unwrap_or_default()
+}
+
 /// Read `/proc/<pid>/maps` raw content.
 /// Go: `ReadMaps()`.
 pub(crate) fn read_maps(pid: u32) -> Option<String> {
@@ -207,10 +225,152 @@ pub(crate) fn read_io_stats(pid: u32) -> Option<ProcIoStats> {
     Some(stats)
 }
 
-/// Check if `/proc/<pid>` exists (process is alive).
-/// Go: `IsAlive()`.
-pub(crate) fn is_alive(pid: u32) -> bool {
-    proc_path(pid).exists()
+/// Read file descriptors from `/proc/<pid>/fd/`.
+/// Go: `readDescriptors()`.
+///
+/// For each fd entry, reads the symlink target. If the target is a socket
+/// (`socket:[inode]`), attempts to enrich the display with socket info via
+/// netlink socket-diag, matching Go's `netlink.GetSocketInfoByInode`.
+pub(crate) fn read_descriptors(pid: u32) -> Vec<ProcDescriptor> {
+    let fd_dir = proc_path(pid).join("fd");
+    let entries = match fs::read_dir(&fd_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut descriptors = Vec::new();
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+
+        let link = match fs::read_link(entry.path()) {
+            Ok(l) => l.to_string_lossy().into_owned(),
+            Err(_) => continue,
+        };
+
+        // Enrich socket descriptors with connection info (Go parity).
+        let sym_link = if let Some(inode) = parse_socket_inode(&link) {
+            enrich_socket_descriptor(&name, inode).unwrap_or(link)
+        } else {
+            link.clone()
+        };
+
+        // Stat the link target for size and mod time (best-effort).
+        let (size, mod_time) = fs::symlink_metadata(entry.path())
+            .map(|m| (m.len() as i64, m.modified().ok()))
+            .unwrap_or((0, None));
+
+        descriptors.push(ProcDescriptor {
+            name,
+            sym_link,
+            size,
+            mod_time,
+        });
+    }
+
+    descriptors
+}
+
+/// Parse `socket:[12345]` → `Some(12345)`.
+/// Go: `socketsRegex.FindStringSubmatch(link)`.
+pub(crate) fn parse_socket_inode(link: &str) -> Option<u32> {
+    let rest = link.strip_prefix("socket:[")?;
+    let inode_str = rest.strip_suffix(']')?;
+    inode_str.parse().ok()
+}
+
+/// Look up socket info by inode via netlink socket-diag and format a
+/// human-readable descriptor string matching Go's enriched format.
+fn enrich_socket_descriptor(fd_name: &str, inode: u32) -> Option<String> {
+    use nix::libc::{AF_INET, AF_INET6, IPPROTO_TCP, IPPROTO_UDP};
+
+    let families_protos: &[(u8, u8)] = &[
+        (AF_INET as u8, IPPROTO_TCP as u8),
+        (AF_INET as u8, IPPROTO_UDP as u8),
+        (AF_INET6 as u8, IPPROTO_TCP as u8),
+        (AF_INET6 as u8, IPPROTO_UDP as u8),
+    ];
+
+    for &(family, proto) in families_protos {
+        let sockets: Vec<SocketInfo> = crate::platform::netlink::runtime::run_on_netlink_rt(
+            SocketDiagAdapter::dump_sockets_async(family, proto),
+        )
+        .ok()?;
+        for sock in &sockets {
+            if sock.inode == inode {
+                let state = tcp_state_name(sock.state);
+                return Some(format!(
+                    "socket:[{fd_name}] - {}:{} -> {}:{}, state: {state}",
+                    sock.src_port, sock.src, sock.dst, sock.dst_port,
+                ));
+            }
+        }
+    }
+
+    None
+}
+
+/// Map TCP state byte to name (Go: `TCPStatesMap`).
+fn tcp_state_name(state: u8) -> &'static str {
+    match state {
+        1 => "established",
+        2 => "syn_sent",
+        3 => "syn_recv",
+        4 => "fin_wait1",
+        5 => "fin_wait2",
+        6 => "time_wait",
+        7 => "close",
+        8 => "close_wait",
+        9 => "last_ack",
+        10 => "listen",
+        11 => "closing",
+        _ => "invalid",
+    }
+}
+
+// ─── Process / inode lookup (Go: find.go) ─────────────────────────────────────
+
+/// List all numeric PIDs under `/proc`.
+/// Go: `getProcPids("/proc")` in `find.go`.
+pub(crate) fn list_pids() -> Vec<u32> {
+    list_pids_in("/proc")
+}
+
+/// List all numeric PIDs (or TIDs) under `dir`.
+/// Go: `getProcPids(dir)` in `find.go`.
+pub(crate) fn list_pids_in(dir: &str) -> Vec<u32> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| e.file_name().to_string_lossy().parse::<u32>().ok())
+        .collect()
+}
+
+/// Check whether a process owns a socket with the given inode.
+/// Scans `/proc/<pid>/fd/` for a symlink matching `socket:[<inode>]`.
+/// Go: `inodeFound()` in `find.go`.
+pub(crate) fn pid_owns_inode(pid: u32, inode: u32) -> bool {
+    pid_owns_inode_at(inode, &proc_path(pid).join("fd"))
+}
+
+/// Check whether any fd in `fd_dir` points to the given socket inode.
+pub(crate) fn pid_owns_inode_at(inode: u32, fd_dir: &Path) -> bool {
+    let Ok(fds) = fs::read_dir(fd_dir) else {
+        return false;
+    };
+    for fd_entry in fds.flatten() {
+        let Ok(target) = fs::read_link(fd_entry.path()) else {
+            continue;
+        };
+        if let Some(found) = parse_socket_inode(&target.to_string_lossy())
+            && found == inode
+        {
+            return true;
+        }
+    }
+    false
 }
 
 // ─── Path resolution (Go: ReadPath + SetPath + CleanPath) ─────────────────────
@@ -270,102 +430,6 @@ fn clean_path(pid: u32, raw: &str) -> String {
     }
 
     path
-}
-
-// ─── PID enumeration + inode lookup (Go: find.go) ─────────────────────────────
-
-/// Enumerate running PIDs from `/proc`.
-/// Go: `getProcPids("/proc/")`.
-pub(crate) fn list_pids() -> Vec<u32> {
-    list_pids_in("/proc")
-}
-
-/// Enumerate PIDs (or TIDs) in a given `/proc`-like directory.
-fn list_pids_in(dir: &str) -> Vec<u32> {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-    let mut pids: Vec<u32> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .filter_map(|e| e.file_name().to_str()?.parse().ok())
-        .collect();
-    // Sort by inode mtime descending (most recent first), matching Go's sortPidsByTime.
-    // We use the directory's metadata mtime as a proxy.
-    pids.sort_unstable_by(|a, b| {
-        let ma = fs::metadata(format!("/proc/{a}"))
-            .map(|m| m.mtime())
-            .unwrap_or(0);
-        let mb = fs::metadata(format!("/proc/{b}"))
-            .map(|m| m.mtime())
-            .unwrap_or(0);
-        mb.cmp(&ma)
-    });
-    pids
-}
-
-/// List file-descriptor entries in `/proc/<pid>/fd/`.
-/// Go: `lookupPidDescriptors()`.
-pub(crate) fn list_descriptors(pid: u32) -> Vec<ProcDescriptor> {
-    let fd_dir = proc_path(pid).join("fd");
-    let entries = match fs::read_dir(&fd_dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-    entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let sym_link = fs::read_link(e.path())
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            Some(ProcDescriptor { name, sym_link })
-        })
-        .collect()
-}
-
-/// Find the PID that owns a socket inode by scanning `/proc/*/fd/`.
-/// Go: `lookupPidInProc("/proc/", expect, inodeKey, inode)`.
-///
-/// `inode` is the socket inode number; this function looks for
-/// `socket:[<inode>]` symlinks across all running processes.
-pub(crate) fn find_pid_by_inode(inode: u64) -> Option<u32> {
-    let expect = format!("socket:[{inode}]");
-    for pid in list_pids() {
-        let fd_dir = proc_path(pid).join("fd");
-        let entries = match fs::read_dir(&fd_dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.filter_map(|e| e.ok()) {
-            if let Ok(link) = fs::read_link(entry.path()) {
-                if link.to_string_lossy() == expect {
-                    return Some(pid);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Check if a specific PID owns a socket inode.
-/// Go: `inodeFound()`.
-pub(crate) fn pid_owns_inode(pid: u32, inode: u64) -> bool {
-    let expect = format!("socket:[{inode}]");
-    let fd_dir = proc_path(pid).join("fd");
-    let entries = match fs::read_dir(&fd_dir) {
-        Ok(e) => e,
-        Err(_) => return false,
-    };
-    for entry in entries.filter_map(|e| e.ok()) {
-        if let Ok(link) = fs::read_link(entry.path()) {
-            if link.to_string_lossy() == expect {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

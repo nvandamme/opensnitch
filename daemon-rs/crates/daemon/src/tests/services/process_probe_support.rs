@@ -24,6 +24,9 @@ impl ProcessService {
                 info: ProcessInfo {
                     pid,
                     path: "/usr/bin/curl".to_string(),
+                    comm: Some("curl".to_string()),
+                    root: "/".to_string(),
+                    uid: None,
                     args: vec!["curl".to_string()],
                     cwd: None,
                     env_preview: Vec::new(),
@@ -60,6 +63,9 @@ impl ProcessService {
                 info: ProcessInfo {
                     pid,
                     path: "/usr/bin/true".to_string(),
+                    comm: Some("true".to_string()),
+                    root: "/".to_string(),
+                    uid: None,
                     args: vec!["true".to_string()],
                     cwd: None,
                     env_preview: Vec::new(),

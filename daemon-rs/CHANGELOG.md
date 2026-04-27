@@ -16,6 +16,25 @@ Versioning baseline:
 
 ### Changed
 
+- **procfs: GetExtraInfo, readDescriptors, and core function consolidation**
+  (`crates/daemon/src/platform/procmon/procfs.rs`,
+  `crates/daemon/src/models/process/state.rs`,
+  `crates/daemon/src/models/task/wire.rs`,
+  `crates/daemon/src/services/process/details.rs`,
+  `crates/daemon/src/services/task/runtime_handlers.rs`,
+  `crates/daemon/src/services/connection/owner.rs`,
+  `crates/daemon/src/services/connection/parsing.rs`,
+  `crates/daemon/src/tests/parsing/connection_probe_support.rs`,
+  `crates/daemon/src/tests/parsing/procmon_procfs.rs`):
+  - Implemented Go `GetExtraInfo()` parity: added `read_status(pid)`, `read_stat(pid)`, `read_stack(pid)` to procfs.rs; created `ProcessExtraInfo` struct in `models/process/state.rs`; created `ProcessService::get_extra_info(pid)` in `services/process/details.rs`; wired into pid_monitor loop via `spawn_blocking` to populate `PidMonitorResult` status/stat/stack/maps/statm/env/io_stats fields (previously hardcoded to zeros/empty).
+  - Implemented Go `readDescriptors()` parity: added `ProcDescriptor` struct and `read_descriptors(pid)` to procfs.rs with `/proc/<pid>/fd/` enumeration and socket enrichment via `enrich_socket_descriptor` (netlink socket-diag dump); added `PidMonitorDescriptor` wire type; changed `PidMonitorResult.descriptors` from `()` (always null) to `Vec<PidMonitorDescriptor>` with RFC 3339 timestamp formatting via zero-dependency `civil_from_days` helper.
+  - Restored core procfs utility functions (Go `find.go` parity): `list_pids()`, `list_pids_in(dir)`, `pid_owns_inode(pid, inode)`, `pid_owns_inode_at(inode, fd_dir)`; made `parse_socket_inode` `pub(crate)`.
+  - Refactored `owner.rs`: removed private `pid_owns_inode`/`pid_owns_inode_at` duplicates, now delegates to canonical `procfs::` functions; replaced inline `/proc` scan with `procfs::list_pids()`.
+  - Deduplicated `parse_socket_inode`: removed copy from `parsing.rs`, test probe redirected to `procfs::parse_socket_inode`.
+  - Removed `#[allow(dead_code)]` from `ProcStatm`, `ProcIoStats`, `read_maps`, `read_statm`, `read_io_stats` (now wired).
+  - Removed dead wrappers: unused `NetlinkHeader`/helpers in audit.rs, unused `request_sock` in connector.rs, dead netlink control fn.
+  - Added 6 new tests: `list_pids_has_self`, `list_pids_in_proc`, `pid_owns_inode_nonexistent`, `read_descriptors_self`, `parse_socket_inode_valid`, `parse_socket_inode_invalid`. 594 tests passing.
+
 - **models/ mass reorganization: flat files → 17 domain subdirectories**
   (`crates/daemon/src/models/`):
   - Reorganized ~45 flat model files into 17 domain subdirectories: `audit/`, `command/`, `config/`, `connection/`, `dns/`, `ebpf/`, `firewall/`, `kernel/`, `metrics/`, `notification/`, `policy/`, `process/`, `rule/`, `storage/`, `subscription/`, `task/`, `verdict/`.

@@ -68,6 +68,9 @@ impl ConnectionService {
         ProcessInfo {
             pid: 0,
             path: "Kernel connection".to_string(),
+            comm: None,
+            root: "/".to_string(),
+            uid: None,
             args: Vec::new(),
             cwd: None,
             env_preview: Vec::new(),
@@ -86,6 +89,9 @@ impl ConnectionService {
         ProcessInfo {
             pid,
             path: String::new(),
+            comm: None,
+            root: "/".to_string(),
+            uid: None,
             args: Vec::new(),
             cwd: None,
             env_preview: Vec::new(),

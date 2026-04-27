@@ -49,17 +49,6 @@ impl ConnectionService {
         None
     }
 
-    pub(super) fn parse_socket_inode(value: &str) -> Option<u32> {
-        if !value.starts_with("socket:[") || !value.ends_with(']') {
-            return None;
-        }
-        value
-            .trim_start_matches("socket:[")
-            .trim_end_matches(']')
-            .parse::<u32>()
-            .ok()
-    }
-
     pub(super) fn inode_lookup_key(
         protocol: TransportProtocol,
         src_ip: IpAddr,

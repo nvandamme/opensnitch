@@ -6,7 +6,7 @@ use nix::libc;
 use sha1::Sha1;
 use sha2::Sha256;
 
-use crate::models::process::state::{ProcessInfo, ProcessNode};
+use crate::models::process::state::{ProcessExtraInfo, ProcessInfo, ProcessNode};
 use crate::platform::procmon::procfs;
 
 use super::ProcessService;
@@ -31,6 +31,9 @@ impl ProcessService {
         let path = procfs::resolve_exe_path(pid)
             .ok_or_else(|| anyhow!("cannot resolve exe for pid {pid}"))?;
 
+        let comm = procfs::read_comm(pid);
+        let root = procfs::read_root(pid);
+        let uid = procfs::read_uid(pid);
         let args = procfs::read_cmdline(pid);
         let cwd = procfs::read_cwd(pid);
         let env_map = procfs::read_environ(pid);
@@ -42,6 +45,9 @@ impl ProcessService {
         Ok(ProcessInfo {
             pid,
             path,
+            comm,
+            root,
+            uid,
             args,
             cwd,
             env_preview,
@@ -206,5 +212,31 @@ impl ProcessService {
 
     pub(super) fn read_proc_starttime(pid: u32) -> Option<u64> {
         procfs::read_starttime(pid)
+    }
+
+    /// Collect extra runtime information for a running process.
+    /// Collect volatile extra information for a running process.
+    /// Go: `Process.GetExtraInfo()` → `ReadEnv`, `readDescriptors`, `readIOStats`, `readStatus`.
+    pub(crate) fn get_extra_info(pid: u32) -> ProcessExtraInfo {
+        let env = procfs::read_environ(pid);
+        let descriptors = procfs::read_descriptors(pid);
+        let io_stats = procfs::read_io_stats(pid);
+        // Go readStatus() reads status, stat, stack, then maps and statm.
+        let status = procfs::read_status(pid);
+        let stat = procfs::read_stat(pid);
+        let stack = procfs::read_stack(pid);
+        let maps = procfs::read_maps(pid).unwrap_or_default();
+        let statm = procfs::read_statm(pid);
+
+        ProcessExtraInfo {
+            env,
+            descriptors,
+            io_stats,
+            statm,
+            status,
+            stat,
+            stack,
+            maps,
+        }
     }
 }

@@ -94,6 +94,20 @@ pub(crate) struct PidMonitorNetStats {
     pub(crate) write_bytes: u64,
 }
 
+/// File descriptor entry in PID monitor output.
+/// Matches Go `procDescriptors` in `process.go`.
+#[derive(Debug, Serialize)]
+pub(crate) struct PidMonitorDescriptor {
+    #[serde(rename = "Name")]
+    pub(crate) name: String,
+    #[serde(rename = "SymLink")]
+    pub(crate) sym_link: String,
+    #[serde(rename = "Size")]
+    pub(crate) size: i64,
+    #[serde(rename = "ModTime")]
+    pub(crate) mod_time: String,
+}
+
 /// Full pid-monitor task result payload (Go-parity field names).
 #[derive(Debug, Serialize)]
 pub(crate) struct PidMonitorResult {
@@ -137,9 +151,8 @@ pub(crate) struct PidMonitorResult {
     pub(crate) maps: String,
     #[serde(rename = "Stack")]
     pub(crate) stack: String,
-    /// Always null — `()` serialises as JSON null.
     #[serde(rename = "Descriptors")]
-    pub(crate) descriptors: (),
+    pub(crate) descriptors: Vec<PidMonitorDescriptor>,
     #[serde(rename = "NetStats")]
     pub(crate) net_stats: PidMonitorNetStats,
     #[serde(rename = "Tree")]

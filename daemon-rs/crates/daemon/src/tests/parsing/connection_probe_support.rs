@@ -3,6 +3,7 @@ use std::sync::atomic::Ordering;
 
 use crate::{
     models::{connection::owner::ConnectionOwnerCacheKey, connection::state::TransportProtocol},
+    platform::procmon::procfs,
     services::connection::ConnectionService,
 };
 
@@ -18,7 +19,7 @@ impl ConnectionService {
     }
 
     pub(crate) fn probe_parse_socket_inode(value: &str) -> Option<u32> {
-        Self::parse_socket_inode(value)
+        procfs::parse_socket_inode(value)
     }
 
     pub(crate) fn probe_parse_value_hex_bytes(value: &str) -> Option<Vec<u8>> {

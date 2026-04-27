@@ -1,6 +1,4 @@
-use crate::platform::netlink::control::{
-    NetlinkControlFlow, classify_nlmsg_control, should_process_nlmsg_payload,
-};
+use crate::platform::netlink::control::{NetlinkControlFlow, classify_nlmsg_control};
 use nix::libc;
 
 #[test]
@@ -26,7 +24,6 @@ fn control_classifier_processes_non_control_messages() {
         classify_nlmsg_control(0x1234, b"payload").expect("data classify"),
         NetlinkControlFlow::Process
     );
-    assert!(should_process_nlmsg_payload(0x1234, b"payload").expect("data should process"));
 }
 
 #[test]

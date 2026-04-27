@@ -70,6 +70,9 @@ impl RuleService {
         let process = ProcessInfo {
             pid: 1,
             path: "/usr/bin/curl".to_string(),
+            comm: Some("curl".to_string()),
+            root: "/".to_string(),
+            uid: Some(1000),
             args: vec!["curl".to_string()],
             cwd: None,
             env_preview: Vec::new(),

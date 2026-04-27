@@ -20,8 +20,9 @@ use crate::{
             IocToolConfig,
         },
         task::wire::{
-            DownloaderResult, NodeMonitorResult, PidMonitorIOStats, PidMonitorNetStats,
-            PidMonitorResult, PidMonitorStatm, PidMonitorTreeNode, TaskErrorPayload,
+            DownloaderResult, NodeMonitorResult, PidMonitorDescriptor, PidMonitorIOStats,
+            PidMonitorNetStats, PidMonitorResult, PidMonitorStatm, PidMonitorTreeNode,
+            TaskErrorPayload,
         },
     },
     platform::netstat::socket_diag::SocketDiagAdapter,
@@ -285,33 +286,92 @@ impl TaskService {
                                     .collect();
                                 let parent_pid =
                                     info.parent_chain.get(1).map(|n| n.pid).unwrap_or(0);
-                                let comm = std::path::Path::new(&info.path)
-                                    .file_name()
-                                    .and_then(|s| s.to_str())
-                                    .unwrap_or("")
-                                    .to_string();
+                                let comm = info.comm.unwrap_or_else(|| {
+                                    std::path::Path::new(&info.path)
+                                        .file_name()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("")
+                                        .to_string()
+                                });
+                                // Go: p.GetExtraInfo() — collect volatile proc data each tick.
+                                let extra = tokio::task::spawn_blocking(move || {
+                                    ProcessService::get_extra_info(pid)
+                                })
+                                .await
+                                .unwrap_or_default();
                                 let result = PidMonitorResult {
                                     pid: info.pid,
                                     id: info.pid,
                                     ppid: parent_pid,
                                     ppid_alias: parent_pid,
-                                    uid: 0,
-                                    uid_alias: 0,
+                                    uid: info.uid.unwrap_or(0),
+                                    uid_alias: info.uid.unwrap_or(0),
                                     comm,
                                     real_path: info.path.clone(),
                                     path: info.path,
-                                    root: "/".to_string(),
+                                    root: info.root,
                                     args: info.args,
-                                    env: HashMap::new(),
+                                    env: extra.env,
                                     cwd: info.cwd.unwrap_or_default(),
                                     checksums,
-                                    io_stats: PidMonitorIOStats::default(),
-                                    statm: PidMonitorStatm::default(),
-                                    status: String::new(),
-                                    stat: String::new(),
-                                    maps: String::new(),
-                                    stack: String::new(),
-                                    descriptors: (),
+                                    io_stats: extra
+                                        .io_stats
+                                        .map(|s| PidMonitorIOStats {
+                                            rchar: s.rchar as u64,
+                                            wchar: s.wchar as u64,
+                                            syscall_read: s.syscall_read as u64,
+                                            syscall_write: s.syscall_write as u64,
+                                            read_bytes: s.read_bytes as u64,
+                                            write_bytes: s.write_bytes as u64,
+                                        })
+                                        .unwrap_or_default(),
+                                    statm: extra
+                                        .statm
+                                        .map(|s| PidMonitorStatm {
+                                            size: s.size as u64,
+                                            resident: s.resident as u64,
+                                            shared: s.shared as u64,
+                                            text: s.text as u64,
+                                            lib: s.lib as u64,
+                                            data: s.data as u64,
+                                            dt: s.dt as u64,
+                                        })
+                                        .unwrap_or_default(),
+                                    status: extra.status,
+                                    stat: extra.stat,
+                                    maps: extra.maps,
+                                    stack: extra.stack,
+                                    descriptors: extra
+                                        .descriptors
+                                        .into_iter()
+                                        .map(|d| PidMonitorDescriptor {
+                                            name: d.name,
+                                            sym_link: d.sym_link,
+                                            size: d.size,
+                                            mod_time: d
+                                                .mod_time
+                                                .and_then(|t| {
+                                                    t.duration_since(std::time::UNIX_EPOCH).ok()
+                                                })
+                                                .map(|dur| {
+                                                    // Format as Go time.Time JSON: RFC 3339 UTC.
+                                                    let total_secs = dur.as_secs();
+                                                    let nanos = dur.subsec_nanos();
+                                                    let days_since_epoch = total_secs / 86400;
+                                                    let rem = total_secs % 86400;
+                                                    let hour = rem / 3600;
+                                                    let min = (rem % 3600) / 60;
+                                                    let sec = rem % 60;
+                                                    // Civil date from days since 1970-01-01.
+                                                    let (y, m, d) =
+                                                        civil_from_days(days_since_epoch as i64);
+                                                    format!(
+                                                        "{y:04}-{m:02}-{d:02}T{hour:02}:{min:02}:{sec:02}.{nanos:09}Z"
+                                                    )
+                                                })
+                                                .unwrap_or_default(),
+                                        })
+                                        .collect(),
                                     net_stats: PidMonitorNetStats::default(),
                                     tree,
                                 };
@@ -901,4 +961,20 @@ impl TaskService {
 
         Ok(())
     }
+}
+
+/// Convert days since 1970-01-01 to (year, month, day).
+/// Algorithm from Howard Hinnant (public domain).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }

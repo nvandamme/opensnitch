@@ -33,13 +33,12 @@ pub(super) use crate::utils::byte_read::read_ne_value_at;
 pub(super) use crate::workers::runtime::control::{
     WorkerCommandResult, impl_restartable_thread_worker_control,
 };
-pub(super) use crate::workers::runtime::ebpf::state::RawBpfMap;
+pub(super) use crate::workers::runtime::ebpf::types::RawBpfMap;
 
 mod aya_runtime;
 mod bpftool;
 mod lifecycle;
 mod newtype;
-pub(crate) mod state;
 mod supervise;
 mod types;
 

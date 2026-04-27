@@ -26,10 +26,3 @@ pub(crate) fn classify_nlmsg_control(msg_type: u16, payload: &[u8]) -> Result<Ne
 
     Ok(NetlinkControlFlow::Process)
 }
-
-pub(crate) fn should_process_nlmsg_payload(msg_type: u16, payload: &[u8]) -> Result<bool> {
-    Ok(matches!(
-        classify_nlmsg_control(msg_type, payload)?,
-        NetlinkControlFlow::Process
-    ))
-}

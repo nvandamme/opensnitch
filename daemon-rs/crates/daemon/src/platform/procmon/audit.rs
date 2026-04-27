@@ -123,10 +123,6 @@ impl AuditNetlinkSocket {
         payload
     }
 
-    fn parse_event_message(msg_type: u16, payload: &[u8]) -> Result<Option<AuditEventMessage>> {
-        AuditEventMessage::decode_from_raw(msg_type, payload)
-    }
-
     /// Parse a framed audit datagram containing one or more netlink messages.
     /// Used by tests that construct full datagram payloads.
     #[cfg(test)]
@@ -150,7 +146,7 @@ impl AuditNetlinkSocket {
             }
 
             let payload = &datagram[(offset + NLMSG_HDR_LEN)..(offset + msg_len)];
-            if let Some(event) = Self::parse_event_message(hdr.msg_type, payload)? {
+            if let Some(event) = AuditEventMessage::decode_from_raw(hdr.msg_type, payload)? {
                 return Ok(Some(event));
             }
 
@@ -175,6 +171,6 @@ impl AuditNetlinkSocket {
         msg_type: u16,
         payload: &[u8],
     ) -> Result<Option<AuditEventMessage>> {
-        Self::parse_event_message(msg_type, payload)
+        AuditEventMessage::decode_from_raw(msg_type, payload)
     }
 }

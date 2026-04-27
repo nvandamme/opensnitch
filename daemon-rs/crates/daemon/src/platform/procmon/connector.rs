@@ -174,10 +174,6 @@ impl ProcEventSocket {
         Self::parse_pid_event_payload(payload)
     }
 
-    fn parse_pid_event_message(msg_type: u16, payload: &[u8]) -> Result<Option<ProcPidEvent>> {
-        ProcPidEvent::decode_from_raw(msg_type, payload)
-    }
-
     fn parse_pid_event_payload(payload: &[u8]) -> Option<ProcPidEvent> {
         if payload.len() < PROC_EVENT_HEADER_LEN {
             return None;
@@ -297,6 +293,6 @@ impl ProcEventSocket {
         msg_type: u16,
         payload: &[u8],
     ) -> Result<Option<ProcPidEvent>> {
-        Self::parse_pid_event_message(msg_type, payload)
+        ProcPidEvent::decode_from_raw(msg_type, payload)
     }
 }

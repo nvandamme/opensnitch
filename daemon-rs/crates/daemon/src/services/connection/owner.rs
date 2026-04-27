@@ -3,11 +3,11 @@ use crate::models::{
     connection::state::{ConnectionAttempt, TransportProtocol},
 };
 use crate::platform::netstat::socket_diag::SocketDiagAdapter;
+use crate::platform::procmon::procfs;
 use crate::utils::proc_fs::proc_pid_exists;
 use crate::utils::proc_net::read_proc_net_packet_rows;
 use std::io::{BufRead, BufReader};
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
 
 use super::ConnectionService;
 
@@ -23,34 +23,6 @@ impl ConnectionService {
             .flatten()
     }
 
-    fn pid_owns_inode(pid: u32, inode: u32) -> bool {
-        let mut fd_dir = PathBuf::with_capacity(24);
-        fd_dir.push("/proc");
-        fd_dir.push(pid.to_string());
-        fd_dir.push("fd");
-        Self::pid_owns_inode_at(inode, &fd_dir)
-    }
-
-    fn pid_owns_inode_at(inode: u32, fd_dir: &Path) -> bool {
-        let Ok(fds) = std::fs::read_dir(fd_dir) else {
-            return false;
-        };
-
-        for fd_entry in fds.flatten() {
-            let Ok(target) = std::fs::read_link(fd_entry.path()) else {
-                continue;
-            };
-            let target = target.to_string_lossy();
-            if let Some(found_inode) = Self::parse_socket_inode(&target)
-                && found_inode == inode
-            {
-                return true;
-            }
-        }
-
-        false
-    }
-
     pub(super) fn resolve_pid_by_inode_with_key(
         inode: u32,
         inode_key: Option<&ConnectionOwnerCacheKey>,
@@ -62,7 +34,7 @@ impl ConnectionService {
         if let Some(key) = inode_key {
             if let Some(pid) = Self::key_cache().get(key)
                 && proc_pid_exists(pid)
-                && Self::pid_owns_inode(pid, inode)
+                && procfs::pid_owns_inode(pid, inode)
             {
                 return Some(pid);
             }
@@ -70,27 +42,13 @@ impl ConnectionService {
 
         if let Some(pid) = Self::cache().get(&inode)
             && proc_pid_exists(pid)
-            && Self::pid_owns_inode(pid, inode)
+            && procfs::pid_owns_inode(pid, inode)
         {
             return Some(pid);
         }
 
-        let proc_entries = std::fs::read_dir("/proc").ok()?;
-        // Pre-allocate once and reuse across all pid candidates to avoid one
-        // format!("/proc/{pid}/fd") heap allocation per iteration.
-        let mut fd_dir = PathBuf::with_capacity(24);
-        for entry in proc_entries.flatten() {
-            let name = entry.file_name();
-            let Ok(pid) = name.to_string_lossy().parse::<u32>() else {
-                continue;
-            };
-
-            fd_dir.clear();
-            fd_dir.push("/proc");
-            fd_dir.push(&name);
-            fd_dir.push("fd");
-
-            if Self::pid_owns_inode_at(inode, &fd_dir) {
+        for pid in procfs::list_pids() {
+            if procfs::pid_owns_inode(pid, inode) {
                 Self::cache().insert(inode, pid);
                 if let Some(key) = inode_key {
                     Self::key_cache().insert(*key, pid);
