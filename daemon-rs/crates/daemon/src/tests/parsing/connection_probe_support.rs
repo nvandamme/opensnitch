@@ -2,7 +2,7 @@ use std::net::IpAddr;
 use std::sync::atomic::Ordering;
 
 use crate::{
-    models::{connection_owner::ConnectionOwnerCacheKey, connection_state::TransportProtocol},
+    models::{connection::owner::ConnectionOwnerCacheKey, connection::state::TransportProtocol},
     services::connection::ConnectionService,
 };
 

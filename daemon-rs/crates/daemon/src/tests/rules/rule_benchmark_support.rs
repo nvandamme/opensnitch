@@ -5,9 +5,9 @@ use globset::Glob;
 
 use crate::{
     models::{
-        connection_state::{ConnectionAttempt, TransportProtocol},
-        process_state::{ProcessInfo, ProcessNode},
-        rule_record::RuleOperator,
+        connection::state::{ConnectionAttempt, TransportProtocol},
+        process::state::{ProcessInfo, ProcessNode},
+        rule::record::RuleOperator,
     },
     services::rule::rule_probe_support::ListsDomainsRegexpCacheMode,
     services::rule::{

@@ -6,8 +6,8 @@ use nix::unistd::{Uid, User};
 use crate::{
     config::Config,
     models::{
-        rule_record::{RuleOperator, RuleRecord},
-        rule_storage::RuleFile,
+        rule::record::{RuleOperator, RuleRecord},
+        rule::storage::RuleFile,
     },
     services::{
         rule::rule_record_now_timestamp,

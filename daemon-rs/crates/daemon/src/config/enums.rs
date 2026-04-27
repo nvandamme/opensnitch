@@ -1,10 +1,10 @@
 use crate::{
     models::{
-        config_runtime::{
+        config::runtime::{
             AskFallbackPolicy, AuthMode, ClientAuthType, DefaultAction, DefaultDuration,
             FirewallPersistenceMode, LoggerSinkConfig, ProcMonitorMethod, StatsConfig,
         },
-        config_storage::{RawConfig, RawLoggerConfig},
+        config::storage::{RawConfig, RawLoggerConfig},
     },
     utils::name_parsing::normalized_name,
 };

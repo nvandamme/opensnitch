@@ -2,7 +2,8 @@ use anyhow::Result;
 use std::fmt::Write as _;
 use std::time::Instant;
 
-use crate::models::{proc_event::ProcEventKind, process_state::ProcessInfo};
+use crate::models::process::state::ProcessInfo;
+use crate::platform::procmon::proc_event::ProcEventKind;
 
 use super::{
     ProcessService,

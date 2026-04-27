@@ -5,7 +5,7 @@ use std::sync::{
 
 use tokio::sync::{broadcast, watch};
 
-use crate::models::connection_owner::ConnectionOwnerCacheKey;
+use crate::models::connection::owner::ConnectionOwnerCacheKey;
 use crate::services::lifecycle::{
     EventSubscription, ServiceEvent, ServiceFactory, ServiceLifecycle, ServiceMonitorStats,
     ServiceRuntimeControl, ServiceState, ServiceStatus, StatusSubscription,

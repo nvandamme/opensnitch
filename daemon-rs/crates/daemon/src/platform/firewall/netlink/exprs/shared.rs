@@ -1,5 +1,5 @@
+use crate::platform::netlink::attrs::NetlinkAttributeRecord;
 use netlink_bindings::nftables;
-use netlink_bindings::utils::Rec;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
@@ -684,7 +684,7 @@ pub(crate) fn cmp_to_range_op(op: nftables::CmpOps) -> Option<nftables::RangeOps
     }
 }
 
-pub(crate) fn push_cmp_from_reg1<Prev: Rec>(
+pub(crate) fn push_cmp_from_reg1<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     op: nftables::CmpOps,
     value: &[u8],
@@ -701,7 +701,7 @@ pub(crate) fn push_cmp_from_reg1<Prev: Rec>(
         .end_nested()
 }
 
-pub(crate) fn push_cmp_after_load_to_reg1<Prev: Rec, F>(
+pub(crate) fn push_cmp_after_load_to_reg1<Prev: NetlinkAttributeRecord, F>(
     exprs: nftables::PushExprListAttrs<Prev>,
     op: nftables::CmpOps,
     value: &[u8],
@@ -713,7 +713,7 @@ where
     push_cmp_from_reg1(load_to_reg1(exprs), op, value)
 }
 
-pub(crate) fn push_meta_cmp_from_key<Prev: Rec>(
+pub(crate) fn push_meta_cmp_from_key<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     key: nftables::MetaKeys,
     op: nftables::CmpOps,
@@ -730,7 +730,7 @@ pub(crate) fn push_meta_cmp_from_key<Prev: Rec>(
     })
 }
 
-pub(crate) fn push_ct_cmp_from_key<Prev: Rec>(
+pub(crate) fn push_ct_cmp_from_key<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     key: nftables::CtKeys,
     op: nftables::CmpOps,
@@ -747,7 +747,7 @@ pub(crate) fn push_ct_cmp_from_key<Prev: Rec>(
     })
 }
 
-pub(crate) fn push_fib_cmp_from_result<Prev: Rec>(
+pub(crate) fn push_fib_cmp_from_result<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     result: u32,
     flags: u32,
@@ -766,7 +766,7 @@ pub(crate) fn push_fib_cmp_from_result<Prev: Rec>(
     })
 }
 
-pub(crate) fn push_range_from_reg1<Prev: Rec>(
+pub(crate) fn push_range_from_reg1<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     op: nftables::RangeOps,
     start: &[u8],
@@ -787,7 +787,7 @@ pub(crate) fn push_range_from_reg1<Prev: Rec>(
         .end_nested()
 }
 
-pub(crate) fn push_payload_load_to_reg1<Prev: Rec>(
+pub(crate) fn push_payload_load_to_reg1<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     base: u32,
     offset: u32,
@@ -804,7 +804,7 @@ pub(crate) fn push_payload_load_to_reg1<Prev: Rec>(
         .end_nested()
 }
 
-pub(crate) fn push_lookup_from_reg1<Prev: Rec>(
+pub(crate) fn push_lookup_from_reg1<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     set: &str,
     invert: bool,
@@ -830,7 +830,7 @@ pub(crate) fn push_lookup_from_reg1<Prev: Rec>(
     lookup.end_nested().end_nested()
 }
 
-pub(crate) fn push_payload_range<Prev: Rec>(
+pub(crate) fn push_payload_range<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     base: u32,
     offset: u32,
@@ -847,7 +847,7 @@ pub(crate) fn push_payload_range<Prev: Rec>(
     )
 }
 
-pub(crate) fn push_payload_cmp<Prev: Rec>(
+pub(crate) fn push_payload_cmp<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     base: u32,
     offset: u32,
@@ -860,7 +860,7 @@ pub(crate) fn push_payload_cmp<Prev: Rec>(
     })
 }
 
-pub(crate) fn push_numgen_cmp<Prev: Rec>(
+pub(crate) fn push_numgen_cmp<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     gen_type: u32,
     modulus: u32,

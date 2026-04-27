@@ -1,5 +1,5 @@
-use crate::models::socket_state::SocketInfo;
 use crate::platform::netstat::socket_diag::SocketDiagAdapter;
+use crate::platform::netstat::socket_state::SocketInfo;
 use nix::libc::{AF_INET, AF_INET6, IPPROTO_TCP, IPPROTO_UDP};
 use std::collections::HashSet;
 

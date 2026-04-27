@@ -1,9 +1,7 @@
 use crate::{
     bus::{BusCaps, BusState},
-    models::{
-        firewall_state::{FirewallBackend, FirewallState},
-        kernel_event::KernelEvent,
-    },
+    models::kernel::event::KernelEvent,
+    platform::firewall::state::{FirewallBackend, FirewallState},
     workers::KernelEventDispatch,
 };
 

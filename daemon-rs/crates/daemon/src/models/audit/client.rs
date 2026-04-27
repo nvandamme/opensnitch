@@ -1,4 +1,4 @@
-use crate::models::command_action::CommandAction;
+use crate::models::command::action::CommandAction;
 
 /// Client service lifecycle transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

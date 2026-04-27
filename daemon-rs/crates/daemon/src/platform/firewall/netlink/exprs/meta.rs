@@ -1,5 +1,5 @@
+use crate::platform::netlink::attrs::NetlinkAttributeRecord;
 use netlink_bindings::nftables;
-use netlink_bindings::utils::Rec;
 
 use super::NftExpression;
 use super::shared::{
@@ -478,7 +478,7 @@ pub(in crate::platform::firewall::netlink) enum NftMeta {
 }
 
 impl NftMeta {
-    pub(in crate::platform::firewall::netlink) fn encode<Prev: Rec>(
+    pub(in crate::platform::firewall::netlink) fn encode<Prev: NetlinkAttributeRecord>(
         &self,
         exprs: nftables::PushExprListAttrs<Prev>,
     ) -> nftables::PushExprListAttrs<Prev> {

@@ -313,7 +313,7 @@ impl Daemon {
         feature = "metrics-http-serve-protobuf"
     ))]
     pub(super) fn reload_metrics_server(&self) {
-        use crate::models::metrics_config::MetricsConfig;
+        use crate::models::metrics::config::MetricsConfig;
         use crate::platform::stats::exporters::http_serve::{
             PROMETHEUS_ADDR_ENV, PrometheusStatsExporter,
         };

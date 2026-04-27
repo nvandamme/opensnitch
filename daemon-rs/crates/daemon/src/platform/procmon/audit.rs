@@ -3,19 +3,18 @@ use std::time::Duration;
 use anyhow::Result;
 #[cfg(test)]
 use anyhow::bail;
-#[cfg(test)]
-use netlink_bindings::builtin;
-use netlink_bindings::traits::{NetlinkRequest, Protocol};
-use netlink_socket2::MulticastSocketRaw;
 use nix::libc;
 
+#[cfg(test)]
+use crate::platform::netlink::wire::{NLMSG_HDR_LEN, nlmsg_align, parse_nlmsg_header};
 use crate::platform::netlink::{
-    control::should_process_nlmsg_payload,
-    io::{new_request_socket, open_multicast_socket, recv_with_timeout, request_with_ack_timeout},
+    io::{
+        MulticastSocketRaw, NetlinkRequest, NetlinkSocket, Protocol, new_request_socket,
+        open_multicast_socket, recv_with_timeout, request_with_ack_timeout,
+    },
+    message::NetlinkEvent,
 };
 
-#[cfg(test)]
-const NLMSG_HDR_LEN: usize = builtin::Nlmsghdr::len();
 const STATUS_MESSAGE_LEN: usize = 40;
 
 const AUDIT_SET: u16 = 1001;
@@ -33,7 +32,7 @@ pub(crate) struct AuditEventMessage {
 }
 
 pub(crate) struct AuditNetlinkSocket {
-    request_sock: netlink_socket2::NetlinkSocket,
+    request_sock: NetlinkSocket,
     event_sock: MulticastSocketRaw,
 }
 
@@ -61,6 +60,21 @@ impl NetlinkRequest for AuditSetRequest {
 
     fn decode_reply<'buf>(buf: &'buf [u8]) -> Self::ReplyType<'buf> {
         buf
+    }
+}
+
+impl NetlinkEvent for AuditEventMessage {
+    fn decode_event(msg_type: u16, payload: &[u8]) -> Result<Option<Self>> {
+        if (AUDIT_EVENT_MESSAGE_MIN..=AUDIT_EVENT_MESSAGE_MAX).contains(&msg_type) {
+            let data = String::from_utf8_lossy(payload)
+                .trim_end_matches('\0')
+                .to_owned();
+            return Ok(Some(AuditEventMessage {
+                kind: msg_type,
+                data,
+            }));
+        }
+        Ok(None)
     }
 }
 
@@ -98,7 +112,7 @@ impl AuditNetlinkSocket {
         };
 
         let (meta, payload) = recv;
-        Self::parse_event_message(meta.message_type, payload)
+        AuditEventMessage::decode_from_raw(meta.message_type, payload)
     }
 
     fn build_enable_events_payload() -> [u8; STATUS_MESSAGE_LEN] {
@@ -110,21 +124,7 @@ impl AuditNetlinkSocket {
     }
 
     fn parse_event_message(msg_type: u16, payload: &[u8]) -> Result<Option<AuditEventMessage>> {
-        if !should_process_nlmsg_payload(msg_type, payload)? {
-            return Ok(None);
-        }
-
-        if (AUDIT_EVENT_MESSAGE_MIN..=AUDIT_EVENT_MESSAGE_MAX).contains(&msg_type) {
-            let data = String::from_utf8_lossy(payload)
-                .trim_end_matches('\0')
-                .to_owned();
-            return Ok(Some(AuditEventMessage {
-                kind: msg_type,
-                data,
-            }));
-        }
-
-        Ok(None)
+        AuditEventMessage::decode_from_raw(msg_type, payload)
     }
 
     /// Parse a framed audit datagram containing one or more netlink messages.
@@ -133,34 +133,28 @@ impl AuditNetlinkSocket {
     fn parse_event_datagram(datagram: &[u8]) -> Result<Option<AuditEventMessage>> {
         let mut offset = 0_usize;
         while offset + NLMSG_HDR_LEN <= datagram.len() {
-            let (msg_len, msg_type) = {
-                let hdr = &datagram[offset..];
-                if hdr.len() < NLMSG_HDR_LEN {
-                    break;
-                }
-                let len = u32::from_ne_bytes(hdr[0..4].try_into().unwrap()) as usize;
-                let mtype = u16::from_ne_bytes(hdr[4..6].try_into().unwrap());
-                let normalized = if len == 0 {
-                    0
-                } else if datagram.len() - offset >= len
-                    && (datagram.len() - offset).saturating_sub(len) <= NLMSG_HDR_LEN
-                {
-                    datagram.len() - offset
-                } else {
-                    len
-                };
-                (normalized, mtype)
+            let Some(hdr) = parse_nlmsg_header(datagram, offset) else {
+                break;
+            };
+            let msg_len = if hdr.len == 0 {
+                0
+            } else if datagram.len() - offset >= hdr.len
+                && (datagram.len() - offset).saturating_sub(hdr.len) <= NLMSG_HDR_LEN
+            {
+                datagram.len() - offset
+            } else {
+                hdr.len
             };
             if msg_len < NLMSG_HDR_LEN || offset + msg_len > datagram.len() {
                 bail!("audit event packet has invalid message length");
             }
 
             let payload = &datagram[(offset + NLMSG_HDR_LEN)..(offset + msg_len)];
-            if let Some(event) = Self::parse_event_message(msg_type, payload)? {
+            if let Some(event) = Self::parse_event_message(hdr.msg_type, payload)? {
                 return Ok(Some(event));
             }
 
-            offset += (msg_len + 3) & !3;
+            offset += nlmsg_align(msg_len);
         }
 
         Ok(None)

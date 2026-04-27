@@ -6,14 +6,14 @@ use crate::{
     config::{Config, ProcMonitorMethod},
     models::{
         audit::{AuditEvent, AuditEventKind, ConfigAction},
-        command_rpc::ClientCommand,
+        command::rpc::ClientCommand,
     },
     services::{
         audit::AuditService,
         client::ClientService,
         config::ConfigService,
         firewall::FirewallService,
-        policy_tx::{
+        policy::{
             PolicyOwner, PolicyTxCoordinator, PolicyTxError, PolicyTxRequest, global_policy_tx,
         },
         rule::RuleService,

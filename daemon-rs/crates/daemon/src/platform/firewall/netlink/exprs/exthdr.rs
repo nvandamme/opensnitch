@@ -1,14 +1,15 @@
+use crate::platform::netlink::attrs::{
+    NetlinkAttributeBuffer, NetlinkAttributeRecord, finalize_nested_attr, push_attr_header,
+    push_nested_attr_header,
+};
 use netlink_bindings::nftables;
-use netlink_bindings::utils::{Rec, finalize_nested_header, push_header, push_nested_header};
 
-use super::NftExpression;
-use super::shared::{
-    parse_cmp_and_value_index, parse_unsigned_token, push_condition,
-};
 use super::super::{
-    NFTA_EXTHDR_DREG, NFTA_EXTHDR_FLAGS, NFTA_EXTHDR_LEN, NFTA_EXTHDR_OFFSET, NFTA_EXTHDR_OP,
-    NFTA_EXTHDR_TYPE, NFTA_EXPR_DATA,
+    NFTA_EXPR_DATA, NFTA_EXTHDR_DREG, NFTA_EXTHDR_FLAGS, NFTA_EXTHDR_LEN, NFTA_EXTHDR_OFFSET,
+    NFTA_EXTHDR_OP, NFTA_EXTHDR_TYPE,
 };
+use super::NftExpression;
+use super::shared::{parse_cmp_and_value_index, parse_unsigned_token, push_condition};
 
 const NFT_EXTHDR_F_PRESENT: u32 = 1;
 
@@ -186,36 +187,36 @@ pub(crate) fn parse_ipv6_exthdr_condition(
 }
 
 impl NftExthdr {
-    pub(in crate::platform::firewall::netlink) fn encode<Prev: Rec>(
+    pub(in crate::platform::firewall::netlink) fn encode<Prev: NetlinkAttributeRecord>(
         &self,
         exprs: nftables::PushExprListAttrs<Prev>,
     ) -> nftables::PushExprListAttrs<Prev> {
         let mut expr = exprs.nested_elem().push_name_bytes(b"exthdr");
-        let data_offset = push_nested_header(expr.as_rec_mut(), NFTA_EXPR_DATA);
+        let data_offset = push_nested_attr_header(expr.attrs_mut(), NFTA_EXPR_DATA);
 
         if let Some(dreg) = self.dreg {
-            push_header(expr.as_rec_mut(), NFTA_EXTHDR_DREG, 4);
-            expr.as_rec_mut().extend((dreg as u32).to_be_bytes());
+            push_attr_header(expr.attrs_mut(), NFTA_EXTHDR_DREG, 4);
+            expr.attrs_mut().extend((dreg as u32).to_be_bytes());
         }
 
-        push_header(expr.as_rec_mut(), NFTA_EXTHDR_TYPE, 1);
-        expr.as_rec_mut().extend([self.hdr_type]);
+        push_attr_header(expr.attrs_mut(), NFTA_EXTHDR_TYPE, 1);
+        expr.attrs_mut().extend([self.hdr_type]);
 
-        push_header(expr.as_rec_mut(), NFTA_EXTHDR_OFFSET, 4);
-        expr.as_rec_mut().extend(self.offset.to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_EXTHDR_OFFSET, 4);
+        expr.attrs_mut().extend(self.offset.to_be_bytes());
 
-        push_header(expr.as_rec_mut(), NFTA_EXTHDR_LEN, 4);
-        expr.as_rec_mut().extend(self.len.to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_EXTHDR_LEN, 4);
+        expr.attrs_mut().extend(self.len.to_be_bytes());
 
-        push_header(expr.as_rec_mut(), NFTA_EXTHDR_OP, 4);
-        expr.as_rec_mut().extend((self.op as u32).to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_EXTHDR_OP, 4);
+        expr.attrs_mut().extend((self.op as u32).to_be_bytes());
 
         if self.flags != 0 {
-            push_header(expr.as_rec_mut(), NFTA_EXTHDR_FLAGS, 4);
-            expr.as_rec_mut().extend(self.flags.to_be_bytes());
+            push_attr_header(expr.attrs_mut(), NFTA_EXTHDR_FLAGS, 4);
+            expr.attrs_mut().extend(self.flags.to_be_bytes());
         }
 
-        finalize_nested_header(expr.as_rec_mut(), data_offset);
+        finalize_nested_attr(expr.attrs_mut(), data_offset);
         expr.end_nested()
     }
 }

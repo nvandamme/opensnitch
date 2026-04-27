@@ -1,5 +1,8 @@
+use crate::platform::netlink::attrs::{
+    NetlinkAttributeBuffer, NetlinkAttributeRecord, finalize_nested_attr, push_attr_header,
+    push_nested_attr_header,
+};
 use netlink_bindings::nftables;
-use netlink_bindings::utils::{Rec, finalize_nested_header, push_header, push_nested_header};
 
 use super::super::NFTA_EXPR_DATA;
 use super::NftExpression;
@@ -130,23 +133,23 @@ pub(in crate::platform::firewall::netlink) struct NftSocket {
 }
 
 impl NftSocket {
-    pub(in crate::platform::firewall::netlink) fn encode<Prev: Rec>(
+    pub(in crate::platform::firewall::netlink) fn encode<Prev: NetlinkAttributeRecord>(
         &self,
         exprs: nftables::PushExprListAttrs<Prev>,
     ) -> nftables::PushExprListAttrs<Prev> {
         let mut expr = exprs.nested_elem().push_name_bytes(b"socket");
-        let data_offset = push_nested_header(expr.as_rec_mut(), NFTA_EXPR_DATA);
+        let data_offset = push_nested_attr_header(expr.attrs_mut(), NFTA_EXPR_DATA);
 
-        push_header(expr.as_rec_mut(), NFTA_SOCKET_KEY, 4);
-        expr.as_rec_mut().extend((self.key as u32).to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_SOCKET_KEY, 4);
+        expr.attrs_mut().extend((self.key as u32).to_be_bytes());
 
-        push_header(expr.as_rec_mut(), NFTA_SOCKET_DREG, 4);
-        expr.as_rec_mut().extend((self.dreg as u32).to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_SOCKET_DREG, 4);
+        expr.attrs_mut().extend((self.dreg as u32).to_be_bytes());
 
-        push_header(expr.as_rec_mut(), NFTA_SOCKET_LEVEL, 4);
-        expr.as_rec_mut().extend(self.level.to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_SOCKET_LEVEL, 4);
+        expr.attrs_mut().extend(self.level.to_be_bytes());
 
-        finalize_nested_header(expr.as_rec_mut(), data_offset);
+        finalize_nested_attr(expr.attrs_mut(), data_offset);
         expr.end_nested()
     }
 }

@@ -10,7 +10,7 @@ use std::{
 
 use ebpf_common::dns::{AF_INET, AF_INET6, AF_UNRESOLVED, DnsEvent};
 
-use crate::models::dns_payload::DnsPayload;
+use crate::models::dns::payload::DnsPayload;
 use crate::utils::byte_read::read_ne_value_at;
 use crate::utils::name_parsing::normalized_name;
 use crate::utils::nul_terminated::nul_terminated_utf8_lossy;

@@ -7,7 +7,7 @@ use crate::config::{
     ProcMonitorMethod,
 };
 use crate::{
-    models::{audit::AuditSeverity, firewall_state::FirewallBackend},
+    models::audit::AuditSeverity, platform::firewall::state::FirewallBackend,
     tests::support::TestDir,
 };
 

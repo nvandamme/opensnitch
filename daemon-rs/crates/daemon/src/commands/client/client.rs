@@ -3,11 +3,11 @@ use transport_wire_core::{WireNotificationReply, WireNotificationReplyCode};
 
 use crate::{
     models::{
-        command_action::CommandAction,
-        command_rpc::{ClientCommand, IncomingTaskNotification, TaskNotification},
-        firewall_config::FirewallConfig,
-        rule_record::RuleRecord,
+        command::action::CommandAction,
+        command::rpc::{ClientCommand, IncomingTaskNotification, TaskNotification},
+        rule::record::RuleRecord,
     },
+    platform::firewall::config::FirewallConfig,
     utils::channel_send::send_with_backpressure,
 };
 

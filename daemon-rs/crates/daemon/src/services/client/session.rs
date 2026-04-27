@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 pub(crate) const CLIENT_SESSION_ID: &str = "client";
 
-impl From<ClientPrincipal> for crate::models::policy_tx_storage::PolicyOwner {
+impl From<ClientPrincipal> for crate::models::policy::storage::PolicyOwner {
     fn from(value: ClientPrincipal) -> Self {
         match value {
             ClientPrincipal::LocalUid(uid) => Self::LocalUid(uid),

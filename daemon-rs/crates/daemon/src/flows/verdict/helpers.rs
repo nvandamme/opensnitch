@@ -11,14 +11,14 @@ use transport_wire_core::{WireConnection, WireProcess, WireRule, WireStringInt};
 use crate::{
     config::{AskFallbackPolicy, DefaultAction},
     models::audit::{AuditEvent, AuditEventKind, VerdictAction},
-    models::connection_state::ConnectionAttempt,
-    models::effective_tunables::NfqueueOverloadPolicy,
-    models::process_state::ProcessInfo,
-    models::rule_record::RuleRecord,
+    models::connection::state::ConnectionAttempt,
+    models::process::state::ProcessInfo,
+    models::rule::record::RuleRecord,
     platform::nfqueue::state::NfqueueRuntimeState,
     services::client::enqueue_alert,
     services::client::{warning_connection_alert, warning_process_alert},
-    services::policy_tx::PolicyOwner,
+    services::policy::PolicyOwner,
+    tunables::effective::NfqueueOverloadPolicy,
 };
 
 use super::verdict::{VerdictFlow, VerdictRulePersistRequest};
@@ -80,7 +80,7 @@ impl VerdictFlow {
 
     pub(super) fn decision_key_hash(
         attempt: &ConnectionAttempt,
-        proc_info: &crate::models::process_state::ProcessInfo,
+        proc_info: &crate::models::process::state::ProcessInfo,
         dst_host: Option<&str>,
     ) -> u64 {
         use std::hash::{Hash, Hasher};

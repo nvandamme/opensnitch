@@ -4,7 +4,7 @@ use transport_wire_core::{
 
 use super::defaults::{DEFAULT_INTERVAL_SECONDS, DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT_SECONDS};
 use super::format::normalize_format;
-pub(crate) use crate::models::subscription_storage::SubscriptionRecord;
+pub(crate) use crate::models::subscription::storage::SubscriptionRecord;
 use crate::utils::name_parsing::sanitize_ascii_name;
 use crate::utils::stable_id::hex_id_from_pair;
 use crate::utils::time_nonce::now_rfc3339_utc;
@@ -138,8 +138,8 @@ pub(crate) fn wire_subscription_action_from_i32(value: i32) -> WireSubscriptionA
 
 pub(crate) fn operation_from_wire_action(
     action: WireSubscriptionAction,
-) -> crate::models::subscription_rpc::SubscriptionOperation {
-    use crate::models::subscription_rpc::SubscriptionOperation;
+) -> crate::models::subscription::rpc::SubscriptionOperation {
+    use crate::models::subscription::rpc::SubscriptionOperation;
 
     match action {
         WireSubscriptionAction::Unspecified => SubscriptionOperation::Unspecified,

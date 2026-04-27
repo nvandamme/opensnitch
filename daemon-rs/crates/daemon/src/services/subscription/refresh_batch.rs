@@ -4,8 +4,8 @@ use transport_wire_core::WireSubscriptionAction;
 use super::SubscriptionService;
 use super::labels::subscription_label;
 use super::{SubscriptionRecord, wire_subscription_from_record};
-pub(super) use crate::models::subscription_refresh::RefreshBatchResult;
-use crate::models::subscription_refresh::RefreshOutcome;
+pub(super) use crate::models::subscription::refresh::RefreshBatchResult;
+use crate::models::subscription::refresh::RefreshOutcome;
 
 impl SubscriptionService {
     pub(super) async fn process_refresh_records(

@@ -2,8 +2,8 @@ use std::sync::{OnceLock, RwLock};
 
 use tracing::warn;
 
-use crate::models::effective_tunables::{NfqueueOverloadPolicy, RuntimeTunables};
-use crate::models::runtime_tunables::RawRuntimeTunables;
+use crate::models::config::tunables::RawRuntimeTunables;
+use crate::tunables::effective::{NfqueueOverloadPolicy, RuntimeTunables};
 use crate::utils::name_parsing::normalized_name;
 
 const MIN_CONNECT_WORKERS: usize = 1;

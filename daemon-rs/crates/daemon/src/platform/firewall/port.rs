@@ -3,7 +3,7 @@ use std::{future::Future, pin::Pin, time::Duration};
 use anyhow::Result;
 use tokio::time::timeout;
 
-use crate::models::firewall_config::FirewallConfig;
+use crate::platform::firewall::config::FirewallConfig;
 use crate::platform::firewall::{
     iptables::FirewallIptablesAdapter,
     netlink::{FirewallNetlinkAdapter, NetlinkFallbackReason, NetlinkFallbackRequired},

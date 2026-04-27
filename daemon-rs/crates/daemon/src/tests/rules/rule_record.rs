@@ -1,5 +1,5 @@
-use crate::models::rule_record::{RuleAction, RuleDuration};
-use crate::models::rule_record::{RuleOperator, RuleRecord};
+use crate::models::rule::record::{RuleAction, RuleDuration};
+use crate::models::rule::record::{RuleOperator, RuleRecord};
 use crate::utils::name_parsing::case_folded;
 use time::OffsetDateTime;
 use transport_wire_core::{WireRule, WireRuleOperator};

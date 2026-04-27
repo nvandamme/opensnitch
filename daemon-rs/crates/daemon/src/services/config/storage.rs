@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use super::{ConfigService, ProcWorkerReconfigure};
 use crate::{
     config::{Config, ProcMonitorMethod},
-    models::ui_alert::UiAlert,
+    models::notification::alert::UiAlert,
     services::{
         client::{AlertBuffer, enqueue_alert, warning_alert},
         firewall::FirewallService,
@@ -29,7 +29,7 @@ use crate::{
             runtime_apply_stage_messages,
         },
     },
-    workers::runtime::{control::WorkerControl, watch::control::WatchWorkerControl},
+    workers::runtime::{control::WorkerControl, watch::WatchWorkerControl},
 };
 
 impl ConfigService {
@@ -114,7 +114,7 @@ impl WatchWorkerControl for ConfigWatchControl {
                 .flatten();
             let previous_mtime = *last_mtime.lock().await;
 
-            if crate::workers::runtime::watch::control::is_newer_mtime(mtime, previous_mtime) {
+            if crate::workers::runtime::watch::is_newer_mtime(mtime, previous_mtime) {
                 tracing::debug!(path = %config_path.display(), "config file change detected, reloading runtime config");
                 let snapshot = config.get_snapshot();
                 match config.reload().await {

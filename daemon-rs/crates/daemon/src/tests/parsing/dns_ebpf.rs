@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ebpf_common::dns::{AF_INET, AF_INET6, DnsEvent, HOST_LEN, IP_LEN};
 
-use crate::{models::dns_payload::DnsPayload, services::dns::DnsService};
+use crate::{models::dns::payload::DnsPayload, services::dns::DnsService};
 
 fn build_dns_sample(addr_type: u32, ip: [u8; IP_LEN], host: &str) -> [u8; DnsEvent::LEN] {
     let mut sample = [0_u8; DnsEvent::LEN];

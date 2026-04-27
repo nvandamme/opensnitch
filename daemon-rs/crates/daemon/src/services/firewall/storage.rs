@@ -2,8 +2,10 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::models::firewall_state::FirewallBackend;
-use crate::{models::firewall_config::FirewallConfig, services::storage::FileLoadableStateStore};
+use crate::platform::firewall::state::FirewallBackend;
+use crate::{
+    platform::firewall::config::FirewallConfig, services::storage::FileLoadableStateStore,
+};
 
 use super::FirewallService;
 

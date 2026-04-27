@@ -9,8 +9,8 @@ use super::{
     naming as task_runtime_naming, validation as task_runtime_validation,
 };
 use crate::{
-    models::task_storage::{TaskDataFile, TasksListFile},
-    models::ui_alert::UiAlert,
+    models::notification::alert::UiAlert,
+    models::task::storage::{TaskDataFile, TasksListFile},
     services::storage::StorageService,
     services::{
         client::{AlertBuffer, enqueue_alert, warning_alert},
@@ -21,7 +21,7 @@ use crate::{
         control::{
             WorkerCommand, WorkerCommandResult, WorkerControl, WorkerJoinStatus, WorkerState,
         },
-        watch::control::WatchWorkerControl,
+        watch::WatchWorkerControl,
     },
 };
 

@@ -1,12 +1,15 @@
+use crate::platform::netlink::attrs::{
+    NetlinkAttributeBuffer, NetlinkAttributeRecord, finalize_nested_attr, push_attr_header,
+    push_nested_attr_header,
+};
 use netlink_bindings::nftables;
-use netlink_bindings::utils::{Rec, finalize_nested_header, push_header, push_nested_header};
 
-use super::NftExpression;
-use super::shared::{parse_unsigned_token, push_payload_load_to_reg1};
 use super::super::{
     NFTA_DYNSET_OP, NFTA_DYNSET_SET_ID, NFTA_DYNSET_SET_NAME, NFTA_DYNSET_SREG,
     NFTA_DYNSET_TIMEOUT, NFTA_EXPR_DATA,
 };
+use super::NftExpression;
+use super::shared::{parse_unsigned_token, push_payload_load_to_reg1};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::platform::firewall::netlink) enum DynsetOp {
@@ -119,37 +122,44 @@ pub(crate) fn parse_dynset_action(
 }
 
 impl NftDynset {
-    pub(in crate::platform::firewall::netlink) fn encode<Prev: Rec>(
+    pub(in crate::platform::firewall::netlink) fn encode<Prev: NetlinkAttributeRecord>(
         &self,
         exprs: nftables::PushExprListAttrs<Prev>,
     ) -> nftables::PushExprListAttrs<Prev> {
-        let exprs =
-            push_payload_load_to_reg1(exprs, self.payload_base, self.payload_offset, self.payload_len);
+        let exprs = push_payload_load_to_reg1(
+            exprs,
+            self.payload_base,
+            self.payload_offset,
+            self.payload_len,
+        );
 
         let mut expr = exprs.nested_elem().push_name_bytes(b"dynset");
-        let data_offset = push_nested_header(expr.as_rec_mut(), NFTA_EXPR_DATA);
+        let data_offset = push_nested_attr_header(expr.attrs_mut(), NFTA_EXPR_DATA);
 
         let name_bytes = self.set_name.as_bytes();
-        push_header(expr.as_rec_mut(), NFTA_DYNSET_SET_NAME, name_bytes.len() as u16 + 1);
-        expr.as_rec_mut().extend(name_bytes);
-        expr.as_rec_mut().extend([0_u8]); // null terminator
+        push_attr_header(
+            expr.attrs_mut(),
+            NFTA_DYNSET_SET_NAME,
+            name_bytes.len() as u16 + 1,
+        );
+        expr.attrs_mut().extend(name_bytes);
+        expr.attrs_mut().extend([0_u8]); // null terminator
 
-        push_header(expr.as_rec_mut(), NFTA_DYNSET_SET_ID, 4);
-        expr.as_rec_mut().extend(self.set_id.to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_DYNSET_SET_ID, 4);
+        expr.attrs_mut().extend(self.set_id.to_be_bytes());
 
-        push_header(expr.as_rec_mut(), NFTA_DYNSET_OP, 4);
-        expr.as_rec_mut().extend((self.op as u32).to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_DYNSET_OP, 4);
+        expr.attrs_mut().extend((self.op as u32).to_be_bytes());
 
-        push_header(expr.as_rec_mut(), NFTA_DYNSET_SREG, 4);
-        expr.as_rec_mut()
-            .extend((self.sreg as u32).to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_DYNSET_SREG, 4);
+        expr.attrs_mut().extend((self.sreg as u32).to_be_bytes());
 
         if let Some(timeout) = self.timeout {
-            push_header(expr.as_rec_mut(), NFTA_DYNSET_TIMEOUT, 8);
-            expr.as_rec_mut().extend(timeout.to_be_bytes());
+            push_attr_header(expr.attrs_mut(), NFTA_DYNSET_TIMEOUT, 8);
+            expr.attrs_mut().extend(timeout.to_be_bytes());
         }
 
-        finalize_nested_header(expr.as_rec_mut(), data_offset);
+        finalize_nested_attr(expr.attrs_mut(), data_offset);
         expr.end_nested()
     }
 }

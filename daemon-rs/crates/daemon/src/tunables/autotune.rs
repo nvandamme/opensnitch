@@ -8,9 +8,9 @@ use std::{
 
 use tracing::warn;
 
-use crate::models::effective_tunables::RuntimeTunables;
-use crate::models::runtime_tunables::RawRuntimeTunables;
+use crate::models::config::tunables::RawRuntimeTunables;
 use crate::services::storage::StorageService;
+use crate::tunables::effective::RuntimeTunables;
 use crate::utils::systemd_notify::{NotifyState, notify};
 
 impl RuntimeTunables {

@@ -2,7 +2,7 @@
 // are disabled; they become active as soon as aya/libbpf features are enabled.
 #![cfg(any(feature = "aya-ebpf", feature = "libbpf-ebpf"))]
 
-use crate::models::{connection_owner::ConnectionOwner, connection_state::TransportProtocol};
+use crate::models::{connection::owner::ConnectionOwner, connection::state::TransportProtocol};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr},

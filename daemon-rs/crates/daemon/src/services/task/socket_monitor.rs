@@ -6,14 +6,12 @@
 
 use std::collections::HashMap;
 
+use crate::models::task::socket_monitor_payload::{
+    SocketEntry, SocketId, SocketMonitorProcessEntry, SocketMonitorRow,
+};
 use crate::{
-    models::{
-        proc_net_packet::{ProcNetPacketRow, ProcNetXdpRow},
-        socket_monitor_payload::{
-            SocketEntry, SocketId, SocketMonitorProcessEntry, SocketMonitorRow,
-        },
-        socket_state::SocketInfo,
-    },
+    platform::netstat::socket_state::SocketInfo,
+    platform::procmon::proc_net_packet::{ProcNetPacketRow, ProcNetXdpRow},
     services::{connection::ConnectionService, process::ProcessService},
 };
 

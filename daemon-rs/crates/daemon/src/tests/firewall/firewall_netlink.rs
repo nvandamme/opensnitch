@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf};
 
-use crate::models::firewall_config::{
+use crate::platform::firewall::config::{
     FirewallChain, FirewallConfig, FirewallExpression, FirewallRule, FirewallStatement,
     FirewallStatementValue,
 };
@@ -151,7 +151,7 @@ fn clear_system_firewall_plan_targets_each_chain() {
                 ..Default::default()
             },
         ],
-        zones: vec![crate::models::firewall_config::FirewallZone {
+        zones: vec![crate::platform::firewall::config::FirewallZone {
             name: "lan".to_string(),
             chains: vec![FirewallChain {
                 family: "inet".to_string(),
@@ -199,7 +199,7 @@ fn apply_system_firewall_plan_includes_zone_chains() {
         version: 0,
         rules: Vec::new(),
         chains: Vec::new(),
-        zones: vec![crate::models::firewall_config::FirewallZone {
+        zones: vec![crate::platform::firewall::config::FirewallZone {
             name: "wan".to_string(),
             chains: vec![FirewallChain {
                 family: "inet".to_string(),

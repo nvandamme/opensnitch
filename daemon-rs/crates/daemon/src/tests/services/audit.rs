@@ -2,9 +2,9 @@ use crate::models::{
     audit::{
         AuditEvent, AuditEventFamily, AuditEventKind, ClientAuthorizationAction, VerdictAction,
     },
-    command_action::CommandAction,
-    config_runtime::AskFallbackPolicy,
-    rule_record::RuleAction,
+    command::action::CommandAction,
+    config::runtime::AskFallbackPolicy,
+    rule::record::RuleAction,
 };
 use crate::services::audit::AuditService;
 

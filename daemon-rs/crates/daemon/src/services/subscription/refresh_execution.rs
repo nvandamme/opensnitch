@@ -4,7 +4,7 @@ use tracing::{info, warn};
 use super::SubscriptionRecord;
 use super::SubscriptionService;
 use super::refresh_timing::next_refresh_success;
-pub(super) use crate::models::subscription_refresh::RefreshOutcome;
+pub(super) use crate::models::subscription::refresh::RefreshOutcome;
 use crate::services::storage::StorageService;
 use crate::utils::http_client::{HttpResponse, build_request, send_request};
 use crate::utils::http_response::{header_value, summarize_http_error};

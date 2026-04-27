@@ -5,9 +5,9 @@ use anyhow::Result;
 use std::sync::Arc;
 
 #[cfg(feature = "openwrt")]
-use crate::models::firewall_state::FirewallBackend;
+use crate::platform::firewall::state::FirewallBackend;
 use crate::{
-    models::{firewall_config::FirewallConfig, firewall_runtime::FirewallRuntime},
+    platform::firewall::config::FirewallConfig, platform::firewall::runtime::FirewallRuntime,
     services::firewall::FirewallService,
 };
 

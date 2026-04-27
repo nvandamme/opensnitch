@@ -8,7 +8,7 @@
 //! Feature gate: `metrics-http-serve-text` OR `metrics-http-push-text`.
 use std::fmt::Write as _;
 
-use crate::models::metrics_snapshot::MetricsExportSnapshot;
+use crate::models::metrics::snapshot::MetricsExportSnapshot;
 use transport_wire_core::WireSubscriptionStatistics;
 
 pub(crate) type PrometheusTextSnapshot = MetricsExportSnapshot;

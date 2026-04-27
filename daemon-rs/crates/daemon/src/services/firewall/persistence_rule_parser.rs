@@ -1,4 +1,4 @@
-use crate::models::firewall_config::{FirewallConfig, FirewallRule};
+use crate::platform::firewall::config::{FirewallConfig, FirewallRule};
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct ParsedRuleParameters {

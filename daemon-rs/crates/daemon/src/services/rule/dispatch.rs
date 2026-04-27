@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::models::{
-    connection_state::ConnectionAttempt, process_state::ProcessInfo, rule_record::RuleOperator,
+    connection::state::ConnectionAttempt, process::state::ProcessInfo, rule::record::RuleOperator,
 };
 
 use super::{RuleMatchCaches, RuleService};

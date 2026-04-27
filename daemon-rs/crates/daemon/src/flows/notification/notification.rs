@@ -22,11 +22,11 @@ use crate::{
             AuditEvent, AuditEventKind,
             ClientAuthorizationAction as ClientAuthorizationSignalPayload,
         },
-        command_rpc::ClientCommand,
-        firewall_config::FirewallConfig,
-        rule_record::RuleRecord,
-        ui_alert::UiAlert,
+        command::rpc::ClientCommand,
+        notification::alert::UiAlert,
+        rule::record::RuleRecord,
     },
+    platform::firewall::config::FirewallConfig,
     services::{
         audit::AuditService,
         client::{
@@ -765,8 +765,8 @@ fn rule_record_from_wire(rule: WireRule) -> RuleRecord {
         updated_at: None,
         name: rule.name,
         description: rule.description,
-        action: crate::models::rule_record::RuleAction::from_name(&rule.action),
-        duration: crate::models::rule_record::RuleDuration::from_name(&rule.duration),
+        action: crate::models::rule::record::RuleAction::from_name(&rule.action),
+        duration: crate::models::rule::record::RuleDuration::from_name(&rule.duration),
         enabled: rule.enabled,
         precedence: rule.precedence,
         nolog: rule.nolog,
@@ -776,12 +776,12 @@ fn rule_record_from_wire(rule: WireRule) -> RuleRecord {
 
 fn rule_operator_from_wire(
     operator: Option<WireRuleOperator>,
-) -> crate::models::rule_record::RuleOperator {
+) -> crate::models::rule::record::RuleOperator {
     let Some(operator) = operator else {
-        return crate::models::rule_record::RuleOperator::default();
+        return crate::models::rule::record::RuleOperator::default();
     };
 
-    let mut parsed = crate::models::rule_record::RuleOperator {
+    let mut parsed = crate::models::rule::record::RuleOperator {
         type_name: operator.type_name,
         operand: operator.operand,
         data: operator.data,
@@ -819,8 +819,10 @@ fn firewall_config_from_wire(value: WireSysFirewall) -> FirewallConfig {
     }
 }
 
-fn firewall_chain_from_wire(value: WireFwChain) -> crate::models::firewall_config::FirewallChain {
-    crate::models::firewall_config::FirewallChain {
+fn firewall_chain_from_wire(
+    value: WireFwChain,
+) -> crate::platform::firewall::config::FirewallChain {
+    crate::platform::firewall::config::FirewallChain {
         name: value.name,
         table: value.table,
         family: value.family,
@@ -836,8 +838,8 @@ fn firewall_chain_from_wire(value: WireFwChain) -> crate::models::firewall_confi
     }
 }
 
-fn firewall_rule_from_wire(value: WireFwRule) -> crate::models::firewall_config::FirewallRule {
-    crate::models::firewall_config::FirewallRule {
+fn firewall_rule_from_wire(value: WireFwRule) -> crate::platform::firewall::config::FirewallRule {
+    crate::platform::firewall::config::FirewallRule {
         table: value.table,
         chain: value.chain,
         uuid: value.uuid,
@@ -857,16 +859,16 @@ fn firewall_rule_from_wire(value: WireFwRule) -> crate::models::firewall_config:
 
 fn firewall_expression_from_wire(
     value: WireFwExpression,
-) -> crate::models::firewall_config::FirewallExpression {
-    crate::models::firewall_config::FirewallExpression {
+) -> crate::platform::firewall::config::FirewallExpression {
+    crate::platform::firewall::config::FirewallExpression {
         statement: value.statement.map(firewall_statement_from_wire),
     }
 }
 
 fn firewall_statement_from_wire(
     value: WireFwStatement,
-) -> crate::models::firewall_config::FirewallStatement {
-    crate::models::firewall_config::FirewallStatement {
+) -> crate::platform::firewall::config::FirewallStatement {
+    crate::platform::firewall::config::FirewallStatement {
         op: value.op,
         name: value.name,
         values: value
@@ -879,8 +881,8 @@ fn firewall_statement_from_wire(
 
 fn firewall_statement_value_from_wire(
     value: WireFwStatementValue,
-) -> crate::models::firewall_config::FirewallStatementValue {
-    crate::models::firewall_config::FirewallStatementValue {
+) -> crate::platform::firewall::config::FirewallStatementValue {
+    crate::platform::firewall::config::FirewallStatementValue {
         key: value.key,
         value: value.value,
     }

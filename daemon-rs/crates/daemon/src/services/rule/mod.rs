@@ -16,7 +16,7 @@ mod semantics;
 mod storage;
 mod utilities;
 #[allow(unused_imports)]
-pub use crate::models::rule_match_decision::RuleMatchDecision;
+pub use crate::models::rule::match_decision::RuleMatchDecision;
 pub(crate) use cache_types::*;
 pub(crate) use conversions::{
     rule_record_from_wire, rule_record_now_timestamp, wire_rule_from_record,

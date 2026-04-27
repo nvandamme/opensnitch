@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use tokio::process::Command;
 
-use crate::models::firewall_config::{FirewallChain, FirewallConfig, FirewallRule};
+use crate::platform::conman::conntrack::flush_conntrack_table;
+use crate::platform::firewall::config::{FirewallChain, FirewallConfig, FirewallRule};
 use crate::utils::command_output::run_command_checked;
 use crate::utils::command_path::resolve_command_path;
-use crate::utils::conntrack::flush_conntrack_table;
 
 const IPTABLES_BIN: &str = "iptables";
 const IP6TABLES_BIN: &str = "ip6tables";
@@ -55,7 +55,7 @@ impl FirewallIptablesAdapter {
 
     fn parse_iptables_save_dump(dump: &str, family: &str) -> FirewallConfig {
         let mut chains: Vec<FirewallChain> = Vec::new();
-        let mut zones: Vec<crate::models::firewall_config::FirewallZone> = Vec::new();
+        let mut zones: Vec<crate::platform::firewall::config::FirewallZone> = Vec::new();
         let mut current_table = String::new();
 
         for raw_line in dump.lines() {
@@ -131,7 +131,7 @@ impl FirewallIptablesAdapter {
                 if let Some(existing) = zones.iter_mut().find(|z| z.name == zone_name) {
                     existing.chains.push(chain);
                 } else {
-                    zones.push(crate::models::firewall_config::FirewallZone {
+                    zones.push(crate::platform::firewall::config::FirewallZone {
                         name: zone_name,
                         chains: vec![chain],
                     });

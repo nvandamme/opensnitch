@@ -1,5 +1,5 @@
 use super::notification::NotificationFlow;
-use crate::models::command_action::CommandAction;
+use crate::models::command::action::CommandAction;
 
 impl NotificationFlow {
     pub(super) fn is_privileged_notification_action(action: CommandAction) -> bool {

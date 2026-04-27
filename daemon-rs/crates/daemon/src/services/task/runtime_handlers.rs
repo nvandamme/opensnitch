@@ -12,14 +12,14 @@ use super::{
 #[cfg(feature = "task-http")]
 use crate::utils::http_client::{build_http_client, build_request, send_request};
 
+use crate::models::task::socket_monitor_payload::SocketMonitorPayload;
 use crate::{
     models::{
-        socket_monitor_payload::SocketMonitorPayload,
-        task_config::{
+        task::config::{
             DownloaderTaskConfig, IocReportConfig, IocScannerTaskConfig, IocScheduleConfig,
             IocToolConfig,
         },
-        task_wire::{
+        task::wire::{
             DownloaderResult, NodeMonitorResult, PidMonitorIOStats, PidMonitorNetStats,
             PidMonitorResult, PidMonitorStatm, PidMonitorTreeNode, TaskErrorPayload,
         },

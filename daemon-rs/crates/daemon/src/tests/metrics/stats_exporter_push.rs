@@ -25,8 +25,8 @@ use hyper_util::rt::TokioIo;
 use tokio::sync::Mutex;
 use transport_wire_core::{WireRuleSubscriptionEntry, WireStatistics, WireSubscriptionStatistics};
 
-use crate::models::metrics_snapshot::MetricsSnapshot;
-use crate::models::prometheus_wire as prom_wire;
+use crate::models::metrics::prometheus_wire as prom_wire;
+use crate::models::metrics::snapshot::MetricsSnapshot;
 use crate::utils::http_client::build_http_client;
 
 // Pull all private items from the parent push adapter module.

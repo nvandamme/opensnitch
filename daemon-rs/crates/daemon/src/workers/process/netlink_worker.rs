@@ -5,9 +5,9 @@ use tracing::{debug, info, warn};
 
 use crate::{
     bus::Bus,
-    models::{kernel_event::KernelEvent, proc_event::ProcEventKind},
+    models::kernel::event::{KernelEvent, ProcEventKind},
     platform::procmon::connector::ProcEventSocket,
-    workers::{KernelEventDispatch, runtime::support::build_current_thread_runtime},
+    workers::{KernelEventDispatch, runtime::helpers::build_current_thread_runtime},
 };
 
 const PROC_EVENT_WORKERS: usize = 4;
@@ -20,14 +20,14 @@ impl NetlinkProcWorkerControl {
         bus: Bus,
         shutdown: CancellationToken,
     ) -> (
-        Vec<mpsc::SyncSender<crate::models::proc_event::ProcPidEvent>>,
+        Vec<mpsc::SyncSender<crate::platform::procmon::proc_event::ProcPidEvent>>,
         Vec<JoinHandle<()>>,
     ) {
         let mut senders = Vec::with_capacity(PROC_EVENT_WORKERS);
         let mut handles = Vec::with_capacity(PROC_EVENT_WORKERS);
 
         for _ in 0..PROC_EVENT_WORKERS {
-            let (tx, rx) = mpsc::sync_channel::<crate::models::proc_event::ProcPidEvent>(
+            let (tx, rx) = mpsc::sync_channel::<crate::platform::procmon::proc_event::ProcPidEvent>(
                 PROC_EVENT_CHANNEL_CAPACITY,
             );
             let worker_bus = bus.clone();

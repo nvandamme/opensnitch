@@ -5,9 +5,9 @@ use tracing::{debug, warn};
 
 use crate::{
     bus::Bus,
-    models::{kernel_event::KernelEvent, proc_event::ProcEventKind},
+    models::kernel::event::{KernelEvent, ProcEventKind},
     platform::procmon::audit::AuditNetlinkSocket,
-    workers::{KernelEventDispatch, runtime::support::build_current_thread_runtime},
+    workers::{KernelEventDispatch, runtime::helpers::build_current_thread_runtime},
 };
 
 pub(crate) struct AuditWorkerControl;

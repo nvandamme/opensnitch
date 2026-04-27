@@ -21,8 +21,8 @@ use super::runtime_lifecycle::{
 };
 
 pub(crate) use super::event_bus::StorageEventSubscription;
-pub(crate) use crate::models::storage_dir_entry::StorageDirEntry;
-pub(crate) use crate::models::storage_event::{StorageEvent, StorageOperation};
+pub(crate) use crate::models::storage::dir_entry::StorageDirEntry;
+pub(crate) use crate::models::storage::event::{StorageEvent, StorageOperation};
 
 use crate::utils::atomic_write::{write_bytes_atomic_async, write_bytes_atomic_sync};
 

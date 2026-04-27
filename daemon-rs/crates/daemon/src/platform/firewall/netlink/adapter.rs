@@ -10,14 +10,12 @@ use super::{
     NetlinkExecutionSummary, NetlinkFallbackReason, NetlinkFallbackRequired, NftChain, NftRule,
     NftTable, TransactionOutcome,
 };
-use crate::models::firewall_config::{FirewallChain, FirewallConfig, FirewallRule};
+use crate::platform::conman::conntrack::flush_conntrack_table;
+use crate::platform::firewall::config::{FirewallChain, FirewallConfig, FirewallRule};
 use crate::platform::firewall::nftables::FirewallNftablesAdapter;
 use crate::platform::netlink::io::{
-    ReplyVisit, for_each_reply, for_each_reply_until,
+    NetlinkSocket, ReplyVisit, for_each_reply, for_each_reply_until,
 };
-use crate::utils::conntrack::flush_conntrack_table;
-
-use netlink_socket2::NetlinkSocket;
 
 impl FirewallNetlinkOperation {
     fn kind(&self) -> &'static str {
@@ -389,7 +387,7 @@ impl FirewallNetlinkAdapter {
 
             chain
                 .rules
-                .push(crate::models::firewall_config::FirewallRule {
+                .push(crate::platform::firewall::config::FirewallRule {
                     table: rule.table,
                     chain: rule.chain,
                     uuid: rule.uuid,
@@ -413,13 +411,13 @@ impl FirewallNetlinkAdapter {
         }
 
         let mut top_level_chains = Vec::new();
-        let mut zones: Vec<crate::models::firewall_config::FirewallZone> = Vec::new();
+        let mut zones: Vec<crate::platform::firewall::config::FirewallZone> = Vec::new();
         for (_, chain) in by_key {
             if let Some(zone_name) = zone_name_from_chain(&chain.name) {
                 if let Some(existing) = zones.iter_mut().find(|z| z.name == zone_name) {
                     existing.chains.push(chain);
                 } else {
-                    zones.push(crate::models::firewall_config::FirewallZone {
+                    zones.push(crate::platform::firewall::config::FirewallZone {
                         name: zone_name.to_string(),
                         chains: vec![chain],
                     });
@@ -470,10 +468,7 @@ impl FirewallNetlinkAdapter {
 
                     let (hook, priority) = match attrs.get_hook() {
                         Ok(hook_attrs) => {
-                            let hook = hook_attrs
-                                .get_num()
-                                .map(hook_num_to_name)
-                                .unwrap_or("");
+                            let hook = hook_attrs.get_num().map(hook_num_to_name).unwrap_or("");
                             let priority = hook_attrs
                                 .get_priority()
                                 .map(|v| v.to_string())
@@ -483,10 +478,7 @@ impl FirewallNetlinkAdapter {
                         Err(_) => ("", String::new()),
                     };
 
-                    let policy = attrs
-                        .get_policy()
-                        .map(policy_num_to_name)
-                        .unwrap_or("");
+                    let policy = attrs.get_policy().map(policy_num_to_name).unwrap_or("");
 
                     out.push(DumpChain {
                         family,
@@ -765,10 +757,7 @@ impl FirewallNetlinkAdapter {
                 for parsed in parsed_rules {
                     operations.push(FirewallNetlinkOperation::ApplySystemRule {
                         rule: parsed
-                            .with_target(
-                                NftTable::new(family, table),
-                                name,
-                            )
+                            .with_target(NftTable::new(family, table), name)
                             .with_tag(FirewallNftablesAdapter::probe_rule_tag(chain, rule)),
                     });
                 }
@@ -886,9 +875,7 @@ impl GenerationId {
             &request,
             anyhow::Error::new,
             anyhow::Error::new,
-            |(_, attrs)| {
-                Ok(ReplyVisit::Break(attrs.get_id()?))
-            },
+            |(_, attrs)| Ok(ReplyVisit::Break(attrs.get_id()?)),
         )
         .await?;
         let id = genid.context("missing nftables generation id reply")?;

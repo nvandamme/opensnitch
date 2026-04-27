@@ -1,8 +1,8 @@
-use crate::models::proc_event::ProcEventKind;
 use crate::platform::procmon::connector::{
     CN_MSG_LEN, NLMSG_HDR_LEN, PROC_EVENT_EXEC_PID_OFFSET, PROC_EVENT_FORK_CHILD_PID_OFFSET,
     PROC_EVENT_HEADER_LEN, ProcEventSocket,
 };
+use crate::platform::procmon::proc_event::ProcEventKind;
 use nix::libc;
 
 fn build_frame(what: u32, pid: u32, is_fork: bool) -> Vec<u8> {
@@ -87,14 +87,6 @@ fn parse_proc_pid_event_handles_missing_pid_bytes_as_none() {
     frame.truncate(payload_offset + PROC_EVENT_EXEC_PID_OFFSET + 2);
 
     assert!(ProcEventSocket::probe_parse_pid_event(&frame).is_none());
-}
-
-#[test]
-fn connector_read_helpers_return_none_out_of_bounds() {
-    let frame = build_frame(libc::PROC_EVENT_EXEC as u32, 321, false);
-
-    assert!(ProcEventSocket::probe_read_u16_ne_at(&frame, frame.len() - 1).is_none());
-    assert!(ProcEventSocket::probe_read_u32_ne_at(&frame, frame.len() - 2).is_none());
 }
 
 #[test]

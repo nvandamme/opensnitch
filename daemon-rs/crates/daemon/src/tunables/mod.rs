@@ -1,4 +1,5 @@
 mod autotune;
+pub mod effective;
 pub mod tunables;
 
-pub use crate::models::effective_tunables::{NfqueueOverloadPolicy, RuntimeTunables};
+pub use effective::{NfqueueOverloadPolicy, RuntimeTunables};

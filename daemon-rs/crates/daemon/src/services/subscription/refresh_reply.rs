@@ -3,7 +3,7 @@ use transport_wire_core::{WireSubscriptionAction, WireSubscriptionReply};
 use super::record_to_wire;
 use super::refresh_timing::build_refresh_message;
 use super::reply::{base_reply, reply_with};
-use crate::models::subscription_storage::SubscriptionRecord;
+use crate::models::subscription::storage::SubscriptionRecord;
 use crate::utils::sort_key::sort_by_string_key;
 
 pub(super) fn empty_refresh_reply(explicit_targeting: bool) -> WireSubscriptionReply {

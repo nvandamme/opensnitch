@@ -14,11 +14,9 @@ use crate::{
     bus::{BusCaps, BusState},
     config::Config,
     flows::verdict::VerdictFlow,
-    models::connection_state::{ConnectionAttempt, TransportProtocol},
-    models::{
-        firewall_state::{FirewallBackend, FirewallState},
-        kernel_event::KernelEvent,
-    },
+    models::connection::state::{ConnectionAttempt, TransportProtocol},
+    models::kernel::event::KernelEvent,
+    platform::firewall::state::{FirewallBackend, FirewallState},
     services::{
         client::ClientService,
         config::ConfigService,

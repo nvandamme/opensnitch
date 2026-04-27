@@ -6,7 +6,6 @@ pub mod channel_send;
 pub mod command_output;
 pub mod command_path;
 pub mod config_reload;
-pub mod conntrack;
 pub mod daemon_guard;
 pub mod duration_parse;
 pub mod hex_parse;

@@ -3,8 +3,8 @@ use std::{collections::HashMap, io::ErrorKind};
 use anyhow::Result;
 use tracing::{debug, warn};
 
-use crate::models::rule_record::{RuleDuration, RuleRecord};
-use crate::models::rule_storage::RuleFile;
+use crate::models::rule::record::{RuleDuration, RuleRecord};
+use crate::models::rule::storage::RuleFile;
 use crate::services::storage::StorageService;
 
 use super::{RuleService, rule_duration_persists_to_disk, rule_duration_temporary_spec};

@@ -19,8 +19,8 @@ use tracing::{debug, info, trace, warn};
 
 use crate::{
     bus::Bus,
-    models::dns_payload::DnsPayload,
-    models::kernel_event::KernelEvent,
+    models::dns::payload::DnsPayload,
+    models::kernel::event::KernelEvent,
     services::dns::normalize_dns_host as normalize_dns_host_value,
     utils::{
         command_path::resolve_command_path,

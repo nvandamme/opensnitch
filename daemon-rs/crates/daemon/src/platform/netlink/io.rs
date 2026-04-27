@@ -1,12 +1,15 @@
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use netlink_bindings::traits::NetlinkRequest;
-use netlink_socket2::{MulticastSocketRaw, NetlinkSocket, ReplyError};
 
-// Re-export for convenience — callers using shared netlink helpers
-// should not need a direct `netlink_socket2` dependency for socket construction.
-pub(crate) use netlink_socket2;
+pub(crate) use netlink_socket2::{MulticastSocketRaw, NetlinkSocket, ReplyError};
+
+pub(crate) use netlink_bindings::traits::{NetlinkRequest, Protocol};
+
+#[allow(unused_imports)]
+pub(crate) use super::message::{
+    NetlinkEvent, NetlinkMessage, NetlinkResponse, RawNetlinkPayload, decode_response,
+};
 
 pub(crate) async fn recv_with_timeout<T, E>(
     timeout: Duration,
@@ -98,7 +101,7 @@ macro_rules! netlink_map_io_error {
 
 macro_rules! netlink_map_reply_error {
     ($action:expr, $message:expr $(, $field:ident = $value:expr )* $(,)?) => {
-        |err: netlink_socket2::ReplyError| {
+        |err: crate::platform::netlink::io::ReplyError| {
             tracing::warn!(
                 action = $action,
                 $( $field = $value, )*

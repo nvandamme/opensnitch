@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use crate::utils::http_client::{build_http_client, build_request, send_request};
 use transport_wire_core::{WireRuleSubscriptionEntry, WireStatistics, WireSubscriptionStatistics};
 
-use crate::models::metrics_snapshot::MetricsSnapshot;
+use crate::models::metrics::snapshot::MetricsSnapshot;
 use crate::platform::stats::exporter_port::StatsExporterPort;
 
 // Pull all private items from the parent adapter module.
@@ -764,6 +764,13 @@ async fn http_endpoint_returns_prometheus_text_by_default() {
 
     assert_eq!(resp.status.as_u16(), 200);
     let ct = resp.headers["content-type"].to_str().unwrap().to_string();
+    // default_format() prefers openmetrics when the feature is compiled in.
+    #[cfg(feature = "metrics-http-serve-openmetrics")]
+    assert!(
+        ct.contains("application/openmetrics-text"),
+        "content-type: {ct}"
+    );
+    #[cfg(not(feature = "metrics-http-serve-openmetrics"))]
     assert!(ct.contains("text/plain"), "content-type: {ct}");
 
     let body = String::from_utf8(resp.body).unwrap();

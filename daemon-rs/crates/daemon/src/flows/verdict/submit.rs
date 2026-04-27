@@ -2,8 +2,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    models::verdict_rpc::VerdictReply, platform::nfqueue::state::NfqueueRuntimeState,
-    services::stats::StatsService, workers::runtime::verdict::dispatch as verdict_dispatch,
+    models::verdict::rpc::VerdictReply, platform::nfqueue::state::NfqueueRuntimeState,
+    services::stats::StatsService, workers::runtime::verdict as verdict_dispatch,
 };
 
 #[derive(Clone)]

@@ -23,7 +23,7 @@ use crate::{
     utils::lru_cache::global_dual_layer_metrics_snapshot,
 };
 
-pub(crate) use crate::models::worker_telemetry::WorkerTelemetrySnapshot;
+pub(crate) use crate::flows::stats::telemetry::WorkerTelemetrySnapshot;
 
 use crate::platform::stats::exporter_port::StatsExporterPort;
 use crate::services::client::transport::ClientPingRequest;

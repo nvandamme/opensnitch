@@ -1,26 +1,21 @@
 use std::{os::fd::AsFd, time::Duration};
 
 use anyhow::Result;
-#[cfg(test)]
-use netlink_bindings::builtin;
-use netlink_bindings::traits::{NetlinkRequest, Protocol};
-use netlink_socket2::MulticastSocketRaw;
 use nix::libc;
 use rustix::thread::{LinkNameSpaceType, move_into_link_name_space};
 
+#[cfg(test)]
+pub(crate) use crate::platform::netlink::wire::NLMSG_HDR_LEN;
 use crate::{
-    models::proc_event::{ProcEventKind, ProcPidEvent},
-    platform::netlink::control::should_process_nlmsg_payload,
     platform::netlink::io::{
-        open_and_listen_multicast_socket, recv_with_timeout, request_with_ack_timeout,
+        MulticastSocketRaw, NetlinkRequest, Protocol, open_and_listen_multicast_socket,
+        recv_with_timeout, request_with_ack_timeout,
     },
+    platform::netlink::message::NetlinkEvent,
     platform::netlink::runtime::run_on_netlink_rt,
+    platform::procmon::proc_event::{ProcEventKind, ProcPidEvent},
 };
-#[cfg(test)]
-use crate::utils::byte_read::read_ne_value_at;
 
-#[cfg(test)]
-pub(crate) const NLMSG_HDR_LEN: usize = builtin::Nlmsghdr::len();
 #[cfg(test)]
 pub(crate) const CN_MSG_LEN: usize = std::mem::size_of::<CnMsg>();
 pub(crate) const PROC_EVENT_HEADER_LEN: usize = std::mem::size_of::<ProcEventHeader>();
@@ -87,6 +82,12 @@ pub struct ProcEventSocket {
     pub(crate) event_sock: MulticastSocketRaw,
 }
 
+impl NetlinkEvent for ProcPidEvent {
+    fn decode_event(_msg_type: u16, payload: &[u8]) -> Result<Option<Self>> {
+        Ok(ProcEventSocket::parse_pid_event_from_payload(payload))
+    }
+}
+
 struct ProcListenRequest {
     payload: [u8; std::mem::size_of::<CnMsgListenPayload>()],
 }
@@ -129,7 +130,7 @@ impl ProcEventSocket {
         };
 
         let (meta, payload) = recv;
-        Self::parse_pid_event_message(meta.message_type, payload)
+        ProcPidEvent::decode_from_raw(meta.message_type, payload)
     }
 
     #[cfg(test)]
@@ -144,10 +145,11 @@ impl ProcEventSocket {
         }
 
         let payload = &frame[payload_offset..];
-        // cn_msg.len lives at byte 16 within CnMsg (after id_idx(4)+id_val(4)+seq(4)+ack(4)).
-        const CN_MSG_LEN_FIELD_OFFSET: usize = 16;
-        let cn_msg_data_len =
-            read_ne_value_at(frame, NLMSG_HDR_LEN + CN_MSG_LEN_FIELD_OFFSET, u16::from_ne_bytes)? as usize;
+        // SAFETY: CnMsg is #[repr(C)] and we verified the frame is large
+        // enough above. read_unaligned handles arbitrary frame alignment.
+        let cn: CnMsg =
+            unsafe { std::ptr::read_unaligned(frame[NLMSG_HDR_LEN..].as_ptr() as *const CnMsg) };
+        let cn_msg_data_len = cn.len as usize;
         if cn_msg_data_len == 0 {
             return None;
         }
@@ -173,11 +175,7 @@ impl ProcEventSocket {
     }
 
     fn parse_pid_event_message(msg_type: u16, payload: &[u8]) -> Result<Option<ProcPidEvent>> {
-        if !should_process_nlmsg_payload(msg_type, payload)? {
-            return Ok(None);
-        }
-
-        Ok(Self::parse_pid_event_from_payload(payload))
+        ProcPidEvent::decode_from_raw(msg_type, payload)
     }
 
     fn parse_pid_event_payload(payload: &[u8]) -> Option<ProcPidEvent> {
@@ -196,9 +194,7 @@ impl ProcEventSocket {
                     return None;
                 }
                 let data: ExecExitProcEventData = unsafe {
-                    std::ptr::read_unaligned(
-                        event_data.as_ptr() as *const ExecExitProcEventData,
-                    )
+                    std::ptr::read_unaligned(event_data.as_ptr() as *const ExecExitProcEventData)
                 };
                 let kind = if x == libc::PROC_EVENT_EXEC as u32 {
                     ProcEventKind::Exec
@@ -266,8 +262,10 @@ impl ProcEventSocket {
         let _ = Self::switch_to_host_netns();
 
         let mut request_sock = crate::platform::netlink::io::new_request_socket();
-        let event_sock =
-            open_and_listen_multicast_socket(libc::NETLINK_CONNECTOR as u16, libc::CN_IDX_PROC as u32)?;
+        let event_sock = open_and_listen_multicast_socket(
+            libc::NETLINK_CONNECTOR as u16,
+            libc::CN_IDX_PROC as u32,
+        )?;
 
         let request = ProcListenRequest {
             payload: Self::build_listen_payload(),
@@ -282,16 +280,6 @@ impl ProcEventSocket {
         .await?;
 
         Ok(Self { event_sock })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn probe_read_u16_ne_at(frame: &[u8], offset: usize) -> Option<u16> {
-        read_ne_value_at(frame, offset, u16::from_ne_bytes)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn probe_read_u32_ne_at(frame: &[u8], offset: usize) -> Option<u32> {
-        read_ne_value_at(frame, offset, u32::from_ne_bytes)
     }
 
     #[cfg(test)]

@@ -1,5 +1,8 @@
+use crate::platform::netlink::attrs::{
+    NetlinkAttributeBuffer, NetlinkAttributeRecord, finalize_nested_attr, push_attr_header,
+    push_nested_attr_header,
+};
 use netlink_bindings::nftables;
-use netlink_bindings::utils::{Rec, finalize_nested_header, push_header, push_nested_header};
 use nix::libc;
 
 use super::super::{
@@ -139,34 +142,34 @@ pub(in crate::platform::firewall::netlink) struct NftLimit {
 }
 
 impl NftLimit {
-    pub(in crate::platform::firewall::netlink) fn encode<Prev: Rec>(
+    pub(in crate::platform::firewall::netlink) fn encode<Prev: NetlinkAttributeRecord>(
         &self,
         exprs: nftables::PushExprListAttrs<Prev>,
     ) -> nftables::PushExprListAttrs<Prev> {
         let mut expr = exprs.nested_elem().push_name_bytes(b"limit");
-        let data_offset = push_nested_header(expr.as_rec_mut(), NFTA_EXPR_DATA);
+        let data_offset = push_nested_attr_header(expr.attrs_mut(), NFTA_EXPR_DATA);
 
-        push_header(expr.as_rec_mut(), NFTA_LIMIT_RATE, 8);
-        expr.as_rec_mut().extend(self.rate.to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_LIMIT_RATE, 8);
+        expr.attrs_mut().extend(self.rate.to_be_bytes());
 
-        push_header(expr.as_rec_mut(), NFTA_LIMIT_UNIT, 8);
-        expr.as_rec_mut().extend(self.unit.to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_LIMIT_UNIT, 8);
+        expr.attrs_mut().extend(self.unit.to_be_bytes());
 
-        push_header(expr.as_rec_mut(), NFTA_LIMIT_TYPE, 4);
-        expr.as_rec_mut().extend(self.limit_type.to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_LIMIT_TYPE, 4);
+        expr.attrs_mut().extend(self.limit_type.to_be_bytes());
 
         if let Some(burst) = self.burst {
-            push_header(expr.as_rec_mut(), NFTA_LIMIT_BURST, 4);
-            expr.as_rec_mut().extend(burst.to_be_bytes());
+            push_attr_header(expr.attrs_mut(), NFTA_LIMIT_BURST, 4);
+            expr.attrs_mut().extend(burst.to_be_bytes());
         }
 
         if self.invert {
-            push_header(expr.as_rec_mut(), NFTA_LIMIT_FLAGS, 4);
-            expr.as_rec_mut()
+            push_attr_header(expr.attrs_mut(), NFTA_LIMIT_FLAGS, 4);
+            expr.attrs_mut()
                 .extend((libc::NFT_LIMIT_F_INV as u32).to_be_bytes());
         }
 
-        finalize_nested_header(expr.as_rec_mut(), data_offset);
+        finalize_nested_attr(expr.attrs_mut(), data_offset);
         expr.end_nested()
     }
 }

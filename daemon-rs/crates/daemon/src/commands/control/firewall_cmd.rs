@@ -3,15 +3,13 @@ use tokio::sync::broadcast;
 use super::CommandControlService;
 use super::control::CONTROL_COMMAND_NOTIFICATION_LABEL;
 use crate::{
-    models::{
-        audit::{AuditEvent, AuditEventKind, FirewallAction, FirewallLifecycle},
-        firewall_config::FirewallConfig,
-    },
+    models::audit::{AuditEvent, AuditEventKind, FirewallAction, FirewallLifecycle},
+    platform::firewall::config::FirewallConfig,
     services::{
         client::ClientService,
         config::ConfigService,
         firewall::FirewallService,
-        policy_tx::{PolicyTxError, PolicyTxRequest},
+        policy::{PolicyTxError, PolicyTxRequest},
         rule::RuleService,
     },
     utils::notification_reply::{send_notification_reply, status_payload},

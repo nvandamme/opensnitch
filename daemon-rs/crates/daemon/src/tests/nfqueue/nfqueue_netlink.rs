@@ -1,6 +1,9 @@
-use crate::platform::nfqueue::netlink::{
-    NFGENMSG_LEN, NLA_HDR_LEN, NLMSG_HDR_LEN, NfqPacket, NfqueueNetlinkAdapter, NlMsg, nla_align,
-    nlmsg_align, parse_nfq_packet,
+use crate::platform::nfqueue::{
+    queue::NfqueueNetlinkAdapter,
+    queue_wire::{
+        NFGENMSG_LEN, NLA_HDR_LEN, NLMSG_HDR_LEN, NfqPacket, NfqueueNlMsgExt, NlMsgBuf, nla_align,
+        nlmsg_align, parse_nfq_packet,
+    },
 };
 use nix::libc;
 use tokio_util::sync::CancellationToken;
@@ -10,12 +13,12 @@ const NFQNL_MSG_VERDICT: u16 =
 const NFQNL_MSG_CONFIG: u16 =
     ((libc::NFNL_SUBSYS_QUEUE as u16) << 8) | (libc::NFQNL_MSG_CONFIG as u16);
 
-// ─── NlMsg wire-shape tests ───────────────────────────────────────────────────
+// ─── NlMsgBuf wire-shape tests ───────────────────────────────────────────────────
 
 /// Minimum well-formed message: nlmsghdr + nfgenmsg only, no attributes.
 #[test]
 fn nlmsg_bare_shape_is_correct() {
-    let buf = NlMsg::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 1)
+    let buf = NlMsgBuf::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 1)
         .nfgenmsg(0, 0)
         .finalize();
 
@@ -51,7 +54,7 @@ fn nlmsg_bare_shape_is_correct() {
 /// nfgenmsg.res_id is written in big-endian (queue_num=7 → bytes [0x00, 0x07]).
 #[test]
 fn nfgenmsg_res_id_is_big_endian() {
-    let buf = NlMsg::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 1)
+    let buf = NlMsgBuf::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 1)
         .nfgenmsg(0, 7)
         .finalize();
     assert_eq!(buf[18], 0x00);
@@ -63,7 +66,7 @@ fn nfgenmsg_res_id_is_big_endian() {
 fn nlmsg_config_bind_cmd_wire_shape() {
     // cmd = { command=BIND(1), pad=0, pf=0 }
     let cmd_payload: [u8; 4] = [libc::NFQNL_CFG_CMD_BIND as u8, 0, 0, 0];
-    let buf = NlMsg::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 2)
+    let buf = NlMsgBuf::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 2)
         .nfgenmsg(0, 7)
         .nla_bytes(libc::NFQA_CFG_CMD as u16, &cmd_payload)
         .finalize();
@@ -93,7 +96,7 @@ fn nlmsg_pf_bind_af_inet_pf_field_is_big_endian() {
         ((libc::AF_INET as u16) >> 8) as u8,
         libc::AF_INET as u8,
     ];
-    let buf = NlMsg::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 1)
+    let buf = NlMsgBuf::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 1)
         .nfgenmsg(0, 0)
         .nla_bytes(libc::NFQA_CFG_CMD as u16, &cmd_payload)
         .finalize();
@@ -105,7 +108,7 @@ fn nlmsg_pf_bind_af_inet_pf_field_is_big_endian() {
 /// nla_u32_be stores the value in network byte order.
 #[test]
 fn nla_u32_be_stores_value_in_network_byte_order() {
-    let buf = NlMsg::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 1)
+    let buf = NlMsgBuf::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 1)
         .nfgenmsg(0, 0)
         .nla_u32_be(libc::NFQA_CFG_QUEUE_MAXLEN as u16, 0x00001000) // 4096
         .finalize();
@@ -118,7 +121,7 @@ fn nla_u32_be_stores_value_in_network_byte_order() {
 fn nla_bytes_pads_to_4_byte_alignment() {
     // 5-byte payload → aligned to 8 bytes → NLA total = 4 + 8 = 12, but nla_len = 4+5=9
     let payload = [1u8, 2, 3, 4, 5];
-    let buf = NlMsg::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 1)
+    let buf = NlMsgBuf::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 1)
         .nfgenmsg(0, 0)
         .nla_bytes(libc::NFQA_CFG_PARAMS as u16, &payload)
         .finalize();
@@ -143,7 +146,7 @@ fn nlmsg_verdict_wire_shape_accept() {
     verdict_hdr[0..4].copy_from_slice(&(libc::NF_ACCEPT as u32).to_be_bytes());
     verdict_hdr[4..8].copy_from_slice(&PACKET_ID.to_be_bytes());
 
-    let buf = NlMsg::new(NFQNL_MSG_VERDICT, libc::NLM_F_REQUEST as u16, 5)
+    let buf = NlMsgBuf::new(NFQNL_MSG_VERDICT, libc::NLM_F_REQUEST as u16, 5)
         .nfgenmsg(0, 7)
         .nla_bytes(libc::NFQA_VERDICT_HDR as u16, &verdict_hdr)
         .finalize();
@@ -171,7 +174,7 @@ fn nlmsg_verdict_wire_shape_requeue() {
     verdict_hdr[0..4].copy_from_slice(&verdict_val.to_be_bytes());
     verdict_hdr[4..8].copy_from_slice(&99u32.to_be_bytes());
 
-    let buf = NlMsg::new(NFQNL_MSG_VERDICT, libc::NLM_F_REQUEST as u16, 1)
+    let buf = NlMsgBuf::new(NFQNL_MSG_VERDICT, libc::NLM_F_REQUEST as u16, 1)
         .nfgenmsg(0, 7)
         .nla_bytes(libc::NFQA_VERDICT_HDR as u16, &verdict_hdr)
         .finalize();
@@ -369,7 +372,7 @@ fn run_reports_socket_availability_or_permission_error() {
 #[test]
 fn adapter_pub_surface_is_stable() {
     // Verify key types and functions compile and are accessible.
-    let _ = NlMsg::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 1)
+    let _ = NlMsgBuf::new(NFQNL_MSG_CONFIG, libc::NLM_F_REQUEST as u16, 1)
         .nfgenmsg(0, 0)
         .finalize();
     let _ = parse_nfq_packet(&[]);

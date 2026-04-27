@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
-pub(crate) use crate::models::firewall_runtime::FirewallRuntime;
+pub(crate) use crate::platform::firewall::runtime::FirewallRuntime;
 
 #[derive(Clone)]
 pub(crate) struct FirewallRuntimeStore {

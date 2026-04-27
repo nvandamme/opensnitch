@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{models::process_state::ProcessInfo, services::process::ProcessService};
+use crate::{models::process::state::ProcessInfo, services::process::ProcessService};
 
 use super::cache::{CachedProcessEntry, PROCESS_INFO_CACHE_CAPACITY};
 

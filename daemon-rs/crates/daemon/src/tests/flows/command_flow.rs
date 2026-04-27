@@ -9,7 +9,7 @@ use crate::{
     },
     config::Config,
     flows::command::CommandFlow,
-    models::command_rpc::ClientCommand,
+    models::command::rpc::ClientCommand,
     services::{
         client::ClientService, config::ConfigService, firewall::FirewallService,
         process::ProcessService, rule::RuleService, stats::StatsService, task::TaskService,

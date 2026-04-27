@@ -3,8 +3,8 @@ use transport_wire_core::{WireSubscription, WireSubscriptionAction, WireSubscrip
 use super::SubscriptionService;
 use super::record_to_wire;
 use super::reply::{base_reply, reply_with};
-use crate::models::subscription_rpc::{SubscriptionCommand, SubscriptionOperation};
-use crate::models::subscription_storage::SubscriptionRecord;
+use crate::models::subscription::rpc::{SubscriptionCommand, SubscriptionOperation};
+use crate::models::subscription::storage::SubscriptionRecord;
 use crate::utils::stable_id::hex_id_from_pair;
 
 impl SubscriptionService {

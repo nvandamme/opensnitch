@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use quick_cache::Weighter;
 
-use crate::models::process_state::ProcessInfo;
+use crate::models::process::state::ProcessInfo;
 use crate::utils::lru_cache::ConcurrentLruCache;
 
 use super::ProcessService;

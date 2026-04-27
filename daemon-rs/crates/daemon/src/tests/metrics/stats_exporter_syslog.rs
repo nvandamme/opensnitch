@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use transport_wire_core::{WireRuleSubscriptionEntry, WireStatistics, WireSubscriptionStatistics};
 
-use crate::models::metrics_snapshot::MetricsSnapshot;
+use crate::models::metrics::snapshot::MetricsSnapshot;
 
 use super::{SyslogFormat, frame_remote_message};
 

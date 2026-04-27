@@ -55,7 +55,10 @@ fn contract_types_stay_under_models() {
         };
         let rel_str = rel.to_string_lossy();
 
-        if rel_str.starts_with("src/models/") || rel_str.starts_with("src/tests/") {
+        if rel_str.starts_with("src/models/")
+            || rel_str.starts_with("src/platform/")
+            || rel_str.starts_with("src/tests/")
+        {
             continue;
         }
 

@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use syslog::{Facility, Formatter3164};
 use tracing::{debug, warn};
 
-use crate::models::metrics_snapshot::{MetricsExportSnapshot, MetricsSnapshot};
+use crate::models::metrics::snapshot::{MetricsExportSnapshot, MetricsSnapshot};
 use crate::platform::stats::exporter_port::StatsExporterPort;
 
 pub const SYSLOG_SERVER_ENV: &str = "OPENSNITCH_METRICS_SYSLOG_SERVER";

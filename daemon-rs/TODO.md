@@ -2,13 +2,6 @@
 
 This is the single tracker file for backend parity, async/runtime hardening, and future enhancements.
 
-It supersedes:
-
-- `daemon-rs/FEATURE_PARITY.md`
-- `daemon-rs/SERVICE_ASYNC_AND_MODEL_SCAN_2026-03-15.md`
-
-Last update: 2026-04-27 (typed proc connector structs, ifaces dedup, zero-warning build)
-
 ## Scope
 
 Track parity and runtime behavior between:
@@ -16,16 +9,20 @@ Track parity and runtime behavior between:
 - Go backend: `daemon/`
 - Rust backend: `daemon-rs/crates/daemon/`
 
-Out of scope for now:
-
-- Replacing proc connector path with a high-level netlink crate.
-
 eBPF library policy:
 
 - **Aya is the preferred eBPF userspace library** for all new code and migration paths.
 - `bpftool` subprocess usage must be eliminated from production paths (cannot guarantee system install).
 - `libbpf-rs` is retained as an optional fallback feature (`libbpf-ebpf`) but is no longer required when `aya-ebpf` is enabled.
 - Migration goal: make `aya-ebpf` sufficient as the sole eBPF runtime; `libbpf-ebpf` becomes a compat-only gate.
+
+## Design Principles
+
+See `daemon-rs/DESIGN_RULES.md` for detailed design principles and pre-commit checklist.
+
+## Compatibility Matrix
+
+See `daemon-rs/COMPATIBILITY.md` for detailed compatibility matrix and policy.
 
 ## Current Status Snapshot
 
@@ -123,10 +120,12 @@ eBPF library policy:
 
 ### Active tasks
 
-- **Active-task scan (2026-04-26)**:
-  - `ARCH/NETLINK-OPS-REFERENCE-BASELINE`: still in progress; manual netlink segments remain in NFQUEUE packet/config framing and proc-connector payload decode.
-  - `ARCH/NFQUEUE-NETLINK-CRATE-PRIMITIVES`: still in progress; `platform/nfqueue/netlink.rs` keeps manual message framing/attribute walking for core paths.
-  - `ARCH/PROC-CONNECTOR-NETLINK-CRATE-PRIMITIVES`: still in progress; primary payload decode still uses adapter-local offset parsing.
+- **Active-task scan (2026-04-26, refreshed 2026-04-27)**:
+  - `ARCH/MODULE-LAYOUT-MODELS-REORG`: done — `models/` reorganized from ~45 flat files to 17 domain subdirectories (`audit/`, `command/`, `config/`, `connection/`, `dns/`, `ebpf/`, `firewall/`, `kernel/`, `metrics/`, `notification/`, `policy/`, `process/`, `rule/`, `storage/`, `subscription/`, `task/`, `verdict/`). DTO violations fixed: shared serde types relocated to `models/` with zero-allowlist `data_contract_ownership` test enforcement.
+  - `ARCH/MODULE-LAYOUT-WORKERS-RUNTIME-COLLAPSE`: done — `workers/runtime/` collapsed 6 subdirectories to flat files (`connect.rs`, `nfqueue.rs`, `verdict.rs`, `helpers.rs`, `kernel.rs`, `watch.rs`), flattened `ebpf/control/` sub-subdirectory into `ebpf/`, renamed `support/` → `helpers.rs`. Only `ebpf/` subdirectory remains (8 files, ~1500 lines).
+  - `ARCH/NETLINK-OPS-REFERENCE-BASELINE`: still in progress; shared `platform/netlink` now owns socket construction, request iteration/ack helpers, generic nlmsg/NLA framing, attribute intrinsics, and the single `NetlinkResponse` adapter path for generated-family replies plus raw unsupported-family datagrams.
+  - `ARCH/NFQUEUE-NETLINK-CRATE-PRIMITIVES`: still in progress; generic nlmsg/NLA framing and `NlMsgFactory` now live in shared `platform/netlink/wire.rs`, while remaining NFQUEUE-specific `NFQA_*` encode/decode is isolated in `platform/nfqueue/netlink_wire.rs` with explicit crate-coverage rationale.
+  - `ARCH/PROC-CONNECTOR-NETLINK-CRATE-PRIMITIVES`: still in progress; production payload decode and framed test helper now use typed `#[repr(C)]` overlays instead of ad-hoc event/cn_msg field offsets.
   - `ARCH/NETLINK-PROBE-AND-MONITOR-PRIMITIVE-ALIGNMENT`: done — firewall netlink preflight + monitor paths both use `netlink-socket2::MulticastSocketRaw` (no direct `libc::socket`/`close` probe path remains in platform firewall netlink preflight/monitor flows).
   - `platform/firewall/port.rs`: removed `OPENSNITCH_NFT_NETLINK_EXPERIMENT` env gating; nft netlink path selection now depends on runtime availability/recovery gate only (fallback behavior unchanged).
   - `ARCH/FIREWALL-NETLINK-THIN-PARSER-TYPED-IR`: only Phase 5 remains (typed unsupported/error-category routing). Substantially complete — `ParseFamily` now covers all 24 expression families including newly added `Connlimit`, `Exthdr`, `Hash`, `Rt`, `Dynset`, `Range`.
@@ -250,6 +249,10 @@ eBPF library policy:
     - Extracted `push_chain_operations()` helper in firewall adapter to deduplicate chain+zone-chain operation-push logic in `plan_apply_system_firewall`, reducing clone cascade and ~40 lines of duplicated iteration code.
     - Replaced `to_ascii_lowercase()` allocation in `chain_hook_num`, `chain_priority`, `chain_policy` (`platform/firewall/netlink/batch.rs`) with `eq_ignore_ascii_case()` for zero-alloc case-insensitive matching.
     - Cleaned up proc-audit dead code (`platform/procmon/audit.rs`): removed unused `NetlinkHeader` struct and private helpers (`parse_header`, `normalized_msg_len`, `align_len`); scoped `parse_event_datagram` and `NLMSG_HDR_LEN` to `#[cfg(test)]`; fixed `from_utf8_lossy().to_string()` → `.to_owned()` in event data construction.
+    - Added shared generic netlink wire helpers in `platform/netlink/wire.rs` (nlmsg/NLA iterators, alignment helpers, scalar decode, generic `NlMsg`, `NlMsgFactory` + `DefaultNlMsgFactory`) and migrated NFQUEUE to reuse them; `platform/nfqueue/netlink_wire.rs` now keeps only NFQUEUE-specific extension methods and `NFQA_*` packet attribute decode, while `platform/nfqueue/netlink.rs` owns runtime/socket orchestration only.
+    - Centralized netlink primitive imports through `platform/netlink/io.rs`: proc audit, proc connector, socket-diag, and firewall netlink callers now consume `NetlinkRequest`, `Protocol`, `NetlinkSocket`, and `MulticastSocketRaw` from the shared daemon netlink boundary instead of importing `netlink-bindings::traits` or `netlink-socket2` directly.
+    - Added daemon-owned shared attribute intrinsics in `platform/netlink/attrs.rs` (`NetlinkAttributeRecord`, `NetlinkAttributeBuffer`, `push_attr_header`, `push_nested_attr_header`, `finalize_nested_attr`) on top of the `netlink-bindings` primitive/utils surface, and migrated firewall netlink expression helpers off direct `netlink_bindings::utils` imports.
+    - Added one shared `NetlinkResponse` adapter contract in `platform/netlink/io.rs`: generated-family socket replies pass through `BindingNetlinkResponse`, and unsupported-family datagrams such as NFQUEUE pass through `RawNetlinkResponse` before protocol-specific parsing.
   - **Constraints**:
     - Keep NFQUEUE runtime policy fail-closed on backend startup errors (no silent fallback to legacy FFI path).
     - Preserve queue configuration sequence semantics (PF bind, queue bind, copy params, maxlen, UID/GID flags best-effort).
@@ -271,6 +274,7 @@ eBPF library policy:
   - **Incremental progress (2026-04-27)**:
     - Replaced manual `build_listen_payload()` byte construction with `#[repr(C)]` typed structs (`CnMsg`, `CnMsgListenPayload`) and `mem::transmute`, eliminating 6 `copy_from_slice` calls with magic ranges.
     - Replaced `parse_pid_event_payload()` magic-offset parsing (`read_ne_value_at` at hard-coded byte offsets) with typed `#[repr(C)]` struct overlays (`ProcEventHeader`, `ExecExitProcEventData`, `ForkProcEventData`) using `ptr::read_unaligned`; field access is now self-documenting.
+    - Replaced the remaining framed-test `cn_msg.len` magic-offset helper with the existing typed `CnMsg` overlay and removed the obsolete test-only byte-read probes.
     - Scoped test-only constants and imports to `#[cfg(test)]`.
     - NOTE(netlink-baseline): `netlink-bindings` 0.3.0 has no `connector` module — no typed cn_msg/proc_event decoder available. Hand-defined `#[repr(C)]` structs are justified.
   - **Why**:

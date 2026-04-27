@@ -5,7 +5,7 @@ use transport_wire_core::NotificationInboundPort;
 use transport_wire_core::{WireCommandAction, WireNotificationReply, WireNotificationReplyCode};
 
 use super::client::ClientService;
-use crate::models::command_action::CommandAction;
+use crate::models::command::action::CommandAction;
 
 pub struct NotificationStream {
     pub inbound: Box<dyn NotificationInboundPort>,

@@ -1,8 +1,8 @@
 use std::sync::atomic::Ordering;
 use transport_wire_core::WireStatistics;
 
-use crate::models::connection_state::ConnectionAttempt;
-use crate::models::metrics_snapshot::MetricsSnapshot;
+use crate::models::connection::state::ConnectionAttempt;
+use crate::models::metrics::snapshot::MetricsSnapshot;
 use crate::services::storage::StorageService;
 
 use super::{
@@ -45,11 +45,11 @@ impl StatsService {
 
     pub(super) fn protocol_name(attempt: &ConnectionAttempt) -> &'static str {
         match attempt.protocol {
-            crate::models::connection_state::TransportProtocol::Tcp => "tcp",
-            crate::models::connection_state::TransportProtocol::Udp => "udp",
-            crate::models::connection_state::TransportProtocol::UdpLite => "udplite",
-            crate::models::connection_state::TransportProtocol::Sctp => "sctp",
-            crate::models::connection_state::TransportProtocol::Icmp => "icmp",
+            crate::models::connection::state::TransportProtocol::Tcp => "tcp",
+            crate::models::connection::state::TransportProtocol::Udp => "udp",
+            crate::models::connection::state::TransportProtocol::UdpLite => "udplite",
+            crate::models::connection::state::TransportProtocol::Sctp => "sctp",
+            crate::models::connection::state::TransportProtocol::Icmp => "icmp",
         }
     }
 

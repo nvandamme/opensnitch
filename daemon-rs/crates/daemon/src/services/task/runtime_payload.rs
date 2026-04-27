@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use transport_wire_core::{decode_json_notification_payload, decode_json_value_payload};
 
-use crate::models::task_config::{DownloaderTaskConfig, IocScannerTaskConfig};
+use crate::models::task::config::{DownloaderTaskConfig, IocScannerTaskConfig};
 use crate::utils::json_value;
 
 use super::naming as task_runtime_naming;

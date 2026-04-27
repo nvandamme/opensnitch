@@ -4,7 +4,7 @@ use transport_wire_core::{
     WireSubscriptionStatistics,
 };
 
-use crate::models::subscription_rpc::SubscriptionCommand;
+use crate::models::subscription::rpc::SubscriptionCommand;
 use crate::services::audit::AuditService;
 use crate::services::stats::StatsService;
 
@@ -26,22 +26,22 @@ impl SubscriptionService {
     #[allow(dead_code)]
     pub async fn handle_wire_command(&self, command: SubscriptionCommand) -> WireSubscriptionReply {
         let operation = match command.operation {
-            crate::models::subscription_rpc::SubscriptionOperation::Unspecified => {
+            crate::models::subscription::rpc::SubscriptionOperation::Unspecified => {
                 WireSubscriptionAction::Unspecified as i32
             }
-            crate::models::subscription_rpc::SubscriptionOperation::List => {
+            crate::models::subscription::rpc::SubscriptionOperation::List => {
                 WireSubscriptionAction::List as i32
             }
-            crate::models::subscription_rpc::SubscriptionOperation::Apply => {
+            crate::models::subscription::rpc::SubscriptionOperation::Apply => {
                 WireSubscriptionAction::Apply as i32
             }
-            crate::models::subscription_rpc::SubscriptionOperation::Delete => {
+            crate::models::subscription::rpc::SubscriptionOperation::Delete => {
                 WireSubscriptionAction::Delete as i32
             }
-            crate::models::subscription_rpc::SubscriptionOperation::Refresh => {
+            crate::models::subscription::rpc::SubscriptionOperation::Refresh => {
                 WireSubscriptionAction::Refresh as i32
             }
-            crate::models::subscription_rpc::SubscriptionOperation::Deploy => {
+            crate::models::subscription::rpc::SubscriptionOperation::Deploy => {
                 WireSubscriptionAction::Deploy as i32
             }
         };

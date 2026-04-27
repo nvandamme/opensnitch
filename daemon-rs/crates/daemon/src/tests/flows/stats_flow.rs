@@ -21,7 +21,7 @@ struct TestExporter {
 }
 
 impl StatsExporterPort for TestExporter {
-    fn export_snapshot(&self, _snapshot: &crate::models::metrics_snapshot::MetricsSnapshot) {
+    fn export_snapshot(&self, _snapshot: &crate::models::metrics::snapshot::MetricsSnapshot) {
         self.exports.fetch_add(1, Ordering::SeqCst);
     }
 }

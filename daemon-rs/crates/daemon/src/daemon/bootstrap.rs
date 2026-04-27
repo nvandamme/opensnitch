@@ -213,7 +213,7 @@ impl Daemon {
 
         // §7: load JSON config layer for metrics export (fail-open: absent file → defaults).
         let metrics_config =
-            crate::models::metrics_config::MetricsConfig::load_sibling(&config.config_path)
+            crate::models::metrics::config::MetricsConfig::load_sibling(&config.config_path)
                 .unwrap_or_else(|e| {
                     warn!("metrics.json could not be loaded, using defaults: {e}");
                     Default::default()

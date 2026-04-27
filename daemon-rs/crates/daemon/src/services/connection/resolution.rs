@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::models::{
-    connection_state::ConnectionAttempt,
-    process_state::{ProcessInfo, ProcessNode},
+    connection::state::ConnectionAttempt,
+    process::state::{ProcessInfo, ProcessNode},
 };
 
 use super::{ConnectionContext, ConnectionService};

@@ -7,7 +7,7 @@ use transport_wire_core::WireNotificationReply;
 use super::notification::NotificationFlow;
 use crate::{
     config::{Config, DefaultAction},
-    models::command_rpc::ClientCommand,
+    models::command::rpc::ClientCommand,
     services::client::{ClientPrincipal, ClientSession, transport::CapturedServerCertIdentity},
     utils::channel_send::send_with_backpressure,
 };

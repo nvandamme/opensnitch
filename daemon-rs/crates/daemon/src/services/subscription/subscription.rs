@@ -16,7 +16,7 @@ use transport_wire_core::{
 };
 
 use super::defaults::{DEFAULT_ROOT_DIR, DEFAULT_STORE_FILE};
-use crate::models::subscription_storage::SubscriptionRecord;
+use crate::models::subscription::storage::SubscriptionRecord;
 use crate::services::subscription::storage::SubscriptionStorage;
 use crate::utils::http_client::{HttpClient, build_http_client};
 use crate::utils::time_nonce::unix_epoch_nanos;

@@ -4,11 +4,9 @@ use anyhow::Result;
 
 use crate::{
     config::Config,
-    models::{
-        config_runtime::FirewallPersistenceMode,
-        firewall_config::FirewallConfig,
-        firewall_state::{FirewallBackend, FirewallState},
-    },
+    models::config::runtime::FirewallPersistenceMode,
+    platform::firewall::config::FirewallConfig,
+    platform::firewall::state::{FirewallBackend, FirewallState},
 };
 
 use super::{firewall::FirewallService, runtime_store::FirewallRuntime};

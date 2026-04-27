@@ -10,8 +10,8 @@ use prost::Message;
 use transport_wire_core::WireSubscriptionStatistics;
 
 use crate::models::{
-    metrics_snapshot::MetricsExportSnapshot,
-    prometheus_wire::{Counter, Gauge, LabelPair, Metric, MetricFamily, MetricType},
+    metrics::prometheus_wire::{Counter, Gauge, LabelPair, Metric, MetricFamily, MetricType},
+    metrics::snapshot::MetricsExportSnapshot,
 };
 
 pub(crate) type ProtoSnapshot = MetricsExportSnapshot;

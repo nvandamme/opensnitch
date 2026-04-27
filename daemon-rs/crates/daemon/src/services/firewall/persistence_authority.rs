@@ -3,8 +3,8 @@ use std::process::Command as StdCommand;
 use anyhow::Result;
 
 use crate::{
-    config::Config, models::firewall_config::FirewallConfig,
-    models::firewall_state::FirewallBackend,
+    config::Config, platform::firewall::config::FirewallConfig,
+    platform::firewall::state::FirewallBackend,
 };
 
 #[cfg(not(test))]

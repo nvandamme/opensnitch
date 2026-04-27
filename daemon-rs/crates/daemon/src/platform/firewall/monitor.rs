@@ -1,12 +1,21 @@
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use crate::platform::netlink::control::should_process_nlmsg_payload;
 use crate::platform::netlink::io::open_and_listen_multicast_socket;
+use crate::platform::netlink::message::NetlinkEvent;
 use crate::services::{firewall::FirewallService, rule::RuleService};
 
+/// Marker event type for nftables ruleset change notifications.
+struct NftDriftEvent;
+
+impl NetlinkEvent for NftDriftEvent {
+    fn decode_event(_msg_type: u16, _payload: &[u8]) -> Result<Option<Self>> {
+        Ok(Some(NftDriftEvent))
+    }
+}
+
 fn should_process_nft_event_message(msg_type: u16, payload: &[u8]) -> Result<bool> {
-    should_process_nlmsg_payload(msg_type, payload)
+    Ok(NftDriftEvent::decode_from_raw(msg_type, payload)?.is_some())
 }
 
 /// NFNLGRP_NFTABLES (group 7) — emitted by the kernel on any nftables ruleset

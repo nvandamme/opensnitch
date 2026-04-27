@@ -11,7 +11,7 @@ use storage_format_core::StorageFormatCodec;
 use storage_format_json::JsonStorageFormat;
 use storage_format_uci::{UciCodecError, UciDocument, UciEntry, UciSection, UciStorageFormat};
 
-use crate::models::firewall_config::{
+use crate::platform::firewall::config::{
     FirewallChain, FirewallConfig, FirewallExpression, FirewallRule, FirewallStatement,
     FirewallStatementValue, FirewallZone,
 };

@@ -6,20 +6,14 @@ use crate::{
     daemon::{KernelPipeline, KernelPipelineCounters, ProcessKernelEvent},
     models::{
         audit::{AuditEvent, AuditEventKind, DnsAction, ProcessAction},
-        dns_payload::DnsPayload,
-        kernel_event::KernelEvent,
-        proc_event::ProcEventKind,
+        dns::payload::DnsPayload,
+        kernel::event::{KernelEvent, ProcEventKind},
     },
     services::{
         audit::AuditService, dns::DnsService, process::ProcessService, stats::StatsService,
     },
     tunables::RuntimeTunables,
-    workers::runtime::{
-        kernel::{
-            dispatch as kernel_dispatch, firewall as kernel_firewall, process as kernel_process,
-        },
-        support,
-    },
+    workers::runtime::{helpers as support, kernel as kernel_dispatch},
 };
 
 #[derive(Clone)]
@@ -162,7 +156,7 @@ impl KernelFlow {
                 tunables.kernel_process_queue_capacity,
             );
             let (firewall_tx, firewall_rx) = tokio::sync::mpsc::channel::<
-                crate::models::firewall_state::FirewallState,
+                crate::platform::firewall::state::FirewallState,
             >(tunables.kernel_firewall_queue_capacity);
 
             // Bounded ingress channels: the fan-out task uses try_send so it never
@@ -175,7 +169,7 @@ impl KernelFlow {
                     tunables.kernel_process_queue_capacity,
                 );
             let (firewall_ingress_tx, firewall_ingress_rx) =
-                tokio::sync::mpsc::channel::<crate::models::firewall_state::FirewallState>(
+                tokio::sync::mpsc::channel::<crate::platform::firewall::state::FirewallState>(
                     tunables.kernel_firewall_queue_capacity,
                 );
 
@@ -302,7 +296,7 @@ impl KernelFlow {
                                 }
                             }
                         }
-                        kernel_process::handle_process_kernel_event(
+                        kernel_dispatch::handle_process_kernel_event(
                             &process_service,
                             &process_audit,
                             event,
@@ -313,7 +307,7 @@ impl KernelFlow {
 
             let firewall_handle =
                 Self::spawn_consumer_task(firewall_rx, shutdown.clone(), move |state| async move {
-                    kernel_firewall::handle_firewall_state_event(state).await;
+                    kernel_dispatch::handle_firewall_state_event(state).await;
                 });
 
             let dns_dispatch_handle = Self::spawn_pipeline_dispatch_task(

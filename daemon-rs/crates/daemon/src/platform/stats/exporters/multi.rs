@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::models::metrics_snapshot::MetricsSnapshot;
+use crate::models::metrics::snapshot::MetricsSnapshot;
 use crate::platform::stats::exporter_port::StatsExporterPort;
 
 /// Fan-out adapter: dispatches `export_snapshot` to multiple inner exporters.

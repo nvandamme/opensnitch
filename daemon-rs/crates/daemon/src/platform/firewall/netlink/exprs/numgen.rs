@@ -1,7 +1,7 @@
 use super::NftExpression;
 use super::shared::{parse_cmp_mapped_conditions, parse_unsigned_token, push_numgen_cmp};
+use crate::platform::netlink::attrs::NetlinkAttributeRecord;
 use netlink_bindings::nftables;
-use netlink_bindings::utils::Rec;
 
 pub(crate) fn parse_numgen_conditions(
     tokens: &[&str],
@@ -65,7 +65,7 @@ pub(in crate::platform::firewall::netlink) struct NftNumgen {
 }
 
 impl NftNumgen {
-    pub(in crate::platform::firewall::netlink) fn encode<Prev: Rec>(
+    pub(in crate::platform::firewall::netlink) fn encode<Prev: NetlinkAttributeRecord>(
         &self,
         exprs: nftables::PushExprListAttrs<Prev>,
     ) -> nftables::PushExprListAttrs<Prev> {

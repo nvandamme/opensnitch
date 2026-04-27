@@ -6,7 +6,7 @@ use transport_wire_core::{
     WireConnection, WireProcess, WireStringInt,
 };
 
-use crate::models::ui_alert::{
+use crate::models::notification::alert::{
     UiAlert, UiAlertConnection, UiAlertData, UiAlertProcess, UiAlertStringInt,
 };
 use crate::utils::ring_buffer::RingBuffer;

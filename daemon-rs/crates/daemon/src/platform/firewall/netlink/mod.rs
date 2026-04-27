@@ -3,7 +3,7 @@ mod apply;
 mod batch;
 mod chain;
 mod exprs;
-mod parse;
+pub(crate) mod parse;
 mod rule;
 mod table;
 mod types;

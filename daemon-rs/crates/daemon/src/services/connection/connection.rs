@@ -1,8 +1,5 @@
-use crate::models::{
-    connection_context::ConnectionContext,
-    connection_state::ConnectionAttempt,
-    connection_worker_state::{ConnectionWorkerKind, ConnectionWorkerState},
-};
+use crate::models::{connection::context::ConnectionContext, connection::state::ConnectionAttempt};
+use crate::workers::connection::worker_state::{ConnectionWorkerKind, ConnectionWorkerState};
 use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

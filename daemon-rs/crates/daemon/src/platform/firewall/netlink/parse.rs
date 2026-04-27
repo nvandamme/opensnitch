@@ -22,7 +22,7 @@ use super::exprs::{
     verdict::{NftVerdict, parse_reject_action},
 };
 use super::{ParseError, ParseFamily};
-use crate::models::firewall_config::{FirewallRule, FirewallStatement, FirewallStatementValue};
+use crate::platform::firewall::config::{FirewallRule, FirewallStatement, FirewallStatementValue};
 
 impl NftRule {
     pub(super) fn parse_all(expression: &str) -> Option<Vec<Self>> {
@@ -253,17 +253,14 @@ impl NftRule {
                     continue;
                 }
                 Some(&"rt") => {
-                    let (next_expansions, next) =
-                        parse_rt_conditions(&tokens, i, end, expansions)
-                            .ok_or(ParseError::invalid_value(ParseFamily::Rt))?;
+                    let (next_expansions, next) = parse_rt_conditions(&tokens, i, end, expansions)
+                        .ok_or(ParseError::invalid_value(ParseFamily::Rt))?;
                     expansions = next_expansions;
                     i = next;
                     continue;
                 }
                 Some(&"add") | Some(&"update")
-                    if tokens
-                        .get(i + 1)
-                        .is_some_and(|t| t.starts_with('@')) =>
+                    if tokens.get(i + 1).is_some_and(|t| t.starts_with('@')) =>
                 {
                     let (action, next) = parse_dynset_action(&tokens, i, end)
                         .ok_or(ParseError::invalid_value(ParseFamily::Dynset))?;
@@ -513,7 +510,7 @@ fn append_limit_statement_tokens(
     Some(())
 }
 
-fn tokenize_nft_expression(input: &str) -> Vec<String> {
+pub(crate) fn tokenize_nft_expression(input: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
     let mut chars = input.chars().peekable();
@@ -553,29 +550,6 @@ fn tokenize_nft_expression(input: &str) -> Vec<String> {
     }
 
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::tokenize_nft_expression;
-
-    #[test]
-    fn tokenize_expression_keeps_quoted_and_splits_complex_fragments() {
-        let tokens =
-            tokenize_nft_expression("log prefix \"opensnitch test\" tcp flags & (fin|syn|rst|ack)");
-        assert_eq!(
-            tokens,
-            vec![
-                "log",
-                "prefix",
-                "\"opensnitch test\"",
-                "tcp",
-                "flags",
-                "&",
-                "(fin|syn|rst|ack)"
-            ]
-        );
-    }
 }
 
 fn finish_expansions(
@@ -632,13 +606,21 @@ fn classify_expression_family(expression: &str) -> ParseFamily {
     if expr.contains("tcp option") || expr.contains("ip6 exthdr") {
         return ParseFamily::Exthdr;
     }
-    if expr.starts_with("jhash ") || expr.contains(" jhash ") || expr.starts_with("symhash ") || expr.contains(" symhash ") {
+    if expr.starts_with("jhash ")
+        || expr.contains(" jhash ")
+        || expr.starts_with("symhash ")
+        || expr.contains(" symhash ")
+    {
         return ParseFamily::Hash;
     }
     if expr.starts_with("rt ") || expr.contains(" rt ") {
         return ParseFamily::Rt;
     }
-    if expr.starts_with("add @") || expr.starts_with("update @") || expr.contains(" add @") || expr.contains(" update @") {
+    if expr.starts_with("add @")
+        || expr.starts_with("update @")
+        || expr.contains(" add @")
+        || expr.contains(" update @")
+    {
         return ParseFamily::Dynset;
     }
     if expr.starts_with("ct ") || expr.contains(" ct ") {

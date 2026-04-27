@@ -1,9 +1,12 @@
+use crate::platform::netlink::attrs::{
+    NetlinkAttributeBuffer, NetlinkAttributeRecord, finalize_nested_attr, push_attr_header,
+    push_nested_attr_header,
+};
 use netlink_bindings::nftables;
-use netlink_bindings::utils::{Rec, finalize_nested_header, push_header, push_nested_header};
 
+use super::super::{NFTA_CONNLIMIT_COUNT, NFTA_CONNLIMIT_FLAGS, NFTA_EXPR_DATA};
 use super::NftExpression;
 use super::shared::parse_unsigned_token;
-use super::super::{NFTA_CONNLIMIT_COUNT, NFTA_CONNLIMIT_FLAGS, NFTA_EXPR_DATA};
 
 const NFT_CONNLIMIT_F_INV: u32 = 1;
 
@@ -42,23 +45,22 @@ pub(in crate::platform::firewall::netlink) struct NftConnlimit {
 }
 
 impl NftConnlimit {
-    pub(in crate::platform::firewall::netlink) fn encode<Prev: Rec>(
+    pub(in crate::platform::firewall::netlink) fn encode<Prev: NetlinkAttributeRecord>(
         &self,
         exprs: nftables::PushExprListAttrs<Prev>,
     ) -> nftables::PushExprListAttrs<Prev> {
         let mut expr = exprs.nested_elem().push_name_bytes(b"connlimit");
-        let data_offset = push_nested_header(expr.as_rec_mut(), NFTA_EXPR_DATA);
+        let data_offset = push_nested_attr_header(expr.attrs_mut(), NFTA_EXPR_DATA);
 
-        push_header(expr.as_rec_mut(), NFTA_CONNLIMIT_COUNT, 4);
-        expr.as_rec_mut().extend(self.count.to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_CONNLIMIT_COUNT, 4);
+        expr.attrs_mut().extend(self.count.to_be_bytes());
 
         if self.invert {
-            push_header(expr.as_rec_mut(), NFTA_CONNLIMIT_FLAGS, 4);
-            expr.as_rec_mut()
-                .extend(NFT_CONNLIMIT_F_INV.to_be_bytes());
+            push_attr_header(expr.attrs_mut(), NFTA_CONNLIMIT_FLAGS, 4);
+            expr.attrs_mut().extend(NFT_CONNLIMIT_F_INV.to_be_bytes());
         }
 
-        finalize_nested_header(expr.as_rec_mut(), data_offset);
+        finalize_nested_attr(expr.attrs_mut(), data_offset);
         expr.end_nested()
     }
 }

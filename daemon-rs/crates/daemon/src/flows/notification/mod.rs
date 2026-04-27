@@ -1,3 +1,4 @@
+pub(crate) mod auth_capability;
 mod authorization;
 mod classification;
 pub mod notification;

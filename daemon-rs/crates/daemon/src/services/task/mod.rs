@@ -3,7 +3,7 @@ pub(crate) use task::*;
 
 mod runtime_types;
 #[allow(unused_imports)]
-pub(crate) use crate::models::task_lifecycle_event::TaskLifecycleEvent;
+pub(crate) use crate::models::task::lifecycle_event::TaskLifecycleEvent;
 pub(crate) use runtime_payload::TaskRuntimePayload;
 pub(crate) use runtime_types::{RuntimeTaskHandles, TaskStorageRuntime};
 mod runtime_lifecycle;

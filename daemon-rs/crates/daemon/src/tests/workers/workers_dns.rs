@@ -1,4 +1,4 @@
-use crate::{models::dns_payload::DnsPayload, workers::dns::dns_worker::DnsWorkerControl};
+use crate::{models::dns::payload::DnsPayload, workers::dns::dns_worker::DnsWorkerControl};
 use serde_json::json;
 
 #[test]

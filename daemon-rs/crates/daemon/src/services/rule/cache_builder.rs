@@ -7,7 +7,7 @@ use anyhow::Result;
 use globset::Glob;
 use tokio::task::JoinSet;
 
-use crate::models::rule_record::{RuleOperator, RuleRecord};
+use crate::models::rule::record::{RuleOperator, RuleRecord};
 use crate::utils::string_iter::trimmed_non_empty;
 
 use super::{

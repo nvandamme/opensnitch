@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::bus::Bus;
 use crate::config::ProcMonitorMethod;
-use crate::models::process_worker_state::ProcessWorkerState;
+use crate::models::process::worker_state::ProcessWorkerState;
 use crate::services::ebpf::EbpfObjectAvailability;
 use crate::services::lifecycle::{
     EventSubscription, ServiceLifecycle, ServiceMonitorStats, ServiceStatus, StatusSubscription,

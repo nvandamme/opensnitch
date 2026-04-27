@@ -1,4 +1,4 @@
-use crate::models::{task_wire::LegacyTaskResultPayload, ui_alert::UiAlert};
+use crate::models::{notification::alert::UiAlert, task::wire::LegacyTaskResultPayload};
 use crate::services::client::{AlertBuffer, enqueue_alert, error_alert, info_alert};
 use crate::utils::notification_reply::{is_ok_reply_code, send_notification_reply};
 

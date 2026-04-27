@@ -4,9 +4,9 @@ use transport_wire_core::{
 };
 
 use crate::{
-    models::command_rpc::IncomingSubscriptionNotification,
-    models::subscription_rpc::{SubscriptionCommand, SubscriptionOperation},
-    models::subscription_storage::SubscriptionRecord,
+    models::command::rpc::IncomingSubscriptionNotification,
+    models::subscription::rpc::{SubscriptionCommand, SubscriptionOperation},
+    models::subscription::storage::SubscriptionRecord,
     services::{
         client::ClientService,
         subscription::{

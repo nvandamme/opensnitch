@@ -1,7 +1,7 @@
 use transport_wire_core::{WireNotificationReplyCode, WireRule, WireRuleOperator};
 
 use crate::commands::rule::RuleCommandService;
-use crate::models::rule_record::RuleRecord;
+use crate::models::rule::record::RuleRecord;
 use crate::services::client::ClientService;
 use crate::services::rule::RuleService;
 use crate::tests::support::TestDir;
@@ -120,8 +120,8 @@ async fn initialized_rule_service(temp_dir: &TestDir) -> RuleService {
 fn sample_rule(name: &str) -> RuleRecord {
     RuleRecord {
         name: name.to_string(),
-        action: crate::models::rule_record::RuleAction::Allow,
-        duration: crate::models::rule_record::RuleDuration::Permanent,
+        action: crate::models::rule::record::RuleAction::Allow,
+        duration: crate::models::rule::record::RuleDuration::Permanent,
         enabled: false,
         operator: crate::services::rule::rule_record_from_wire(&WireRule {
             operator: Some(WireRuleOperator {

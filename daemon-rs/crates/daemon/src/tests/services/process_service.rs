@@ -1,4 +1,4 @@
-use crate::models::proc_event::ProcEventKind;
+use crate::platform::procmon::proc_event::ProcEventKind;
 use crate::services::process::ProcessService;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;

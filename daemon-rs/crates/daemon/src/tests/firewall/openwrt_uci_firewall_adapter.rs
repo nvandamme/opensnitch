@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use crate::models::firewall_config::{
+use crate::platform::firewall::config::{
     FirewallChain, FirewallConfig, FirewallExpression, FirewallRule, FirewallStatement,
     FirewallStatementValue, FirewallZone,
 };

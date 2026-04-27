@@ -7,18 +7,18 @@ use crate::{
     bus::Bus,
     models::{
         audit::{AuditEvent, AuditEventKind, VerdictAction, VerdictSource},
-        connection_state::ConnectionAttempt,
-        verdict_rpc::VerdictReply,
+        connection::state::ConnectionAttempt,
+        verdict::rpc::VerdictReply,
     },
+    platform::conman::connection::ProtoMapperAdapter,
     platform::conman::event_exporter::ConnectionEventExporterPort,
-    platform::netstat::proto_mapper::ProtoMapperAdapter,
     services::rule::rule_record_from_wire,
     services::{
         audit::AuditService,
         client::{AlertBuffer, ClientService, ClientTransportConnector, WireSessionCache},
         config::ConfigService,
         connection::ConnectionService,
-        policy_tx::{PolicyOwner, PolicyTxRequest, global_policy_tx},
+        policy::{PolicyOwner, PolicyTxRequest, global_policy_tx},
         rule::RuleService,
         stats::StatsService,
     },
@@ -26,7 +26,7 @@ use crate::{
 use std::sync::Arc;
 use tracing::{debug, warn};
 
-use crate::models::{rule_match_decision::RuleMatchDecision, rule_record::RuleRecord};
+use crate::models::{rule::match_decision::RuleMatchDecision, rule::record::RuleRecord};
 
 #[derive(Debug)]
 pub(super) struct VerdictRulePersistRequest {
@@ -259,7 +259,7 @@ impl VerdictFlow {
     /// Build a WireRule summary for runtime-matched rules.
     #[inline]
     fn summary_rule_to_wire(
-        summary: crate::models::rule_match_decision::RuleMatchSummary,
+        summary: crate::models::rule::match_decision::RuleMatchSummary,
     ) -> WireRule {
         WireRule {
             created: 0,

@@ -7,7 +7,7 @@ use crate::{
     bus::{BusCaps, BusState},
     config::Config,
     flows::{connect::ConnectFlow, verdict::VerdictFlow},
-    models::connection_state::{ConnectionAttempt, TransportProtocol},
+    models::connection::state::{ConnectionAttempt, TransportProtocol},
     services::{
         client::ClientService, config::ConfigService, connection::ConnectionService,
         dns::DnsService, process::ProcessService, rule::RuleService, stats::StatsService,

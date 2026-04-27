@@ -1,8 +1,8 @@
 use tokio::sync::mpsc;
 
 use crate::models::{
-    command_rpc::ClientCommand, connection_state::ConnectionAttempt, kernel_event::KernelEvent,
-    ui_alert::UiAlert, verdict_rpc::VerdictReply,
+    command::rpc::ClientCommand, connection::state::ConnectionAttempt, kernel::event::KernelEvent,
+    notification::alert::UiAlert, verdict::rpc::VerdictReply,
 };
 
 #[derive(Clone)]

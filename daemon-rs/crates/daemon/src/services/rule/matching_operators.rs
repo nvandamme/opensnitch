@@ -2,9 +2,9 @@ use std::borrow::Cow;
 use std::path::Path;
 
 use crate::models::{
-    connection_state::{ConnectionAttempt, TransportProtocol},
-    process_state::ProcessInfo,
-    rule_record::RuleOperator,
+    connection::state::{ConnectionAttempt, TransportProtocol},
+    process::state::ProcessInfo,
+    rule::record::RuleOperator,
 };
 
 use super::{ListPathSlotCache, RegexCacheKey, RuleMatchCaches, RuleService};

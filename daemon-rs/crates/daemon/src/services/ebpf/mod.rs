@@ -6,7 +6,7 @@ mod paths;
 mod ringbuf;
 mod runtime_lifecycle;
 
-pub use crate::models::ebpf_availability::EbpfObjectAvailability;
+pub use crate::models::ebpf::availability::EbpfObjectAvailability;
 pub use ebpf::*;
 pub(crate) use paths::*;
 // Re-exported backend API surface used by feature-specific runtime modules.

@@ -3,12 +3,13 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 
 use crate::{
-    models::{firewall_config::FirewallConfig, firewall_state::FirewallBackend},
+    platform::firewall::config::FirewallConfig,
     platform::firewall::port::InterceptionHealth,
     platform::firewall::port::{
         FirewallIntrospectionPort, FirewallPersistencePort, IptablesFirewallPort,
         NftablesFirewallPort,
     },
+    platform::firewall::state::FirewallBackend,
     platform::firewall::{netlink::FirewallNetlinkAdapter, nftables::FirewallNftablesAdapter},
     services::lifecycle::ServiceState,
     utils::command_path::resolve_command_path,

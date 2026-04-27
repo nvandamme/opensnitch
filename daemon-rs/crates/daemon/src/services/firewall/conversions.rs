@@ -1,16 +1,16 @@
 use transport_wire_core;
 
-use crate::models::firewall_config::{
-    FirewallChain, FirewallConfig, FirewallExpression, FirewallRule, FirewallStatement,
-    FirewallStatementValue, FirewallZone,
-};
-use crate::models::firewall_state::FirewallBackend;
-use crate::models::firewall_storage::{
+use crate::models::firewall::storage::{
     PersistedFirewallChain, PersistedFirewallExpression, PersistedFirewallRule,
     PersistedFirewallStatement, PersistedFirewallStatementValue, PersistedFirewallZone,
     RawFirewallChain, RawFirewallExpression, RawFirewallRule, RawFirewallStatement,
     RawFirewallStatementValue, RawFirewallZone,
 };
+use crate::platform::firewall::config::{
+    FirewallChain, FirewallConfig, FirewallExpression, FirewallRule, FirewallStatement,
+    FirewallStatementValue, FirewallZone,
+};
+use crate::platform::firewall::state::FirewallBackend;
 use crate::utils::name_parsing::normalized_name;
 
 pub(crate) fn parse_firewall_backend(name: &str) -> FirewallBackend {

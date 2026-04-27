@@ -12,7 +12,7 @@ use crate::{
         rule::RuleCommandService,
         task::{TaskCommandDispatch, TaskCommandService},
     },
-    models::command_rpc::ClientCommand,
+    models::command::rpc::ClientCommand,
     services::{
         audit::AuditService, client::ClientService, config::ConfigService,
         firewall::FirewallService, lifecycle::ServiceLifecycle, process::ProcessService,
@@ -92,7 +92,7 @@ impl CommandFlow {
 
         let command_control = CommandControlService::new(audit.clone());
         let rule_command = RuleCommandService::new(
-            crate::services::policy_tx::global_policy_tx().clone(),
+            crate::services::policy::global_policy_tx().clone(),
             audit.clone(),
         );
         let task_command = TaskCommandService::new(audit.clone());

@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use transport_wire_core::{WireSubscription, WireSubscriptionEvent, WireSubscriptionStatistics};
 
 use super::{SubscriptionRecord, record_from_wire, record_to_wire};
-use crate::models::subscription_storage::SubscriptionStorageDocument;
+use crate::models::subscription::storage::SubscriptionStorageDocument;
 use crate::services::storage::StorageService;
 use crate::utils::sort_key::sort_by_string_key;
 

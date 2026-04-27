@@ -1,5 +1,5 @@
+use crate::platform::netlink::attrs::NetlinkAttributeRecord;
 use netlink_bindings::nftables;
-use netlink_bindings::utils::Rec;
 
 use super::NftTable;
 use super::exprs::bitwise::NftBitwise;
@@ -57,7 +57,7 @@ pub(super) enum NftExpression {
 }
 
 impl NftExpression {
-    pub(super) fn encode<Prev: Rec>(
+    pub(super) fn encode<Prev: NetlinkAttributeRecord>(
         &self,
         exprs: nftables::PushExprListAttrs<Prev>,
     ) -> nftables::PushExprListAttrs<Prev> {

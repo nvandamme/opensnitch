@@ -16,6 +16,53 @@ Versioning baseline:
 
 ### Changed
 
+- **models/ mass reorganization: flat files → 17 domain subdirectories**
+  (`crates/daemon/src/models/`):
+  - Reorganized ~45 flat model files into 17 domain subdirectories: `audit/`, `command/`, `config/`, `connection/`, `dns/`, `ebpf/`, `firewall/`, `kernel/`, `metrics/`, `notification/`, `policy/`, `process/`, `rule/`, `storage/`, `subscription/`, `task/`, `verdict/`.
+  - Each domain directory owns its serde DTOs, wire types, and shared state structs; all cross-crate import paths updated.
+  - Removed `utils/conntrack.rs` (unused).
+
+- **DTO violation fixes: shared serde types relocated to models/**
+  (`crates/daemon/src/models/{task/socket_monitor_payload.rs,config/tunables.rs,firewall/storage.rs}`):
+  - Moved `SocketMonitorPayload` from `services/task/` to `models/task/` (sibling to existing task DTOs).
+  - Moved `RuntimeTunablesDescriptor` from `tunables/runtime.rs` to `models/config/tunables.rs` (file-loadable config shape).
+  - Moved firewall config shapes from `platform/firewall/storage.rs` to `models/firewall/storage.rs`.
+  - `data_contract_ownership` test now enforces zero-allowlist: any serde type outside `models/` or `platform/` is a violation.
+
+- **workers/runtime/ collapse: 6 subdirectories → flat files + ebpf/control/ flattened**
+  (`crates/daemon/src/workers/runtime/`):
+  - Collapsed `connect/dispatch.rs` → `connect.rs`, `nfqueue/worker.rs` → `nfqueue.rs`, `verdict/dispatch.rs` → `verdict.rs` (single-file subdirs removed).
+  - Renamed `support/` → `helpers.rs` (semantic rename: worker utility helpers).
+  - Merged `kernel/{dispatch,firewall,process}.rs` → single `kernel.rs` (183 lines).
+  - Collapsed `watch/{control.rs,control_trigger.rs}` → `watch.rs` + `watch_trigger.rs` (flat files, `#[path]` updated).
+  - Flattened `ebpf/control/` sub-subdirectory: moved 5 impl files (`aya_runtime.rs`, `bpftool.rs`, `lifecycle.rs`, `supervise.rs`, `types.rs`) up into `ebpf/`; merged shared imports from `control/mod.rs` into `ebpf/mod.rs`.
+  - Only remaining subdirectory: `ebpf/` (8 files, ~1500 lines — justified by eBPF runtime complexity).
+  - All import paths updated across commands/, daemon/, flows/, services/, tests/, tunables/, utils/, workers/.
+
+- **Prometheus test fix: feature-gated content-type assertion**
+  (`crates/daemon/src/tests/metrics/stats_exporter_prometheus.rs`):
+  - `http_endpoint_returns_prometheus_text_by_default` now uses `#[cfg]`-gated assertion: expects `application/openmetrics-text` when `metrics-http-serve-openmetrics` feature is enabled, `text/plain` otherwise.
+
+- **services/policy_tx/ renamed to services/policy/**
+  (`crates/daemon/src/services/policy/`):
+  - Module path renamed from `policy_tx/` to `policy/`; type names (`PolicyTx*`) retained.
+
+- **worker_state.rs files relocated from services/ to workers/**
+  (`crates/daemon/src/workers/{connection/,dns/}`):
+  - Moved `worker_state.rs` from `services/connection/` and `services/dns/` to `workers/connection/` and `workers/dns/` respectively.
+
+- **workers/runtime/control/ collapsed to single file**
+  (`crates/daemon/src/workers/runtime/control.rs`):
+  - Merged `control/control.rs` + `control/mod.rs` into flat `control.rs` (417 lines).
+
+- **Netlink wire, proc connector, NFQUEUE, and firewall adapter improvements**
+  (see TODO.md incremental-progress entries for full enumeration):
+  - Added shared generic netlink wire helpers (`platform/netlink/wire.rs`), attribute intrinsics (`platform/netlink/attrs.rs`), and `NetlinkResponse` adapter contract (`platform/netlink/io.rs`).
+  - Centralized netlink primitive imports through `platform/netlink/io.rs`.
+  - Replaced proc connector framed-test `cn_msg.len` magic-offset helper with typed `CnMsg` overlay.
+  - NFQUEUE migrated to shared wire helpers; `platform/nfqueue/netlink_wire.rs` keeps only NFQUEUE-specific extensions.
+  - Various nfqueue and firewall platform cleanups and type safety improvements.
+
 - **Firewall netlink planning now binds OpenSnitch JSON rules through structured expressions first; textual parsing is fallback-only**
   (`crates/daemon/src/platform/firewall/{netlink/{adapter.rs,parse.rs,rule.rs,types.rs,exprs/{mod.rs,quota.rs}},nftables.rs}`,
   `crates/daemon/src/services/firewall/persistence_rule_parser.rs`,

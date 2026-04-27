@@ -1,6 +1,6 @@
 use crate::models::{
-    rule_record::{RuleAction, RuleDuration, RuleOperator, RuleRecord},
-    rule_storage::{RuleFile, RuleFileOperator},
+    rule::record::{RuleAction, RuleDuration, RuleOperator, RuleRecord},
+    rule::storage::{RuleFile, RuleFileOperator},
 };
 use crate::utils::name_parsing::case_folded;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};

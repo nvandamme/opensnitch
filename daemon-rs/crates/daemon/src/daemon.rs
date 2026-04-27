@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     bus::Bus,
-    models::config_runtime::FirewallPersistenceMode,
+    models::config::runtime::FirewallPersistenceMode,
     services::{
         audit::AuditService,
         client::{AlertBuffer, ClientService},
@@ -73,7 +73,7 @@ pub struct CliOverrides {
     pub firewall_persistence_mode: Option<String>,
     pub main_storage_format: Option<String>,
     pub rule_migration: RuleMigrationCliOverrides,
-    pub metrics: crate::models::metrics_config::MetricsCliOverrides,
+    pub metrics: crate::models::metrics::config::MetricsCliOverrides,
     pub audit: AuditCliOverrides,
 }
 
@@ -143,7 +143,7 @@ pub(crate) struct DaemonRuntime {
         feature = "metrics-http-push-influxdb",
         feature = "metrics-syslog"
     ))]
-    pub(crate) metrics_config: crate::models::metrics_config::MetricsConfig,
+    pub(crate) metrics_config: crate::models::metrics::config::MetricsConfig,
     /// Metrics CLI overrides supplied via `--metrics-*` flags (§7 highest tier; overrides env vars and JSON).
     // Read only inside metrics feature-gated blocks in tasks.rs.
     // blocks in tasks.rs; dead when both metrics features are off.
@@ -157,7 +157,7 @@ pub(crate) struct DaemonRuntime {
         feature = "metrics-http-push-influxdb",
         feature = "metrics-syslog"
     ))]
-    pub(crate) metrics_cli: crate::models::metrics_config::MetricsCliOverrides,
+    pub(crate) metrics_cli: crate::models::metrics::config::MetricsCliOverrides,
     /// Hot-reload handle for the Prometheus scrape HTTP server.
     ///
     /// Written once by `spawn_stats_flow` and updated on SIGHUP via
@@ -218,7 +218,7 @@ impl Daemon {
         let cleanup_runtime_rules = cleanup_runtime_rules
             && !matches!(
                 config.firewall_backend,
-                crate::models::firewall_state::FirewallBackend::OpenWrtUci
+                crate::platform::firewall::state::FirewallBackend::OpenWrtUci
             );
 
         if cleanup_runtime_rules

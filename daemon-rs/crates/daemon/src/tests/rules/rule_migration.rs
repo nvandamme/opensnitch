@@ -4,7 +4,7 @@ use crate::{
     daemon::{
         CliOverrides, classify_rule_for_ownerless_migration, load_ownerless_rule_migration_plan,
     },
-    models::rule_record::{RuleAction, RuleDuration, RuleOperator, RuleRecord},
+    models::rule::record::{RuleAction, RuleDuration, RuleOperator, RuleRecord},
     tests::support::{TestDir, read_text, write_text},
 };
 

@@ -1,4 +1,4 @@
-use crate::{config::Config, models::config_storage::RawConfig};
+use crate::{config::Config, models::config::storage::RawConfig};
 use anyhow::Result;
 
 use super::ConfigService;

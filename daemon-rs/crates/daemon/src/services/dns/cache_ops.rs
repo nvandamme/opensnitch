@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 
-use crate::models::dns_payload::DnsAnswerRecord;
+use crate::models::dns::payload::DnsAnswerRecord;
 
 use super::{DNS_CACHE_CAPACITY, DnsCacheMutation, DnsService};
 

@@ -1,4 +1,4 @@
-use crate::models::firewall_config::{FirewallChain, FirewallRule};
+use crate::platform::firewall::config::{FirewallChain, FirewallRule};
 use crate::platform::firewall::iptables::FirewallIptablesAdapter;
 
 #[test]

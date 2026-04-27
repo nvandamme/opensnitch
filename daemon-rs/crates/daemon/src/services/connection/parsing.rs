@@ -1,6 +1,6 @@
 use crate::models::{
-    connection_owner::ConnectionOwnerCacheKey,
-    connection_state::{ConnectionAttempt, TransportProtocol},
+    connection::owner::ConnectionOwnerCacheKey,
+    connection::state::{ConnectionAttempt, TransportProtocol},
 };
 use nix::libc;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};

@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::Config,
-    models::firewall_state::FirewallState,
+    platform::firewall::state::FirewallState,
     services::{
         config::ConfigService,
         lifecycle::{

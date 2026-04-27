@@ -4,7 +4,7 @@ use std::io::Write;
 
 use anyhow::{Result, anyhow};
 
-use crate::models::firewall_config::{FirewallConfig, FirewallRule};
+use crate::platform::firewall::config::{FirewallConfig, FirewallRule};
 use crate::utils::command_path::resolve_command_path;
 
 use super::firewall::FirewallService;

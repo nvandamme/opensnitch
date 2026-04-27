@@ -1,6 +1,6 @@
 use serde::{Deserialize, Deserializer};
 
-use crate::models::rule_storage::RuleFileOperator;
+use crate::models::rule::storage::RuleFileOperator;
 
 pub fn deserialize_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where

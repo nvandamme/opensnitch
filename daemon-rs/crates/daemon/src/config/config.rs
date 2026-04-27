@@ -11,7 +11,8 @@ use super::{
     LoggerSinkConfig, ProcMonitorMethod, StatsConfig,
 };
 use crate::{
-    models::{audit::AuditSeverity, config_storage::RawConfig, firewall_state::FirewallBackend},
+    models::{audit::AuditSeverity, config::storage::RawConfig},
+    platform::firewall::state::FirewallBackend,
     services::firewall::parse_firewall_backend,
     services::storage::StorageFormat,
     utils::name_parsing::normalized_name,

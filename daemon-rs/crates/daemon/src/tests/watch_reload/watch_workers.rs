@@ -9,10 +9,10 @@ use storage_format_json::JsonStorageFormat;
 
 use crate::{
     config::{Config, DefaultAction, ProcMonitorMethod},
-    models::rule_storage::{RuleFile, RuleFileOperator},
+    models::rule::storage::{RuleFile, RuleFileOperator},
     models::{
-        connection_state::{ConnectionAttempt, TransportProtocol},
-        process_state::ProcessInfo,
+        connection::state::{ConnectionAttempt, TransportProtocol},
+        process::state::ProcessInfo,
     },
     services::{
         config::ConfigService, firewall::FirewallService, rule::RuleService, stats::StatsService,
@@ -20,7 +20,7 @@ use crate::{
     tests::support::{TestDir, path_string, remove_file_async},
     workers::{
         firewall::watch_worker as firewall_watch_worker, runtime::control::WorkerControl,
-        runtime::watch::control,
+        runtime::watch,
     },
 };
 use tokio::time::timeout;
@@ -886,9 +886,9 @@ fn config_file_changed_only_triggers_on_newer_timestamp() {
     let prev = SystemTime::UNIX_EPOCH + Duration::from_secs(5);
     let newer = SystemTime::UNIX_EPOCH + Duration::from_secs(6);
 
-    assert!(!control::is_newer_mtime(Some(newer), None));
-    assert!(!control::is_newer_mtime(Some(prev), Some(prev)));
-    assert!(control::is_newer_mtime(Some(newer), Some(prev)));
+    assert!(!watch::is_newer_mtime(Some(newer), None));
+    assert!(!watch::is_newer_mtime(Some(prev), Some(prev)));
+    assert!(watch::is_newer_mtime(Some(newer), Some(prev)));
 }
 
 #[test]
@@ -904,24 +904,20 @@ fn read_rules_dir_state_counts_json_files_only() {
 
 #[test]
 fn inotify_mask_filter_accepts_change_events() {
-    assert!(control::should_forward_inotify_mask(nix::libc::IN_MODIFY));
-    assert!(control::should_forward_inotify_mask(
+    assert!(watch::should_forward_inotify_mask(nix::libc::IN_MODIFY));
+    assert!(watch::should_forward_inotify_mask(
         nix::libc::IN_CLOSE_WRITE
     ));
-    assert!(!control::should_forward_inotify_mask(nix::libc::IN_ACCESS));
+    assert!(!watch::should_forward_inotify_mask(nix::libc::IN_ACCESS));
 }
 
 #[test]
 fn inotify_name_filter_ignores_transient_temp_artifacts() {
-    assert!(control::is_transient_watch_event_name("rule.json.tmp"));
-    assert!(control::is_transient_watch_event_name(
-        "config.json.tmp-123"
-    ));
-    assert!(control::is_transient_watch_event_name(
-        "domains.txt.download"
-    ));
-    assert!(control::is_transient_watch_event_name(".domains.txt.swp"));
+    assert!(watch::is_transient_watch_event_name("rule.json.tmp"));
+    assert!(watch::is_transient_watch_event_name("config.json.tmp-123"));
+    assert!(watch::is_transient_watch_event_name("domains.txt.download"));
+    assert!(watch::is_transient_watch_event_name(".domains.txt.swp"));
 
-    assert!(!control::is_transient_watch_event_name("rule.json"));
-    assert!(!control::is_transient_watch_event_name("domains.txt"));
+    assert!(!watch::is_transient_watch_event_name("rule.json"));
+    assert!(!watch::is_transient_watch_event_name("domains.txt"));
 }

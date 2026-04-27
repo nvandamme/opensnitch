@@ -9,7 +9,7 @@
 macro_rules! ebpf_worker_newtype {
     ($vis:vis $name:ident, $worker_name:literal, $mode_variant:ident) => {
         $vis struct $name {
-            inner: $crate::workers::runtime::ebpf::control::EbpfWorkerControl,
+            inner: $crate::workers::runtime::ebpf::EbpfWorkerControl,
         }
 
         impl $name {
@@ -19,11 +19,11 @@ macro_rules! ebpf_worker_newtype {
                 tunables: $crate::tunables::RuntimeTunables,
             ) -> Self {
                 Self {
-                    inner: $crate::workers::runtime::ebpf::control::EbpfWorkerControl::new_with_mode(
+                    inner: $crate::workers::runtime::ebpf::EbpfWorkerControl::new_with_mode(
                         bus,
                         daemon_shutdown,
                         tunables,
-                        $crate::workers::runtime::ebpf::control::EbpfWorkerMode::$mode_variant,
+                        $crate::workers::runtime::ebpf::EbpfWorkerMode::$mode_variant,
                         $worker_name,
                     ),
                 }

@@ -8,7 +8,7 @@ use std::{
 };
 use tokio::sync::{broadcast, watch};
 
-pub(crate) use crate::models::lifecycle_contract::{
+pub(crate) use crate::services::lifecycle_contract::{
     ServiceEvent, ServiceMonitorStats, ServiceState, ServiceStatus,
 };
 

@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use netlink_bindings::nftables::{self, Nfgenmsg};
-use netlink_socket2::NetlinkSocket;
 use nix::libc;
 
 use super::{
@@ -8,7 +7,7 @@ use super::{
     INTERCEPTION_TCP_SYN_TAG, NetfilterTransactionBuilder, NftTable, SYSFW_TAG_PREFIX,
 };
 use crate::platform::netlink::io::{
-    ReplyVisit, commit_chained_transaction, for_each_reply, for_each_reply_until,
+    NetlinkSocket, ReplyVisit, commit_chained_transaction, for_each_reply, for_each_reply_until,
 };
 
 impl NetfilterTransactionBuilder {
@@ -137,10 +136,7 @@ impl NetfilterTransactionBuilder {
         }
     }
 
-    pub(super) async fn commit(
-        mut self,
-        sock: &mut NetlinkSocket,
-    ) -> Result<()> {
+    pub(super) async fn commit(mut self, sock: &mut NetlinkSocket) -> Result<()> {
         if self.is_empty() {
             return Ok(());
         }

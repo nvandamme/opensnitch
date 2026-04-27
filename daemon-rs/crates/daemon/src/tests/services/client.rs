@@ -1,5 +1,5 @@
 use crate::config::{ClientAuthType, Config};
-use crate::models::firewall_config::FirewallConfig;
+use crate::platform::firewall::config::FirewallConfig;
 use crate::services::client::ClientService;
 use crate::services::client::transport::ClientPingRequest;
 use std::sync::Arc;

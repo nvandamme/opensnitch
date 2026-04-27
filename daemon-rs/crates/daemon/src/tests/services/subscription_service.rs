@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use crate::models::subscription_rpc::{SubscriptionCommand, SubscriptionOperation};
-use crate::models::subscription_storage::SubscriptionRecord;
+use crate::models::subscription::rpc::{SubscriptionCommand, SubscriptionOperation};
+use crate::models::subscription::storage::SubscriptionRecord;
 use crate::services::subscription::{SubscriptionService, record_from_wire};
 use transport_wire_core::WireSubscriptionReply;
 

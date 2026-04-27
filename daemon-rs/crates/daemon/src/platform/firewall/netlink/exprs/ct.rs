@@ -1,4 +1,4 @@
-use netlink_bindings::utils::Rec;
+use crate::platform::netlink::attrs::NetlinkAttributeRecord;
 use netlink_bindings::{conntrack, nftables};
 
 use super::NftExpression;
@@ -238,7 +238,7 @@ pub(crate) fn parse_ct_conditions(
     }
 }
 
-fn push_ct_mask_condition<Prev: Rec>(
+fn push_ct_mask_condition<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     key: nftables::CtKeys,
     mask: u32,
@@ -389,7 +389,7 @@ pub(in crate::platform::firewall::netlink) enum NftCt {
 }
 
 impl NftCt {
-    pub(in crate::platform::firewall::netlink) fn encode<Prev: Rec>(
+    pub(in crate::platform::firewall::netlink) fn encode<Prev: NetlinkAttributeRecord>(
         &self,
         exprs: nftables::PushExprListAttrs<Prev>,
     ) -> nftables::PushExprListAttrs<Prev> {

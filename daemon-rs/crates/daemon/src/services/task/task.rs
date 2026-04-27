@@ -6,7 +6,7 @@ use super::{
     runtime_lifecycle::TaskLifecycle,
 };
 use crate::{
-    models::command_rpc::TaskNotification,
+    models::command::rpc::TaskNotification,
     services::{lifecycle::ServiceLifecycle, process::ProcessService},
     utils::notification_reply::send_notification_reply,
 };

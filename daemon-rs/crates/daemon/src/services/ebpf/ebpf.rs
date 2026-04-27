@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::{models::ebpf_availability::EbpfObjectAvailability, services::ebpf::EbpfPinDomain};
+use crate::{models::ebpf::availability::EbpfObjectAvailability, services::ebpf::EbpfPinDomain};
 
 #[cfg(feature = "aya-ebpf")]
 #[derive(Debug)]

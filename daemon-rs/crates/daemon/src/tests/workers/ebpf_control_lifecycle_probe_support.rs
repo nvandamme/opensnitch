@@ -55,7 +55,7 @@ impl EbpfWorkerControl {
     #[cfg(feature = "native-ebpf-ringbuf")]
     pub(crate) fn probe_parse_native_proc_kind(
         sample: &[u8],
-    ) -> Option<crate::models::proc_event::ProcEventKind> {
+    ) -> Option<crate::platform::procmon::proc_event::ProcEventKind> {
         match Self::parse_native_sample(sample) {
             Some(NativeQueuedEvent::ProcStateChanged(payload)) => Some(payload.kind),
             _ => None,

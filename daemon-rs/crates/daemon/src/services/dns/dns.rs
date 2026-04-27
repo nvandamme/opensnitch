@@ -10,13 +10,13 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 use crate::bus::Bus;
-use crate::models::dns_worker_state::{DnsWorkerKind, DnsWorkerState};
 use crate::services::ebpf::EbpfObjectAvailability;
 use crate::services::lifecycle::{
     EventSubscription, ServiceLifecycle, ServiceMonitorStats, ServiceStatus, StatusSubscription,
 };
 use crate::tunables::RuntimeTunables;
 use crate::utils::lru_cache::EvictionTrackedLruMap;
+use crate::workers::dns::worker_state::{DnsWorkerKind, DnsWorkerState};
 use crate::workers::{
     dns::{dns_worker::DnsWorkerControl, ebpf_worker::EbpfDnsWorkerControl},
     runtime::control::WorkerControl,

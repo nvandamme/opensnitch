@@ -10,8 +10,8 @@ use netlink_bindings::{
 };
 
 use crate::platform::netlink::io::{
-    ReplyVisit, for_each_reply, for_each_reply_until, netlink_map_io_error, netlink_map_reply_error,
-    new_request_socket,
+    ReplyVisit, for_each_reply, for_each_reply_until, netlink_map_io_error,
+    netlink_map_reply_error, new_request_socket,
 };
 
 fn interface_name_cache() -> &'static RwLock<HashMap<u32, String>> {
@@ -45,9 +45,9 @@ impl NetIfaceAdapter {
     }
 
     pub(crate) fn interface_name_by_index(index: u32) -> Result<Option<String>> {
-        crate::platform::netlink::runtime::run_on_netlink_rt(
-            Self::interface_name_by_index_async(index),
-        )
+        crate::platform::netlink::runtime::run_on_netlink_rt(Self::interface_name_by_index_async(
+            index,
+        ))
     }
 
     pub(crate) async fn interface_name_by_index_async(index: u32) -> Result<Option<String>> {

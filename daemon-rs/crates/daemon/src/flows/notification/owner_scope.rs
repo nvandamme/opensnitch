@@ -1,9 +1,7 @@
 use super::notification::NotificationFlow;
-use crate::models::{
-    firewall_config::{
-        FirewallConfig, FirewallExpression, FirewallRule, FirewallStatement, FirewallStatementValue,
-    },
-    rule_record::{RuleOperator, RuleRecord},
+use crate::models::rule::record::{RuleOperator, RuleRecord};
+use crate::platform::firewall::config::{
+    FirewallConfig, FirewallExpression, FirewallRule, FirewallStatement, FirewallStatementValue,
 };
 
 impl NotificationFlow {

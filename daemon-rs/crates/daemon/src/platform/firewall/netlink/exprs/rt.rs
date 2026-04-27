@@ -1,14 +1,14 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use netlink_bindings::nftables;
-use netlink_bindings::utils::{Rec, finalize_nested_header, push_header, push_nested_header};
-
-use super::NftExpression;
-use super::shared::{
-    parse_cmp_and_value_index, parse_token, parse_unsigned_token,
-    push_condition,
+use crate::platform::netlink::attrs::{
+    NetlinkAttributeBuffer, NetlinkAttributeRecord, finalize_nested_attr, push_attr_header,
+    push_nested_attr_header,
 };
+use netlink_bindings::nftables;
+
 use super::super::{NFTA_EXPR_DATA, NFTA_RT_DREG, NFTA_RT_KEY};
+use super::NftExpression;
+use super::shared::{parse_cmp_and_value_index, parse_token, parse_unsigned_token, push_condition};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::platform::firewall::netlink) enum RtKey {
@@ -134,26 +134,26 @@ pub(crate) fn parse_rt_conditions(
     }
 }
 
-fn push_rt_expression<Prev: Rec>(
+fn push_rt_expression<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     key: RtKey,
     dreg: nftables::Registers,
 ) -> nftables::PushExprListAttrs<Prev> {
     let mut expr = exprs.nested_elem().push_name_bytes(b"rt");
-    let data_offset = push_nested_header(expr.as_rec_mut(), NFTA_EXPR_DATA);
+    let data_offset = push_nested_attr_header(expr.attrs_mut(), NFTA_EXPR_DATA);
 
-    push_header(expr.as_rec_mut(), NFTA_RT_DREG, 4);
-    expr.as_rec_mut().extend((dreg as u32).to_be_bytes());
+    push_attr_header(expr.attrs_mut(), NFTA_RT_DREG, 4);
+    expr.attrs_mut().extend((dreg as u32).to_be_bytes());
 
-    push_header(expr.as_rec_mut(), NFTA_RT_KEY, 4);
-    expr.as_rec_mut().extend((key as u32).to_be_bytes());
+    push_attr_header(expr.attrs_mut(), NFTA_RT_KEY, 4);
+    expr.attrs_mut().extend((key as u32).to_be_bytes());
 
-    finalize_nested_header(expr.as_rec_mut(), data_offset);
+    finalize_nested_attr(expr.attrs_mut(), data_offset);
     expr.end_nested()
 }
 
 impl NftRt {
-    pub(in crate::platform::firewall::netlink) fn encode<Prev: Rec>(
+    pub(in crate::platform::firewall::netlink) fn encode<Prev: NetlinkAttributeRecord>(
         &self,
         exprs: nftables::PushExprListAttrs<Prev>,
     ) -> nftables::PushExprListAttrs<Prev> {

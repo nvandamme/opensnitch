@@ -4,7 +4,7 @@ use tracing::debug;
 use super::SubscriptionService;
 use super::refresh_timing::scheduler_wake_duration;
 use crate::models::audit::{AuditEvent, AuditEventKind, SubscriptionAction};
-use crate::models::subscription_rpc::{SubscriptionCommand, SubscriptionOperation};
+use crate::models::subscription::rpc::{SubscriptionCommand, SubscriptionOperation};
 use crate::services::audit::AuditService;
 use crate::services::rule::RuleService;
 use crate::services::stats::StatsService;

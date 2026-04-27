@@ -1,4 +1,4 @@
-use crate::models::metrics_snapshot::MetricsExportSnapshot;
+use crate::models::metrics::snapshot::MetricsExportSnapshot;
 
 pub(crate) fn encode_syslog_metrics(snapshot: &MetricsExportSnapshot) -> Vec<String> {
     let mut records = Vec::new();

@@ -6,7 +6,8 @@ use regex::Regex;
 
 use crate::{
     models::{
-        connection_state::ConnectionAttempt, process_state::ProcessInfo, rule_record::RuleOperator,
+        connection::state::ConnectionAttempt, process::state::ProcessInfo,
+        rule::record::RuleOperator,
     },
     services::rule::{ListRegexCache, RuleMatchCaches, RuleService},
 };

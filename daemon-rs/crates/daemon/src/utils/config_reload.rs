@@ -1,8 +1,8 @@
-pub(crate) use crate::models::config_reload::{
+pub(crate) use crate::models::config::reload::{
     RuntimeApplyMessageContext, RuntimeApplyPolicy, RuntimeApplyReport, RuntimeApplyStage,
     RuntimeApplyStageMessages,
 };
-use crate::utils::conntrack::{flush_conntrack_expect, flush_conntrack_table};
+use crate::platform::conman::conntrack::{flush_conntrack_expect, flush_conntrack_table};
 
 pub(crate) fn apply_runtime_core(
     updated: &crate::config::Config,

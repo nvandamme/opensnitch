@@ -1,5 +1,5 @@
 use crate::config::AskFallbackPolicy;
-use crate::models::rule_record::RuleAction;
+use crate::models::rule::record::RuleAction;
 
 /// Verdict domain runtime actions (decision outcomes and queue observations).
 #[derive(Debug, Clone, PartialEq, Eq)]

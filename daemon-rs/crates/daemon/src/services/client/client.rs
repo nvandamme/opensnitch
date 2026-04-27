@@ -41,7 +41,7 @@ use super::wire::{ClientWire, ClientWireProfile, select_wire_profile};
 use crate::config::ClientAuthType;
 use crate::config::Config;
 #[cfg(feature = "subscriptions")]
-use crate::models::subscription_rpc::{SubscriptionCommand, SubscriptionOperation};
+use crate::models::subscription::rpc::{SubscriptionCommand, SubscriptionOperation};
 #[cfg(feature = "subscriptions")]
 use transport_wire_core::SubscriptionCommandInboundPort;
 #[cfg(feature = "subscriptions")]
@@ -521,7 +521,7 @@ impl ClientService {
         config: &Config,
         rules: &[WireRule],
         is_firewall_running: bool,
-        system_firewall: &Arc<Option<crate::models::firewall_config::FirewallConfig>>,
+        system_firewall: &Arc<Option<crate::platform::firewall::config::FirewallConfig>>,
     ) -> ClientSubscribeConfig {
         let (name, version) = Self::runtime_identity();
 
@@ -696,7 +696,7 @@ impl ClientService {
 
 #[cfg(feature = "subscriptions")]
 fn wire_subscription_from_record(
-    sub: &crate::models::subscription_storage::SubscriptionRecord,
+    sub: &crate::models::subscription::storage::SubscriptionRecord,
 ) -> WireSubscription {
     WireSubscription {
         id: sub.id.clone(),

@@ -1,4 +1,4 @@
-use crate::models::proc_net_packet::{ProcNetPacketRow, ProcNetXdpRow};
+use crate::platform::procmon::proc_net_packet::{ProcNetPacketRow, ProcNetXdpRow};
 use crate::utils::hex_parse::parse_hex_token;
 use crate::utils::name_parsing::normalized_name;
 

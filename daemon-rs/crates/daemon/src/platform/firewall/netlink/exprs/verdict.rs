@@ -1,5 +1,5 @@
+use crate::platform::netlink::attrs::NetlinkAttributeRecord;
 use netlink_bindings::nftables;
-use netlink_bindings::utils::Rec;
 
 use super::NftExpression;
 use super::shared::{
@@ -95,7 +95,7 @@ fn parse_reject_icmpx_code(token: &str) -> Option<u8> {
     )
 }
 
-fn push_verdict_code<Prev: Rec>(
+fn push_verdict_code<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     code: nftables::VerdictCode,
 ) -> nftables::PushExprListAttrs<Prev> {
@@ -112,7 +112,7 @@ fn push_verdict_code<Prev: Rec>(
         .end_nested()
 }
 
-fn push_chain_verdict<Prev: Rec>(
+fn push_chain_verdict<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     code: nftables::VerdictCode,
     chain: &str,
@@ -157,7 +157,7 @@ pub(in crate::platform::firewall::netlink) enum NftVerdict {
 }
 
 impl NftVerdict {
-    pub(in crate::platform::firewall::netlink) fn encode<Prev: Rec>(
+    pub(in crate::platform::firewall::netlink) fn encode<Prev: NetlinkAttributeRecord>(
         &self,
         exprs: nftables::PushExprListAttrs<Prev>,
     ) -> nftables::PushExprListAttrs<Prev> {

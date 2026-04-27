@@ -2,8 +2,8 @@
 #![cfg(feature = "native-ebpf-ringbuf")]
 
 use crate::{
-    models::{ebpf_payload::EbpfProcStatePayload, proc_event::ProcEventKind},
-    utils::byte_read::read_ne_value_at,
+    platform::procmon::ebpf_payload::EbpfProcStatePayload,
+    platform::procmon::proc_event::ProcEventKind, utils::byte_read::read_ne_value_at,
     utils::nul_terminated::nul_terminated_utf8_lossy,
 };
 

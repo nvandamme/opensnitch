@@ -1,14 +1,17 @@
+use crate::platform::netlink::attrs::{
+    NetlinkAttributeBuffer, NetlinkAttributeRecord, finalize_nested_attr, push_attr_header,
+    push_nested_attr_header,
+};
 use netlink_bindings::nftables;
-use netlink_bindings::utils::{Rec, finalize_nested_header, push_header, push_nested_header};
 
+use super::super::{
+    NFTA_EXPR_DATA, NFTA_HASH_DREG, NFTA_HASH_LEN, NFTA_HASH_MODULUS, NFTA_HASH_OFFSET,
+    NFTA_HASH_SEED, NFTA_HASH_SREG, NFTA_HASH_TYPE,
+};
 use super::NftExpression;
 use super::shared::{
     OptionParseStep, parse_cmp_mapped_conditions, parse_unsigned_token, push_cmp_from_reg1,
     push_payload_load_to_reg1, scan_option_sequence,
-};
-use super::super::{
-    NFTA_EXPR_DATA, NFTA_HASH_DREG, NFTA_HASH_LEN, NFTA_HASH_MODULUS, NFTA_HASH_OFFSET,
-    NFTA_HASH_SEED, NFTA_HASH_SREG, NFTA_HASH_TYPE,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,7 +190,7 @@ fn parse_symhash_conditions(
 }
 
 impl NftHash {
-    pub(in crate::platform::firewall::netlink) fn encode<Prev: Rec>(
+    pub(in crate::platform::firewall::netlink) fn encode<Prev: NetlinkAttributeRecord>(
         &self,
         exprs: nftables::PushExprListAttrs<Prev>,
     ) -> nftables::PushExprListAttrs<Prev> {
@@ -199,34 +202,33 @@ impl NftHash {
         };
 
         let mut expr = exprs.nested_elem().push_name_bytes(b"hash");
-        let data_offset = push_nested_header(expr.as_rec_mut(), NFTA_EXPR_DATA);
+        let data_offset = push_nested_attr_header(expr.attrs_mut(), NFTA_EXPR_DATA);
 
         if let Some(sreg) = self.sreg {
-            push_header(expr.as_rec_mut(), NFTA_HASH_SREG, 4);
-            expr.as_rec_mut().extend((sreg as u32).to_be_bytes());
+            push_attr_header(expr.attrs_mut(), NFTA_HASH_SREG, 4);
+            expr.attrs_mut().extend((sreg as u32).to_be_bytes());
         }
 
-        push_header(expr.as_rec_mut(), NFTA_HASH_DREG, 4);
-        expr.as_rec_mut()
-            .extend((self.dreg as u32).to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_HASH_DREG, 4);
+        expr.attrs_mut().extend((self.dreg as u32).to_be_bytes());
 
-        push_header(expr.as_rec_mut(), NFTA_HASH_LEN, 4);
-        expr.as_rec_mut().extend(self.len.to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_HASH_LEN, 4);
+        expr.attrs_mut().extend(self.len.to_be_bytes());
 
-        push_header(expr.as_rec_mut(), NFTA_HASH_MODULUS, 4);
-        expr.as_rec_mut().extend(self.modulus.to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_HASH_MODULUS, 4);
+        expr.attrs_mut().extend(self.modulus.to_be_bytes());
 
-        push_header(expr.as_rec_mut(), NFTA_HASH_SEED, 4);
-        expr.as_rec_mut().extend(self.seed.to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_HASH_SEED, 4);
+        expr.attrs_mut().extend(self.seed.to_be_bytes());
 
-        push_header(expr.as_rec_mut(), NFTA_HASH_OFFSET, 4);
-        expr.as_rec_mut().extend(self.offset.to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_HASH_OFFSET, 4);
+        expr.attrs_mut().extend(self.offset.to_be_bytes());
 
-        push_header(expr.as_rec_mut(), NFTA_HASH_TYPE, 4);
-        expr.as_rec_mut()
+        push_attr_header(expr.attrs_mut(), NFTA_HASH_TYPE, 4);
+        expr.attrs_mut()
             .extend((self.hash_type as u32).to_be_bytes());
 
-        finalize_nested_header(expr.as_rec_mut(), data_offset);
+        finalize_nested_attr(expr.attrs_mut(), data_offset);
         let exprs = expr.end_nested();
 
         push_cmp_from_reg1(exprs, self.op, &self.value.to_be_bytes())

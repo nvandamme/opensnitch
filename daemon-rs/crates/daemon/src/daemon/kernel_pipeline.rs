@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::Daemon;
-pub(crate) use crate::models::kernel_pipeline::{
+pub(crate) use crate::models::kernel::pipeline::{
     KernelPipeline, KernelPipelineDropStats, KernelPipelineIngressStats, ProcessKernelEvent,
 };
 

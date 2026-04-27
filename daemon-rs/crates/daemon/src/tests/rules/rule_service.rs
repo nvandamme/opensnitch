@@ -6,9 +6,9 @@ use transport_wire_core::{WireRule, WireRuleOperator};
 
 use crate::{
     models::{
-        connection_state::{ConnectionAttempt, TransportProtocol},
-        process_state::{ProcessInfo, ProcessNode},
-        rule_storage::{RuleFile, RuleFileOperator},
+        connection::state::{ConnectionAttempt, TransportProtocol},
+        process::state::{ProcessInfo, ProcessNode},
+        rule::storage::{RuleFile, RuleFileOperator},
     },
     services::rule::rule_probe_support::ListsDomainsRegexpCacheMode,
     services::rule::{RuleMatchDecision, RuleService},

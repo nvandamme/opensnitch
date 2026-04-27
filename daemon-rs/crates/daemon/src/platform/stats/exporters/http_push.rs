@@ -49,7 +49,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use crate::models::metrics_snapshot::{MetricsExportSnapshot, MetricsSnapshot};
+use crate::models::metrics::snapshot::{MetricsExportSnapshot, MetricsSnapshot};
 use crate::platform::stats::exporter_port::StatsExporterPort;
 use crate::utils::http_client::{HttpClient, build_http_client, build_request, send_request};
 

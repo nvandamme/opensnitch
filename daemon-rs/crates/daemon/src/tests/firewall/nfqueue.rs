@@ -10,10 +10,10 @@ use nix::libc;
 use crate::{
     bus::{BusCaps, BusState},
     config::DefaultAction,
-    models::connection_state::{ConnectionAttempt, TransportProtocol},
-    models::dns_payload::DnsPayload,
-    models::kernel_event::KernelEvent,
-    models::queue_metrics_snapshot::QueueMetricsSnapshot,
+    models::connection::state::{ConnectionAttempt, TransportProtocol},
+    models::dns::payload::DnsPayload,
+    models::kernel::event::KernelEvent,
+    platform::nfqueue::queue_metrics_snapshot::QueueMetricsSnapshot,
 };
 
 use crate::platform::nfqueue::decision::NfqueueDecisionState;

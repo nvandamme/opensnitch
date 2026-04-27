@@ -1,9 +1,8 @@
 use super::notification::{NotificationAuthorizationClass, NotificationFlow};
 use crate::{
     config::{AuthMode, Config},
-    models::{
-        command_action::CommandAction, firewall_config::FirewallConfig, rule_record::RuleRecord,
-    },
+    models::{command::action::CommandAction, rule::record::RuleRecord},
+    platform::firewall::config::FirewallConfig,
     services::client::{ClientPrincipal, ClientSession},
 };
 
@@ -341,7 +340,7 @@ impl NotificationFlow {
         class: NotificationAuthorizationClass,
         reason: &'static str,
     ) -> std::result::Result<(), &'static str> {
-        use crate::models::auth_capability::required_capability;
+        use crate::flows::notification::auth_capability::required_capability;
 
         match class {
             NotificationAuthorizationClass::AlwaysAllowed => Ok(()),

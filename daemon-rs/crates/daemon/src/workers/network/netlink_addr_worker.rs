@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::platform::netlink::ifaces::NetIfaceAdapter;
-use crate::workers::runtime::support::build_current_thread_runtime;
+use crate::workers::runtime::helpers::build_current_thread_runtime;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 

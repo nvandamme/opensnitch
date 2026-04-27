@@ -1,5 +1,5 @@
+use crate::platform::netlink::attrs::NetlinkAttributeRecord;
 use netlink_bindings::nftables;
-use netlink_bindings::utils::Rec;
 
 /// Standalone immediate expression.
 ///
@@ -12,7 +12,7 @@ pub(in crate::platform::firewall::netlink) struct NftImmediate {
 }
 
 impl NftImmediate {
-    pub(in crate::platform::firewall::netlink) fn encode<Prev: Rec>(
+    pub(in crate::platform::firewall::netlink) fn encode<Prev: NetlinkAttributeRecord>(
         &self,
         exprs: nftables::PushExprListAttrs<Prev>,
     ) -> nftables::PushExprListAttrs<Prev> {

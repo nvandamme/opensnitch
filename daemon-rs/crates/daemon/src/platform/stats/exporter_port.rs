@@ -1,4 +1,4 @@
-use crate::models::metrics_snapshot::MetricsSnapshot;
+use crate::models::metrics::snapshot::MetricsSnapshot;
 
 /// Trait for pluggable stats snapshot exporters.
 ///

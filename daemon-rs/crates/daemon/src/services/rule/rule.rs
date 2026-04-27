@@ -8,10 +8,10 @@ use super::dispatch::ActiveOperatorDispatch;
 use super::matching::{AttemptDerived, AttemptTextNeeds};
 use super::{rule_record_from_wire, rule_record_now_timestamp, wire_rule_from_record};
 use crate::models::{
-    connection_state::ConnectionAttempt,
-    process_state::ProcessInfo,
-    rule_match_decision::RuleMatchDecision,
-    rule_record::{RuleDuration, RuleOperator, RuleRecord},
+    connection::state::ConnectionAttempt,
+    process::state::ProcessInfo,
+    rule::match_decision::RuleMatchDecision,
+    rule::record::{RuleDuration, RuleOperator, RuleRecord},
 };
 use anyhow::Result;
 use tokio::sync::{Mutex, watch};
@@ -325,7 +325,7 @@ impl RuleService {
     /// are `lists.*` operators are included as well.
     pub fn list_rule_data_paths(&self) -> Vec<(Arc<str>, std::path::PathBuf)> {
         fn collect(
-            op: &crate::models::rule_record::RuleOperator,
+            op: &crate::models::rule::record::RuleOperator,
             out: &mut Vec<std::path::PathBuf>,
         ) {
             if RuleService::operator_is_lists(&op.type_name, &op.operand) && !op.data.is_empty() {

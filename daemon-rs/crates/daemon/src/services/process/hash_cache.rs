@@ -18,7 +18,7 @@ use dashmap::DashMap;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::models::hash_cache_storage::{
+use crate::models::storage::hash_cache::{
     HashCacheEntry, HashCacheKey, InternalHashCacheFile, InternalHashCacheRecord,
 };
 

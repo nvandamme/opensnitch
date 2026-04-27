@@ -1,6 +1,6 @@
 use crate::models::{
-    connection_owner::{ConnectionOwner, ConnectionOwnerCacheKey},
-    connection_state::{ConnectionAttempt, TransportProtocol},
+    connection::owner::{ConnectionOwner, ConnectionOwnerCacheKey},
+    connection::state::{ConnectionAttempt, TransportProtocol},
 };
 use crate::platform::netstat::socket_diag::SocketDiagAdapter;
 use crate::utils::proc_fs::proc_pid_exists;

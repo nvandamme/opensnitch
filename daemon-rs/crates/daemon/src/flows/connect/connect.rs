@@ -5,12 +5,12 @@ use crate::{
     flows::verdict::VerdictFlow,
     models::{
         audit::{AuditEvent, AuditEventKind, ConnectFlowAction},
-        connection_state::ConnectionAttempt,
+        connection::state::ConnectionAttempt,
     },
     services::{audit::AuditService, stats::StatsService},
     tunables::RuntimeTunables,
     workers::runtime::{
-        connect::dispatch as connect_dispatch, support, verdict::dispatch as verdict_dispatch,
+        connect as connect_dispatch, helpers as support, verdict as verdict_dispatch,
     },
 };
 
@@ -18,7 +18,7 @@ use crate::{
 pub struct ConnectFlow {
     shutdown: CancellationToken,
     tunables: RuntimeTunables,
-    verdict_tx: tokio::sync::mpsc::Sender<crate::models::verdict_rpc::VerdictReply>,
+    verdict_tx: tokio::sync::mpsc::Sender<crate::models::verdict::rpc::VerdictReply>,
     verbose_hot_path_audit: bool,
 }
 
@@ -26,7 +26,7 @@ impl ConnectFlow {
     pub(crate) fn new(
         shutdown: CancellationToken,
         tunables: RuntimeTunables,
-        verdict_tx: tokio::sync::mpsc::Sender<crate::models::verdict_rpc::VerdictReply>,
+        verdict_tx: tokio::sync::mpsc::Sender<crate::models::verdict::rpc::VerdictReply>,
         verbose_hot_path_audit: bool,
     ) -> Self {
         Self {

@@ -1,6 +1,6 @@
 use transport_wire_core::WireSubscriptionReply;
 
-use crate::models::subscription_storage::SubscriptionRecord;
+use crate::models::subscription::storage::SubscriptionRecord;
 
 use super::SubscriptionService;
 use super::refresh_batch::RefreshBatchResult;

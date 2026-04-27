@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use nix::libc;
 
-use crate::models::connection_state::{ConnectionAttempt, TransportProtocol};
+use crate::models::connection::state::{ConnectionAttempt, TransportProtocol};
 
 use super::state::RejectSocketSpec;
 

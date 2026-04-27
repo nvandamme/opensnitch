@@ -2,7 +2,7 @@ use nix::unistd::{Group, User};
 
 use crate::{
     config::{Config, LocalPrincipal, RemotePrincipalBinding},
-    models::config_storage::{RawPrincipalEntry, RawRemotePrincipalBinding, RawServerAuth},
+    models::config::storage::{RawPrincipalEntry, RawRemotePrincipalBinding, RawServerAuth},
     utils::name_parsing::normalized_name,
 };
 

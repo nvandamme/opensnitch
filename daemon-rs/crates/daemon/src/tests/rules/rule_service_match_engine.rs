@@ -3,9 +3,9 @@ use nix::unistd::{Uid, User};
 use regex::Regex;
 
 use crate::models::{
-    connection_state::{ConnectionAttempt, TransportProtocol},
-    process_state::{ProcessInfo, ProcessNode},
-    rule_record::RuleOperator,
+    connection::state::{ConnectionAttempt, TransportProtocol},
+    process::state::{ProcessInfo, ProcessNode},
+    rule::record::RuleOperator,
 };
 use crate::platform::netlink::ifaces::NetIfaceAdapter;
 use crate::services::rule::{

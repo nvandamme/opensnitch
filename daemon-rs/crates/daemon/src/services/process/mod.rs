@@ -10,5 +10,5 @@ mod process_probe_support;
 mod runtime_lifecycle;
 
 #[allow(unused_imports)]
-pub use crate::models::process_worker_state::ProcessWorkerState;
+pub use crate::models::process::worker_state::ProcessWorkerState;
 pub use process::*;

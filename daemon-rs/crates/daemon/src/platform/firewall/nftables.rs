@@ -1,9 +1,9 @@
 use anyhow::{Context, Result, bail};
 use tokio::process::Command;
 
-use crate::models::firewall_config::{FirewallChain, FirewallConfig, FirewallRule};
+use crate::platform::conman::conntrack::flush_conntrack_table;
+use crate::platform::firewall::config::{FirewallChain, FirewallConfig, FirewallRule};
 use crate::utils::command_path::resolve_command_path;
-use crate::utils::conntrack::flush_conntrack_table;
 use crate::utils::name_parsing::case_folded;
 
 const SYSFW_TAG_PREFIX: &str = "opensnitch-sysfw:";
@@ -65,7 +65,7 @@ impl FirewallNftablesAdapter {
 
     fn parse_ruleset_text(ruleset: &str) -> FirewallConfig {
         let mut top_level_chains: Vec<FirewallChain> = Vec::new();
-        let mut zones: Vec<crate::models::firewall_config::FirewallZone> = Vec::new();
+        let mut zones: Vec<crate::platform::firewall::config::FirewallZone> = Vec::new();
 
         let mut current_family = String::new();
         let mut current_table = String::new();
@@ -84,7 +84,7 @@ impl FirewallNftablesAdapter {
                         if let Some(existing) = zones.iter_mut().find(|z| z.name == zone_name) {
                             existing.chains.push(done);
                         } else {
-                            zones.push(crate::models::firewall_config::FirewallZone {
+                            zones.push(crate::platform::firewall::config::FirewallZone {
                                 name: zone_name,
                                 chains: vec![done],
                             });

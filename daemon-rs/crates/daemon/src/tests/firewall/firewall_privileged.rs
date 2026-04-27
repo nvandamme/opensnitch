@@ -1,4 +1,4 @@
-use crate::models::firewall_config::{
+use crate::platform::firewall::config::{
     FirewallChain, FirewallConfig, FirewallExpression, FirewallRule, FirewallStatement,
     FirewallStatementValue,
 };

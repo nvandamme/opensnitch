@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::models::rule_storage::RuleFile;
+use crate::models::rule::storage::RuleFile;
 use crate::services::storage::StorageService;
 
 #[test]

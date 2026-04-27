@@ -26,8 +26,8 @@ impl NfqueueMetricsState {
     pub(crate) fn to_snapshot(
         queue_num: u16,
         metrics: QueueMetrics,
-    ) -> crate::models::queue_metrics_snapshot::QueueMetricsSnapshot {
-        crate::models::queue_metrics_snapshot::QueueMetricsSnapshot {
+    ) -> crate::platform::nfqueue::queue_metrics_snapshot::QueueMetricsSnapshot {
+        crate::platform::nfqueue::queue_metrics_snapshot::QueueMetricsSnapshot {
             queue_num,
             packets_total: metrics.packets_total,
             verdict_accept: metrics.verdict_accept,
@@ -39,7 +39,7 @@ impl NfqueueMetricsState {
 
     #[cfg(test)]
     pub fn debug_metrics_snapshot()
-    -> Vec<crate::models::queue_metrics_snapshot::QueueMetricsSnapshot> {
+    -> Vec<crate::platform::nfqueue::queue_metrics_snapshot::QueueMetricsSnapshot> {
         let Ok(metrics_map) = Self::queue_metrics_map().lock() else {
             return Vec::new();
         };

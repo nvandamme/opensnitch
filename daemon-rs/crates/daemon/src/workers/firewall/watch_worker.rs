@@ -7,7 +7,7 @@ use crate::{
     utils::duration_parse::{DurationParseOptions, parse_human_duration},
     workers::{
         runtime::control::WorkerControl,
-        runtime::watch::control::{EmptyWatchTargetsBehavior, WatchWorkerControl},
+        runtime::watch::{EmptyWatchTargetsBehavior, WatchWorkerControl},
     },
 };
 

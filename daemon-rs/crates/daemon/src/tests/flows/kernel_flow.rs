@@ -3,7 +3,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     flows::kernel::KernelFlow,
-    models::{dns_payload::DnsPayload, kernel_event::KernelEvent},
+    models::{dns::payload::DnsPayload, kernel::event::KernelEvent},
     services::{dns::DnsService, process::ProcessService, stats::StatsService},
     tunables::RuntimeTunables,
 };

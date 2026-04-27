@@ -1,7 +1,10 @@
 use std::net::IpAddr;
 
+use crate::platform::netlink::attrs::{
+    NetlinkAttributeBuffer, NetlinkAttributeRecord, finalize_nested_attr, push_attr_header,
+    push_nested_attr_header,
+};
 use netlink_bindings::nftables;
-use netlink_bindings::utils::{Rec, finalize_nested_header, push_header, push_nested_header};
 
 use super::super::{
     NFTA_EXPR_DATA, NFTA_MASQ_FLAGS, NFTA_MASQ_REG_PROTO_MAX, NFTA_MASQ_REG_PROTO_MIN,
@@ -156,7 +159,7 @@ pub(crate) fn parse_tproxy_action(
     Some((NftExpression::Nat(NftNat::Tproxy { addr, port }), index))
 }
 
-pub(crate) fn push_masq_expression<Prev: Rec>(
+pub(crate) fn push_masq_expression<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     flags: u32,
     proto_min: Option<u16>,
@@ -176,30 +179,30 @@ pub(crate) fn push_masq_expression<Prev: Rec>(
     }
 
     let mut expr = exprs.nested_elem().push_name_bytes(b"masq");
-    let data_offset = push_nested_header(expr.as_rec_mut(), NFTA_EXPR_DATA);
+    let data_offset = push_nested_attr_header(expr.attrs_mut(), NFTA_EXPR_DATA);
 
     if flags != 0 {
-        push_header(expr.as_rec_mut(), NFTA_MASQ_FLAGS, 4);
-        expr.as_rec_mut().extend(flags.to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_MASQ_FLAGS, 4);
+        expr.attrs_mut().extend(flags.to_be_bytes());
     }
 
     if proto_min.is_some() {
-        push_header(expr.as_rec_mut(), NFTA_MASQ_REG_PROTO_MIN, 4);
-        expr.as_rec_mut()
+        push_attr_header(expr.attrs_mut(), NFTA_MASQ_REG_PROTO_MIN, 4);
+        expr.attrs_mut()
             .extend((nftables::Registers::Reg1 as u32).to_be_bytes());
     }
 
     if proto_max.is_some() {
-        push_header(expr.as_rec_mut(), NFTA_MASQ_REG_PROTO_MAX, 4);
-        expr.as_rec_mut()
+        push_attr_header(expr.attrs_mut(), NFTA_MASQ_REG_PROTO_MAX, 4);
+        expr.attrs_mut()
             .extend((nftables::Registers::Reg2 as u32).to_be_bytes());
     }
 
-    finalize_nested_header(expr.as_rec_mut(), data_offset);
+    finalize_nested_attr(expr.attrs_mut(), data_offset);
     expr.end_nested()
 }
 
-fn push_immediate_to_reg<Prev: Rec>(
+fn push_immediate_to_reg<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     dreg: nftables::Registers,
     data: &[u8],
@@ -211,7 +214,7 @@ fn push_immediate_to_reg<Prev: Rec>(
     .encode(exprs)
 }
 
-pub(crate) fn push_nat_expression<Prev: Rec>(
+pub(crate) fn push_nat_expression<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     nat_type: u32,
     addr_min: &std::net::IpAddr,
@@ -300,7 +303,7 @@ pub(crate) fn push_nat_expression<Prev: Rec>(
     nat_expr.end_nested().end_nested()
 }
 
-pub(crate) fn push_redirect_expression<Prev: Rec>(
+pub(crate) fn push_redirect_expression<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     flags: u32,
     proto_min: Option<u16>,
@@ -336,30 +339,30 @@ pub(crate) fn push_redirect_expression<Prev: Rec>(
     }
 
     let mut expr = exprs.nested_elem().push_name_bytes(b"redir");
-    let data_offset = push_nested_header(expr.as_rec_mut(), NFTA_EXPR_DATA);
+    let data_offset = push_nested_attr_header(expr.attrs_mut(), NFTA_EXPR_DATA);
 
     if proto_min.is_some() {
-        push_header(expr.as_rec_mut(), NFTA_REDIR_REG_PROTO_MIN, 4);
-        expr.as_rec_mut()
+        push_attr_header(expr.attrs_mut(), NFTA_REDIR_REG_PROTO_MIN, 4);
+        expr.attrs_mut()
             .extend((nftables::Registers::Reg1 as u32).to_be_bytes());
     }
 
     if proto_max.is_some() {
-        push_header(expr.as_rec_mut(), NFTA_REDIR_REG_PROTO_MAX, 4);
-        expr.as_rec_mut()
+        push_attr_header(expr.attrs_mut(), NFTA_REDIR_REG_PROTO_MAX, 4);
+        expr.attrs_mut()
             .extend((nftables::Registers::Reg2 as u32).to_be_bytes());
     }
 
     if flags != 0 {
-        push_header(expr.as_rec_mut(), NFTA_REDIR_FLAGS, 4);
-        expr.as_rec_mut().extend(flags.to_be_bytes());
+        push_attr_header(expr.attrs_mut(), NFTA_REDIR_FLAGS, 4);
+        expr.attrs_mut().extend(flags.to_be_bytes());
     }
 
-    finalize_nested_header(expr.as_rec_mut(), data_offset);
+    finalize_nested_attr(expr.attrs_mut(), data_offset);
     expr.end_nested()
 }
 
-pub(crate) fn push_tproxy_expression<Prev: Rec>(
+pub(crate) fn push_tproxy_expression<Prev: NetlinkAttributeRecord>(
     exprs: nftables::PushExprListAttrs<Prev>,
     addr: Option<&std::net::IpAddr>,
     port: u16,
@@ -570,7 +573,7 @@ pub(in crate::platform::firewall::netlink) enum NftNat {
 }
 
 impl NftNat {
-    pub(in crate::platform::firewall::netlink) fn encode<Prev: Rec>(
+    pub(in crate::platform::firewall::netlink) fn encode<Prev: NetlinkAttributeRecord>(
         &self,
         exprs: nftables::PushExprListAttrs<Prev>,
     ) -> nftables::PushExprListAttrs<Prev> {

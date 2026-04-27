@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use transport_wire_core::ClientTransportConnectorPort;
 
-use crate::models::subscription_rpc::{SubscriptionCommand, SubscriptionOperation};
+use crate::models::subscription::rpc::{SubscriptionCommand, SubscriptionOperation};
 use crate::services::{
     client::{ClientTransportConnector, WireSessionCache},
     config::ConfigService,

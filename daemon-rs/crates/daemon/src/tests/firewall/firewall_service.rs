@@ -2,14 +2,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::{fs, path::PathBuf};
 
 use crate::config::Config;
-use crate::models::config_runtime::FirewallPersistenceMode;
-use crate::models::firewall_config::{
+use crate::models::config::runtime::FirewallPersistenceMode;
+use crate::platform::firewall::config::{
     FirewallChain, FirewallConfig, FirewallExpression, FirewallRule, FirewallStatement,
     FirewallStatementValue,
 };
-use crate::models::firewall_state::FirewallBackend;
 #[cfg(feature = "openwrt")]
 use crate::platform::firewall::openwrt_uci::OpenWrtUciFirewallAdapter;
+use crate::platform::firewall::state::FirewallBackend;
 use crate::services::firewall::FirewallService;
 use crate::tests::support::TestDir;
 
@@ -99,7 +99,7 @@ fn make_zone_service_sysfw(
         version,
         rules: Vec::new(),
         chains: Vec::new(),
-        zones: vec![crate::models::firewall_config::FirewallZone {
+        zones: vec![crate::platform::firewall::config::FirewallZone {
             name: zone_name.to_string(),
             chains: vec![FirewallChain {
                 name: format!("zone_{zone_name}_input"),
@@ -171,7 +171,7 @@ fn make_empty_zone_sysfw(version: u32, zone_name: &str) -> FirewallConfig {
         version,
         rules: Vec::new(),
         chains: Vec::new(),
-        zones: vec![crate::models::firewall_config::FirewallZone {
+        zones: vec![crate::platform::firewall::config::FirewallZone {
             name: zone_name.to_string(),
             chains: Vec::new(),
         }],
@@ -1165,7 +1165,7 @@ fn save_and_load_preserves_zone_chains() {
         version: 9,
         rules: Vec::new(),
         chains: Vec::new(),
-        zones: vec![crate::models::firewall_config::FirewallZone {
+        zones: vec![crate::platform::firewall::config::FirewallZone {
             name: "lan".to_string(),
             chains: vec![FirewallChain {
                 name: "zone_lan_output".to_string(),

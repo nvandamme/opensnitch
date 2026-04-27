@@ -2,7 +2,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::RuntimeTaskHandles;
 use crate::{
-    models::ui_alert::UiAlert,
+    models::notification::alert::UiAlert,
     services::{client::AlertBuffer, config::ConfigService, process::ProcessService},
     workers::runtime::control::WorkerControl,
 };

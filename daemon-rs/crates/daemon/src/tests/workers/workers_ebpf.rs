@@ -1,8 +1,8 @@
 #[cfg(feature = "native-ebpf-ringbuf")]
-use crate::models::dns_payload::DnsPayload;
+use crate::models::dns::payload::DnsPayload;
 #[cfg(feature = "native-ebpf-ringbuf")]
-use crate::models::proc_event::ProcEventKind;
-use crate::workers::runtime::ebpf::control::EbpfWorkerControl;
+use crate::platform::procmon::proc_event::ProcEventKind;
+use crate::workers::runtime::ebpf::EbpfWorkerControl;
 
 #[cfg(feature = "native-ebpf-ringbuf")]
 #[test]

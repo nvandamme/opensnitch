@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use regex::Regex;
 
-use crate::models::rule_record::RuleOperator;
+use crate::models::rule::record::RuleOperator;
 use crate::utils::duration_parse::{DurationParseOptions, parse_human_duration};
 use crate::utils::name_parsing::case_folded;
 

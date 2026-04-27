@@ -20,13 +20,13 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::models::metrics_snapshot::{MetricsExportSnapshot, MetricsSnapshot};
+use crate::models::metrics::snapshot::{MetricsExportSnapshot, MetricsSnapshot};
 use crate::platform::stats::exporter_port::StatsExporterPort;
 
 pub(crate) type CompactStats = MetricsExportSnapshot;
 
 #[cfg(all(test, feature = "metrics-http-serve-protobuf"))]
-use crate::models::prometheus_wire as prom_proto;
+use crate::models::metrics::prometheus_wire as prom_proto;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResponseFormat {

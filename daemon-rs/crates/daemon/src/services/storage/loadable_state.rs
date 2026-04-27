@@ -4,15 +4,13 @@ use anyhow::{Context, Result};
 
 use crate::{
     config::Config,
-    models::{
-        firewall_config::{FirewallChain, FirewallConfig, FirewallRule, FirewallZone},
-        firewall_state::FirewallBackend,
-        firewall_storage::{
-            PersistedFirewallChain, PersistedFirewallGroup, PersistedFirewallRule,
-            PersistedFirewallZone, RawFirewallConfig,
-        },
-        rule_storage::RuleFile,
+    models::firewall::storage::{
+        PersistedFirewallChain, PersistedFirewallGroup, PersistedFirewallRule,
+        PersistedFirewallZone, RawFirewallConfig,
     },
+    models::rule::storage::RuleFile,
+    platform::firewall::config::{FirewallChain, FirewallConfig, FirewallRule, FirewallZone},
+    platform::firewall::state::FirewallBackend,
     services::storage::StorageService,
 };
 
@@ -135,7 +133,7 @@ impl FileLoadableStateStore {
             });
         }
 
-        let persisted = crate::models::firewall_storage::PersistedFirewallConfig {
+        let persisted = crate::models::firewall::storage::PersistedFirewallConfig {
             enabled: sysfw.enabled,
             version: sysfw.version,
             system_rules,

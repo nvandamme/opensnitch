@@ -1,7 +1,7 @@
 use super::*;
 use crate::models::{
     audit::{AuditEvent, AuditEventKind, AuditLifecycle, AuditSeverity},
-    config_runtime::AuditSinkConfig,
+    config::runtime::AuditSinkConfig,
 };
 
 #[test]

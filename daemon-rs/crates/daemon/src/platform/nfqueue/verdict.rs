@@ -3,7 +3,7 @@ use tracing::warn;
 
 use crate::{
     config::DefaultAction,
-    models::{dns_payload::DnsPayload, kernel_event::KernelEvent},
+    models::{dns::payload::DnsPayload, kernel::event::KernelEvent},
     platform::netstat::socket_diag::SocketDiagAdapter,
     tunables::NfqueueOverloadPolicy,
 };
@@ -12,7 +12,7 @@ use super::decision::NfqueueDecisionState;
 use super::packet::NfqueuePacketParser;
 use super::state::{NfqueueRuntimeState, RUNTIME, RejectSocketSpec};
 use crate::bus::Bus;
-use crate::models::connection_state::ConnectionAttempt;
+use crate::models::connection::state::ConnectionAttempt;
 
 pub(crate) struct NfqueueVerdictEngine;
 

@@ -1,14 +1,12 @@
 use crate::models::{
     audit::{AuditEvent, AuditEventKind, RuleAction},
-    command_rpc::ClientCommand,
-    rule_record::RuleRecord,
+    command::rpc::ClientCommand,
+    rule::record::RuleRecord,
 };
 use crate::services::{
     audit::AuditService,
     client::ClientService,
-    policy_tx::{
-        PolicyOwner, PolicyTxCoordinator, PolicyTxError, PolicyTxRequest, global_policy_tx,
-    },
+    policy::{PolicyOwner, PolicyTxCoordinator, PolicyTxError, PolicyTxRequest, global_policy_tx},
     rule::RuleService,
 };
 use crate::utils::notification_reply::{send_notification_reply, status_payload};

@@ -5,13 +5,13 @@ use tracing::{debug, warn};
 
 use crate::{
     bus::Bus,
-    models::firewall_state::FirewallState,
-    models::kernel_event::KernelEvent,
+    models::kernel::event::KernelEvent,
+    platform::firewall::state::FirewallState,
     services::{
         firewall::{FirewallService, firewall_backend_name},
         rule::RuleService,
     },
-    workers::runtime::support::build_current_thread_runtime,
+    workers::runtime::helpers::build_current_thread_runtime,
 };
 
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(250);

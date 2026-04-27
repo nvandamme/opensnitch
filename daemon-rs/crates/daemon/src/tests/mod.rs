@@ -60,6 +60,8 @@ mod firewall_iptables;
 mod firewall_monitor;
 #[path = "firewall/firewall_netlink.rs"]
 mod firewall_netlink;
+#[path = "firewall/firewall_nft_parse.rs"]
+mod firewall_nft_parse;
 #[path = "firewall/firewall_nftables.rs"]
 mod firewall_nftables;
 #[path = "firewall/firewall_privileged.rs"]
@@ -88,6 +90,8 @@ mod netlink_sync_async_harness;
 mod nfqueue;
 #[path = "nfqueue/nfqueue_netlink.rs"]
 mod nfqueue_netlink_adapter;
+#[path = "nfqueue/nfqueue_queue.rs"]
+mod nfqueue_queue;
 #[path = "flows/notification_flow.rs"]
 mod notification_flow;
 #[path = "firewall/openwrt_uci_firewall_adapter.rs"]
@@ -103,6 +107,8 @@ mod proc_ebpf;
 mod proc_fs;
 #[path = "services/process_service.rs"]
 mod process_service;
+#[path = "parsing/procmon_procfs.rs"]
+mod procmon_procfs;
 #[path = "smoke/readonly_smoke.rs"]
 mod readonly_smoke;
 #[path = "parsing/ring_buffer.rs"]

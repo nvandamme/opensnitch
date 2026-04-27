@@ -3,13 +3,12 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use anyhow::Result;
 use netlink_bindings::inet_diag::{self, BytecodeOp, BytecodeOpCode, Hostcond, ReqV2};
-use netlink_bindings::traits::{NetlinkRequest, Protocol};
-use netlink_socket2::NetlinkSocket;
 
-use crate::models::socket_state::SocketInfo;
 use crate::platform::netlink::io::{
-    for_each_reply, netlink_map_io_error, netlink_map_reply_error, request_with_ack,
+    NetlinkRequest, NetlinkSocket, Protocol, for_each_reply, netlink_map_io_error,
+    netlink_map_reply_error, request_with_ack,
 };
+use crate::platform::netstat::socket_state::SocketInfo;
 
 const SOCKET_DIAG_FAMILIES: [u8; 2] = [nix::libc::AF_INET as u8, nix::libc::AF_INET6 as u8];
 const SOCKET_DIAG_PROTOCOLS: [u8; 2] = [nix::libc::IPPROTO_TCP as u8, nix::libc::IPPROTO_UDP as u8];
@@ -402,9 +401,7 @@ impl SocketDiagAdapter {
     pub(crate) fn kill_socket(family: u8, protocol: u8, socket: &SocketInfo) -> Result<()> {
         let socket = socket.clone();
         crate::platform::netlink::runtime::run_on_netlink_rt(Self::kill_socket_async(
-            family,
-            protocol,
-            socket,
+            family, protocol, socket,
         ))
     }
 

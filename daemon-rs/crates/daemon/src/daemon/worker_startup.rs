@@ -34,7 +34,7 @@ impl Daemon {
 
         handles.push_worker(
             "nfqueue",
-            workers::runtime::nfqueue::worker::NfqueueWorkerControl::spawn(
+            workers::runtime::nfqueue::NfqueueWorkerControl::spawn(
                 self.runtime.bus.clone(),
                 self.runtime.nfqueue_num,
                 self.runtime.default_action,

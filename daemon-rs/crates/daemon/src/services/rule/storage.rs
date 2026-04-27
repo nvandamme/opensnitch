@@ -14,17 +14,17 @@ use tracing::warn;
 use super::{RuleService, rule_duration_temporary_spec};
 use crate::{
     models::{
-        rule_record::{RuleDuration, RuleOperator, RuleRecord},
-        rule_storage::RuleFile,
+        rule::record::{RuleDuration, RuleOperator, RuleRecord},
+        rule::storage::RuleFile,
     },
     services::storage::{FileLoadableStateStore, StorageService},
     utils::path_text::file_name_lossy,
     utils::transient_files::is_transient_artifact_name,
-    workers::runtime::{control::WorkerControl, watch::control::WatchWorkerControl},
+    workers::runtime::{control::WorkerControl, watch::WatchWorkerControl},
 };
 
 #[cfg(test)]
-use crate::models::rule_storage::RuleFileOperator;
+use crate::models::rule::storage::RuleFileOperator;
 
 pub(crate) struct RuleDirScanWithHint {
     pub(crate) state: BTreeMap<String, Option<SystemTime>>,

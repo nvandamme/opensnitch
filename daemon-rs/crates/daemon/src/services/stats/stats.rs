@@ -7,9 +7,9 @@ use super::internal::{
     StatsCounters, StatsEvent,
 };
 use crate::config::StatsConfig;
-use crate::models::connection_state::ConnectionAttempt;
-use crate::models::metrics_snapshot::MetricsSnapshot;
-pub(crate) use crate::models::storage_event_counters::StorageEventCounters;
+use crate::models::connection::state::ConnectionAttempt;
+use crate::models::metrics::snapshot::MetricsSnapshot;
+pub(crate) use crate::models::storage::event_counters::StorageEventCounters;
 use crate::utils::time_nonce::unix_epoch_nanos;
 
 #[derive(Clone)]

@@ -27,7 +27,7 @@ use crate::{
         ConnectFlowLifecycle, KernelFlowLifecycle, NotificationFlowLifecycle, StatsFlowLifecycle,
         StatsLifecycle, TaskAction, VerdictFlowLifecycle,
     },
-    models::connection_state::ConnectionAttempt,
+    models::connection::state::ConnectionAttempt,
     services::{
         config::{ConfigService, ProcWorkerReconfigure as ConfigProcWorkerReconfigure},
         dns::DnsService,
@@ -308,7 +308,7 @@ impl Daemon {
         &self,
         flow: NotificationFlow,
         task_reply_rx: tokio::sync::mpsc::Receiver<transport_wire_core::WireNotificationReply>,
-        alert_rx: tokio::sync::mpsc::Receiver<crate::models::ui_alert::UiAlert>,
+        alert_rx: tokio::sync::mpsc::Receiver<crate::models::notification::alert::UiAlert>,
     ) -> JoinHandle<()> {
         let shutdown = self.runtime.shutdown.clone();
         let audit = self.runtime.audit.clone();
@@ -354,7 +354,7 @@ impl Daemon {
         process: ProcessService,
         dns: DnsService,
         stats: StatsService,
-        kernel_rx: tokio::sync::mpsc::Receiver<crate::models::kernel_event::KernelEvent>,
+        kernel_rx: tokio::sync::mpsc::Receiver<crate::models::kernel::event::KernelEvent>,
     ) -> JoinHandle<()> {
         let verbose_hot_path_audit = self
             .runtime
@@ -375,7 +375,7 @@ impl Daemon {
     #[cfg(test)]
     pub(crate) fn spawn_client_command_task(
         &self,
-        client_cmd_rx: tokio::sync::mpsc::Receiver<crate::models::command_rpc::ClientCommand>,
+        client_cmd_rx: tokio::sync::mpsc::Receiver<crate::models::command::rpc::ClientCommand>,
     ) -> JoinHandle<()> {
         CommandFlow::new(
             self.runtime.shutdown.clone(),
@@ -403,7 +403,7 @@ impl Daemon {
 
     pub(super) fn spawn_verdict_rpc_task(
         &self,
-        verdict_rx: tokio::sync::mpsc::Receiver<crate::models::verdict_rpc::VerdictReply>,
+        verdict_rx: tokio::sync::mpsc::Receiver<crate::models::verdict::rpc::VerdictReply>,
         stats: StatsService,
     ) -> JoinHandle<()> {
         VerdictSubmitFlow::new(self.runtime.shutdown.clone()).spawn(verdict_rx, stats)

@@ -1,4 +1,4 @@
-use crate::models::firewall_config::{
+use crate::platform::firewall::config::{
     FirewallChain, FirewallExpression, FirewallRule, FirewallStatement, FirewallStatementValue,
 };
 use crate::platform::firewall::nftables::FirewallNftablesAdapter;

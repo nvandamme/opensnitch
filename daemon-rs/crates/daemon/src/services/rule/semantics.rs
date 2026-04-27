@@ -1,4 +1,4 @@
-use crate::models::rule_record::RuleDuration;
+use crate::models::rule::record::RuleDuration;
 
 pub(crate) fn rule_duration_persists_to_disk(duration: &RuleDuration) -> bool {
     matches!(duration, RuleDuration::Permanent)

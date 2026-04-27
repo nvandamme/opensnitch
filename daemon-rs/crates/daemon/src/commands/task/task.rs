@@ -1,7 +1,7 @@
 use crate::{
     models::{
         audit::{AuditEvent, AuditEventKind, TaskAction},
-        command_rpc::ClientCommand,
+        command::rpc::ClientCommand,
     },
     services::{audit::AuditService, lifecycle::ServiceLifecycle, task::TaskRuntime},
 };

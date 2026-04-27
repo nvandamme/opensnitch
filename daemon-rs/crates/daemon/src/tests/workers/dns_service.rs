@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{models::dns_payload::DnsAnswerRecord, services::dns::DnsService};
+use crate::{models::dns::payload::DnsAnswerRecord, services::dns::DnsService};
 
 #[tokio::test]
 async fn track_skips_loopback_and_self_alias() {

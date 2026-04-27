@@ -5,12 +5,12 @@ use crate::{
     commands::client::client::{parse_log_level_data, parse_task_notification_data},
     config::{AuthMode, ClientAuthType, Config},
     flows::notification::{NotificationFlow, notification::NotificationAuthorizationClass},
-    models::command_action::CommandAction,
-    models::firewall_config::{
+    models::command::action::CommandAction,
+    models::rule::record::{RuleOperator, RuleRecord},
+    platform::firewall::config::{
         FirewallChain, FirewallConfig, FirewallExpression, FirewallRule, FirewallStatement,
         FirewallStatementValue,
     },
-    models::rule_record::{RuleOperator, RuleRecord},
     services::client::{ClientPrincipal, ClientService, NotificationStream},
     services::config::ConfigService,
     services::firewall::FirewallService,
@@ -1590,7 +1590,7 @@ fn resolve_remote_principal_binding_returns_none_when_not_configured() {
 
 #[test]
 fn required_capability_returns_owner_write_for_user_scoped_rule_mutations() {
-    use crate::models::auth_capability::{CAP_RULES_OWNER_WRITE, required_capability};
+    use crate::flows::notification::auth_capability::{CAP_RULES_OWNER_WRITE, required_capability};
 
     for action in [
         CommandAction::ChangeRule,
@@ -1608,7 +1608,9 @@ fn required_capability_returns_owner_write_for_user_scoped_rule_mutations() {
 
 #[test]
 fn required_capability_returns_global_write_for_elevated_rule_mutations() {
-    use crate::models::auth_capability::{CAP_RULES_GLOBAL_WRITE, required_capability};
+    use crate::flows::notification::auth_capability::{
+        CAP_RULES_GLOBAL_WRITE, required_capability,
+    };
 
     assert_eq!(
         required_capability(
@@ -1621,7 +1623,7 @@ fn required_capability_returns_global_write_for_elevated_rule_mutations() {
 
 #[test]
 fn required_capability_returns_none_for_always_allowed_and_always_denied() {
-    use crate::models::auth_capability::required_capability;
+    use crate::flows::notification::auth_capability::required_capability;
 
     assert_eq!(
         required_capability(
@@ -1641,7 +1643,7 @@ fn required_capability_returns_none_for_always_allowed_and_always_denied() {
 
 #[test]
 fn required_capability_maps_elevated_commands() {
-    use crate::models::auth_capability::{
+    use crate::flows::notification::auth_capability::{
         CAP_CONFIG_WRITE, CAP_DAEMON_CONTROL_STOP, CAP_FIREWALL_TOGGLE, CAP_INTERCEPTION_TOGGLE,
         CAP_LOG_LEVEL, CAP_TASK_CONTROL, required_capability,
     };
@@ -1708,7 +1710,7 @@ fn required_capability_maps_elevated_commands() {
 
 #[test]
 fn notification_command_allowed_permits_remote_session_with_matching_capability() {
-    use crate::models::auth_capability::CAP_CONFIG_WRITE;
+    use crate::flows::notification::auth_capability::CAP_CONFIG_WRITE;
 
     let mut cfg = Config::default();
     cfg.auth_mode = AuthMode::LocalRemoteCapabilities;
@@ -1760,7 +1762,7 @@ fn notification_command_allowed_denies_remote_session_without_required_capabilit
 
 #[test]
 fn notification_command_allowed_denies_remote_session_with_empty_capabilities() {
-    use crate::models::auth_capability::CAP_CONFIG_WRITE;
+    use crate::flows::notification::auth_capability::CAP_CONFIG_WRITE;
 
     let mut cfg = Config::default();
     cfg.auth_mode = AuthMode::LocalRemoteCapabilities;
@@ -1793,7 +1795,7 @@ fn notification_command_allowed_denies_remote_session_with_empty_capabilities() 
 
 #[test]
 fn notification_command_allowed_permits_remote_root_for_elevated_command() {
-    use crate::models::auth_capability::CAP_DAEMON_CONTROL_STOP;
+    use crate::flows::notification::auth_capability::CAP_DAEMON_CONTROL_STOP;
 
     let mut cfg = Config::default();
     cfg.auth_mode = AuthMode::LocalRemoteCapabilities;
@@ -1847,7 +1849,7 @@ fn notification_command_allowed_denies_remote_root_without_required_capability()
 
 #[test]
 fn notification_command_allowed_permits_remote_owner_scoped_rule_with_owner_cap() {
-    use crate::models::auth_capability::CAP_RULES_OWNER_WRITE;
+    use crate::flows::notification::auth_capability::CAP_RULES_OWNER_WRITE;
 
     let mut cfg = Config::default();
     cfg.auth_mode = AuthMode::LocalRemoteCapabilities;
@@ -1882,7 +1884,7 @@ fn notification_command_allowed_permits_remote_owner_scoped_rule_with_owner_cap(
 
 #[test]
 fn notification_command_allowed_denies_remote_global_rule_with_only_owner_cap() {
-    use crate::models::auth_capability::CAP_RULES_OWNER_WRITE;
+    use crate::flows::notification::auth_capability::CAP_RULES_OWNER_WRITE;
 
     let mut cfg = Config::default();
     cfg.auth_mode = AuthMode::LocalRemoteCapabilities;
@@ -2092,7 +2094,7 @@ fn normalize_owner_scoped_rules_works_with_remote_cert_session() {
 
 #[test]
 fn remote_cert_principal_converts_to_network_identity_policy_owner() {
-    use crate::models::policy_tx_storage::PolicyOwner;
+    use crate::models::policy::storage::PolicyOwner;
 
     let principal = crate::services::client::ClientPrincipal::RemoteCert {
         binding_name: "ui-server-1".to_string(),
