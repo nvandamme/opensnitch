@@ -1074,133 +1074,244 @@ fn system_rule_expression_shipped_coverage_audit_report() {
 
 #[test]
 fn unsupported_expression_family_classifier_is_stable() {
+    // (expression, expected_family, expected_class)
     let cases = [
-        ("meta nfproto ipv4 accept", "meta"),
-        ("meta unknownkey 1 accept", "meta"),
-        ("ip saddr 192.168.1.0/24 accept", "cidr"),
-        ("ip6 daddr 2001:db8::/129 accept", "cidr"),
-        ("ct state bogus accept", "ct_state"),
-        ("ct status bogus accept", "ct_state"),
-        ("ct direction bogus accept", "ct_state"),
-        ("ct mark bogus accept", "ct_state"),
-        ("ct secmark bogus accept", "ct_state"),
-        ("ct expiration bogus accept", "ct_state"),
-        ("ct l3protocol bogus accept", "ct_state"),
-        ("ct protocol bogus accept", "ct_state"),
-        ("ct proto-src bogus accept", "ct_state"),
-        ("ct proto-dst bogus accept", "ct_state"),
-        ("ct zone bogus accept", "ct_state"),
-        ("ct helper bad*helper accept", "ct_state"),
-        ("ct src bogus accept", "ct_state"),
-        ("ct dst bogus accept", "ct_state"),
-        ("ct src-ip bogus accept", "ct_state"),
-        ("ct dst-ip bogus accept", "ct_state"),
-        ("ct src-ip6 bogus accept", "ct_state"),
-        ("ct dst-ip6 bogus accept", "ct_state"),
-        ("ct pkts bogus accept", "ct_state"),
-        ("ct bytes bogus accept", "ct_state"),
-        ("ct avgpkt bogus accept", "ct_state"),
-        ("ct eventmask bogus accept", "ct_state"),
-        ("ct id bogus accept", "ct_state"),
-        ("tcp dport 25 reject with icmpx type bogus", "reject"),
-        ("ip saddr @ accept", "lookup"),
-        ("ip saddr > @allowed_v4 accept", "lookup"),
-        ("ip saddr vmap @", "lookup"),
-        ("tcp dport 53 masquerade to 1024", "nat"),
-        ("tcp dport 53 snat to 10.0.0.10:bad", "nat"),
-        ("tcp dport 53 snat to 10.0.0.10 randomx", "nat"),
-        ("tcp dport 53 snat to 10.0.0.10-2001:db8::10", "nat"),
-        ("tcp dport 53 redirect to 5353", "nat"),
-        ("tcp dport 53 redirect random", "nat"),
-        ("tcp dport 53 redirect to :5353 random fully-random", "nat"),
-        ("tcp dport 53 redirect randomx", "nat"),
-        ("tcp dport 53 tproxy", "nat"),
-        ("tcp dport 53 tproxy to 127.0.0.1", "nat"),
-        ("tcp dport 53 tproxy to :bad", "nat"),
-        ("tcp dport 53 tproxy to :12345 random", "nat"),
-        ("counter name accept", "objref"),
-        ("counter name bad*counter accept", "objref"),
-        ("quota bogus accept", "quota"),
-        ("limit rate bogus/second accept", "limit"),
-        ("notrack", "notrack"),
-        ("queue bogus 3", "queue"),
-        ("queue num 3 bypass extra", "queue"),
+        ("meta nfproto ipv4 accept", "meta", "parse_ok"),
+        ("meta unknownkey 1 accept", "meta", "invalid_value"),
+        ("ip saddr 192.168.1.0/24 accept", "cidr", "invalid_value"),
+        ("ip6 daddr 2001:db8::/129 accept", "cidr", "invalid_value"),
+        ("ct state bogus accept", "ct_state", "invalid_value"),
+        ("ct status bogus accept", "ct_state", "invalid_value"),
+        ("ct direction bogus accept", "ct_state", "invalid_value"),
+        ("ct mark bogus accept", "ct_state", "invalid_value"),
+        ("ct secmark bogus accept", "ct_state", "invalid_value"),
+        ("ct expiration bogus accept", "ct_state", "invalid_value"),
+        ("ct l3protocol bogus accept", "ct_state", "invalid_value"),
+        ("ct protocol bogus accept", "ct_state", "invalid_value"),
+        ("ct proto-src bogus accept", "ct_state", "invalid_value"),
+        ("ct proto-dst bogus accept", "ct_state", "invalid_value"),
+        ("ct zone bogus accept", "ct_state", "invalid_value"),
+        ("ct helper bad*helper accept", "ct_state", "invalid_value"),
+        ("ct src bogus accept", "ct_state", "invalid_value"),
+        ("ct dst bogus accept", "ct_state", "invalid_value"),
+        ("ct src-ip bogus accept", "ct_state", "invalid_value"),
+        ("ct dst-ip bogus accept", "ct_state", "invalid_value"),
+        ("ct src-ip6 bogus accept", "ct_state", "invalid_value"),
+        ("ct dst-ip6 bogus accept", "ct_state", "invalid_value"),
+        ("ct pkts bogus accept", "ct_state", "invalid_value"),
+        ("ct bytes bogus accept", "ct_state", "invalid_value"),
+        ("ct avgpkt bogus accept", "ct_state", "invalid_value"),
+        ("ct eventmask bogus accept", "ct_state", "invalid_value"),
+        ("ct id bogus accept", "ct_state", "invalid_value"),
+        (
+            "tcp dport 25 reject with icmpx type bogus",
+            "reject",
+            "invalid_value",
+        ),
+        ("ip saddr @ accept", "lookup", "invalid_value"),
+        ("ip saddr > @allowed_v4 accept", "lookup", "invalid_value"),
+        ("ip saddr vmap @", "lookup", "invalid_value"),
+        ("tcp dport 53 masquerade to 1024", "nat", "invalid_value"),
+        ("tcp dport 53 snat to 10.0.0.10:bad", "nat", "invalid_value"),
+        (
+            "tcp dport 53 snat to 10.0.0.10 randomx",
+            "nat",
+            "trailing_tokens",
+        ),
+        (
+            "tcp dport 53 snat to 10.0.0.10-2001:db8::10",
+            "nat",
+            "invalid_value",
+        ),
+        ("tcp dport 53 redirect to 5353", "nat", "invalid_value"),
+        ("tcp dport 53 redirect random", "nat", "invalid_value"),
+        (
+            "tcp dport 53 redirect to :5353 random fully-random",
+            "nat",
+            "trailing_tokens",
+        ),
+        ("tcp dport 53 redirect randomx", "nat", "invalid_value"),
+        ("tcp dport 53 tproxy", "nat", "invalid_value"),
+        ("tcp dport 53 tproxy to 127.0.0.1", "nat", "invalid_value"),
+        ("tcp dport 53 tproxy to :bad", "nat", "invalid_value"),
+        (
+            "tcp dport 53 tproxy to :12345 random",
+            "nat",
+            "trailing_tokens",
+        ),
+        ("counter name accept", "objref", "invalid_value"),
+        ("counter name bad*counter accept", "objref", "invalid_value"),
+        ("quota bogus accept", "quota", "invalid_value"),
+        ("limit rate bogus/second accept", "limit", "invalid_value"),
+        ("notrack", "notrack", "invalid_value"),
+        ("queue bogus 3", "queue", "invalid_value"),
+        ("queue num 3 bypass extra", "queue", "trailing_tokens"),
         (
             "icmp type { echo-request, echo-reply } accept",
             "set_or_list",
+            "ambiguous_form",
         ),
-        ("meta mark 0x10 accept", "meta"),
-        ("meta skuid bogus accept", "meta"),
-        ("meta skgid bogus accept", "meta"),
-        ("meta iif bogus accept", "meta"),
-        ("meta oif bogus accept", "meta"),
-        ("meta iiftype bogus accept", "meta"),
-        ("meta oiftype bogus accept", "meta"),
-        ("meta iifname bad*iface accept", "meta"),
-        ("meta iifname { bad*iface, lo } accept", "set_or_list"),
-        ("meta oifname > eth0 accept", "meta"),
-        ("meta oifname > { eth0, wlan0 } accept", "set_or_list"),
-        ("meta bri_iifname bad*iface accept", "meta"),
-        ("meta bri_iifname { bad*iface, br0 } accept", "set_or_list"),
-        ("meta bri_oifname > br0 accept", "meta"),
-        ("meta bri_oifname > { br0, br-lan } accept", "set_or_list"),
-        ("meta secmark bogus accept", "meta"),
-        ("meta priority bogus accept", "meta"),
-        ("meta len bogus accept", "meta"),
-        ("meta rtclassid bogus accept", "meta"),
-        ("meta cpu bogus accept", "meta"),
-        ("meta iifgroup bogus accept", "meta"),
-        ("meta oifgroup bogus accept", "meta"),
-        ("meta nftrace bogus accept", "meta"),
-        ("meta cgroup bogus accept", "meta"),
-        ("meta prandom bogus accept", "meta"),
-        ("meta secpath bogus accept", "meta"),
-        ("meta pkttype bogus accept", "meta"),
-        ("meta sdif bogus accept", "meta"),
-        ("meta sdifname > lo accept", "meta"),
-        ("meta sdifname > { lo, eth0 } accept", "set_or_list"),
-        ("meta iifkind bad*kind accept", "meta"),
-        ("meta iifkind { bad*kind, vlan } accept", "set_or_list"),
-        ("meta oifkind > bridge accept", "meta"),
-        ("meta oifkind > { bridge, vlan } accept", "set_or_list"),
-        ("meta time ns bogus accept", "meta"),
-        ("meta time day bogus accept", "meta"),
-        ("meta time hour bogus accept", "meta"),
-        ("meta protocol bogus accept", "meta"),
-        ("meta iiftype { 1, bogus } accept", "set_or_list"),
-        ("meta oiftype { 1, bogus } accept", "set_or_list"),
-        ("meta sdif { 2, bogus } accept", "set_or_list"),
-        ("meta time day { 1, bogus } accept", "set_or_list"),
-        ("meta time hour { 8, bogus } accept", "set_or_list"),
-        ("meta protocol { 0x0800, bogus } accept", "set_or_list"),
-        ("meta bri_iifpvid bogus accept", "meta"),
-        ("meta bri_iifpvid { 1, bogus } accept", "set_or_list"),
-        ("meta bri_iifvproto bogus accept", "meta"),
-        ("meta bri_iifvproto { 0x8100, bogus } accept", "set_or_list"),
-        ("meta bri_broute 999 accept", "meta"),
-        ("meta bri_broute { 0, 999 } accept", "set_or_list"),
-        ("log level bogus accept", "log"),
-        ("log flags bogus accept", "log"),
-        ("log group bogus accept", "log"),
-        ("log snaplen bogus accept", "log"),
-        ("log qthreshold bogus accept", "log"),
-        ("log prefix bad*prefix accept", "log"),
-        ("fib saddr . iif bogus 1 accept", "fib"),
-        ("fib saddr . bogus oif 1 accept", "fib"),
-        ("fib saddr . iif oifname bad*iface accept", "fib"),
-        ("fib saddr . iif oifname > eth0 accept", "fib"),
-        ("fib saddr . iif oifname { bad*iface, eth0 } accept", "fib"),
-        ("numgen random mod 0 < 1 accept", "numgen"),
-        ("numgen random mod 10 { bogus, 1 } accept", "numgen"),
-        ("ip ttl bogus accept", "ip_addr_or_proto"),
-        ("ip6 hoplimit bogus accept", "ip_addr_or_proto"),
-        ("udp length bogus accept", "transport"),
-        ("tcp dport 22 accept", "transport"),
-        ("ip protocol 250 accept", "ip_addr_or_proto"),
+        ("meta mark 0x10 accept", "meta", "invalid_value"),
+        ("meta skuid bogus accept", "meta", "invalid_value"),
+        ("meta skgid bogus accept", "meta", "invalid_value"),
+        ("meta iif bogus accept", "meta", "invalid_value"),
+        ("meta oif bogus accept", "meta", "invalid_value"),
+        ("meta iiftype bogus accept", "meta", "invalid_value"),
+        ("meta oiftype bogus accept", "meta", "invalid_value"),
+        ("meta iifname bad*iface accept", "meta", "invalid_value"),
+        (
+            "meta iifname { bad*iface, lo } accept",
+            "set_or_list",
+            "ambiguous_form",
+        ),
+        ("meta oifname > eth0 accept", "meta", "invalid_value"),
+        (
+            "meta oifname > { eth0, wlan0 } accept",
+            "set_or_list",
+            "ambiguous_form",
+        ),
+        ("meta bri_iifname bad*iface accept", "meta", "invalid_value"),
+        (
+            "meta bri_iifname { bad*iface, br0 } accept",
+            "set_or_list",
+            "ambiguous_form",
+        ),
+        ("meta bri_oifname > br0 accept", "meta", "invalid_value"),
+        (
+            "meta bri_oifname > { br0, br-lan } accept",
+            "set_or_list",
+            "ambiguous_form",
+        ),
+        ("meta secmark bogus accept", "meta", "invalid_value"),
+        ("meta priority bogus accept", "meta", "invalid_value"),
+        ("meta len bogus accept", "meta", "invalid_value"),
+        ("meta rtclassid bogus accept", "meta", "invalid_value"),
+        ("meta cpu bogus accept", "meta", "invalid_value"),
+        ("meta iifgroup bogus accept", "meta", "invalid_value"),
+        ("meta oifgroup bogus accept", "meta", "invalid_value"),
+        ("meta nftrace bogus accept", "meta", "invalid_value"),
+        ("meta cgroup bogus accept", "meta", "invalid_value"),
+        ("meta prandom bogus accept", "meta", "invalid_value"),
+        ("meta secpath bogus accept", "meta", "invalid_value"),
+        ("meta pkttype bogus accept", "meta", "invalid_value"),
+        ("meta sdif bogus accept", "meta", "invalid_value"),
+        ("meta sdifname > lo accept", "meta", "invalid_value"),
+        (
+            "meta sdifname > { lo, eth0 } accept",
+            "set_or_list",
+            "ambiguous_form",
+        ),
+        ("meta iifkind bad*kind accept", "meta", "invalid_value"),
+        (
+            "meta iifkind { bad*kind, vlan } accept",
+            "set_or_list",
+            "ambiguous_form",
+        ),
+        ("meta oifkind > bridge accept", "meta", "invalid_value"),
+        (
+            "meta oifkind > { bridge, vlan } accept",
+            "set_or_list",
+            "ambiguous_form",
+        ),
+        ("meta time ns bogus accept", "meta", "invalid_value"),
+        ("meta time day bogus accept", "meta", "invalid_value"),
+        ("meta time hour bogus accept", "meta", "invalid_value"),
+        ("meta protocol bogus accept", "meta", "invalid_value"),
+        (
+            "meta iiftype { 1, bogus } accept",
+            "set_or_list",
+            "ambiguous_form",
+        ),
+        (
+            "meta oiftype { 1, bogus } accept",
+            "set_or_list",
+            "ambiguous_form",
+        ),
+        (
+            "meta sdif { 2, bogus } accept",
+            "set_or_list",
+            "ambiguous_form",
+        ),
+        (
+            "meta time day { 1, bogus } accept",
+            "set_or_list",
+            "ambiguous_form",
+        ),
+        (
+            "meta time hour { 8, bogus } accept",
+            "set_or_list",
+            "ambiguous_form",
+        ),
+        (
+            "meta protocol { 0x0800, bogus } accept",
+            "set_or_list",
+            "ambiguous_form",
+        ),
+        ("meta bri_iifpvid bogus accept", "meta", "invalid_value"),
+        (
+            "meta bri_iifpvid { 1, bogus } accept",
+            "set_or_list",
+            "ambiguous_form",
+        ),
+        ("meta bri_iifvproto bogus accept", "meta", "invalid_value"),
+        (
+            "meta bri_iifvproto { 0x8100, bogus } accept",
+            "set_or_list",
+            "ambiguous_form",
+        ),
+        ("meta bri_broute 999 accept", "meta", "invalid_value"),
+        (
+            "meta bri_broute { 0, 999 } accept",
+            "set_or_list",
+            "ambiguous_form",
+        ),
+        ("log level bogus accept", "log", "invalid_value"),
+        ("log flags bogus accept", "log", "invalid_value"),
+        ("log group bogus accept", "log", "invalid_value"),
+        ("log snaplen bogus accept", "log", "invalid_value"),
+        ("log qthreshold bogus accept", "log", "invalid_value"),
+        ("log prefix bad*prefix accept", "log", "invalid_value"),
+        ("fib saddr . iif bogus 1 accept", "fib", "invalid_value"),
+        ("fib saddr . bogus oif 1 accept", "fib", "invalid_value"),
+        (
+            "fib saddr . iif oifname bad*iface accept",
+            "fib",
+            "invalid_value",
+        ),
+        (
+            "fib saddr . iif oifname > eth0 accept",
+            "fib",
+            "invalid_value",
+        ),
+        (
+            "fib saddr . iif oifname { bad*iface, eth0 } accept",
+            "fib",
+            "invalid_value",
+        ),
+        ("numgen random mod 0 < 1 accept", "numgen", "invalid_value"),
+        (
+            "numgen random mod 10 { bogus, 1 } accept",
+            "numgen",
+            "invalid_value",
+        ),
+        ("ip ttl bogus accept", "ip_addr_or_proto", "invalid_value"),
+        (
+            "ip6 hoplimit bogus accept",
+            "ip_addr_or_proto",
+            "invalid_value",
+        ),
+        ("udp length bogus accept", "transport", "invalid_value"),
+        ("tcp dport 22 accept", "transport", "invalid_value"),
+        (
+            "ip protocol 250 accept",
+            "ip_addr_or_proto",
+            "invalid_value",
+        ),
     ];
 
-    for (expression, expected_family) in cases {
-        let family = FirewallNetlinkAdapter::probe_unsupported_expression_family(expression);
+    for (expression, expected_family, _expected_class) in cases {
+        let (family, _class) =
+            FirewallNetlinkAdapter::probe_unsupported_expression_family(expression);
         assert_eq!(
             family, expected_family,
             "unexpected classifier family for expression: {expression}"
@@ -1241,7 +1352,7 @@ fn unsupported_summary_shape_is_stable() {
         },
     ];
 
-    let (unsupported_ops, unsupported_expression_families) =
+    let (unsupported_ops, unsupported_expression_families, unsupported_failure_classes) =
         FirewallNetlinkAdapter::probe_unsupported_summary_for_ops(&ops);
 
     assert_eq!(
@@ -1254,6 +1365,39 @@ fn unsupported_summary_shape_is_stable() {
         ]
     );
     assert_eq!(unsupported_expression_families, vec![("queue", 1)]);
+    assert_eq!(unsupported_failure_classes, vec![("invalid_value", 1)]);
+}
+
+#[test]
+fn parse_failure_class_covers_all_categories() {
+    // empty_expression: empty input
+    let (family, class) = FirewallNetlinkAdapter::probe_unsupported_expression_family("");
+    assert_eq!(family, "other");
+    assert_eq!(class, "empty_expression");
+
+    // unsupported_shape: verdict missing target chain
+    let (family, class) = FirewallNetlinkAdapter::probe_unsupported_expression_family("jump");
+    assert_eq!(family, "other");
+    assert_eq!(class, "unsupported_shape");
+
+    // trailing_tokens: parsed action followed by unexpected non-comment tokens
+    let (family, class) =
+        FirewallNetlinkAdapter::probe_unsupported_expression_family("accept extra");
+    assert_eq!(family, "other");
+    assert_eq!(class, "trailing_tokens");
+
+    // invalid_value: recognized family but bad value
+    let (family, class) =
+        FirewallNetlinkAdapter::probe_unsupported_expression_family("ct state bogus accept");
+    assert_eq!(family, "ct_state");
+    assert_eq!(class, "invalid_value");
+
+    // ambiguous_form: unrecognized expression with set/list syntax
+    let (family, class) = FirewallNetlinkAdapter::probe_unsupported_expression_family(
+        "bogus { a, b } accept",
+    );
+    assert_eq!(family, "set_or_list");
+    assert_eq!(class, "ambiguous_form");
 }
 
 #[test]

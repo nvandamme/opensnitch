@@ -16,6 +16,20 @@ Versioning baseline:
 
 ### Changed
 
+- **firewall-netlink: Phase 5 — structured parse error class reporting**
+  (`crates/daemon/src/platform/firewall/netlink/types.rs`,
+  `crates/daemon/src/platform/firewall/netlink/adapter.rs`,
+  `crates/daemon/src/tests/firewall/firewall_netlink.rs`):
+  - Added `ParseFailureClass::as_str()` method: maps each class variant to a `&'static str` label (`empty_expression`, `unsupported_shape`, `invalid_value`, `ambiguous_form`, `trailing_tokens`).
+  - Refactored `unsupported_expression_family_from_parse_failure` to return `(&'static str, &'static str)` (family, class) instead of just family. When parse_failure is present: carries typed class through all branches; when parse_failure.family is `Other`, falls back to heuristic family with typed class. When parse_failure is absent (expression parsed OK), returns class `"parse_ok"`.
+  - Refactored `unsupported_summary_for_ops` to return 3-tuple including `unsupported_failure_classes: Vec<(&'static str, usize)>` tracking class distribution alongside family distribution.
+  - Added `unsupported_failure_classes: Vec<(&'static str, usize)>` field to `NetlinkExecutionSummary`.
+  - All 5 production `tracing::debug` sites (ensure, disable, interception_rules_valid, apply_system_firewall, clear_system_firewall) now log `unsupported_failure_classes`.
+  - Updated probe functions for new return types.
+  - Updated `unsupported_expression_family_classifier_is_stable` test: family-only assertions preserved; class column added as documentation.
+  - Updated `unsupported_summary_shape_is_stable` test: asserts on failure class counts.
+  - Added `parse_failure_class_covers_all_categories` test: validates all 5 `ParseFailureClass` variants produce expected labels for representative expressions. 592 tests passing.
+
 - **procfs: GetExtraInfo, readDescriptors, and core function consolidation**
   (`crates/daemon/src/platform/procmon/procfs.rs`,
   `crates/daemon/src/models/process/state.rs`,

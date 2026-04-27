@@ -41,10 +41,11 @@ fn unsupported_expression_for_operation(op: &FirewallNetlinkOperation) -> Option
 fn unsupported_expression_family_from_parse_failure(
     expression: &str,
     parse_failure: Option<super::ParseError>,
-) -> &'static str {
+) -> (&'static str, &'static str) {
     let classified = NftRule::classify_expression_family(expression);
     match parse_failure {
         Some(parse_failure) => {
+            let class = parse_failure.class.as_str();
             if classified == "set_or_list"
                 && matches!(
                     parse_failure.class,
@@ -52,49 +53,57 @@ fn unsupported_expression_family_from_parse_failure(
                         | super::ParseFailureClass::AmbiguousForm
                 )
             {
-                return classified;
+                return (classified, class);
             }
 
             let parsed_family = parse_failure.family.as_str();
             if parsed_family != "other" {
-                return parsed_family;
+                return (parsed_family, class);
             }
 
-            match parse_failure.class {
-                super::ParseFailureClass::EmptyExpression => {}
-                super::ParseFailureClass::UnsupportedShape
-                | super::ParseFailureClass::InvalidValue
-                | super::ParseFailureClass::AmbiguousForm
-                | super::ParseFailureClass::TrailingTokens => {}
+            // Parse family is `other` but class is still meaningful — use heuristic
+            // family with the typed class from the parser.
+            if classified != "other" {
+                return (classified, class);
             }
+
+            ("other", class)
         }
-        None => {}
+        None => (
+            if classified != "other" {
+                classified
+            } else {
+                "other"
+            },
+            "parse_ok",
+        ),
     }
-
-    if classified != "other" {
-        return classified;
-    }
-
-    "other"
 }
 
 fn unsupported_summary_for_ops(
     ops: &[FirewallNetlinkOperation],
-) -> (Vec<&'static str>, Vec<(&'static str, usize)>) {
+) -> (
+    Vec<&'static str>,
+    Vec<(&'static str, usize)>,
+    Vec<(&'static str, usize)>,
+) {
     let mut unsupported_ops = Vec::new();
     let mut unsupported_expression_families: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut unsupported_failure_classes: BTreeMap<&'static str, usize> = BTreeMap::new();
     for op in ops {
         unsupported_ops.push(op.kind());
         if let Some(expression) = unsupported_expression_for_operation(op) {
             let parse_failure = NftRule::parse_failure(expression);
-            let family =
+            let (family, class) =
                 unsupported_expression_family_from_parse_failure(expression, parse_failure);
             *unsupported_expression_families.entry(family).or_insert(0) += 1;
+            *unsupported_failure_classes.entry(class).or_insert(0) += 1;
         }
     }
     (
         unsupported_ops,
         unsupported_expression_families.into_iter().collect(),
+        unsupported_failure_classes.into_iter().collect(),
     )
 }
 
@@ -211,6 +220,7 @@ impl FirewallNetlinkAdapter {
             ops = plan.len(),
             unsupported_ops = ?summary.unsupported_ops,
             unsupported_expression_families = ?summary.unsupported_expression_families,
+            unsupported_failure_classes = ?summary.unsupported_failure_classes,
             "nftables ensure partially handled via netlink; falling back for remaining ops"
         );
         Err(NetlinkFallbackRequired::new(
@@ -241,6 +251,7 @@ impl FirewallNetlinkAdapter {
             ops = plan.len(),
             unsupported_ops = ?summary.unsupported_ops,
             unsupported_expression_families = ?summary.unsupported_expression_families,
+            unsupported_failure_classes = ?summary.unsupported_failure_classes,
             "nftables disable partially handled via netlink; falling back for remaining ops"
         );
         Err(NetlinkFallbackRequired::new(
@@ -271,6 +282,7 @@ impl FirewallNetlinkAdapter {
             ops = plan.len(),
             unsupported_ops = ?summary.unsupported_ops,
             unsupported_expression_families = ?summary.unsupported_expression_families,
+            unsupported_failure_classes = ?summary.unsupported_failure_classes,
             "nftables validation requires compatibility path"
         );
         Err(NetlinkFallbackRequired::new(
@@ -301,6 +313,7 @@ impl FirewallNetlinkAdapter {
             dropped_unsupported_rules,
             unsupported_ops = ?summary.unsupported_ops,
             unsupported_expression_families = ?summary.unsupported_expression_families,
+            unsupported_failure_classes = ?summary.unsupported_failure_classes,
             "nftables apply partially handled via netlink; falling back for remaining ops"
         );
         let reason = if dropped_unsupported_rules > 0 {
@@ -333,6 +346,7 @@ impl FirewallNetlinkAdapter {
             ops = plan.len(),
             unsupported_ops = ?summary.unsupported_ops,
             unsupported_expression_families = ?summary.unsupported_expression_families,
+            unsupported_failure_classes = ?summary.unsupported_failure_classes,
             "nftables clear requires compatibility path"
         );
         Err(NetlinkFallbackRequired::new(
@@ -601,6 +615,7 @@ impl FirewallNetlinkAdapter {
                 outcome: TransactionOutcome::Full,
                 unsupported_ops: Vec::new(),
                 unsupported_expression_families: Vec::new(),
+                unsupported_failure_classes: Vec::new(),
             });
         }
 
@@ -623,7 +638,7 @@ impl FirewallNetlinkAdapter {
             }
         }
 
-        let (unsupported_ops, unsupported_expression_families) =
+        let (unsupported_ops, unsupported_expression_families, unsupported_failure_classes) =
             unsupported_summary_for_ops(&unsupported_netlink_ops);
 
         if !unsupported_ops.is_empty() {
@@ -632,6 +647,7 @@ impl FirewallNetlinkAdapter {
                 unsupported_count = unsupported_ops.len(),
                 unsupported_ops = ?unsupported_ops,
                 unsupported_expression_families = ?unsupported_expression_families,
+                unsupported_failure_classes = ?unsupported_failure_classes,
                 "nftables netlink left unsupported operations for CLI fallback"
             );
         }
@@ -641,6 +657,7 @@ impl FirewallNetlinkAdapter {
                 outcome: TransactionOutcome::Partial,
                 unsupported_ops,
                 unsupported_expression_families,
+                unsupported_failure_classes,
             });
         }
 
@@ -656,6 +673,7 @@ impl FirewallNetlinkAdapter {
             },
             unsupported_ops,
             unsupported_expression_families,
+            unsupported_failure_classes,
         })
     }
 
@@ -846,7 +864,9 @@ impl FirewallNetlinkAdapter {
         NftRule::parse_all(expression).is_some()
     }
     #[cfg(test)]
-    pub(crate) fn probe_unsupported_expression_family(expression: &str) -> &'static str {
+    pub(crate) fn probe_unsupported_expression_family(
+        expression: &str,
+    ) -> (&'static str, &'static str) {
         unsupported_expression_family_from_parse_failure(
             expression,
             NftRule::parse_failure(expression),
@@ -855,7 +875,11 @@ impl FirewallNetlinkAdapter {
     #[cfg(test)]
     pub(crate) fn probe_unsupported_summary_for_ops(
         ops: &[FirewallNetlinkOperation],
-    ) -> (Vec<&'static str>, Vec<(&'static str, usize)>) {
+    ) -> (
+        Vec<&'static str>,
+        Vec<(&'static str, usize)>,
+        Vec<(&'static str, usize)>,
+    ) {
         unsupported_summary_for_ops(ops)
     }
     #[cfg(test)]

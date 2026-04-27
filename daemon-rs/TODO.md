@@ -128,7 +128,7 @@ See `daemon-rs/COMPATIBILITY.md` for detailed compatibility matrix and policy.
   - `ARCH/PROC-CONNECTOR-NETLINK-CRATE-PRIMITIVES`: still in progress; production payload decode and framed test helper now use typed `#[repr(C)]` overlays instead of ad-hoc event/cn_msg field offsets.
   - `ARCH/NETLINK-PROBE-AND-MONITOR-PRIMITIVE-ALIGNMENT`: done — firewall netlink preflight + monitor paths both use `netlink-socket2::MulticastSocketRaw` (no direct `libc::socket`/`close` probe path remains in platform firewall netlink preflight/monitor flows).
   - `platform/firewall/port.rs`: removed `OPENSNITCH_NFT_NETLINK_EXPERIMENT` env gating; nft netlink path selection now depends on runtime availability/recovery gate only (fallback behavior unchanged).
-  - `ARCH/FIREWALL-NETLINK-THIN-PARSER-TYPED-IR`: only Phase 5 remains (typed unsupported/error-category routing). Substantially complete — `ParseFamily` now covers all 24 expression families including newly added `Connlimit`, `Exthdr`, `Hash`, `Rt`, `Dynset`, `Range`.
+  - `ARCH/FIREWALL-NETLINK-THIN-PARSER-TYPED-IR`: **closed.** All 5 phases complete — thin parser with typed IR, per-family encode, structured parse error class reporting with `ParseFailureClass::as_str()`, and unsupported-family/class distribution surfaced in all production debug log sites.
   - `ARCH/FIREWALL-NFT-EXPR-MAP-PARITY`: high-priority expression families landed (range, exthdr, connlimit, hash, rt, dynset). IPv6 extension header support wired into exthdr parser (hbh/rt/frag/dst/mh/ah). Coverage audit reports 50/50 (100%). Remaining gap is low-priority/niche families only (see parity matrix below).
   - Future/architecture epics (`PERF/FUTURE-HYBRID-BANDIX`, `ARCH/OPENWRT`, `ARCH/FIREWALL-PERSISTENCE`, `PERF/ARCH`, `Privileged Control Boundary`, proto `Operator.scope`, daemon-as-server gRPC, HTTP+WS client, OpenWrt integration feature, `redb` evaluation) remain open by design and require dedicated scoped slices.
 
@@ -303,7 +303,7 @@ See `daemon-rs/COMPATIBILITY.md` for detailed compatibility matrix and policy.
   - **Closure condition**:
     - ~~Adapter netlink preflight/monitor code paths use shared crate primitives/helpers consistently, with no duplicated low-level socket probe logic.~~ **Done.**
 
-- [ ] **ARCH/FIREWALL-NETLINK-THIN-PARSER-TYPED-IR** Reshape firewall netlink expression handling around a thin parser and canonical typed IR.
+- [x] **ARCH/FIREWALL-NETLINK-THIN-PARSER-TYPED-IR** Reshape firewall netlink expression handling around a thin parser and canonical typed IR.
   - **Goal**: keep nft expression text parsing minimal and move expression semantics into a stable typed intermediate representation that is independent from raw token walking and independent from any external nft library runtime types.
   - **Current baseline**:
     - Per-family IR types (`NftMeta`, `NftCt`, `NftPayload`, `NftNat`, `NftFib`, `NftNumgen`, `NftLog`, `NftCounter`, `NftQueue`, `NftVerdict`, plus `NftBitwise`, `NftCmp`, `NftImmediate`, `NftLookup`, `NftSocket`, `NftLimit`, `NftQuota`, `NftNotrack`) live in their respective `exprs/` family modules with co-located `encode()` methods.
@@ -328,10 +328,15 @@ See `daemon-rs/COMPATIBILITY.md` for detailed compatibility matrix and policy.
     - ~~Phase 2: per-family IR types with `encode()` impls; unified `NftExpression` + `NftRule`.~~ **Done.**
     - ~~Phase 3: atomic parser/apply switchover — all family parsers return `NftExpression`, `parse.rs` produces `Vec<NftRule>`, `apply.rs` encodes via dispatch.~~ **Done.**
     - ~~Phase 4: dissolve `types.rs` — remove dead `RuleCondition`/`RuleAction`/`RuleVerdict`/`ParsedRuleExpression`, remove old `is_*/push_*` dispatch functions.~~ **Done.**
-    - Phase 5: add structured parse error categories (`unsupported_family`, `unsupported_shape`, `invalid_value`, `ambiguous_form`) and route unsupported summary/classifier logic through those categories where possible.
+    - ~~Phase 5: add structured parse error categories (`unsupported_family`, `unsupported_shape`, `invalid_value`, `ambiguous_form`) and route unsupported summary/classifier logic through those categories where possible.~~ **Done.**
   - **Incremental progress (2026-04-26)**:
     - Unsupported expression family reporting in `adapter.rs` now prioritizes parser-produced `ParseError` family outcomes for unsupported summary/classifier paths, then falls back to heuristic family classification when parser family is `other`.
     - Parser error taxonomy now includes explicit `ambiguous_form` classification for set/list-shaped expressions (`{...}`) in thin-parser fallback paths, and unsupported-family routing preserves `set_or_list` reporting for those parser-classified ambiguous forms.
+  - **Incremental progress (Phase 5 completion)**:
+    - `ParseFailureClass::as_str()` added — all 5 class variants produce stable `&'static str` labels.
+    - Classifier returns `(family, class)` tuple; summary tracks `unsupported_failure_classes` alongside `unsupported_expression_families`.
+    - `NetlinkExecutionSummary` carries `unsupported_failure_classes`; all 5 production `tracing::debug` sites surface class distribution.
+    - New `parse_failure_class_covers_all_categories` test validates all 5 class variants.
   - **Validation/proof**:
     - Focused validation remains `cargo test -p opensnitchd-rs firewall_netlink -- --nocapture`.
     - Each family migration slice must update parser/apply/classifier tests together and preserve fallback behavior for unsupported forms.
@@ -339,7 +344,7 @@ See `daemon-rs/COMPATIBILITY.md` for detailed compatibility matrix and policy.
   - **Closure condition**:
     - ~~`parse.rs` is a thin dispatcher with shared token/value helpers factored out of family modules.~~ **Done.**
     - ~~Family parsers are syntax-to-IR only, and family encoders are IR-to-netlink only.~~ **Done.**
-    - Unsupported-family reporting is driven by typed parse outcomes for primary firewall-netlink paths rather than only string heuristics.
+    - Unsupported-family reporting is driven by typed parse outcomes for primary firewall-netlink paths rather than only string heuristics. **Done.**
 
 - [ ] **ARCH/FIREWALL-NFT-EXPR-MAP-PARITY** Align daemon-rs firewall-netlink expression support with upstream kernel nftables maps used by `netlink-bindings`.
   - **Goal**: close the gap between the current safe parser/apply subset and the full expression-map surface defined by upstream nftables schemas:

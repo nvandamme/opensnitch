@@ -100,6 +100,7 @@ pub(super) struct NetlinkExecutionSummary {
     pub(super) outcome: TransactionOutcome,
     pub(super) unsupported_ops: Vec<&'static str>,
     pub(super) unsupported_expression_families: Vec<(&'static str, usize)>,
+    pub(super) unsupported_failure_classes: Vec<(&'static str, usize)>,
 }
 
 pub(super) struct NetfilterTransactionBuilder {
@@ -222,6 +223,18 @@ pub(super) enum ParseFailureClass {
     InvalidValue,
     AmbiguousForm,
     TrailingTokens,
+}
+
+impl ParseFailureClass {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::EmptyExpression => "empty_expression",
+            Self::UnsupportedShape => "unsupported_shape",
+            Self::InvalidValue => "invalid_value",
+            Self::AmbiguousForm => "ambiguous_form",
+            Self::TrailingTokens => "trailing_tokens",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
