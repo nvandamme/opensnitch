@@ -123,16 +123,16 @@ See `daemon-rs/COMPATIBILITY.md` for detailed compatibility matrix and policy.
 - **Active-task scan (2026-04-26, refreshed 2026-04-27)**:
   - `ARCH/MODULE-LAYOUT-MODELS-REORG`: done — `models/` reorganized from ~45 flat files to 17 domain subdirectories (`audit/`, `command/`, `config/`, `connection/`, `dns/`, `ebpf/`, `firewall/`, `kernel/`, `metrics/`, `notification/`, `policy/`, `process/`, `rule/`, `storage/`, `subscription/`, `task/`, `verdict/`). DTO violations fixed: shared serde types relocated to `models/` with zero-allowlist `data_contract_ownership` test enforcement.
   - `ARCH/MODULE-LAYOUT-WORKERS-RUNTIME-COLLAPSE`: done — `workers/runtime/` collapsed 6 subdirectories to flat files (`connect.rs`, `nfqueue.rs`, `verdict.rs`, `helpers.rs`, `kernel.rs`, `watch.rs`), flattened `ebpf/control/` sub-subdirectory into `ebpf/`, renamed `support/` → `helpers.rs`. Only `ebpf/` subdirectory remains (8 files, ~1500 lines).
-  - `ARCH/NETLINK-OPS-REFERENCE-BASELINE`: still in progress; shared `platform/netlink` now owns socket construction, request iteration/ack helpers, generic nlmsg/NLA framing, attribute intrinsics, and the single `NetlinkResponse` adapter path for generated-family replies plus raw unsupported-family datagrams.
-  - `ARCH/NFQUEUE-NETLINK-CRATE-PRIMITIVES`: still in progress; generic nlmsg/NLA framing and `NlMsgFactory` now live in shared `platform/netlink/wire.rs`, while remaining NFQUEUE-specific `NFQA_*` encode/decode is isolated in `platform/nfqueue/netlink_wire.rs` with explicit crate-coverage rationale.
-  - `ARCH/PROC-CONNECTOR-NETLINK-CRATE-PRIMITIVES`: still in progress; production payload decode and framed test helper now use typed `#[repr(C)]` overlays instead of ad-hoc event/cn_msg field offsets.
+  - `ARCH/NETLINK-OPS-REFERENCE-BASELINE`: **closed.** All adapters consume primitives from shared `platform/netlink/` boundary; remaining manual paths (NFQUEUE, proc connector) documented with `NOTE(netlink-baseline)`.
+  - `ARCH/NFQUEUE-NETLINK-CRATE-PRIMITIVES`: **closed.** Core config/verdict/packet paths use shared wire helpers (`NlMsgFactory`/`NlmsgIter`/`NlaIter`). Only NFQA_* attribute encode/decode remains manual (`netlink-bindings` has no NFQUEUE module); documented with `NOTE(netlink-baseline)`.
+  - `ARCH/PROC-CONNECTOR-NETLINK-CRATE-PRIMITIVES`: **closed.** All decode uses typed `#[repr(C)]` overlays; 8 malformed-frame tests; `NOTE(netlink-baseline)` documented.
   - `ARCH/NETLINK-PROBE-AND-MONITOR-PRIMITIVE-ALIGNMENT`: done — firewall netlink preflight + monitor paths both use `netlink-socket2::MulticastSocketRaw` (no direct `libc::socket`/`close` probe path remains in platform firewall netlink preflight/monitor flows).
   - `platform/firewall/port.rs`: removed `OPENSNITCH_NFT_NETLINK_EXPERIMENT` env gating; nft netlink path selection now depends on runtime availability/recovery gate only (fallback behavior unchanged).
   - `ARCH/FIREWALL-NETLINK-THIN-PARSER-TYPED-IR`: **closed.** All 5 phases complete — thin parser with typed IR, per-family encode, structured parse error class reporting with `ParseFailureClass::as_str()`, and unsupported-family/class distribution surfaced in all production debug log sites.
   - `ARCH/FIREWALL-NFT-EXPR-MAP-PARITY`: high-priority expression families landed (range, exthdr, connlimit, hash, rt, dynset). IPv6 extension header support wired into exthdr parser (hbh/rt/frag/dst/mh/ah). Coverage audit reports 50/50 (100%). Remaining gap is low-priority/niche families only (see parity matrix below).
   - Future/architecture epics (`PERF/FUTURE-HYBRID-BANDIX`, `ARCH/OPENWRT`, `ARCH/FIREWALL-PERSISTENCE`, `PERF/ARCH`, `Privileged Control Boundary`, proto `Operator.scope`, daemon-as-server gRPC, HTTP+WS client, OpenWrt integration feature, `redb` evaluation) remain open by design and require dedicated scoped slices.
 
-- [ ] **ARCH/NETLINK-OPS-REFERENCE-BASELINE** Standardize all daemon-rs netlink operation work on `netlink-bindings` API reference as the canonical baseline.
+- [x] **ARCH/NETLINK-OPS-REFERENCE-BASELINE** Standardize all daemon-rs netlink operation work on `netlink-bindings` API reference as the canonical baseline.
   - **Reference**: `https://docs.rs/netlink-bindings/0.3.0/netlink_bindings/`
   - **Incremental progress (2026-04-26)**:
     - Added explicit `NOTE(netlink-baseline)` rationale markers in remaining manual netlink paths:
@@ -146,9 +146,9 @@ See `daemon-rs/COMPATIBILITY.md` for detailed compatibility matrix and policy.
     - Each netlink migration PR must document which `netlink-bindings` APIs were used (or unavailable) and why.
     - Remaining manual segments must be isolated and covered by malformed-frame/error-path tests.
   - **Closure condition**:
-    - All active netlink adapter migrations reference this baseline and no untracked manual netlink operation path remains.
+    - ~~All active netlink adapter migrations reference this baseline and no untracked manual netlink operation path remains.~~ **Done.** All adapters consume socket/request/reply/message/attribute primitives from shared `platform/netlink/` boundary. Domain-specific adapters import protocol-typed constants (`netlink_bindings::nftables`, `inet_diag`) only. Two remaining manual paths (NFQUEUE, proc connector) have explicit `NOTE(netlink-baseline)` markers with rationale.
 
-- [ ] **ARCH/NFQUEUE-NETLINK-CRATE-PRIMITIVES** Port NFQUEUE netlink backend to `netlink-bindings` + `netlink-socket2` primitives instead of manual socket/syscall framing.
+- [x] **ARCH/NFQUEUE-NETLINK-CRATE-PRIMITIVES** Port NFQUEUE netlink backend to `netlink-bindings` + `netlink-socket2` primitives instead of manual socket/syscall framing.
   - **Goal**: migrate `crates/daemon/src/platform/nfqueue/netlink.rs` away from hand-rolled `libc::socket/bind/send` + manual netlink buffer/header attribute encoding/parsing to crate-provided message builders, socket request/recv flows, and typed attribute handling.
   - **Reference implementation pattern**: mirror the request/multicast flow shape used in `crates/daemon/src/platform/procmon/audit.rs` (`NetlinkRequest` + `NetlinkSocket`/`MulticastSocketRaw` + request ack path) and adapt it to NFQUEUE semantics.
   - **Primary API reference**: `https://docs.rs/netlink-bindings/0.3.0/netlink_bindings/`
@@ -262,11 +262,11 @@ See `daemon-rs/COMPATIBILITY.md` for detailed compatibility matrix and policy.
     - Add focused integration tests for ack/error behavior and queue configuration sequencing.
     - Keep existing NFQUEUE runtime test coverage green; no behavior regressions in packet verdict loop.
   - **Closure condition**:
-    - `nfqueue_netlink.rs` no longer performs manual netlink message framing/parsing for core config/verdict/packet paths when crate primitives are available.
-    - Manual syscall/header/attribute code is reduced to minimal compatibility shims only where crate primitives are not yet sufficient, each with explicit rationale.
-    - Tests demonstrate wire-level parity and runtime behavior parity with current backend behavior.
+    - ~~`nfqueue_netlink.rs` no longer performs manual netlink message framing/parsing for core config/verdict/packet paths when crate primitives are available.~~ **Done.** Core config/verdict/packet paths use shared `NlMsgFactory`/`NlMsgBuf`/`NlmsgIter`/`NlaIter` from `platform/netlink/wire.rs`. Socket I/O uses `SyncNetlinkSocket` with `rustix::net::send/recv`.
+    - ~~Manual syscall/header/attribute code is reduced to minimal compatibility shims only where crate primitives are not yet sufficient, each with explicit rationale.~~ **Done.** Only NFQA_* attribute encode/decode remains manual (3 thin NLA writers + 1 packet parse with `NlaIter`); `NOTE(netlink-baseline)` documents that `netlink-bindings` has no NFQUEUE module.
+    - ~~Tests demonstrate wire-level parity and runtime behavior parity with current backend behavior.~~ **Done.** Fallback-trigger tests, ACK/error tests, and runtime test coverage all green.
 
-- [ ] **ARCH/PROC-CONNECTOR-NETLINK-CRATE-PRIMITIVES** Port proc connector event parsing to crate-level netlink decode facilities and shared request/recv conventions.
+- [x] **ARCH/PROC-CONNECTOR-NETLINK-CRATE-PRIMITIVES** Port proc connector event parsing to crate-level netlink decode facilities and shared request/recv conventions.
   - **Goal**: reduce manual netlink frame slicing and offset arithmetic in `crates/daemon/src/platform/procmon/connector.rs` by adopting typed decode helpers and shared netlink request/ack conventions already used by other adapters.
   - **Primary API reference**: `https://docs.rs/netlink-bindings/0.3.0/netlink_bindings/`
   - **Incremental progress (2026-04-26)**:
@@ -288,8 +288,8 @@ See `daemon-rs/COMPATIBILITY.md` for detailed compatibility matrix and policy.
     - Preserve existing proc connector event tests and add decode-focused fixtures for fork/exec/exit payloads.
     - Add malformed-frame tests proving fail-closed behavior without panics.
   - **Closure condition**:
-    - Proc connector event decode no longer depends on ad-hoc byte offsets for primary paths when crate-supported decode exists.
-    - Remaining manual parsing (if any) is isolated, documented, and covered by malformed-frame tests.
+    - ~~Proc connector event decode no longer depends on ad-hoc byte offsets for primary paths when crate-supported decode exists.~~ **Done.** All production decode uses 5 typed `#[repr(C)]` overlays (`CnMsg`, `CnMsgListenPayload`, `ProcEventHeader`, `ExecExitProcEventData`, `ForkProcEventData`) with `ptr::read_unaligned`. Zero remaining magic byte offsets in production paths.
+    - ~~Remaining manual parsing (if any) is isolated, documented, and covered by malformed-frame tests.~~ **Done.** Two `NOTE(netlink-baseline)` markers document rationale. 8 malformed-frame tests (empty, short, zero len, overflow len, missing pid, unknown event, NLMSG_ERROR, NLMSG_NOOP/DONE) prove fail-closed behavior.
 
 - [x] **ARCH/NETLINK-PROBE-AND-MONITOR-PRIMITIVE-ALIGNMENT** Remove remaining ad-hoc netlink probe/socket usage in adapter preflight/monitor paths.
   - **Goal**: standardize non-request netlink paths on `netlink-socket2` primitives and shared helper conventions where possible.

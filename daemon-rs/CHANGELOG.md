@@ -16,6 +16,12 @@ Versioning baseline:
 
 ### Changed
 
+- **backlog: close NETLINK-OPS-REFERENCE-BASELINE, NFQUEUE-NETLINK-CRATE-PRIMITIVES, PROC-CONNECTOR-NETLINK-CRATE-PRIMITIVES**
+  (`daemon-rs/TODO.md`):
+  - Closed `ARCH/NETLINK-OPS-REFERENCE-BASELINE`: all adapters consume primitives from shared `platform/netlink/` boundary; no untracked manual paths remain.
+  - Closed `ARCH/NFQUEUE-NETLINK-CRATE-PRIMITIVES`: core config/verdict/packet paths use shared wire helpers; only NFQA_* attribute shims remain (crate has no NFQUEUE module).
+  - Closed `ARCH/PROC-CONNECTOR-NETLINK-CRATE-PRIMITIVES`: all decode uses typed `#[repr(C)]` overlays with 8 malformed-frame tests.
+
 - **firewall-netlink: Phase 5 — structured parse error class reporting**
   (`crates/daemon/src/platform/firewall/netlink/types.rs`,
   `crates/daemon/src/platform/firewall/netlink/adapter.rs`,
