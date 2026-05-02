@@ -490,6 +490,33 @@ See `daemon-rs/COMPATIBILITY.md` for detailed compatibility matrix and policy.
   - **Validation/proof**: commit a short future-goal memo + decision table and add focused test/perf plan bullets covering miss fallback correctness, stale-cache prevention, and p50/p95/p99 latency impact; include one mock/harness run report proving that each listed counter can be incremented at least once in a controlled scenario.
   - **Closure condition**: this task closes when the future-goal metrics contract is accepted (including bootstrap counters), Bandix reference scope is documented with the full repository URL above, and a concrete fast-branch exploration plan exists without reclassifying the work as mandatory Phase 0 delivery.
 
+- [ ] **ARCH/FUTURE-AYA-NATIVE-PROBE-INTEGRATION** Future architecture goal: move daemon-rs eBPF probes from direct C-runtime parity ports toward Aya-native probe modeling and typed ABI contracts.
+  - **Goal**: keep Aya as the preferred eBPF userspace/runtime library while incrementally replacing offset-heavy, raw-byte probe plumbing with Aya-first hook selection, shared typed wire structs, and typed map/ringbuf surfaces.
+  - **Complement to `PERF/FUTURE-HYBRID-BANDIX`**: Bandix-inspired work covers hybrid observability, counters, and fast-branch bootstrap experiments. This item covers probe authoring/runtime integration quality: Aya-native ABI modeling, hook selection, shared helper/layout boundaries, and reducing 1:1 C-port baggage in `crates/ebpf/`.
+  - **Reference baseline (architecture/style only)**:
+    - [https://github.com/obdev/littlesnitch-linux](https://github.com/obdev/littlesnitch-linux)
+    - Scope to review explicitly: root workspace layout, `common/` shared POD/wire types, `ebpf/` kernel-side context/helper/cache organization, and `demo-runner/` Aya loader/attach/map/ringbuf orchestration.
+  - **Why this is relevant**:
+    - Current `crates/ebpf/` entrypoints already use Aya program macros, but probe internals still resemble a direct port from `ebpf_prog/`: hard-coded offsets, `helpers::r#gen::*` reads, manual buffer packing, and raw byte-slice decode on the userspace side.
+    - Aya-native probe boundaries improve maintainability, reduce verifier-footgun surface, and make future hybrid fast-path hooks (`cgroup/connect4+connect6`, tracing, typed map contracts) easier to prototype without dragging legacy C-shape assumptions into each new slice.
+  - **Aya-native target shape**:
+    - Shared typed event/map value structs in `opensnitch-ebpf-common` become the canonical ABI contract for both kernel and userspace.
+    - Userspace consumers decode ringbuf/map payloads through typed shared records where feasible, not ad-hoc `sample[offset..]` parsing.
+    - Probe families are organized around Aya-native context/helper modules (context, helper reads, scratch buffers, domain caches) rather than monolithic probe files.
+    - Hook selection prefers Aya-supported higher-level hooks when semantics fit (`cgroup_sock_addr`, `cgroup_sock`, `cgroup_skb`, `fentry/fexit`, `tracepoint`) instead of defaulting to kprobe/kretprobe parity ports.
+  - **Guardrails**:
+    - Preserve daemon-rs policy authority in userspace (`RuleService` / NFQUEUE / canonical verdict flow); do not adopt kernel-resident filter-engine semantics from external examples.
+    - Use the Little Snitch for Linux repository as an architecture reference only; do not treat it as a drop-in code source or product-model match.
+    - Keep runtime compatibility gates explicit: new Aya-native paths must coexist with current compat/fallback flows until parity is proven.
+  - **Validation/proof**:
+    - Add typed ABI contract tests for every migrated event/map shape (kernel writer ↔ userspace reader).
+    - Keep DNS/process/connection smoke coverage green under `aya-ebpf`.
+    - For each migrated probe family, record which manual offset/byte-slice decode paths were removed and which Aya-native hooks/helpers replaced them.
+  - **Closure condition**:
+    - At least one actively used probe family is migrated end-to-end to a typed shared ABI with no raw byte-slice decode on the daemon side.
+    - A documented hook-selection matrix exists for DNS/process/connection probes showing current hook, Aya-native candidate hook, blockers, and chosen direction.
+    - The future hybrid fast-path work can build on Aya-native probe/helpers/ABI surfaces instead of extending the current 1:1 C-port shape.
+
 - [ ] **ARCH/OPENWRT** Deliver OpenWrt-native storage and ubus transport adapters without policy-layer coupling.
   - **Objective**: keep OpenWrt file formats, runtime command plans, and transport wiring adapter-owned while daemon services/flows stay canonical-model-first.
   - **Remote progress already landed**: firewall zones are part of the canonical firewall model, backend-to-DTO extraction exists for nftables and iptables, OpenWrt firewall authority is explicit (`OpenWrtUci`), UCI CLI plan scaffolding exists behind the `openwrt` feature, and OpenWrt mode now hard-requires UCI storage-format support.
